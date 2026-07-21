@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Node",
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "jsx": "preserve",
+    "noImplicitThis": true,
+    "strict": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "lib": ["esnext", "dom"],
+    "types": ["@dcloudio/types", "node"],
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue"],
+  "exclude": [
+    "src/uni_modules/uv-scroll-list/components/uv-scroll-list/uv-scroll-list.vue",
+    "src/uni_modules/uv-swipe-action/components/uv-swipe-action-item/uv-swipe-action-item.vue"
+  ]
+}

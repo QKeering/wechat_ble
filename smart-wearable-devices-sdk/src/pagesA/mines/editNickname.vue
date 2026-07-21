@@ -1,0 +1,61 @@
+<script setup>
+import { ref } from 'vue';
+import { onLoad } from '@dcloudio/uni-app';
+import { useUserStore } from '@/stores/user';
+
+const userStore = useUserStore();
+const nickName = ref('');
+
+const updateUserNickName = async () => {
+  if (!nickName.value) {
+    return uni.showToast({
+      title: '请输入昵称',
+      icon: 'error'
+    });
+  }
+  await userStore.refreshUserInfo({
+    nickName: nickName.value
+  });
+  uni.showToast({
+    title: '修改成功',
+    icon: 'success'
+  });
+  uni.navigateBack();
+};
+
+onLoad((e) => {
+  nickName.value = e.nickName || '';
+});
+</script>
+
+<template>
+  <view class="p-30">
+    <view class="bg-white p-40 r-50">
+      <uv-input maxlength="20" border="none" placeholder="请输入内容" v-model="nickName" :customStyle="{ fontSize: '36rpx' }"></uv-input>
+    </view>
+    <view class="footer p-30">
+      <uv-button
+        text="保存"
+        color="#2E70FC"
+        :customTextStyle="{ 'font-size': '36rpx' }"
+        :customStyle="{
+          'border-radius': '50rpx',
+          padding: '64rpx 0',
+          'box-shadow': '0 8rpx 20rpx 0 #2e70fc80'
+        }"
+        @click="updateUserNickName"
+      ></uv-button>
+      <uv-safe-bottom></uv-safe-bottom>
+    </view>
+  </view>
+</template>
+
+<style lang="scss" scoped>
+.footer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+</style>

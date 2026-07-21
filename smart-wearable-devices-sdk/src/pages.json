@@ -1,0 +1,341 @@
+{
+  "pages": [
+    {
+      "path": "pages/awareness/awareness",
+      "style": {
+        "navigationBarTitleText": "首页",
+        "navigationStyle": "custom",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/health/health",
+      "style": {
+        "navigationBarTitleText": "健康",
+        "navigationStyle": "custom",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/health/growth-girlfriend",
+      "style": {
+        "navigationBarTitleText": "小轻AI成长闺蜜",
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/family/family",
+      "style": {
+        "navigationBarTitleText": "家人守护",
+        "navigationStyle": "custom",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/family/addMember",
+      "style": {
+        "navigationBarTitleText": "添加家人",
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/family/memberDetail",
+      "style": {
+        "navigationBarTitleText": "家人详情",
+        "navigationStyle": "custom",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/family/bindDevice",
+      "style": {
+        "navigationBarTitleText": "绑定父母设备",
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/family/sharePermission",
+      "style": {
+        "navigationBarTitleText": "共享权限",
+        "navigationStyle": "custom"
+      }
+    },
+      {
+        "path": "pages/family/elderHome",
+        "style": {
+          "navigationBarTitleText": "长辈模式",
+          "navigationStyle": "custom",
+          "enablePullDownRefresh": true
+        }
+      },
+    {
+      "path": "pages/family/elderDevice",
+      "style": {
+        "navigationBarTitleText": "我的设备",
+        "navigationStyle": "custom",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/family/shareManage",
+      "style": {
+        "navigationBarTitleText": "共享管理",
+        "navigationStyle": "custom",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/family/inviteList",
+      "style": {
+        "navigationBarTitleText": "家人邀请",
+        "navigationStyle": "custom",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/family/familyCollaborate",
+      "style": {
+        "navigationBarTitleText": "协同照护",
+        "navigationStyle": "custom",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/mine/mine",
+      "style": {
+        "navigationBarTitleText": "我的",
+        "navigationStyle": "custom",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/login/login",
+      "style": {
+        "navigationBarTitleText": "登录",
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/login/agreement",
+      "style": {
+        "navigationBarTitleText": "用户协议"
+      }
+    }
+  ],
+  "subPackages": [
+    {
+      "root": "pagesA/mines",
+      "pages": [
+        {
+          "path": "profile",
+          "style": {
+            "navigationBarTitleText": "个人信息",
+            "navigationBarBackgroundColor": "#ffffff"
+          }
+        },
+        {
+          "path": "editNickname",
+          "style": {
+            "navigationBarTitleText": "修改昵称"
+          }
+        },
+        {
+          "path": "device",
+          "style": {
+            "navigationBarTitleText": "设备信息",
+            "navigationBarBackgroundColor": "#f1f3f6"
+          }
+        },
+        {
+          "path": "setting",
+          "style": {
+            "navigationBarTitleText": "功能设置",
+            "navigationBarBackgroundColor": "#f1f3f6"
+          }
+        },
+        {
+          "path": "guide",
+          "style": {
+            "navigationBarTitleText": "使用指南",
+            "navigationBarBackgroundColor": "#f1f3f6"
+          }
+        },
+        {
+          "path": "question",
+          "style": {
+            "navigationBarTitleText": "常见问题",
+            "navigationBarBackgroundColor": "#f1f3f6"
+          }
+        },
+        {
+          "path": "connectDevice",
+          "style": {
+            "navigationBarTitleText": "连接设备",
+            "navigationBarBackgroundColor": "#ffffff"
+          }
+        }
+      ]
+    },
+    {
+      "root": "pagesA/healths",
+      "pages": [
+        {
+          "path": "deviceData",
+          "style": {
+            "navigationBarTitleText": "设备测量数据",
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "healthReport",
+          "style": {
+            "navigationBarTitleText": "检测报告",
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "indicatorDetail",
+          "style": {
+            "navigationBarTitleText": "健康详情",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        }
+      ]
+    },
+    {
+      "root": "homeDetail",
+      "pages": [
+        {
+          "path": "sleepPage/sleepPage",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
+          "path": "sleepPageEdit/sleepPageEdit",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationBarTitleText": "编辑卡片"
+          }
+        },
+        {
+          "path": "exercise/exercise",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
+          "path": "exerciseEdit/exerciseEdit",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationBarTitleText": "编辑卡片"
+          }
+        },
+        {
+          "path": "relaxStatus/relaxStatus",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
+          "path": "relaxEdit/relaxEdit",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationBarTitleText": "编辑卡片"
+          }
+        },
+        {
+          "path": "vitalSigns/vitalSigns",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
+          "path": "vitalSignsEdit/vitalSignsEdit",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationBarTitleText": "编辑卡片"
+          }
+        },
+        {
+          "path": "vitalSignsHeartDetail/vitalSignsDetail",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "vitalSignsHeartDetail/oxyGenDetail",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "vitalSignsHeartDetail/temperatureDetail",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "vitalSignsHeartDetail/heartRateVariabilityDetail",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationStyle": "custom"
+          }
+        }
+      ]
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "智能穿戴设备",
+    "navigationBarBackgroundColor": "#F1F3F6",
+    "backgroundColor": "#F1F3F6",
+    "enablePullDownRefresh": false,
+    "enableShareAppMessage": true
+  },
+  "easycom": {
+    "autoscan": true,
+    "custom": {
+      "^uv-(.*)": "@/uni_modules/uv-$1/components/uv-$1/uv-$1.vue",
+      "^uni-(.*)": "@/uni_modules/uni-$1/components/uni-$1/uni-$1.vue"
+    }
+  },
+  "tabBar": {
+    "custom": false,
+    "color": "#A0A0A0",
+    "selectedColor": "#2E70FC",
+    "backgroundColor": "#F1F3F6",
+    "list": [
+      {
+        "pagePath": "pages/awareness/awareness",
+        "iconPath": "static/tabbar/awareness.png",
+        "selectedIconPath": "static/tabbar/awareness-active.png",
+        "text": "感知"
+      },
+      {
+        "pagePath": "pages/health/health",
+        "iconPath": "static/tabbar/health.png",
+        "selectedIconPath": "static/tabbar/health-active.png",
+        "text": "健康"
+      },
+      {
+        "pagePath": "pages/mine/mine",
+        "iconPath": "static/tabbar/mine.png",
+        "selectedIconPath": "static/tabbar/mine-active.png",
+        "text": "我的"
+      }
+    ]
+  }
+}

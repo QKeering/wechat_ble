@@ -1,0 +1,69 @@
+{
+  "setting": {
+    "es6": true,
+    "postcss": true,
+    "minified": true,
+    "uglifyFileName": false,
+    "enhance": true,
+    "packNpmRelationList": [],
+    "babelSetting": {
+      "ignore": [],
+      "disablePlugins": [],
+      "outputPath": ""
+    },
+    "useCompilerPlugins": false,
+    "minifyWXML": true,
+    "ignoreDevUnusedFiles": true,
+    "ignoreUploadUnusedFiles": true
+  },
+  "compileType": "miniprogram",
+  "miniprogramRoot": "dist/build/mp-weixin/",
+  "simulatorPluginLibVersion": {},
+  "packOptions": {
+    "ignore": [
+      {
+        "type": "folder",
+        "value": "src"
+      },
+      {
+        "type": "folder",
+        "value": "node_modules"
+      },
+      {
+        "type": "folder",
+        "value": "docs"
+      },
+      {
+        "type": "folder",
+        "value": "scripts"
+      },
+      {
+        "type": "folder",
+        "value": ".npm-cache"
+      },
+      {
+        "type": "folder",
+        "value": "dist/dev"
+      },
+      {
+        "type": "file",
+        "value": "package-lock.json"
+      },
+      {
+        "type": "file",
+        "value": "package.json"
+      },
+      {
+        "type": "file",
+        "value": "tsconfig.json"
+      },
+      {
+        "type": "file",
+        "value": "vite.config.ts"
+      }
+    ],
+    "include": []
+  },
+  "appid": "wx52f427a73d7678cb",
+  "editorSetting": {}
+}

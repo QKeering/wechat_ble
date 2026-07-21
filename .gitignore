@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# FastAPI runtime files
+admin_fastapi/.env
+admin_fastapi/logs/
+admin_fastapi/uploads/
+*.log
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.cache/
+.npm-cache/
+unpackage/
+
+# Mini program local/debug artifacts
+smart-wearable-devices-next/project.private.config.json
+smart-wearable-devices-next/rw-debug*.json
+smart-wearable-devices-next/rw-debug*.html
+smart-wearable-devices-next/rw-q-*.json
+smart-wearable-devices-next/rw-sync-result.json
+smart-wearable-devices-next/rw-upload-result.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Archives / generated local packages
+*.zip
+*.7z
+*.rar

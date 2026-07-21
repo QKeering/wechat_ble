@@ -1,0 +1,32 @@
+{
+  "name": "smart-wearable-devices-next",
+  "appid": "__UNI__QKEER_NEXT",
+  "description": "QKeer next mini-program frontend",
+  "versionName": "0.1.0",
+  "versionCode": "10",
+  "transformPx": false,
+  "mp-weixin": {
+    "appid": "wx52f427a73d7678cb",
+    "setting": {
+      "urlCheck": true,
+      "postcss": false,
+      "minified": true,
+      "ignoreDevUnusedFiles": true,
+      "ignoreUploadUnusedFiles": true
+    },
+    "networkTimeout": {
+      "request": 120000,
+      "connectSocket": 60000,
+      "uploadFile": 180000,
+      "downloadFile": 120000
+    },
+    "lazyCodeLoading": "requiredComponents",
+    "permission": {
+      "scope.userLocation": {
+        "desc": "用于蓝牙扫描附近的戒指设备"
+      }
+    },
+    "requiredPrivateInfos": ["getLocation"],
+    "usingComponents": true
+  }
+}
