@@ -3976,7 +3976,7 @@ const handleMineRwL19Acceptance = async () => {
 
 <template>
   <view style="position: relative">
-    <uv-navbar placeholder leftIcon="" title="我的" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar placeholder leftIcon="" :title="'\u6211\u7684'" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view v-if="finalShowProgress">
       <view class="wave-progress-wrapper">
         <WaveProgress
@@ -3987,197 +3987,292 @@ const handleMineRwL19Acceptance = async () => {
           :wave-speed="1.5"
         />
       </view>
-      <!-- <uv-line-progress :percentage="uploadProgress" height="2" :showText="false"></uv-line-progress> -->
     </view>
     <view v-else style="height: 2px; background: transparent"></view>
     <view style="position: absolute; top: 0; left: 0; width: 100%">
-      <uv-image src="/static/images/bg05.png" width="100%" mode="widthFix"></uv-image>
+      <image class="mine-bg-image" src="/static/images/bg05.png" mode="widthFix"></image>
     </view>
 
     <view class="p-30 pb-100 relative" style="z-index: 1; box-sizing: border-box">
-      <!-- <custom-steps></custom-steps> -->
       <view class="pl-30 pr-30">
-        <!-- 用户信息区域 -->
         <view class="user-section mb-50">
           <view v-if="userStore.userInfo.id" @click="$uv.route('/pagesA/mines/profile')" class="user-card user-card--logged flex ai-center">
-            <uv-image :src="getFullUrl(userStore.userInfo.avatar) || '/static/images/mine/avatar.png'" width="148rpx" height="148rpx" radius="50rpx"></uv-image>
+            <image class="user-avatar-image" :src="getFullUrl(userStore.userInfo.avatar)" mode="aspectFill"></image>
             <view class="user-info flex-1 flex ai-center jc-between ml-30">
               <view class="user-nickname fs-48">{{ userStore.userInfo.nickName }}</view>
-              <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+              <view class="mine-arrow"></view>
             </view>
           </view>
           <view v-else class="user-card user-card--guest flex ai-center" @click="$uv.route('/pages/login/login')">
-            <uv-image src="/static/images/mine/avatar.png" width="148rpx" height="148rpx" radius="50rpx"></uv-image>
-            <view class="user-login-prompt ml-30 fs-48">登录/注册</view>
+            <image class="user-avatar-image" src="/static/images/mine/avatar.png" mode="aspectFill"></image>
+            <view class="user-login-prompt ml-30 fs-48">{{ '\u767b\u5f55/\u6ce8\u518c' }}</view>
           </view>
         </view>
 
-        <!-- 设备与操作区域 -->
         <view class="device-section flex ai-center jc-between relative">
           <view class="device-status flex fd-c ai-center mr-30" style="min-height: 150rpx">
-            <!-- <uv-image :src="userStore.deviceInfo.deviceId ? '/static/images/mine/bluetooth02.png' : '/static/images/mine/bluetooth01.png'" width="48rpx" height="48rpx"></uv-image>
-            <view class="device-text mt-10" :style="{ color: userStore.deviceInfo.deviceId ? '#4C76F1' : '#010101' }">
-              {{ userStore.deviceInfo.deviceId ? '已连接' : '未连接' }}
-            </view> -->
-            <uv-image
-              :src="userStore.isReconnecting === '2' ? '/static/images/mine/bluetooth02.png' : '/static/images/mine/bluetooth01.png'"
-              width="48rpx"
-              height="48rpx"
-            ></uv-image>
-            <view class="device-text mt-10" :style="{ color: userStore.isReconnecting === '2' ? '#4C76F1' : '#010101' }">
-              {{ userStore.isReconnecting === '2' ? '已连接' : '未连接' }}
+            <image
+              class="device-status-icon"
+              :src="isConnectedStatus ? '/static/images/mine/bluetooth02.png' : '/static/images/mine/bluetooth01.png'"
+              mode="aspectFit"
+            ></image>
+            <view class="device-text mt-10" :style="{ color: isConnectedStatus ? '#4C76F1' : '#010101' }">
+              {{ isConnectedStatus ? '\u5df2\u8fde\u63a5' : '\u672a\u8fde\u63a5' }}
             </view>
           </view>
-          <!-- <view class="absolute" style="left: 50%; transform: translateX(-50%)"> -->
           <view>
-            <uv-image src="/static/images/mine/logo3.png" width="300rpx" mode="widthFix" class="banner-logo"></uv-image>
+            <image src="/static/images/mine/logo3.png" mode="widthFix" class="banner-logo"></image>
           </view>
           <view class="device-banner relative flex">
-            <!-- <view class="banner-actions absolute right-0" style="bottom: 112rpx"> -->
             <view class="banner-actions flex jc-between" style="margin-bottom: 50rpx">
               <view v-if="shouldShowBatteryInfo" class="device-battery-info flex fd-c ai-center">
-                <view class="battery-icon mb-10" :class="{ charging: isCharging }">
-                  <view class="battery-body">
-                    <view class="battery-fill" :style="{ width: batteryPercent + '%' }"></view>
-                  </view>
-                  <view class="battery-cap"></view>
-                </view>
-                <view class="battery-level fs-40">{{ displayBatteryValue }}</view>
+                <view class="battery-level fs-56">{{ displayBatteryValue }}</view>
               </view>
               <view v-else class="action-buttons">
-                <template v-if="shouldShowReconnectButton">
-                  <uv-button
-                    text="点击重连"
-                    shape="circle"
-                    color="#2E70FC"
-                    loadingMode="circle"
-                    :loading="isLoading"
-                    :loadingText="isLoading ? '重连中...' : '点击重连'"
-                    :customTextStyle="{ 'font-size': '28rpx' }"
-                    :customStyle="{
-                      padding: '38rpx 0',
-                      width: '190rpx',
-                      'margin-bottom': '30rpx'
-                    }"
-                    @click="connectAgain"
-                  ></uv-button>
-                  <uv-button
-                    text="解除绑定"
-                    shape="circle"
-                    color="#FFFFFF"
-                    :customTextStyle="{ color: '#010101', 'font-size': '28rpx' }"
-                    :customStyle="{
-                      padding: '38rpx 0',
-                      width: '190rpx'
-                    }"
-                    @click="unbindDevice"
-                  ></uv-button>
-                </template>
-                <template v-else>
-                  <uv-button
-                    text="扫一扫"
-                    shape="circle"
-                    icon="scan"
-                    color="#FFFFFF"
-                    :customTextStyle="{ color: '#010101', 'font-size': '28rpx' }"
-                    :customStyle="{
-                      padding: '38rpx 0',
-                      width: '190rpx',
-                      'margin-bottom': '30rpx'
-                    }"
-                    @click="scanDevice"
-                  ></uv-button>
-                  <uv-button
-                    text="去配对"
-                    shape="circle"
-                    color="#2E70FC"
-                    :customTextStyle="{ 'font-size': '28rpx' }"
-                    :customStyle="{
-                      padding: '38rpx 0',
-                      width: '190rpx',
-                      'margin-bottom': '30rpx'
-                    }"
-                    @click="jumpDetail"
-                  ></uv-button>
-                </template>
+                <uv-button
+                  :text="'\u626b\u4e00\u626b'"
+                  shape="circle"
+                  color="#FFFFFF"
+                  :customTextStyle="{ color: '#010101', 'font-size': '28rpx' }"
+                  :customStyle="{ padding: '38rpx 0', width: '190rpx', 'margin-bottom': '30rpx' }"
+                  @click="scanDevice"
+                ></uv-button>
+                <uv-button
+                  :text="'\u53bb\u914d\u5bf9'"
+                  shape="circle"
+                  color="#2E70FC"
+                  :customTextStyle="{ 'font-size': '28rpx' }"
+                  :customStyle="{ padding: '38rpx 0', width: '190rpx', 'margin-bottom': '30rpx' }"
+                  @click="jumpDetail"
+                ></uv-button>
+                <uv-button
+                  v-if="shouldShowReconnectButton"
+                  :text="'\u91cd\u65b0\u8fde\u63a5'"
+                  shape="circle"
+                  color="#2E70FC"
+                  loadingMode="circle"
+                  :loading="isLoading"
+                  :loadingText="isLoading ? '\u8fde\u63a5\u4e2d...' : '\u91cd\u65b0\u8fde\u63a5'"
+                  :customTextStyle="{ 'font-size': '28rpx' }"
+                  :customStyle="{ padding: '38rpx 0', width: '190rpx' }"
+                  @click="connectAgain"
+                ></uv-button>
               </view>
             </view>
           </view>
         </view>
       </view>
 
-      <!-- 功能菜单列表 -->
+      <view class="rw-diagnostic-panel bg-white r-50 mb-30 pt-30 pr-40 pb-30 pl-40">
+        <view class="rw-diagnostic-header flex jc-between ai-center">
+          <view>
+            <view class="rw-diagnostic-title">RW{{ '\u8bca\u65ad' }}</view>
+            <view class="rw-diagnostic-subtitle">{{ '\u7248\u672c' }} {{ RW_DIAGNOSTIC_BUILD_TAG }}</view>
+          </view>
+          <view class="rw-diagnostic-status">{{ rwDiagnosticStatusText }}</view>
+        </view>
+        <view class="rw-diagnostic-actions">
+          <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineHistoryButtonLoading('summary')" :loading="isMineHistoryButtonLoading('summary')" @tap="handleMineHistorySync()">{{ historySyncButtonText }}</button>
+          <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineCoreProtocolProbeRunning" :loading="isMineCoreProtocolProbeRunning" @tap="handleMineProtocolProbe('core')">{{ protocolProbeButtonText }}</button>
+          <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineBloodOxygenRealtimeProtocolProbeRunning" :loading="isMineBloodOxygenRealtimeProtocolProbeRunning" @tap="handleMineProtocolProbe('bloodOxygenRealtime')">{{ bloodOxygenRealtimeProtocolProbeButtonText }}</button>
+          <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineHeartRateRealtimeProtocolProbeRunning" :loading="isMineHeartRateRealtimeProtocolProbeRunning" @tap="handleMineProtocolProbe('heartRateRealtime')">{{ heartRateRealtimeProtocolProbeButtonText }}</button>
+          <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineHrvRealtimeProtocolProbeRunning" :loading="isMineHrvRealtimeProtocolProbeRunning" @tap="handleMineProtocolProbe('hrvRealtime')">{{ hrvRealtimeProtocolProbeButtonText }}</button>
+          <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineStressMonitoringProtocolProbeRunning" :loading="isMineStressMonitoringProtocolProbeRunning" @tap="handleMineProtocolProbe('stressMonitoring')">{{ stressMonitoringProtocolProbeButtonText }}</button>
+          <template v-if="MINE_SHOW_TEMPERATURE_PROTOCOL_PROBES">
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureProtocolProbeRunning" :loading="isMineTemperatureProtocolProbeRunning" @tap="handleMineProtocolProbe('temperature')">{{ temperatureProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureMonitoringProtocolProbeRunning" :loading="isMineTemperatureMonitoringProtocolProbeRunning" @tap="handleMineProtocolProbe('temperatureMonitoring')">{{ temperatureMonitoringProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureDetectingProtocolProbeRunning" :loading="isMineTemperatureDetectingProtocolProbeRunning" @tap="handleMineProtocolProbe('temperatureDetecting')">{{ temperatureDetectingProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureDetectingPlainProtocolProbeRunning" :loading="isMineTemperatureDetectingPlainProtocolProbeRunning" @tap="handleMineProtocolProbe('temperatureDetectingPlain')">{{ temperatureDetectingPlainProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureDetectingShortProtocolProbeRunning" :loading="isMineTemperatureDetectingShortProtocolProbeRunning" @tap="handleMineProtocolProbe('temperatureDetectingShort')">{{ temperatureDetectingShortProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureDetectingNoCrcProtocolProbeRunning" :loading="isMineTemperatureDetectingNoCrcProtocolProbeRunning" @tap="handleMineProtocolProbe('temperatureDetectingNoCrc')">{{ temperatureDetectingNoCrcProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureRealtimeReadProtocolProbeRunning" :loading="isMineTemperatureRealtimeReadProtocolProbeRunning" @tap="handleMineProtocolProbe('temperatureRealtimeRead')">{{ temperatureRealtimeReadProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureRealtimeControlEnableProtocolProbeRunning" :loading="isMineTemperatureRealtimeControlEnableProtocolProbeRunning" @tap="handleMineProtocolProbe('temperatureRealtimeControlEnable')">{{ temperatureRealtimeControlEnableProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureRealtimeControlDisableProtocolProbeRunning" :loading="isMineTemperatureRealtimeControlDisableProtocolProbeRunning" @tap="handleMineProtocolProbe('temperatureRealtimeControlDisable')">{{ temperatureRealtimeControlDisableProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureHistoryProtocolProbeRunning" :loading="isMineTemperatureHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('temperatureHistory')">{{ temperatureHistoryProtocolProbeButtonText }}</button>
+          </template>
+          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepHistoryProtocolProbeRunning" :loading="isMineSleepHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepHistory')">{{ sleepHistoryProtocolProbeButtonText }}</button>
+          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepNativeDetailProtocolProbeRunning" :loading="isMineSleepNativeDetailProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepNativeDetail')">{{ sleepNativeDetailProtocolProbeButtonText }}</button>
+          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepNativeListProtocolProbeRunning" :loading="isMineSleepNativeListProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepNativeList')">{{ sleepNativeListProtocolProbeButtonText }}</button>
+          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepEnhanceReadProtocolProbeRunning" :loading="isMineSleepEnhanceReadProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepEnhanceRead')">{{ sleepEnhanceReadProtocolProbeButtonText }}</button>
+          <button v-if="false && MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepSdkHistoryProtocolProbeRunning" :loading="isMineSleepSdkHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepSdkHistory')">{{ sleepSdkHistoryProtocolProbeButtonText }}</button>
+          <button v-if="false && MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepActivityCurrentDayProtocolProbeRunning" :loading="isMineSleepActivityCurrentDayProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepActivityCurrentDay')">{{ sleepActivityCurrentDayProtocolProbeButtonText }}</button>
+          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepContinueHistoryProtocolProbeRunning" :loading="isMineSleepContinueHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepContinueHistory')">{{ sleepContinueHistoryProtocolProbeButtonText }}</button>
+          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineRawSleepHistoryProtocolProbeRunning" :loading="isMineRawSleepHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('rawSleepHistory')">{{ rawSleepHistoryProtocolProbeButtonText }}</button>
+          <template v-if="MINE_SHOW_STEP_PROTOCOL_PROBES">
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineStepCurrentDayProtocolProbeRunning" :loading="isMineStepCurrentDayProtocolProbeRunning" @tap="handleMineProtocolProbe('stepCurrentDay')">{{ stepCurrentDayProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineStepCurrentDayC6ProtocolProbeRunning" :loading="isMineStepCurrentDayC6ProtocolProbeRunning" @tap="handleMineProtocolProbe('stepCurrentDayC6')">{{ stepCurrentDayC6ProtocolProbeButtonText }}</button>
+            <button v-if="false" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineActivityHistoryProtocolProbeRunning" :loading="isMineActivityHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('activityHistory')">{{ activityHistoryProtocolProbeButtonText }}</button>
+            <button v-if="false" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineStepSleepProtocolProbeRunning" :loading="isMineStepSleepProtocolProbeRunning" @tap="handleMineProtocolProbe('stepSleep')">{{ stepSleepProtocolProbeButtonText }}</button>
+          </template>
+          <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineFullProtocolProbeRunning" :loading="isMineFullProtocolProbeRunning" @tap="handleMineProtocolProbe('full')">{{ fullProtocolProbeButtonText }}</button>
+          <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !mineRwAcceptanceBusy" :loading="mineRwAcceptanceBusy" @tap="handleMineRwL19Acceptance">{{ rwAcceptanceButtonText }}</button>
+          <button class="rw-diagnostic-button danger-text" @tap="clearMineRwDiagnosticLogs">{{ '\u6e05\u7a7a\u65e5\u5fd7' }}</button>
+        </view>
+        <view class="rw-history-status">{{ mineHistoryStatusText }}</view>
+        <view class="rw-diagnostic-section-label">{{ '\u5b9e\u65f6\u6d4b\u91cf' }}</view>
+        <view class="rw-metric-test-actions">
+          <button
+            v-for="item in mineMetricTestItems"
+            :key="item.name"
+            class="rw-diagnostic-button rw-metric-test-button"
+            :disabled="isMineRwAnyActionBusy && !isMineMetricButtonLoading(item.name)"
+            :loading="isMineMetricButtonLoading(item.name)"
+            @tap="handleMineMetricTest(item)"
+          >
+            {{ getMineMetricButtonText(item) }}
+          </button>
+        </view>
+        <view class="rw-diagnostic-section-label">{{ '\u5386\u53f2\u540c\u6b65' }}</view>
+        <view class="rw-history-type-actions">
+          <button
+            v-for="item in mineHistorySyncItems"
+            :key="item.key"
+            class="rw-diagnostic-button rw-history-type-button"
+            :disabled="isMineRwAnyActionBusy && !isMineHistoryButtonLoading(item.key)"
+            :loading="isMineHistoryButtonLoading(item.key)"
+            @tap="handleMineHistorySync(item)"
+          >
+            {{ getMineHistoryButtonText(item) }}
+          </button>
+        </view>
+      </view>
+
       <view class="menu-section">
         <view class="menu-item flex jc-between ai-center bg-white r-50 mb-30 pt-30 pr-40 pb-30 pl-40" v-for="(item, index) in menuList" :key="index" @click="$uv.route(item.path)">
           <view class="menu-item__content flex ai-center">
-            <image v-if="!menuIconErrors[index]" class="menu-icon" :src="item.icon" mode="aspectFit" @error="handleMenuIconError(index)" @load="handleMenuIconLoad(index)"></image>
-            <view v-else class="menu-icon menu-icon-fallback">{{ getMenuFallbackText(item.title) }}</view>
+            <image class="menu-icon" :src="item.icon" mode="aspectFit"></image>
             <view class="menu-title fs-36 ml-30">{{ item.title }}</view>
           </view>
           <view class="mine-arrow"></view>
         </view>
       </view>
     </view>
-
-    <!-- <view>
-      <button @click="handleReadUnuploaded">仅读未上传</button>
-      <button @click="handleReadAllHistory">读全部</button>
-      <button @click="readDeviceTime()">读设备时间</button>
-      <button @click="sendDeleteAllLocalDataCommand()">删除全部本地数据历史记录</button>
-      <button @click="updateDeviceTime()">更新设备时间小端</button>
-
-      <view v-if="local.length === 0" class="empty">暂无历史数据</view>
-      <view v-else class="record-list">
-        <view v-for="(record, index) in local as any" :key="record.unixTime || index" class="record-item">
-          <view>🆔 序号: {{ record?.seq }}</view>
-          <view>🕒 时间: {{ record?.timestamp }}</view>
-          <view>👣 步数: {{ record?.stepCount }}</view>
-          <view>❤ 心率: {{ record?.heartRate || '—' }} bpm</view>
-          <view>🩸 血氧: {{ record?.spo2 || '—' }}%</view>
-          <view>💓 心率变异(HRV): {{ record?.hrv || '—' }} ms</view>
-          <view>🧠 压力指数: {{ record?.stress || '—' }} / 100</view>
-          <view>🌡 温度: {{ record?.temperature }}</view>
-          <view>😴 睡眠: {{ sleepTypeMap[record?.sleepType] || '未知' }}</view>
-          <view>🏃‍♂️ 活动强度: {{ activityLevelMap[record?.activityLevel] || '未知' }}</view>
-          <view>💉 灌注率: {{ record.perfusion || '—' }}%</view>
-          <view v-if="record.rrIntervals && record.rrIntervals.length > 0">💓 RR间期: {{ record.rrIntervals.join(', ') }} ms</view>
-        </view>
-      </view>
-    </view> -->
   </view>
 </template>
-
 <style lang="scss" scoped>
 .menu-item {
   &:last-child {
     margin-bottom: 0;
   }
 }
+.mine-bg-image {
+  display: block;
+  width: 100%;
+}
+.user-avatar-image {
+  border-radius: 50%;
+  display: block;
+  flex: 0 0 148rpx;
+  height: 148rpx;
+  overflow: hidden;
+  width: 148rpx;
+}
+.device-status-icon {
+  display: block;
+  height: 48rpx;
+  width: 48rpx;
+}
+.banner-logo {
+  display: block;
+  width: 300rpx;
+}
 .menu-icon {
   display: block;
   flex: 0 0 64rpx;
-  width: 64rpx;
   height: 64rpx;
-}
-.menu-icon-fallback {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 2rpx solid #dbe5ff;
-  border-radius: 50%;
-  background: #f3f7ff;
-  color: #2e70fc;
-  font-size: 28rpx;
-  font-weight: 600;
-  line-height: 64rpx;
+  width: 64rpx;
 }
 .mine-arrow {
-  flex: 0 0 auto;
-  width: 18rpx;
-  height: 18rpx;
-  border-top: 3rpx solid #010101;
   border-right: 3rpx solid #010101;
+  border-top: 3rpx solid #010101;
+  flex: 0 0 auto;
+  height: 18rpx;
   transform: rotate(45deg);
+  width: 18rpx;
+}
+.rw-diagnostic-panel {
+  box-sizing: border-box;
+}
+.rw-diagnostic-title {
+  color: #111827;
+  font-size: 32rpx;
+  font-weight: 600;
+}
+.rw-diagnostic-subtitle {
+  color: #8a8f99;
+  font-size: 22rpx;
+  margin-top: 8rpx;
+}
+.rw-diagnostic-status {
+  color: #4c76f1;
+  font-size: 24rpx;
+  max-width: 220rpx;
+  text-align: right;
+}
+.rw-diagnostic-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16rpx;
+  margin-top: 24rpx;
+}
+.rw-history-status {
+  color: #6b7280;
+  font-size: 22rpx;
+  margin-top: 16rpx;
+}
+.rw-diagnostic-section-label {
+  color: #6b7280;
+  font-size: 22rpx;
+  margin-top: 18rpx;
+}
+.rw-metric-test-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12rpx;
+  margin-top: 12rpx;
+}
+.rw-history-type-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12rpx;
+  margin-top: 16rpx;
+}
+.rw-diagnostic-button {
+  align-items: center;
+  background: #f5f7fb;
+  border: 1rpx solid #e5e7ef;
+  border-radius: 12rpx;
+  box-sizing: border-box;
+  color: #111827;
+  display: flex;
+  font-size: 24rpx;
+  justify-content: center;
+  line-height: 1.25;
+  margin: 0;
+  min-height: 82rpx;
+  padding: 12rpx 10rpx;
+  text-align: center;
+  white-space: normal;
+  word-break: break-all;
+}
+.rw-history-type-button {
+  color: #4c76f1;
+  font-size: 22rpx;
+  min-height: 74rpx;
+}
+.rw-metric-test-button {
+  color: #111827;
+  font-size: 22rpx;
+  min-height: 74rpx;
+}
+.rw-diagnostic-button[disabled] {
+  color: #a8b0bd;
+}
+.rw-diagnostic-button::after {
+  border: 0;
+}
+.danger-text {
+  color: #e34d59;
 }
 .custom-reconnect-btn {
   width: 190rpx;
@@ -4207,69 +4302,9 @@ const handleMineRwL19Acceptance = async () => {
   font-size: 28rpx;
 }
 .wave-progress-wrapper {
-  padding: 0; /* 移除上下padding，让波浪只在填充部分显示 */
+  padding: 0; /* Remove vertical padding so the wave stays inside the filled area. */
   background: rgba(255, 255, 255, 0.1);
   border-radius: 2rpx;
-  overflow: hidden; /* 确保波浪不会溢出到容器外 */
-}
-
-.battery-icon {
-  display: flex;
-  align-items: center;
-  width: 56rpx;
-  height: 28rpx;
-}
-
-.battery-body {
-  position: relative;
-  flex: 1;
-  height: 100%;
-  border: 3rpx solid #4c76f1;
-  border-radius: 6rpx;
-  padding: 3rpx;
-  box-sizing: border-box;
-  overflow: hidden;
-}
-
-.battery-fill {
-  height: 100%;
-  background: #4c76f1;
-  border-radius: 3rpx;
-  transition: width 0.3s ease;
-}
-
-/* 充电中：电量一级一级增加的循环动画（0 → 25 → 50 → 75 → 100 → 重置） */
-.battery-icon.charging .battery-fill {
-  animation: battery-charging 2.4s linear infinite;
-}
-
-@keyframes battery-charging {
-  0%,
-  5% {
-    width: 0%;
-  }
-  25%,
-  30% {
-    width: 25%;
-  }
-  50%,
-  55% {
-    width: 50%;
-  }
-  75%,
-  80% {
-    width: 75%;
-  }
-  100% {
-    width: 100%;
-  }
-}
-
-.battery-cap {
-  width: 5rpx;
-  height: 12rpx;
-  background: #4c76f1;
-  border-radius: 0 3rpx 3rpx 0;
-  margin-left: 2rpx;
+  overflow: hidden; /* Keep the wave from overflowing the container. */
 }
 </style>

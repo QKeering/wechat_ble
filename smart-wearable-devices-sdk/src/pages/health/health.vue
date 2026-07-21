@@ -309,6 +309,23 @@ onPullDownRefresh(async () => {
         </view>
       </view>
 
+      <!-- AI 实验室 -->
+      <view class="module bg-white p-40 mt-30 r-50">
+        <AiLab></AiLab>
+      </view>
+
+      <view class="growth-girlfriend-module bg-white p-40 mt-30 r-50" @tap="openGrowthGirlfriend">
+        <view class="growth-icon">
+          <uv-image src="/static/images/brain.png" width="82rpx" height="82rpx"></uv-image>
+        </view>
+        <view class="growth-copy">
+          <view class="growth-title">小轻AI成长闺蜜</view>
+          <view class="growth-subtitle">会听你说，也更懂你的状态</view>
+          <view class="growth-desc">AI融合多维健康大数据，生成健康、美丽、成长建议</view>
+        </view>
+        <view class="growth-action">进入</view>
+      </view>
+
       <view class="score-card mt-30 r-50 bg-white p-40">
         <view class="score-title fs-36 mb-50">生活习惯评分</view>
         <view class="score-chart flex ai-center jc-center">
@@ -326,7 +343,7 @@ onPullDownRefresh(async () => {
 
       <view class="measure-guide mt-30 r-50 bg-white p-40">
         <view class="guide-title fs-36">全面测量</view>
-        <view class="guide-desc mt-40 fs-32" style="color: #3d3d3d">同步最新健康数据，并引导完成心率、血氧、体温等测量；压力将根据已入库体征数据计算。</view>
+        <view class="guide-desc mt-40 fs-32" style="color: #3d3d3d">我将从运动、体温、睡眠、心率、心率变异性、血氧、压力各项指标全面开始测量。</view>
         <view class="guide-action mt-90 flex jc-center ai-center relative" @click="jumpMeasureDetail">
           <view class="absolute center-xy flex fd-c ai-center" style="z-index: 1">
             <view class="t-white fs-60">测量</view>
@@ -425,5 +442,59 @@ onPullDownRefresh(async () => {
   background: rgba(255, 255, 255, 0.1);
   border-radius: 2rpx;
   overflow: hidden; /* 确保波浪不会溢出到容器外 */
+}
+.growth-girlfriend-module {
+  display: flex;
+  align-items: center;
+  min-height: 132rpx;
+  border: 1rpx solid rgba(232, 77, 157, 0.1);
+  background: linear-gradient(135deg, #ffffff 0%, #fff7fb 100%);
+  box-shadow: 0 12rpx 28rpx rgba(232, 77, 157, 0.08);
+  box-sizing: border-box;
+}
+.growth-icon {
+  width: 100rpx;
+  height: 100rpx;
+  flex: 0 0 100rpx;
+  border-radius: 50%;
+  background: RGB(46, 112, 252);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 22rpx;
+  overflow: hidden;
+  box-shadow: 0 12rpx 22rpx rgba(46, 112, 252, 0.18);
+}
+.growth-copy {
+  flex: 1;
+  min-width: 0;
+}
+.growth-title {
+  color: #333333;
+  font-size: 34rpx;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.growth-subtitle {
+  margin-top: 8rpx;
+  color: #5b6472;
+  font-size: 26rpx;
+  line-height: 1.25;
+}
+.growth-desc {
+  margin-top: 8rpx;
+  color: #8a94a6;
+  font-size: 22rpx;
+  line-height: 1.35;
+}
+.growth-action {
+  margin-left: 18rpx;
+  padding: 12rpx 20rpx;
+  border-radius: 999rpx;
+  background: #ffffff;
+  color: #3474ff;
+  font-size: 24rpx;
+  font-weight: 700;
+  box-shadow: 0 8rpx 18rpx rgba(46, 112, 252, 0.1);
 }
 </style>

@@ -553,13 +553,13 @@ defineExpose({
     </view>
     <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
     <view v-for="cardId in listData" :key="cardId">
-      <sleepTime v-if="cardId === 'subjectiveSleepScore'" :sleepDetailObj="sleepDetailObj" :sleepSegmentObj="sleepSegmentObj">
+      <sleepTime v-if="cardId === 'subjectiveSleepScore'" :sleepDetailObj="displaySleepDetailObj" :sleepSegmentObj="displaySleepSegmentObj">
         <DetailInfo id="sleep_duration" v-model:isPopupActive="isPopupActive" size="small" style="margin-left: 6rpx"></DetailInfo>
       </sleepTime>
-      <sleepRage v-else-if="cardId === 'sleepInterval'" :sleepSegmentObj="sleepSegmentObj">
+      <sleepRage v-else-if="cardId === 'sleepInterval'" :sleepSegmentObj="displaySleepSegmentObj">
         <DetailInfo id="sleep_stages" v-model:isPopupActive="isPopupActive" style="margin-left: 2rpx"></DetailInfo>
       </sleepRage>
-      <sleepScore v-else-if="cardId === 'sleepScore'" :sleepOverviewObj="sleepOverviewObj" :sleepSegmentObj="sleepSegmentObj">
+      <sleepScore v-else-if="cardId === 'sleepScore'" :sleepOverviewObj="sleepOverviewObj" :sleepSegmentObj="displaySleepSegmentObj">
         <DetailInfo id="sleep_score" v-model:isPopupActive="isPopupActive" style="margin-left: 2rpx"></DetailInfo>
       </sleepScore>
       <HeartRate v-else-if="cardId === 'heartRate'" :heartRateData="heartRateObj" :isHeartTate="false">
@@ -572,7 +572,7 @@ defineExpose({
         <DetailInfo id="heart_rate_variability" v-model:isPopupActive="isPopupActive" style="margin-left: 6rpx"></DetailInfo>
       </heartRateVariability>
       <temperature v-else-if="cardId === 'skinTemperature'" :temperatureData="temperatureObj" :isHeartTate="false" />
-      <sleepNap v-else-if="cardId === 'napRecord'" @refresh="refreshSleepNapForSelectedDate" :sleepNapList="sleepNapList" />
+      <sleepNap v-else-if="cardId === 'napRecord'" @refresh="getSleepNapList" :sleepNapList="sleepNapList" />
       <eventSummary v-else-if="cardId === 'activitySummary'" :sleepSummaryObj="sleepSummaryObj" />
     </view>
     <view @tap="jumpEdit" class="bg-white r-50 flex ai-center jc-center p-30">
