@@ -63,7 +63,7 @@ const sleepEfficiency = computed(() => {
 
 // 睡眠时长（分钟）
 const sleepDurationMinutes = computed(() => {
-  return getSleepStageMinutes('深睡') + getSleepStageMinutes('浅睡') + getSleepStageMinutes('快速眼动') + getSleepStageMinutes('清醒');
+  return getSleepStageMinutes('深睡') + getSleepStageMinutes('浅睡') + getSleepStageMinutes('快速眼动');
 });
 
 // 格式化睡眠时长为小时分钟

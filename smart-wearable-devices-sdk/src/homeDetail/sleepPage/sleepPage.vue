@@ -109,9 +109,30 @@ const isSleepStagePoint = (point: any) => {
   return value === '2' || value === '3' || value === '4' || ['深睡', '浅睡', '快速眼动'].includes(value);
 };
 
-const getMainSleepEndTimeFromDetail = (detail?: sleepDetail, segment?: sleepSegment) => {
+const SLEEP_STAGE_NAMES: Record<string, string> = {
+  '1': '清醒',
+  '2': '快速眼动',
+  '3': '浅睡',
+  '4': '深睡',
+  清醒: '清醒',
+  快速眼动: '快速眼动',
+  浅睡: '浅睡',
+  深睡: '深睡'
+};
+const MAIN_SLEEP_GAP_MINUTES = 90;
+const DEFAULT_STAGE_SAMPLE_MINUTES = 10;
+
+const getSleepStageName = (point: any) => SLEEP_STAGE_NAMES[String(point?.value ?? '').trim()] || '';
+const isNapStagePoint = (point: any) => {
+  const value = String(point?.value ?? '').trim();
+  return value === '5' || value === '小睡';
+};
+
+const getMainSleepAnalysis = (detail?: sleepDetail, segment?: sleepSegment) => {
   const chartData = Array.isArray(detail?.chartData) ? detail.chartData : [];
-  if (!chartData.length) return '';
+  if (!chartData.length) {
+    return { endTime: '', chartData: [], chartDataSection: [] as Point[] };
+  }
 
   const segmentStart = parseClockMinutes(segment?.startTime);
   let segmentEnd = parseClockMinutes(segment?.endTime);
@@ -119,19 +140,74 @@ const getMainSleepEndTimeFromDetail = (detail?: sleepDetail, segment?: sleepSegm
     segmentEnd += 1440;
   }
 
-  let latestSleepEnd = 0;
-  chartData.forEach((item: any, index: number) => {
-    if (!isSleepStagePoint(item)) return;
-    const start = normalizeTimelineMinutes(item?.time, segmentStart);
-    if (start == null) return;
-    const nextStart = normalizeTimelineMinutes(chartData[index + 1]?.time, segmentStart);
-    let end = nextStart ?? segmentEnd ?? start;
-    if (segmentEnd != null && end > segmentEnd) end = segmentEnd;
-    if (end > start) latestSleepEnd = Math.max(latestSleepEnd, end);
+  const points = chartData
+    .map((item: any) => ({ item, minute: normalizeTimelineMinutes(item?.time, segmentStart) }))
+    .filter((entry: any) => entry.minute != null)
+    .sort((a: any, b: any) => a.minute - b.minute);
+  if (!points.length) return { endTime: '', chartData: [], chartDataSection: [] as Point[] };
+
+  const ordinaryGaps = points
+    .slice(0, -1)
+    .map((entry: any, index: number) => points[index + 1].minute - entry.minute)
+    .filter((gap: number) => gap > 0 && gap <= 60)
+    .sort((a: number, b: number) => a - b);
+  const typicalGap = ordinaryGaps.length
+    ? ordinaryGaps[Math.floor(ordinaryGaps.length / 2)]
+    : DEFAULT_STAGE_SAMPLE_MINUTES;
+
+  let mainEnd = segmentEnd ?? points[points.length - 1].minute + typicalGap;
+  let cutoffIndex = points.length;
+  for (let index = 0; index < points.length; index += 1) {
+    const current = points[index];
+    const previous = points[index - 1];
+    if (isNapStagePoint(current.item)) {
+      mainEnd = previous ? previous.minute + Math.min(typicalGap, 30) : current.minute;
+      cutoffIndex = index;
+      break;
+    }
+    if (previous && current.minute - previous.minute > MAIN_SLEEP_GAP_MINUTES) {
+      mainEnd = previous.minute + Math.min(typicalGap, 30);
+      cutoffIndex = index;
+      break;
+    }
+  }
+  if (segmentEnd != null) mainEnd = Math.min(mainEnd, segmentEnd);
+
+  const mainPoints = points.slice(0, cutoffIndex).filter((entry: any) => !isNapStagePoint(entry.item));
+  if (!mainPoints.some((entry: any) => getSleepStageName(entry.item))) {
+    const sourceSection = Array.isArray(segment?.chartDataSection) ? segment.chartDataSection : [];
+    const chartDataSection = ['清醒', '快速眼动', '浅睡', '深睡'].map((time) => {
+      const source = sourceSection.find((item: any) => item?.time === time);
+      return { time, value: String(Math.max(0, toPositiveNumber(source?.value))) };
+    });
+    const asleepMinutes = chartDataSection
+      .filter((item) => item.time !== '清醒')
+      .reduce((total, item) => total + toPositiveNumber(item.value), 0);
+    const fallbackEnd = segmentStart != null && asleepMinutes > 0 ? segmentStart + asleepMinutes : mainEnd;
+    return {
+      endTime: fallbackEnd > (segmentStart ?? -1) ? formatClockMinutes(fallbackEnd) : '',
+      chartData: [],
+      chartDataSection
+    };
+  }
+  const stageMinutes: Record<string, number> = { 清醒: 0, 快速眼动: 0, 浅睡: 0, 深睡: 0 };
+  mainPoints.forEach((entry: any, index: number) => {
+    const stageName = getSleepStageName(entry.item);
+    if (!stageName) return;
+    const nextMinute = mainPoints[index + 1]?.minute ?? mainEnd;
+    const duration = Math.max(0, Math.min(nextMinute, mainEnd) - entry.minute);
+    stageMinutes[stageName] += duration;
   });
 
-  if (!latestSleepEnd || (segmentStart != null && latestSleepEnd <= segmentStart)) return '';
-  return formatClockMinutes(latestSleepEnd);
+  const chartDataSection = ['清醒', '快速眼动', '浅睡', '深睡'].map((time) => ({
+    time,
+    value: String(Math.round(stageMinutes[time]))
+  }));
+  return {
+    endTime: mainEnd > (segmentStart ?? -1) ? formatClockMinutes(mainEnd) : '',
+    chartData: mainPoints.map((entry: any) => entry.item),
+    chartDataSection
+  };
 };
 
 const shouldPreferOverviewSleepDuration = (detailMinutes = 0) => {
@@ -143,31 +219,29 @@ const shouldPreferOverviewSleepDuration = (detailMinutes = 0) => {
 
 const displaySleepDetailObj = computed(() => {
   const detail = sleepDetailObj.value || {};
+  const analysis = getMainSleepAnalysis(detail, sleepSegmentObj.value);
   const detailMinutes = toPositiveNumber(detail.sleepDuration);
-  if (!shouldPreferOverviewSleepDuration(detailMinutes)) return detail;
+  if (!shouldPreferOverviewSleepDuration(detailMinutes)) {
+    return {
+      ...detail,
+      chartData: Array.isArray(detail.chartData) ? analysis.chartData : detail.chartData
+    };
+  }
   return {
     ...detail,
-    sleepDuration: getOverviewSleepDurationMinutes()
+    sleepDuration: getOverviewSleepDurationMinutes(),
+    chartData: Array.isArray(detail.chartData) ? analysis.chartData : detail.chartData
   };
 });
 
 const displaySleepSegmentObj = computed(() => {
   const segment = sleepSegmentObj.value || {};
-  const overviewMinutes = getOverviewSleepDurationMinutes();
-  const spanMinutes = getSleepSegmentSpanMinutes(segment);
-  const startMinutes = parseClockMinutes(segment.startTime);
-  const detailEndTime = getMainSleepEndTimeFromDetail(sleepDetailObj.value, segment);
-  if (!overviewMinutes || startMinutes == null || !spanMinutes || spanMinutes <= overviewMinutes + MAIN_SLEEP_OVERVIEW_TOLERANCE_MINUTES) {
-    return segment;
-  }
-  if (detailEndTime) {
-    return {
-      ...segment,
-      endTime: detailEndTime
-    };
-  }
+  const analysis = getMainSleepAnalysis(sleepDetailObj.value, segment);
   return {
-    ...segment
+    ...segment,
+    endTime: analysis.endTime || segment.endTime,
+    chartData: analysis.chartDataSection.length ? analysis.chartDataSection : segment.chartData,
+    chartDataSection: analysis.chartDataSection.length ? analysis.chartDataSection : segment.chartDataSection
   };
 });
 
