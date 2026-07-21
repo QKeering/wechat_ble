@@ -350,6 +350,9 @@ const relaxStressStatus = computed(() => {
     return getRelaxStatusByScore(relaxStressNumber.value) || normalizeHealthLevel('', relaxStressNumber.value, '\u5e73\u7a33\u72b6\u6001');
   }
   const normalized = normalizeHealthText(rawStatus, '');
+  if (/^\s*\d+\s*(?:级|等级)\s*$/.test(normalized) || normalized === '等级') {
+    return getRelaxStatusByScore(relaxStressNumber.value) || '\u5e73\u7a33\u72b6\u6001';
+  }
   return normalized || getRelaxStatusByScore(relaxStressNumber.value) || '\u5e73\u7a33\u72b6\u6001';
 });
 const activeIcon = computed(() => {
@@ -2063,8 +2066,7 @@ onPullDownRefresh(async () => {
         </view>
         <view class="module-content flex ai-end jc-between">
           <view class="relax-score">
-            <text class="score-number fs-72">{{ relaxStressValue }}</text>
-            <text class="score-label ml-10">{{ relaxStressStatus }}</text>
+            <text class="score-label">{{ relaxStressStatus }}</text>
           </view>
           <view class="flex ai-center jc-center flex-1 ml-30">
             <l-echart ref="chartRelaxlRef" @finished="initRelaxChart" style="width: 100%; height: 192rpx; margin: 0"></l-echart>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { sleepRageOption } from '@/homeDetail/sleepPage/echartOptions';
 import type { sleepSegment, Point } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
@@ -52,6 +52,13 @@ const areAllValuesZero = (dataArray: any[]): boolean => {
 };
 // 睡眠区间图例显示顺序
 const SLEEP_ORDER = ['清醒', '快速眼动', '小睡', '浅睡', '深睡'];
+const SLEEP_COLORS: Record<string, string> = {
+  清醒: '#e2e1fd',
+  快速眼动: '#9994f4',
+  小睡: '#feba8a',
+  浅睡: '#c5c2f9',
+  深睡: '#5f57ec'
+};
 // 按指定顺序对睡眠数据进行排序
 const sortBySleepOrder = (dataArray: any[]): any[] => {
   return [...dataArray].sort((a, b) => {
@@ -60,6 +67,20 @@ const sortBySleepOrder = (dataArray: any[]): any[] => {
     return (idxA === -1 ? Infinity : idxA) - (idxB === -1 ? Infinity : idxB);
   });
 };
+const stageStats = computed(() => {
+  const source = Array.isArray(props.sleepSegmentObj?.chartDataSection) ? props.sleepSegmentObj.chartDataSection : [];
+  const values = SLEEP_ORDER.map((name) => {
+    const item = source.find((entry: any) => entry?.time === name);
+    const minutes = Math.max(0, parseInt(String(item?.value || 0), 10) || 0);
+    return { name, minutes, color: SLEEP_COLORS[name] };
+  });
+  const total = values.reduce((sum, item) => sum + item.minutes, 0);
+  return values.map((item) => ({
+    ...item,
+    duration: formatMinutesToTime(String(item.minutes)),
+    percent: total > 0 ? `${((item.minutes / total) * 100).toFixed(1)}%` : '0.0%'
+  }));
+});
 const getProcessedOption = () => {
   // 测试数据
   const testData = {
@@ -88,6 +109,14 @@ const getProcessedOption = () => {
 
   // 深拷贝原option
   const newOption = cloneDeep(sleepRageOption);
+  if (newOption.legend) newOption.legend.show = false;
+  if (newOption.title) {
+    newOption.title.left = '50%';
+    newOption.title.top = '45%';
+  }
+  if (newOption.series?.[0]) {
+    newOption.series[0].center = ['50%', '50%'];
+  }
 
   // 根据sleepSegmentObj动态修改配置
   if (props.sleepSegmentObj?.chartData && props.sleepSegmentObj?.chartDataSection) {
@@ -234,10 +263,74 @@ const initChart = async () => {
         <text>{{ sleepSegmentObj.endTime || '00:00' }}</text>
       </view>
     </view>
-    <view class="flex ai-center jc-center">
-      <l-echart ref="chartRef" @finished="initChart" style="width: 100%; height: 380rpx; margin: 0"></l-echart>
+    <view class="sleep-range-content">
+      <view class="sleep-range-chart">
+        <l-echart ref="chartRef" @finished="initChart" style="width: 100%; height: 380rpx; margin: 0"></l-echart>
+      </view>
+      <view class="sleep-stage-stats">
+        <view v-for="item in stageStats" :key="item.name" class="sleep-stage-row">
+          <view class="sleep-stage-name">
+            <view class="sleep-stage-dot" :style="{ backgroundColor: item.color }"></view>
+            <text>{{ item.name }}</text>
+          </view>
+          <view class="sleep-stage-value">
+            <text>{{ item.duration }}</text>
+            <text class="sleep-stage-percent">{{ item.percent }}</text>
+          </view>
+        </view>
+      </view>
     </view>
   </view>
 </template>
 
-<style></style>
+<style scoped>
+.sleep-range-content {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.sleep-range-chart {
+  width: 42%;
+  flex-shrink: 0;
+}
+
+.sleep-stage-stats {
+  flex: 1;
+  min-width: 0;
+  padding-left: 20rpx;
+}
+
+.sleep-stage-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 54rpx;
+  font-size: 24rpx;
+}
+
+.sleep-stage-name,
+.sleep-stage-value {
+  display: flex;
+  align-items: center;
+}
+
+.sleep-stage-dot {
+  width: 20rpx;
+  height: 20rpx;
+  margin-right: 12rpx;
+  border-radius: 4rpx;
+}
+
+.sleep-stage-value {
+  color: #010101;
+  white-space: nowrap;
+}
+
+.sleep-stage-percent {
+  width: 78rpx;
+  margin-left: 12rpx;
+  color: #979797;
+  text-align: right;
+}
+</style>
