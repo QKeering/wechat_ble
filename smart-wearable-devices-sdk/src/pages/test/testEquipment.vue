@@ -36,7 +36,7 @@ const handleConnect = async (deviceId) => {
     <view v-if="devices.length && !connectedDeviceId">
       <text>发现 {{ devices.length }} 个指环设备：</text>
       <view v-for="dev in devices" :key="dev.deviceId" class="device-item">
-        <text>{{ dev.name || '未知设备' }}</text>
+        <text>{{ dev.name || '新设备' }}</text>
         <button size="mini" @click="handleConnect(dev.deviceId)">连接</button>
       </view>
     </view>

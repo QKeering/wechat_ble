@@ -57,6 +57,7 @@ import WaveProgress from '@/components/waveProgress.vue';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
 import { clearRwDiagnosticCommandLock, setRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
+import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
 const {
   handleConnectDevice,
   deviceInfo: ringDeviceInfo,
@@ -268,9 +269,6 @@ const uploadProgress = computed(() => {
   }
 });
 // Device upload progress is hidden for now.
-// Device upload progress is hidden for now.
-//   return (userStore.isUploading === '1' || userStore.isUploading === '2') && !shouldHideProgress.value;
-// });
 const finalShowProgress = computed(() => {
   return !shouldHideProgress.value;
 });
@@ -2611,11 +2609,6 @@ const latestBattery = computed(() => {
   return null;
 });
 const getFirstMetricValue = (...values: any[]) => values.find((value) => value != null && value !== '');
-const formatBatteryText = (value: unknown, emptyText = '--') => {
-  if (value == null || value === '') return emptyText;
-  const text = String(value).trim();
-  return /^\d+(?:\.\d+)?$/.test(text) ? `${text}%` : text;
-};
 const hasMineBatterySnapshot = () =>
   getFirstMetricValue(
     getMineBatterySourceValue(latestBattery.value as Record<string, any> | null),
@@ -2635,7 +2628,7 @@ const displayBatteryValue = computed(() => {
     userStore.healthData?.battery,
     userStore.latestMetrics?.battery
   );
-  return formatBatteryText(value);
+  return formatBatteryPercentForDisplay(value, '--');
 });
 // Whether cached battery info can be shown.
 const shouldShowBatteryInfo = computed(() => {

@@ -167,6 +167,7 @@ import { getRingBusinessDeviceKey, getRingBusinessDeviceName, getRingBusinessDev
 import { ensureRingBusinessPageReady, useRingBusinessController } from '@/features/ring';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
+import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
 import type { RingDeviceInfo } from '@/sdk/ring-ble';
 
 const ring = useRingBusinessController();
@@ -176,12 +177,7 @@ const currentDeviceName = computed(() => (ring.isReady.value ? getRingBusinessDe
 const currentDeviceTail = computed(() => `尾号 ${getRingBusinessDeviceTail(ring.deviceInfo.value)}`);
 const heartRateText = computed(() => metrics.value.heartRate ?? normalizeHealthText(metrics.value.heartRateStatus, '-'));
 const bloodOxygenText = computed(() => metrics.value.bloodOxygen ?? normalizeHealthText(metrics.value.bloodOxygenStatus, '-'));
-const formatBatteryText = (value: unknown) => {
-  if (value == null || value === '') return '-';
-  const text = String(value).trim();
-  return /^\d+(?:\.\d+)?$/.test(text) ? `${text}%` : text;
-};
-const batteryText = computed(() => formatBatteryText(metrics.value.battery));
+const batteryText = computed(() => formatBatteryPercentForDisplay(metrics.value.battery));
 const batteryStatusText = computed(() => normalizeHealthText(metrics.value.batteryStatus, '-'));
 const temperatureText = computed(() => metrics.value.temperature ?? normalizeHealthText(metrics.value.temperatureStatus, '-'));
 const hrvText = computed(() => metrics.value.hrv ?? normalizeHealthText(metrics.value.hrvStatus, '-'));

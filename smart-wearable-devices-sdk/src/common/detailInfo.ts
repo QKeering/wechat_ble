@@ -103,9 +103,9 @@ const DETAIL_INFO: DetailInfoItem[] = [
   },
   {
     id: 'daily_calories',
-    title: '全天卡路里',
+    title: '全天卡',
     detail:
-      '全天卡路里表示一天内身体消耗的总能量，通常包含基础代谢消耗和活动消耗。\n\n该指标会受到年龄、性别、身高、体重和活动强度影响。'
+      '全天卡表示一天内身体消耗的总能量，通常包含基础代谢消耗和活动消耗。\n\n该指标会受到年龄、性别、身高、体重和活动强度影响。'
   },
   {
     id: 'lifestyle_score',

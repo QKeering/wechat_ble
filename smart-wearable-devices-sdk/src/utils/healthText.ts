@@ -78,7 +78,7 @@ const HEALTH_TEXT_MAP: Record<string, string> = {
 
 const CHINESE_HEALTH_TEXT = /[\u4e00-\u9fff]/;
 const ASCII_TEXT = /^[\x00-\x7f]+$/;
-const NUMBER_OR_VERSION_TEXT = /^[-+]?\d+(?:\.\d+)*(?:\s*(?:%|bpm|mmhg|mmol\/l|\u2103|\u00b0c|\u5206\u949f|\u5c0f\u65f6|\u6b65|\u5343\u5361|kcal))?$/i;
+const NUMBER_OR_VERSION_TEXT = /^[-+]?\d+(?:\.\d+)*(?:\s*(?:%|bpm|mmhg|mmol\/l|\u2103|\u00b0c|\u5206\u949f|\u5c0f\u65f6|\u6b65|\u5361|\u5343\u5361|kcal))?$/i;
 const DATE_OR_RANGE_TEXT = /^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:\s*[~-]\s*\d{4}[-/.]\d{1,2}[-/.]\d{1,2})?$/;
 const MOJIBAKE_TEXT =
   /[\ufffd\u951f]|[\ue000-\uf8ff]|\u95bc\?[\s\S]*\u9288\?|(?:\u93c8|\u7481|\u9422|\u7e51|\u934a){2,}/;

@@ -4,6 +4,8 @@ export interface MotionCalorieNormalizeContext {
   unit?: unknown;
 }
 
+export const MOTION_CALORIE_DISPLAY_UNIT = '卡';
+
 const toFiniteNumber = (value: unknown) => {
   if (value == null || value === '') return null;
   const numeric = Number(String(value).replace(/,/g, '').trim());
@@ -24,7 +26,7 @@ export const normalizeMotionCalorieKcal = (
 
   const stepCount = toFiniteNumber(context.stepCount);
   const targetCalorie = toFiniteNumber(context.targetCalorie);
-  const explicitKcal = ['千卡', 'kcal'].includes(String(context.unit || '').trim().toLowerCase());
+  const explicitKcal = ['卡', '千卡', 'kcal'].includes(String(context.unit || '').trim().toLowerCase());
   const looksLikeSmallCalorie =
     !explicitKcal &&
     numeric >= 1000 &&
@@ -40,3 +42,5 @@ export const formatMotionCalorieKcal = (value: unknown, emptyText = '00') => {
   if (numeric == null || numeric <= 0) return emptyText;
   return String(roundKcal(numeric));
 };
+
+export const normalizeMotionCalorieDisplayUnit = () => MOTION_CALORIE_DISPLAY_UNIT;

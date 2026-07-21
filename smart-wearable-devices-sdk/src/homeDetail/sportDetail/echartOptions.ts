@@ -1,5 +1,5 @@
 // utils/echartOptions.ts
-// 1. 运动卡路里
+// 1. 运动卡
 export const heartRateOption = {
   backgroundColor: '#fff',
   tooltip: {

@@ -10,7 +10,7 @@ const form = reactive({
 });
 const list = ref([
   { name: '活动主观评分', value: 'valueFirst' },
-  { name: '全天卡路里', value: 'valueSecound' },
+  { name: '全天卡', value: 'valueSecound' },
   // { name: '站立时长', value: 'valueThird' },
   { name: '全天活动强度', value: 'valueFourth' },
   { name: '活动总结', value: 'valueFifth' }

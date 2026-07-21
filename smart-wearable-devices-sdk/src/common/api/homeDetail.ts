@@ -120,7 +120,7 @@ export const getsleepSummary = (params: { date?: string }, config: HttpRequestCo
 export const getMotionOverview = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<motionOverview> => {
   return (uni as any).$uv.http.get('/app/data/motion/motionOverview', { params, ...config });
 };
-// 获取活动卡路里
+// 获取活动卡
 export const getMotionCalorie = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<motionCalorie> => {
   return (uni as any).$uv.http.get('/app/data/motion/motionCalorie', { params, ...config });
 };

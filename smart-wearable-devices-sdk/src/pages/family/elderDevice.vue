@@ -4,6 +4,7 @@ import { onPullDownRefresh, onShow } from '@dcloudio/uni-app';
 import { getBindInfo } from '@/common/api/device';
 import { getFamilyGuardians, type FamilyGuardian } from '@/common/api/family';
 import { getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
+import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
 
 const loading = ref(false);
 const device = ref<any>(null);
@@ -25,8 +26,9 @@ const batteryValue = computed(() => {
 });
 const batteryText = computed(() => {
   if (batteryValue.value == null) return '电量暂时未知';
-  if (batteryValue.value <= 20) return `电量 ${batteryValue.value}%，建议现在充电`;
-  return `电量 ${batteryValue.value}%，可以继续使用`;
+  const displayValue = formatBatteryPercentForDisplay(batteryValue.value);
+  if (batteryValue.value <= 20) return `电量 ${displayValue}，建议现在充电`;
+  return `电量 ${displayValue}，可以继续使用`;
 });
 const statusText = computed(() => {
   if (!hasDevice.value) return '等待子女帮您绑定设备';

@@ -19,7 +19,7 @@ const permissions = ref<Record<string, boolean>>({
 const items = [
   { key: 'vitalSigns', title: '生命体征', desc: '心率、血氧、体温、压力等关键指标' },
   { key: 'sleep', title: '睡眠数据', desc: '睡眠评分、时长、质量和醒来次数' },
-  { key: 'motion', title: '活动数据', desc: '步数、活动时间、卡路里和运动评分' },
+  { key: 'motion', title: '活动数据', desc: '步数、活动时间、卡和运动评分' },
   { key: 'alerts', title: '异常提醒', desc: '低血氧、心率异常、设备离线等提醒' },
   { key: 'aiSummary', title: 'AI 健康摘要', desc: '每日总结、趋势解释和看护建议' },
   { key: 'deviceStatus', title: '设备状态', desc: '设备绑定、在线、同步时间和电量' }

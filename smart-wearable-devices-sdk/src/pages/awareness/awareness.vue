@@ -45,7 +45,8 @@ import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/rin
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
 import { useRingBusinessHistoryPageSync } from '@/composables/useRingBusinessHistoryPageSync';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
-import { formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
 import {
   buildRingHistorySubmitRecords,
   countRingHistoryRecordMetrics,
@@ -190,6 +191,7 @@ const getAwarenessHistoryUploadSinceTimestamp = (isRwRing: boolean) => {
 
 const pullDownRefresh = ref(false);
 const pullDownProgress = ref(0);
+const homeDataSyncing = ref(false);
 // const showProgress = ref(false);
 
 
@@ -402,6 +404,7 @@ const activityMotionTimeNumber = computed(() =>
 );
 const activityStepValue = computed(() => (activityStepNumber.value > 0 ? `${activityStepNumber.value}` : '00'));
 const activityCalorieValue = computed(() => formatMotionCalorieKcal(activityCalorieNumber.value));
+const activityCalorieUnit = computed(() => MOTION_CALORIE_DISPLAY_UNIT);
 const activityMotionTimeValue = computed(() => (activityMotionTimeNumber.value > 0 ? `${activityMotionTimeNumber.value}` : '00'));
 const activityTargetStep = computed(() => getPositiveMetricNumber(motionOverviewObj.value?.targetStep) || 6000);
 const activityTargetCalorie = computed(() => getPositiveMetricNumber(motionOverviewObj.value?.targetCalorie) || 500);
@@ -441,11 +444,6 @@ const latestBattery = computed(() => {
   }
   return null;
 });
-const formatBatteryText = (value: unknown, emptyText = '') => {
-  if (value == null || value === '') return emptyText;
-  const text = String(value).trim();
-  return /^\d+(?:\.\d+)?$/.test(text) ? `${text}%` : text;
-};
 const displayBatteryValue = computed(() => {
   const value =
     getBatteryDisplaySourceValue(latestBattery.value as Record<string, any> | null) ??
@@ -453,7 +451,7 @@ const displayBatteryValue = computed(() => {
     userStore.latestMetrics?.battery ??
     ringStore.healthData?.battery ??
     ringStore.latestMetrics?.battery;
-  return formatBatteryText(value);
+  return formatBatteryPercentForDisplay(value, '');
 });
 const getDisplayMetricValue = (...values: unknown[]) => {
   for (const value of values) {
@@ -496,14 +494,23 @@ const bluetoothStatus = computed(() => {
     isReconnecting: userStore.isReconnecting === true || ringStore.isReconnecting === true
   });
   const isDisconnected = !isConnecting && !isConnected;
+  const isSyncing =
+    isConnected &&
+    (homeDataSyncing.value ||
+      userStore.isSending === true ||
+      ringStore.isSending === true ||
+      userStore.uploadingStatus === 'uploading' ||
+      ringStore.uploadingStatus === 'uploading');
 
   return {
     isDisconnected,
     isConnecting,
     isConnected,
+    isSyncing,
 
 
     statusText: isConnecting ? '\u8fde\u63a5\u4e2d' : '',
+    syncingText: isSyncing ? '\u4e0a\u4f20\u4e2d' : '',
     batteryText: isConnected ? displayBatteryValue.value : '',
 
 
@@ -744,6 +751,7 @@ watch(
         }
 
         if (submitArray.length !== 0) {
+          homeDataSyncing.value = true;
           userStore.updateUploadingStatus('1');
           if (!isRwRing) {
             appendAwarenessDiagnosticLog('legacy-local-data-upload-start', {
@@ -789,16 +797,7 @@ watch(
 
           await new Promise((resolve) => setTimeout(resolve, 500));
 
-          await getBalanceScoreData();
-          await getSleepOverviewData();
-          await getMotionOverviewData();
-          await getStressInfo();
-          await getVitalSigns();
-          await initBalanceChart();
-          await initSportChart();
-          await initVitalChart();
-          await initRelaxChart();
-          await initSleepChart();
+          await refreshAwarenessAfterDataProcessed('legacy-local-data-upload-complete');
           // uni.hideLoading();
         } else if (!isRwRing) {
           appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
@@ -813,6 +812,7 @@ watch(
             submitMetricCounts,
             snapshot: getAwarenessConnectionSnapshot()
           });
+          await refreshAwarenessAfterDataProcessed('legacy-local-data-no-submit');
         }
       } else {
         // userStore.updateIsSending(false);
@@ -845,6 +845,7 @@ watch(
       });
     } finally {
       // userStore.updateIsSending(false);
+      homeDataSyncing.value = false;
     }
   },
   { deep: true }
@@ -1028,6 +1029,25 @@ const refreshAwarenessBusinessOverview = async (date: string) => {
   await Promise.all([initBalanceChart(), initSportChart(), initVitalChart(), initRelaxChart(), initSleepChart()]);
 };
 
+const refreshAwarenessAfterDataProcessed = async (reason: string, date = getSelectedDetailDate()) => {
+  appendAwarenessDiagnosticLog('business-processed-refresh-start', {
+    trigger: reason,
+    date,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+  await refreshAwarenessBusinessOverview(date);
+  appendAwarenessDiagnosticLog('business-processed-refresh-result', {
+    trigger: reason,
+    date,
+    balanceScore: summarizeAwarenessResponse(balanceScoreObj.value),
+    sleepOverview: summarizeAwarenessResponse(sleepOverviewObj.value),
+    motionOverview: summarizeAwarenessResponse(motionOverviewObj.value),
+    stressDetail: summarizeAwarenessResponse(stressDetailObj.value),
+    vitalSign: summarizeAwarenessResponse(vitalSignObj.value),
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+};
+
 const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string) => {
   if (!isAwarenessRwRing() || !hasAwarenessCommunicationReady()) return;
 
@@ -1100,6 +1120,7 @@ const syncRwHomeHistoryAndRefreshOverview = async (
 
   awarenessHistorySyncPromise = (async () => {
     const startedAt = Date.now();
+    homeDataSyncing.value = true;
     appendAwarenessDiagnosticLog('business-sync-background-start', {
       trigger: reason,
       date,
@@ -1168,6 +1189,7 @@ const syncRwHomeHistoryAndRefreshOverview = async (
       });
     });
     } finally {
+      homeDataSyncing.value = false;
       awarenessHistorySyncPromise = null;
     }
   })();
@@ -1420,6 +1442,7 @@ const executeCommandsSequentially = async () => {
     const startedAt = Date.now();
     const protocol = userStore.deviceInfo?.protocol || ringStore.deviceInfo?.protocol || 'unknown';
     try {
+      homeDataSyncing.value = true;
       userStore.updateIsSending(true);
       started = true;
       sendTimer.value = setTimeout(() => {
@@ -1488,6 +1511,7 @@ const executeCommandsSequentially = async () => {
         clearTimer();
         userStore.updateIsSending(false);
       }
+      homeDataSyncing.value = false;
       awarenessRefreshPromise = null;
     }
   })();
@@ -1856,8 +1880,10 @@ onPullDownRefresh(async () => {
             </view>
 
             <view v-else-if="bluetoothStatus.isConnected" class="bluetooth-transition bluetooth-connected flex fd-c ai-center">
-              <uv-image :src="bluetoothStatus.iconPath" width="48rpx" height="48rpx"></uv-image>
-              <uv-loading-icon v-if="userStore.isUploading === '1'" mode="circle" size="16" color="#4C76F1" style="margin-top: 18rpx"></uv-loading-icon>
+              <view class="bluetooth-icon-wrap" :class="{ 'bluetooth-icon-wrap--syncing': bluetoothStatus.isSyncing }">
+                <uv-image :src="bluetoothStatus.iconPath" width="48rpx" height="48rpx"></uv-image>
+              </view>
+              <view v-if="bluetoothStatus.isSyncing" class="fs-20 bluetooth-sync-text">{{ bluetoothStatus.syncingText }}</view>
               <view v-else class="fs-20">{{ bluetoothStatus.batteryText }}</view>
             </view>
 
@@ -2025,7 +2051,7 @@ onPullDownRefresh(async () => {
               <uv-image src="/static/images/icon10.png" width="36rpx" height="36rpx"></uv-image>
               <view class="activity-text ml-10">
                 <text class="activity-value fs-36">{{ activityCalorieValue }}</text>
-                <text class="activity-goal t-979797 fs-24">/{{ activityTargetCalorie }}{{ '\u5343\u5361' }}</text>
+                <text class="activity-goal t-979797 fs-24">/{{ activityTargetCalorie }}{{ activityCalorieUnit }}</text>
               </view>
             </view>
             <view class="activity-item flex ai-center mb-10">
@@ -2262,6 +2288,40 @@ onPullDownRefresh(async () => {
 
 .bluetooth-connected {
   animation: fadeInScale 0.5s ease-out;
+}
+
+.bluetooth-icon-wrap {
+  position: relative;
+  width: 56rpx;
+  height: 56rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bluetooth-icon-wrap--syncing::after {
+  content: '';
+  position: absolute;
+  inset: -6rpx;
+  border: 4rpx solid rgba(76, 118, 241, 0.18);
+  border-top-color: #4c76f1;
+  border-radius: 50%;
+  animation: bluetoothSpin 0.85s linear infinite;
+}
+
+.bluetooth-sync-text {
+  margin-top: 6rpx;
+  color: #4c76f1;
+  white-space: nowrap;
+}
+
+@keyframes bluetoothSpin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes pulse {

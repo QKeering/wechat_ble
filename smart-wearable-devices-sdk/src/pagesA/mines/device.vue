@@ -11,6 +11,7 @@ import { clearFrontendRingBindingState, getBoundRingIdentityTail, hasBoundRingId
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
+import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
 
 const userStore = useUserStore();
 const ringStore = useRingStore();
@@ -295,8 +296,9 @@ const readBatteryOnly = async () => {
     const parsed = await waitForFirstSuccessful<Record<string, any>>([directWaiter, sharedWaiter], '电量读取超时，请靠近戒指后重试');
     const value = getBatteryReadingValue(parsed);
     if (value == null) throw new Error('设备返回的电量格式无效');
-    singleReadResults.value = { ...singleReadResults.value, battery: `${value}%` };
-    lastActionText.value = `电量读取成功：${value}%`;
+    const displayValue = formatBatteryPercentForDisplay(value);
+    singleReadResults.value = { ...singleReadResults.value, battery: displayValue };
+    lastActionText.value = `电量读取成功：${displayValue}`;
     appendDeviceDiagnosticLog('battery-read-result', {
       value,
       parsed,
@@ -400,10 +402,8 @@ const formatMetricValue = (value: unknown, suffix = '') => {
   if (value == null || value === '') return '-';
   const text = String(value).trim();
   if (suffix === '%') {
-    if (isBatteryChargedLike(value)) return '100%';
-    const numeric = Number(text.replace('%', '').trim());
-    if (Number.isFinite(numeric) && numeric >= 0 && numeric <= 100) return `${numeric}%`;
-    return text;
+    if (isBatteryChargedLike(value)) return formatBatteryPercentForDisplay(100);
+    return formatBatteryPercentForDisplay(value, '-');
   }
   if (!suffix || text.endsWith(suffix)) return text;
   return `${text}${suffix}`;

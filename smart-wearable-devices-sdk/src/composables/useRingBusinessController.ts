@@ -1522,7 +1522,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 export function getRingBusinessDeviceName(device: RingDeviceInfo | Record<string, any>) {
   const name = `${device.displayName || device.deviceName || device.name || device.localName || device.bleName || ''}`.trim();
   if (name) return name;
-  return getRingDeviceStableIdentity(device as RingDeviceInfo) || '未知设备';
+  return getRingDeviceStableIdentity(device as RingDeviceInfo) || '新设备';
 }
 
 export function getRingBusinessDeviceTail(device: RingDeviceInfo | Record<string, any>) {

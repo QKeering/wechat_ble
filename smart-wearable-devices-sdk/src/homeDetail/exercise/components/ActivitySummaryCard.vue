@@ -6,7 +6,7 @@ import { todayOption, lastDayOption } from '@/homeDetail/exercise/echartOptions'
 import type { motionSummary, Point } from '@/types/api/homeDetail';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';
 import { cloneDeep } from 'lodash-es';
-import { formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 const props = defineProps({
   motionSummaryObj: {
     type: Object as () => motionSummary,
@@ -276,7 +276,7 @@ onLoad(() => {});
         </view>
         <view class="">
           <text class="fs-36">{{ motionCalorieText }}</text>
-          <text class="fs-24">{{ '\u5343\u5361' }}</text>
+          <text class="fs-24">{{ MOTION_CALORIE_DISPLAY_UNIT }}</text>
         </view>
       </view>
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start pl-45">

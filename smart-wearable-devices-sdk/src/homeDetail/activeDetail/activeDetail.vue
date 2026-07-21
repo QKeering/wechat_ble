@@ -7,7 +7,7 @@ import { heartRateOption, stepCount, exerciseMileage } from '@/homeDetail/active
 import { getMotionDetail } from '@/common/api/homeDetail';
 import type { motionDetail, Point } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
-import { normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+import { MOTION_CALORIE_DISPLAY_UNIT, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 const echarts = require('../../static/echarts.min.js');
 const list = ref(['日', '周', '月']);
 const current = ref<number>(0);
@@ -340,7 +340,7 @@ onPageScroll((e) => {
         <homeHeartChart
           ref="chartRefF"
           :currentRate="motionCalorieKcal"
-          :rateUnit="'/' + motionTargetCalorie + '千卡'"
+          :rateUnit="'/' + motionTargetCalorie + MOTION_CALORIE_DISPLAY_UNIT"
           card-title="活动总热量"
           :showRigntBox="false"
           :showChartTitle="true"

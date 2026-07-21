@@ -37,7 +37,7 @@ const copy = {
   specifiedModel: t(25351, 23450, 22411, 21495),
   connect: t(36830, 25509),
   cancel: t(21462, 28040),
-  unknownDevice: t(38476, 29983, 35774, 22791),
+  unknownDevice: t(26032, 35774, 22791),
   bindNewDevice: t(26159, 21542, 32465, 23450, 26032, 35774, 22791),
   noDeviceTip: `1. ${t(26410, 26816, 27979, 21040, 30446, 26631, 35774, 22791, 65292, 35831, 28857, 20987, 37325, 26032, 25628, 32034, 12290)}`,
   nearTip: `2. ${t(35831, 30830, 35748, 25106, 25351, 24050, 24320, 26426, 24182, 38752, 36817, 25163, 26426, 12290)}`
@@ -270,7 +270,7 @@ onUnload(() => {
       <view class="device-list mt-50">
         <view v-for="dev in devices" :key="dev.deviceId" class="device-item flex jc-between ai-center mb-50 bg-white pt-20 pb-20 pl-40 pr-40 r-50">
           <view class="device-info">
-            <view class="device-name">{{ dev.name }}</view>
+            <view class="device-name">{{ getRingBusinessDeviceName(dev) || copy.unknownDevice }}</view>
             <view class="device-model t-979797">{{ isIOS ? dev?.uniMacId : dev?.deviceId }}</view>
           </view>
           <uv-button
@@ -282,7 +282,7 @@ onUnload(() => {
               padding: '43rpx 0',
               width: '174rpx'
             }"
-            @click="handleConnect(dev.deviceId, dev.name, dev?.uniMacId)"
+            @click="handleConnect(dev)"
           ></uv-button>
         </view>
       </view>

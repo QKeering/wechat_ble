@@ -104,11 +104,11 @@ onShow(async () => {
           </view>
         </view>
 
-        <!-- 卡路里目标 -->
+        <!-- 卡目标 -->
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('calorie')">
           <view class="" style="width: 60%">
-            <text>卡路里目标</text>
-            <text class="t-979797 fs-24">（千卡）</text>
+            <text>卡目标</text>
+            <text class="t-979797 fs-24">（卡）</text>
           </view>
           <view class="flex ai-center">
             <text class="mr-20">{{ calorieTarget || '请选择' }}</text>

@@ -169,20 +169,20 @@ export type sleepSummaryData = {
 // 获取活动概览
 export type motionOverview = {
   step?: number; // 步数
-  calorie?: number; // 消耗卡路里
-  calorieUnit?: string; // 卡路里单位；后端统一返回“千卡”，旧接口缺失时前端兜底
+  calorie?: number; // 消耗卡
+  calorieUnit?: string; // 卡单位；后端统一返回“卡”，旧接口缺失时前端兜底
   motionTime?: number; // 运动时长
   targetStep?: number; // 目标步数
-  targetCalorie?: number; // 目标卡路里
+  targetCalorie?: number; // 目标卡
   targetMotionTime?: number; // 目标运动时长
 };
-// 获取活动消耗卡路里
+// 获取活动消耗卡
 export type motionCalorie = {
-  totalCalorie?: number; // 总消耗卡路里（千卡）
-  calorieUnit?: string; // 卡路里单位；后端统一返回“千卡”，旧接口缺失时前端兜底
-  targetCalorie?: number; // 目标消耗卡路里（千卡）
-  motionCalorie?: number; // 活动消耗卡路里（千卡，必填）
-  basalCalorie?: number; // 基础代谢消耗卡路里（千卡）
+  totalCalorie?: number; // 总消耗卡
+  calorieUnit?: string; // 卡单位；后端统一返回“卡”，旧接口缺失时前端兜底
+  targetCalorie?: number; // 目标消耗卡
+  motionCalorie?: number; // 活动消耗卡（必填）
+  basalCalorie?: number; // 基础代谢消耗卡
   motionCalorieChart?: Point[]; // 活动消耗图表（数组，元素为 Point 类型）
   basalCalorieChart?: Point[]; // 基础代谢消耗图表（数组，元素为 Point 类型）
 };
@@ -197,10 +197,10 @@ export type motionIntensity = {
 };
 // 获取活动详情
 export type motionDetail = {
-  calorie?: number; // 运动卡路里
-  calorieUnit?: string; // 卡路里单位
-  targetCalorie?: number; // 目标卡路里
-  calorieChart?: Point[]; // 运动卡路里图表（数组，元素为 Point 类型）
+  calorie?: number; // 运动卡
+  calorieUnit?: string; // 卡单位
+  targetCalorie?: number; // 目标卡
+  calorieChart?: Point[]; // 运动卡图表（数组，元素为 Point 类型）
   step?: number; // 步数
   targetStep?: number; // 目标步数
   stepChart?: Point[]; // 步数图表（数组，元素为 Point 类型）
@@ -213,8 +213,8 @@ export type motionSummary = {
   todayStepChart: Point[]; // 今天的步数图表
   yesterdayStep: number; // 昨天的步数
   yesterdayStepChart: Point[]; // 昨天的步数图表
-  motionCalorie: number; // 活动消耗的能量（千卡）
-  calorieUnit?: string; // 卡路里单位
+  motionCalorie: number; // 活动消耗的能量（卡）
+  calorieUnit?: string; // 卡单位
   motionTime: number; // 活动时长
   midHighTime: number; // 中高强度活动时长
   motionScore: number; // 活动得分

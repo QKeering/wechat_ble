@@ -156,6 +156,7 @@ import { getRingDeviceStableIdentity } from '@/composables/useRingBleSdk';
 import { ensureRingBusinessPageReady, getRingBusinessDeviceKey, getRingBusinessDeviceName, getRingBusinessDeviceTail, useRingBusinessController } from '@/features/ring';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
+import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
 import type { RingDeviceInfo } from '@/sdk/ring-ble';
 
 const ring = useRingBusinessController();
@@ -182,7 +183,7 @@ const wornText = computed(() => {
 });
 const fatigueText = computed(() => healthStatusText(metrics.value.fatigueLevel || metrics.value.fatigue));
 const anxietyText = computed(() => healthStatusText(metrics.value.anxietyLevel || metrics.value.anxiety));
-const batteryText = computed(() => (metrics.value.battery == null ? '-' : `${metrics.value.battery}`));
+const batteryText = computed(() => formatBatteryPercentForDisplay(metrics.value.battery));
 const batteryStatusText = computed(() => normalizeHealthText(metrics.value.batteryStatus, '电量'));
 const monitoringStatusText = computed(() => healthStatusText(metrics.value.monitoringStatus));
 const currentDeviceName = computed(() => (ring.isReady.value ? getRingBusinessDeviceName(ring.deviceInfo.value) : '未连接戒指'));

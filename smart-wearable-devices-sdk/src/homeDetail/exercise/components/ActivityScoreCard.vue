@@ -3,7 +3,7 @@ import { ref, computed, watch } from 'vue';
 const echarts = require('../../../static/echarts.min.js');
 import { pressureOption } from '@/homeDetail/exercise/echartOptions';
 import type { motionOverview, motionSummary } from '@/types/api/homeDetail';
-import { formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 
 const props = defineProps({
   motionOverviewObj: {
@@ -38,13 +38,14 @@ const targetStep = computed(() => toPositiveNumber(props.motionOverviewObj?.targ
 const targetCalorie = computed(() => toPositiveNumber(props.motionOverviewObj?.targetCalorie) || 500);
 const targetMotionTime = computed(() => toPositiveNumber(props.motionOverviewObj?.targetMotionTime) || 30);
 const motionTimeNumber = computed(() => toPositiveNumber(props.motionOverviewObj?.motionTime, props.motionSummaryObj?.motionTime));
-const calorieUnit = computed(() => props.motionOverviewObj?.calorieUnit || props.motionSummaryObj?.calorieUnit || '千卡');
+const calorieSourceUnit = computed(() => props.motionOverviewObj?.calorieUnit || props.motionSummaryObj?.calorieUnit || MOTION_CALORIE_DISPLAY_UNIT);
+const calorieUnit = computed(() => MOTION_CALORIE_DISPLAY_UNIT);
 const calorieNumber = computed(
   () =>
     normalizeMotionCalorieKcal(toPositiveNumber(props.motionOverviewObj?.calorie, props.motionSummaryObj?.motionCalorie), {
       stepCount: stepNumber.value,
       targetCalorie: targetCalorie.value,
-      unit: calorieUnit.value
+      unit: calorieSourceUnit.value
     }) || 0
 );
 const calorieText = computed(() => formatMotionCalorieKcal(calorieNumber.value));

@@ -88,7 +88,7 @@ const getMotionOverviewData = async (currentDate = new Date()) => {
     motionOverviewObj.value = res;
   }
 };
-// 获取活动卡路里数据
+// 获取活动卡数据
 const getMotionCalorieData = async (currentDate = new Date()) => {
   const isoDate = formatLocalDate(currentDate);
   const res = await queryActivityPage('motion-calorie', currentDate, (requestConfig) => getMotionCalorie({ date: isoDate }, requestConfig));

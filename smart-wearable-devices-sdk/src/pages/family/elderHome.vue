@@ -6,6 +6,7 @@ import { getVitalSign, getSleepOverview, getMotionOverview } from '@/common/api/
 import { getBindInfo } from '@/common/api/device';
 import { getFamilyGuardians, getFamilyInvites, type FamilyGuardian, type FamilyInvite } from '@/common/api/family';
 import { hasBoundRingIdentity } from '@/utils/ringBinding';
+import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
 
 const loading = ref(false);
 const health = ref<any>(null);
@@ -37,8 +38,9 @@ const batteryText = computed(() => {
   if (battery === undefined || battery === null || battery === '') return '电量未知';
   const number = Math.round(Number(battery));
   if (Number.isNaN(number)) return '电量未知';
-  if (number <= 20) return `电量 ${number}%，请及时充电`;
-  return `电量 ${number}%，可以继续使用`;
+  const displayValue = formatBatteryPercentForDisplay(number);
+  if (number <= 20) return `电量 ${displayValue}，请及时充电`;
+  return `电量 ${displayValue}，可以继续使用`;
 });
 
 const todayStatus = computed(() => {

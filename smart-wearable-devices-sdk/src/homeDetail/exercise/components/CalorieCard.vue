@@ -4,7 +4,7 @@ const echarts = require('../../../static/echarts.min.js');
 import { calorieOption } from '@/homeDetail/exercise/echartOptions';
 import type { motionCalorie, Point } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
-import { formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 const props = defineProps({
   motionCalorieObj: {
     type: Object as () => motionCalorie,
@@ -26,7 +26,7 @@ const normalizeCalorie = (value: unknown) =>
     targetCalorie: props.motionCalorieObj?.targetCalorie,
     unit: props.motionCalorieObj?.calorieUnit
   }) || 0;
-const calorieUnit = computed(() => props.motionCalorieObj?.calorieUnit || '千卡');
+const calorieUnit = computed(() => MOTION_CALORIE_DISPLAY_UNIT);
 const totalCalorie = computed(() => normalizeCalorie(props.motionCalorieObj?.totalCalorie));
 const motionCalorie = computed(() => normalizeCalorie(props.motionCalorieObj?.motionCalorie));
 const basalCalorie = computed(() => normalizeCalorie(props.motionCalorieObj?.basalCalorie));
@@ -104,7 +104,7 @@ const initChart = async () => {
 <template>
   <view class="p-30 bg-white r-50 mb-30">
     <view class="">
-      <text class="fs-36">全天卡路里</text>
+      <text class="fs-36">全天卡</text>
       <text class="fs-28">({{ calorieUnit }})</text>
       <slot></slot>
     </view>
@@ -136,7 +136,7 @@ const initChart = async () => {
     <view class="flex ai-center jc-center mt-20">
       <l-echart ref="chartRef" @finished="initChart" style="width: 100%; height: 324rpx; margin: 0"></l-echart>
     </view>
-    <view class="fs-28 ta-c" style="color: #ff5d7c">全天卡路里目标，可通过修改活动卡路里目标，进行联动修改。</view>
+    <view class="fs-28 ta-c" style="color: #ff5d7c">全天卡目标，可通过修改活动卡目标，进行联动修改。</view>
   </view>
 </template>
 

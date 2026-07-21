@@ -68,7 +68,7 @@
 
       <view v-for="device in devices" :key="device.deviceId" class="device-row">
         <view class="device-main">
-          <text class="device-name">{{ device.displayName || device.name || device.localName || '未知设备' }}</text>
+          <text class="device-name">{{ device.displayName || device.name || device.localName || '新设备' }}</text>
           <text class="device-id">deviceId={{ device.deviceId || '-' }}</text>
           <text class="device-id">MAC={{ device.uniMacId || device.mac || '-' }}</text>
           <text class="device-id">protocol={{ device.protocol || '-' }} RSSI={{ device.RSSI ?? device.rssi ?? '-' }}</text>
