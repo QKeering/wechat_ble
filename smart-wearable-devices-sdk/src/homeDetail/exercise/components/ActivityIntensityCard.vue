@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// @ts-nocheck
 import { ref, watch } from 'vue';
 const echarts = require('../../../static/echarts.min.js');
 import { actIntensityOption, activePieOption } from '@/homeDetail/exercise/echartOptions';
@@ -8,7 +7,7 @@ import { cloneDeep } from 'lodash-es';
 const props = defineProps({
   motionIntensityObj: {
     type: Object as () => motionIntensity,
-    default: () => {}
+    default: () => ({})
   }
 });
 watch(

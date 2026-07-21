@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// @ts-nocheck
 import { reactive, ref } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
 const form = reactive({

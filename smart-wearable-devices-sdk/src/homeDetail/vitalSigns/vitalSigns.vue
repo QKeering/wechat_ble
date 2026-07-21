@@ -679,19 +679,6 @@ const openTimePicker = () => {
         <!-- <DetailInfo id="vital_signs_status" v-model:isPopupActive="isPopupActive" style="margin-left: 14rpx;"></DetailInfo> -->
       </temperature>
     </view>
-    <view v-if="showRwExtendedVitals" class="rw-extended-vitals">
-      <view class="rw-extended-title">扩展生命体征</view>
-      <view class="rw-extended-grid">
-        <view v-if="bloodSugarDisplay" class="rw-extended-item">
-          <text class="rw-extended-label">血糖</text>
-          <text class="rw-extended-value">{{ bloodSugarDisplay }} mmol/L</text>
-        </view>
-        <view v-if="bloodPressureDisplay" class="rw-extended-item">
-          <text class="rw-extended-label">血压</text>
-          <text class="rw-extended-value">{{ bloodPressureDisplay }} mmHg</text>
-        </view>
-      </view>
-    </view>
     <view @tap="jumpEdit" class="bg-white r-50 flex ai-center jc-center p-30">
       <view class="flex ai-center jc-center">
         <uv-image src="/static/images/homeDetail/editCardIcon.png" width="40rpx" height="40rpx"></uv-image>
@@ -730,40 +717,5 @@ const openTimePicker = () => {
 }
 .calendar-day--selected {
   background: #2e70fc;
-}
-.rw-extended-vitals {
-  margin-bottom: 30rpx;
-  padding: 28rpx;
-  border-radius: 16rpx;
-  background: #fff;
-}
-.rw-extended-title {
-  margin-bottom: 20rpx;
-  font-size: 30rpx;
-  font-weight: 600;
-}
-.rw-extended-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16rpx;
-}
-.rw-extended-item {
-  display: flex;
-  flex-direction: column;
-  gap: 8rpx;
-  min-width: 0;
-  padding: 20rpx;
-  border-radius: 12rpx;
-  background: #f5f7fa;
-}
-.rw-extended-label {
-  color: #69707d;
-  font-size: 24rpx;
-}
-.rw-extended-value {
-  overflow-wrap: anywhere;
-  color: #16181d;
-  font-size: 30rpx;
-  font-weight: 600;
 }
 </style>

@@ -192,15 +192,19 @@ const confirm = async (e) => {
 
 <template>
   <view class="p-30 bg-white min-h-screen">
+    <!-- 头像区域 -->
     <view class="avatar-section flex jc-center ai-center mb-60">
-      <button class="uv-reset-button" open-type="chooseAvatar" @chooseavatar="onChooseAvatar">
+      <button class="uv-reset-button" open-type="chooseAvatar" :disabled="avatarUploading" @chooseavatar="onChooseAvatar">
         <view style="width: 216rpx; height: 216rpx" class="relative">
           <uv-image :src="avatar" width="216rpx" height="216rpx" radius="50rpx"></uv-image>
-          <view class="camera-overlay absolute bottom-0 right-0">+</view>
+          <view class="camera-overlay absolute bottom-0 right-0">
+            <uv-image src="/static/images/mine/camera.png" width="48rpx" height="48rpx"></uv-image>
+          </view>
         </view>
       </button>
     </view>
 
+    <!-- 基本资料 -->
     <view class="info-section">
       <view class="section-title fs-36 mb-50">基本资料</view>
       <view class="info-list mb-50">
@@ -219,6 +223,7 @@ const confirm = async (e) => {
       </view>
     </view>
 
+    <!-- 退出登录 -->
     <view class="logout-section mt-90">
       <uv-button
         text="退出登录"
@@ -241,16 +246,6 @@ const confirm = async (e) => {
 <style lang="scss" scoped>
 .camera-overlay {
   z-index: 1;
-  width: 48rpx;
-  height: 48rpx;
-  border-radius: 50%;
-  background: #2e70fc;
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 36rpx;
-  line-height: 48rpx;
 }
 
 .info-item {
@@ -261,6 +256,6 @@ const confirm = async (e) => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 400rpx;
+  max-width: 400rpx; /* 可以根据实际布局调整最大宽度 */
 }
 </style>

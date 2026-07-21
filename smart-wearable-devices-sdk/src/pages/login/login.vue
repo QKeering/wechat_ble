@@ -3,6 +3,7 @@ import { ref } from 'vue';
 import { onPageScroll } from '@dcloudio/uni-app';
 import { wechatLogin, phoneLogin, getPhoneCode } from '@/common/api/login';
 import { useUserStore } from '@/stores/user';
+import { formatBleErrorMessage } from '@/utils/bleError';
 
 const userStore = useUserStore();
 
@@ -39,9 +40,7 @@ const validatePhoneNumber = (value) => {
   return /^1[3-9]\d{9}$/.test(String(value).trim());
 };
 
-const getErrorMessage = (error, fallback) => {
-  return error?.msg || error?.errMsg || error?.message || fallback;
-};
+const getErrorMessage = (error, fallback) => formatBleErrorMessage(error, fallback);
 
 const withTimeout = (promise, timeout = 15000, message = '请求超时，请稍后重试') => {
   let timer;
@@ -70,10 +69,7 @@ const getCode = async () => {
 
   uni.showLoading({ title: '正在获取验证码' });
   try {
-    await getPhoneCode(
-      { phone: phone.value },
-      { custom: { auth: false } }
-    );
+    await getPhoneCode({ phone: phone.value }, { custom: { auth: false } });
     showToast('验证码已发送');
     codeRef.value.start();
   } catch (error) {
@@ -255,6 +251,7 @@ const leftClick = () => {
 .form-row {
   border: 2rpx solid #2e70fc;
 }
+
 .btn-get-code {
   min-width: 180rpx;
   text-align: right;
@@ -317,7 +314,3 @@ const leftClick = () => {
   background: #2e70fc;
 }
 </style>
-
-
-
-

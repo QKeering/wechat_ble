@@ -1,22 +1,6 @@
 <script setup lang="ts">
-// @ts-nocheck
-import { ref, computed, watch } from 'vue';
-import { sleepTimeOption2 as sleepTimeOption } from '@/homeDetail/sleepPage/echartOptions';
+import { computed, ref, getCurrentInstance } from 'vue';
 import type { sleepDetail, sleepSegment, Point } from '@/types/api/homeDetail';
-import { cloneDeep } from 'lodash-es';
-
-const echarts = require('../../../static/echarts.min.js');
-
-// ECharts 实例类型（简化）
-interface EChartsInstance {
-  setOption: (option: any) => void;
-  dispose: () => void;
-}
-
-// l-echart 组件类型
-interface LEchartComponent {
-  init: (echarts: any) => Promise<EChartsInstance>;
-}
 
 const props = defineProps({
   sleepDetailObj: {
@@ -29,33 +13,42 @@ const props = defineProps({
   }
 });
 
-const chartRef = ref<LEchartComponent | null>(null);
-const chartInstance = ref<EChartsInstance | null>(null);
-
-// 计算属性：将分钟数拆分为小时和分钟
+// ===== 睡眠时长展示 =====
 const sleepDurationHours = computed(() => {
   if (!props.sleepDetailObj?.sleepDuration) return 0;
   return Math.floor(props.sleepDetailObj.sleepDuration / 60);
 });
-
 const sleepDurationMinutes = computed(() => {
   if (!props.sleepDetailObj?.sleepDuration) return 0;
   return props.sleepDetailObj.sleepDuration % 60;
 });
+const formattedMinutes = computed(() => sleepDurationMinutes.value.toString().padStart(2, '0'));
 
-const formattedMinutes = computed(() => {
-  return sleepDurationMinutes.value.toString().padStart(2, '0');
-});
-
-// 睡眠状态到系列索引的映射
-const stageSeriesMap: Record<string, number> = {
-  快速眼动: 0,
-  深睡: 1,
-  浅睡: 2,
-  清醒: 3
+// ===== 阶段配置 =====
+const STAGE_CONFIG: Record<string, { level: number; color: string }> = {
+  清醒: { level: 0, color: '#feba8a' },
+  快速眼动: { level: 1, color: '#baacfb' },
+  浅睡: { level: 2, color: '#8c65f6' },
+  深睡: { level: 3, color: '#4b13be' }
 };
 
-// 从 chartDataSection 获取各睡眠阶段的时长（分钟）
+// ===== 时间工具 =====
+const parseTimeToMinutes = (timeStr: string): number => {
+  if (!timeStr) return 0;
+  const parts = timeStr.split(':');
+  const hours = parseInt(parts[0], 10) || 0;
+  const minutes = parseInt(parts[1], 10) || 0;
+  const seconds = parseInt(parts[2], 10) || 0;
+  return hours * 60 + minutes + Math.floor(seconds / 60);
+};
+
+const formatTime = (minutes: number): string => {
+  const h = Math.floor(minutes / 60) % 24;
+  const m = Math.floor(minutes % 60);
+  return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+};
+
+// ===== 从 chartDataSection 获取各阶段时长（分钟） =====
 const getStageDuration = (stageName: string): number => {
   const chartDataSection = props.sleepSegmentObj?.chartDataSection;
   if (!chartDataSection || !Array.isArray(chartDataSection)) return 0;
@@ -63,258 +56,277 @@ const getStageDuration = (stageName: string): number => {
   return stage ? parseInt(String(stage.value || '0'), 10) : 0;
 };
 
-// 解析时间字符串 "HH:MM:SS" 为从00:00:00开始的分钟数
-const parseTimeToMinutes = (timeStr: string): number => {
-  const parts = timeStr.split(':');
-  const hours = parseInt(parts[0], 10);
-  const minutes = parseInt(parts[1], 10);
-  const seconds = parseInt(parts[2], 10);
-  return hours * 60 + minutes + Math.floor(seconds / 60);
-};
-
-// 处理数据，生成时间段
-// 规则：chartData 的每个成员项表示当前睡眠类型的开始时间
-// 当前睡眠类型的结束时间是下一个成员项的时间（下一个睡眠类型的开始时间）
-// 最后一个睡眠类型的结束时间是 sleepSegmentObj.endTime
+// ===== 处理时间段：保证所有时间段首尾连续 =====
+// 1. 缺失 → 清醒填充  2. 交叉 → 对齐  3. 乱序 → 排序
+// 4. 重复时间戳 → 跳过  5. 跨午夜 → 归一化  6. 超范围 → 裁剪  7. 同类型相邻 → 合并
 const processTimeSegments = (): Array<{ start: number; duration: number; type: string }> => {
   const chartData = props.sleepDetailObj?.chartData;
+  // 睡眠状态映射（与后端 API 契约一致：0无效 1清醒 2快速眼动 3浅睡 4深睡 5小睡）
+  const stateMap: Record<number, string> = {
+    1: '清醒',
+    2: '快速眼动',
+    3: '浅睡',
+    4: '深睡',
+    5: '小睡'
+  };
+
   if (!chartData || !Array.isArray(chartData) || chartData.length === 0) {
-    // 没有时间序列数据，使用累计时长简单展示
     const segments: Array<{ start: number; duration: number; type: string }> = [];
     let currentStart = 0;
-
-    const stages = ['快速眼动', '深睡', '浅睡', '清醒'];
+    const stages = ['深睡', '浅睡', '快速眼动', '清醒'];
     stages.forEach((stage) => {
       const duration = getStageDuration(stage);
       if (duration > 0) {
-        segments.push({
-          start: currentStart,
-          duration: duration,
-          type: stage
-        });
+        segments.push({ start: currentStart, duration, type: stage });
         currentStart += duration;
       }
     });
-
     return segments;
   }
 
-  // 处理时间点序列数据
-  const segments: Array<{ start: number; duration: number; type: string }> = [];
+  const startStr = props.sleepSegmentObj?.startTime || '';
+  const endStr = props.sleepSegmentObj?.endTime || '';
+  const startMins = parseTimeToMinutes(startStr);
+  const endMins = parseTimeToMinutes(endStr);
+  const firstDataMins = parseTimeToMinutes(chartData[0]?.time || '');
+  const lastDataMins = parseTimeToMinutes(chartData[chartData.length - 1]?.time || '');
 
-  // 睡眠状态映射
-  const stateMap: Record<number, string> = {
-    2: '浅睡',
-    3: '深睡',
-    4: '快速眼动'
+  const refStart = startMins > 0 ? startMins : firstDataMins;
+  const refEnd = endMins > 0 ? endMins : lastDataMins;
+  const crossesMidnight = refStart > refEnd;
+
+  const normalizeTime = (minutes: number): number => {
+    if (crossesMidnight && minutes < refStart) return minutes + 1440;
+    return minutes;
   };
 
-  // 获取睡眠结束时间
-  const endTimeStr = props.sleepSegmentObj?.endTime || '';
-  const endTime = parseTimeToMinutes(endTimeStr);
+  const sleepStart = normalizeTime(refStart);
+  const sleepEnd = normalizeTime(refEnd);
 
-  // 遍历每个数据点
-  for (let i = 0; i < chartData.length; i++) {
-    const item = chartData[i];
-    const timeStr = item.time || '';
-    const value = item.value || '';
+  const sortedPoints = chartData
+    .map((item: any) => ({
+      time: normalizeTime(parseTimeToMinutes(item.time || '')),
+      value: item.value || ''
+    }))
+    .sort((a: any, b: any) => a.time - b.time);
 
-    // 解析当前时间点（睡眠类型的开始时间）
-    const startTime = parseTimeToMinutes(timeStr);
-    if (endTime > 0 && startTime >= endTime) {
-      continue;
+  const segments: Array<{ start: number; duration: number; type: string }> = [];
+  let cursor = sleepStart;
+
+  for (let i = 0; i < sortedPoints.length; i++) {
+    const point = sortedPoints[i];
+    if (point.time >= sleepEnd) break;
+
+    const rawSegEnd = i < sortedPoints.length - 1 ? sortedPoints[i + 1].time : sleepEnd;
+    const segEnd = Math.min(rawSegEnd, sleepEnd);
+
+    if (point.time > cursor) {
+      segments.push({ start: cursor, duration: point.time - cursor, type: '清醒' });
+      cursor = point.time;
     }
 
-    // 计算结束时间
-    // 如果是最后一个数据点，使用 sleepSegmentObj.endTime
-    // 否则使用下一个数据点的时间
-    let endTimeMinutes = 0;
-    if (i === chartData.length - 1) {
-      endTimeMinutes = endTime;
-    } else {
-      const nextItem = chartData[i + 1];
-      endTimeMinutes = parseTimeToMinutes(nextItem.time || '');
-    }
-    if (endTime > 0 && endTimeMinutes > endTime) {
-      endTimeMinutes = endTime;
-    }
+    const segStart = Math.max(point.time, cursor);
+    const duration = segEnd - segStart;
 
-    // 计算持续时间（分钟）
-    const duration = endTimeMinutes - startTime;
-
-    // 根据数值映射到睡眠状态
-    const numValue = parseInt(String(value), 10);
-    const type = stateMap[numValue] || '清醒';
-
-    // 添加时间段
     if (duration > 0) {
-      segments.push({
-        start: startTime,
-        duration: duration,
-        type: type
-      });
+      const numValue = parseInt(String(point.value), 10);
+      const type = stateMap[numValue] || '清醒';
+      segments.push({ start: segStart, duration, type });
+      cursor = segStart + duration;
     }
   }
 
-  return segments;
+  if (cursor < sleepEnd) {
+    segments.push({ start: cursor, duration: sleepEnd - cursor, type: '清醒' });
+  }
+
+  const merged: Array<{ start: number; duration: number; type: string }> = [];
+  for (const seg of segments) {
+    const last = merged[merged.length - 1];
+    if (last && last.type === seg.type && last.start + last.duration === seg.start) {
+      last.duration += seg.duration;
+    } else {
+      merged.push({ ...seg });
+    }
+  }
+
+  return merged;
 };
 
-// 获取处理的图表配置
-const getProcessedOption = () => {
-  const newOption = cloneDeep(sleepTimeOption);
+// ===== 时间范围 =====
+const timeRange = computed(() => {
+  const startStr = props.sleepSegmentObj?.startTime || '';
+  const endStr = props.sleepSegmentObj?.endTime || '';
+  const startMins = parseTimeToMinutes(startStr);
+  const endMins = parseTimeToMinutes(endStr);
 
-  // 定义系列数据项类型
-  interface SeriesDataItem {
-    value: [number, number]; // [center位置, y索引]
-    startTime: number;
-    duration: number;
-    startOffset: number; // 用于定位（负值表示向左偏移）
+  if (startMins > 0 && endMins > 0) {
+    return { min: startMins, max: endMins > startMins ? endMins : endMins + 1440 };
   }
 
-  // 初始化四个系列的数据数组
-  const seriesData: SeriesDataItem[][] = [[], [], [], []];
+  const chartData = props.sleepDetailObj?.chartData;
+  if (chartData && chartData.length > 0) {
+    const first = parseTimeToMinutes(chartData[0]?.time || '');
+    const last = parseTimeToMinutes(chartData[chartData.length - 1]?.time || '');
+    return { min: first, max: last > first ? last : last + 1440 };
+  }
 
-  // 处理时间段数据
+  return { min: 0, max: 1 };
+});
+
+// ===== 布局计算 =====
+// 4 行，每行 25%；色块高度 = 行高的一半（间距=色块高度）
+const ROW_COUNT = 4;
+const ROW_PCT = 100 / ROW_COUNT;          // 25%
+const BLOCK_PCT = ROW_PCT / 2;            // 12.5%
+const BLOCK_OFFSET = (ROW_PCT - BLOCK_PCT) / 2; // 6.25%
+
+const layoutList = computed(() => {
   const segments = processTimeSegments();
+  const { min, max } = timeRange.value;
+  const total = max - min || 1;
+  const lastIdx = segments.length - 1;
 
-  segments.forEach((segment) => {
-    const seriesIndex = stageSeriesMap[segment.type];
-    if (seriesIndex !== undefined) {
-      // 数据格式：{ value: [center, duration], startTime, duration, yIndex }
-      // center: 柱子中心位置（用于 scatter）
-      const center = segment.start + segment.duration / 2;
-      seriesData[seriesIndex].push({
-        value: [center, seriesIndex], // x=中心位置, y=系列索引
-        startTime: segment.start,
-        duration: segment.duration,
-        startOffset: -segment.duration / 2  // 用于 symbolOffset
-      });
-    }
+  return segments.map((seg, idx) => {
+    const config = STAGE_CONFIG[seg.type] || STAGE_CONFIG['清醒'];
+    return {
+      left: ((seg.start - min) / total) * 100,
+      width: (seg.duration / total) * 100,
+      top: config.level * ROW_PCT + BLOCK_OFFSET,
+      height: BLOCK_PCT,
+      color: config.color,
+      idx,
+      isFirst: idx === 0,
+      isLast: idx === lastIdx
+    };
   });
+});
 
-  // 计算时间范围
-  let minTime = 0;
-  let maxTime = 0;
-
-  // 优先使用 sleepSegmentObj 的开始和结束时间
-  if (props.sleepSegmentObj?.startTime && props.sleepSegmentObj?.endTime) {
-    minTime = parseTimeToMinutes(props.sleepSegmentObj.startTime);
-    maxTime = parseTimeToMinutes(props.sleepSegmentObj.endTime);
-  } else {
-    // 回退到使用 chartData 的第一个和最后一个时间点
-    const chartData = props.sleepDetailObj?.chartData;
-    if (chartData && chartData.length > 0) {
-      const firstTime = parseTimeToMinutes(chartData[0].time || '');
-      const lastTime = parseTimeToMinutes(chartData[chartData.length - 1].time || '');
-      minTime = firstTime;
-      maxTime = lastTime;
-    }
+// ===== 网格线位置（每行色块的上下边缘） =====
+const gridLines = computed(() => {
+  const lines: number[] = [];
+  for (let i = 0; i < ROW_COUNT; i++) {
+    const center = i * ROW_PCT + ROW_PCT / 2;
+    lines.push(center - BLOCK_PCT / 2);
+    lines.push(center + BLOCK_PCT / 2);
   }
+  return lines;
+});
 
-  // 更新系列数据
-  if (newOption.series) {
-    newOption.series.forEach((seriesItem: any, index: number) => {
-      seriesItem.data = seriesData[index] || [];
-      // 移除 stack 属性
-      delete seriesItem.stack;
-      // 保持 scatter 类型
-      seriesItem.type = 'scatter';
-      // 设置 symbolSize 来模拟柱状图的横向长度
-      seriesItem.symbolSize = function (data: any): [number, number] {
-        // data 格式：{ value: [center, yIndex], duration, startOffset }
-        let duration = 0;
-        if (data && typeof data === 'object') {
-          duration = data.duration || 0;
-        }
-        // 将分钟数转换为像素宽度
-        const width = Math.max(10, duration * 2); // 调整缩放因子
-        const height = 30; // 柱子高度
-        return [width, height];
-      };
-      // 设置符号为矩形
-      seriesItem.symbol = 'rect';
-      // 设置颜色
-      const itemStyleColor = {
-        快速眼动: '#a78bfa',
-        深睡: '#4f46e5',
-        浅睡: '#818cf8',
-        清醒: '#fb923c'
-      } as unknown as any;
-      seriesItem.itemStyle = {
-        color: itemStyleColor[seriesItem.name as string] || '#818cf8',
-        borderRadius: [6, 6, 6, 6]
-      };
-      // 正确配置 encode（scatter 使用 x/y 而非 xAxis/yAxis）
-      seriesItem.encode = {
-        x: 0,  // value[0] = center 位置
-        y: 1   // value[1] = y 索引
-      };
+// ===== 相邻色块之间的连线 =====
+// 时间段首尾连续，相邻不同行的色块在 X 轴上相接，连线为垂直线
+// 两端各去掉 10rpx（与色块圆角对齐），颜色为渐变
+const CORNER_TRIM_PCT = (10 / 300) * 100; // 10rpx 占图表高度 300rpx 的百分比
+
+const connectors = computed(() => {
+  const items = layoutList.value;
+  const result: Array<{ left: number; top: number; height: number; gradient: string }> = [];
+
+  for (let i = 0; i < items.length - 1; i++) {
+    const curr = items[i];
+    const next = items[i + 1];
+    if (curr.top === next.top) continue; // 同行不需要连线
+
+    const x = next.left; // = curr.left + curr.width（连续）
+
+    const currTop = curr.top;
+    const currBottom = curr.top + curr.height;
+    const nextTop = next.top;
+    const nextBottom = next.top + next.height;
+
+    const topY = Math.min(currTop, nextTop);
+    const bottomY = Math.max(currBottom, nextBottom);
+    // 上端使用位于上方的色块颜色，下端使用位于下方的色块颜色
+    const topColor = currTop < nextTop ? curr.color : next.color;
+    const bottomColor = currTop < nextTop ? next.color : curr.color;
+
+    result.push({
+      left: x,
+      top: topY + CORNER_TRIM_PCT,
+      height: bottomY - topY - CORNER_TRIM_PCT * 2,
+      gradient: `linear-gradient(to bottom, ${topColor}, ${bottomColor})`
     });
   }
+  return result;
+});
 
-  if (newOption.xAxis) {
-    // 设置 xAxis 的范围：从睡眠开始时间到睡眠结束时间
-    (newOption.xAxis as any).min = minTime;
-    (newOption.xAxis as any).max = maxTime;
+// ===== 时间标签 =====
+const startTimeLabel = computed(() => formatTime(timeRange.value.min));
+const endTimeLabel = computed(() => formatTime(timeRange.value.max));
 
-    // 强制显示首尾标签，中间标签自动间隔
-    (newOption.xAxis as any).axisLabel = {
-      fontSize: 12,
-      color: '#9ca3af',
-      interval: 'auto',
-      showMinLabel: true,
-      showMaxLabel: true,
-      formatter: function (value: number) {
-        const hours = Math.floor(value / 60) % 24;
-        const minutes = Math.floor(value % 60);
-        return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
-      }
-    };
-  }
+// ===== 点击指示器 =====
+const instance = getCurrentInstance();
+const indicatorX = ref<number | null>(null);
+const indicatorInfo = ref<{
+  type: string;
+  color: string;
+  startTime: string;
+  endTime: string;
+} | null>(null);
 
-  // 更新Y轴标签的颜色
-  if (newOption.yAxis && newOption.yAxis.axisLabel) {
-    (newOption.yAxis.axisLabel as any).color = ['#a78bfa', '#4f46e5', '#818cf8', '#fb923c'];
-  }
+// 提示框水平位置：边界处做钳制，防止溢出
+const tooltipLeft = computed(() => {
+  if (indicatorX.value === null) return 0;
+  return Math.max(15, Math.min(85, indicatorX.value));
+});
 
-  // 禁用 tooltip
-  if (newOption.tooltip) {
-    (newOption.tooltip as any).show = false;
-  }
-
-  return newOption;
+const dismissIndicator = () => {
+  indicatorX.value = null;
+  indicatorInfo.value = null;
 };
 
-// 初始化图表
-const initChart = async () => {
-  if (!chartRef.value) return;
-  // 检查是否有有效数据
-  if (!props.sleepDetailObj?.chartData || props.sleepDetailObj.chartData.length === 0) {
-    return;
-  }
-  try {
-    // 等待一小段时间确保 canvas 完全准备好
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const option = getProcessedOption();
-    const chart = await chartRef.value.init(echarts);
-    chartInstance.value = chart;
-    chart.setOption(option);
-  } catch (error) {
-    console.error('[sleepTime] 图表初始化失败:', error);
-  }
+// 缓存 chart-body 的位置信息，touchmove 时同步使用避免异步延迟
+let cachedRect: { left: number; width: number } | null = null;
+
+const updateIndicator = (clientX: number) => {
+  if (!cachedRect) return;
+  const xPercent = Math.max(0, Math.min(100, ((clientX - cachedRect.left) / cachedRect.width) * 100));
+
+  const { min, max } = timeRange.value;
+  const time = min + (xPercent / 100) * (max - min);
+
+  const segments = processTimeSegments();
+  let seg = segments.find(s => time >= s.start && time < s.start + s.duration);
+  if (!seg && segments.length > 0) seg = segments[segments.length - 1];
+  if (!seg) return;
+
+  const config = STAGE_CONFIG[seg.type] || STAGE_CONFIG['清醒'];
+  indicatorX.value = xPercent;
+  indicatorInfo.value = {
+    type: seg.type,
+    color: config.color,
+    startTime: formatTime(seg.start),
+    endTime: formatTime(seg.start + seg.duration)
+  };
 };
 
-// 监听数据变化
-watch(
-  () => props.sleepDetailObj,
-  async () => {
-    // 检查是否有有效数据
-    if (props.sleepDetailObj?.chartData && props.sleepDetailObj.chartData.length > 0) {
-      await initChart();
-    }
-  },
-  { deep: true }
-);
+const queryRectAndUpdate = (clientX: number) => {
+  uni.createSelectorQuery()
+    .in(instance!.proxy)
+    .select('.chart-body')
+    .boundingClientRect((rect: any) => {
+      if (!rect) return;
+      cachedRect = { left: rect.left, width: rect.width };
+      updateIndicator(clientX);
+    })
+    .exec();
+};
+
+const handleChartTouchStart = (e: any) => {
+  const clientX = e.touches?.[0]?.clientX ?? e.changedTouches?.[0]?.clientX;
+  if (clientX === undefined) return;
+  queryRectAndUpdate(clientX);
+};
+
+const handleChartTouchMove = (e: any) => {
+  const clientX = e.touches?.[0]?.clientX;
+  if (clientX === undefined) return;
+  if (cachedRect) {
+    updateIndicator(clientX);
+  } else {
+    queryRectAndUpdate(clientX);
+  }
+};
 </script>
 
 <template>
@@ -330,11 +342,179 @@ watch(
         睡眠时间
         <slot></slot>
       </view>
-      <view class="flex ai-center jc-center">
-        <l-echart ref="chartRef" @finished="initChart" :beforeDelay="100" style="width: 100%; height: 424rpx; margin: 0"></l-echart>
+
+      <!-- CSS 图表 -->
+      <view class="chart-container">
+        <view class="chart-body" @touchstart="handleChartTouchStart" @touchmove="handleChartTouchMove">
+          <!-- 左右纵轴虚线 -->
+          <view class="axis-v left"></view>
+          <view class="axis-v right"></view>
+
+          <!-- 横向网格虚线（色块上下边缘） -->
+          <view
+            v-for="(top, idx) in gridLines"
+            :key="'grid-' + idx"
+            class="grid-line"
+            :style="{ top: top + '%' }"
+          ></view>
+
+          <!-- 相邻色块连线（渐变色） -->
+          <view
+            v-for="(conn, idx) in connectors"
+            :key="'conn-' + idx"
+            class="connector"
+            :style="{
+              left: conn.left + '%',
+              top: conn.top + '%',
+              height: conn.height + '%',
+              backgroundImage: conn.gradient
+            }"
+          ></view>
+
+          <!-- 阶段色块（相邻色块水平方向各延伸 1rpx，互相覆盖连接线宽度） -->
+          <view
+            v-for="item in layoutList"
+            :key="'bar-' + item.idx"
+            class="stage-bar"
+            :class="{ 'is-first': item.isFirst, 'is-last': item.isLast }"
+            :style="{
+              left: 'calc(' + item.left + '% - 1rpx)',
+              width: 'calc(' + item.width + '% + 2rpx)',
+              top: item.top + '%',
+              height: item.height + '%',
+              backgroundColor: item.color
+            }"
+          ></view>
+
+          <!-- 点击指示线 -->
+          <view
+            v-if="indicatorX !== null"
+            class="indicator-line"
+            :style="{ left: indicatorX + '%' }"
+          ></view>
+
+          <!-- 提示框 -->
+          <view
+            v-if="indicatorInfo"
+            class="indicator-tooltip"
+            :style="{ left: tooltipLeft + '%' }"
+            @tap.stop="dismissIndicator"
+          >
+            <view class="tooltip-dot" :style="{ backgroundColor: indicatorInfo.color }"></view>
+            <text class="tooltip-type">{{ indicatorInfo.type }}</text>
+            <text class="tooltip-time">{{ indicatorInfo.startTime }}-{{ indicatorInfo.endTime }}</text>
+          </view>
+
+          <!-- 时间刻度 -->
+          <text class="time-text left">{{ startTimeLabel }}</text>
+          <text class="time-text right">{{ endTimeLabel }}</text>
+        </view>
       </view>
     </view>
   </view>
 </template>
 
-<style></style>
+<style scoped>
+.chart-container {
+  position: relative;
+  width: 100%;
+  margin-top: 25rpx;
+  padding-bottom: 50rpx;
+}
+
+.chart-body {
+  position: relative;
+  width: 100%;
+  height: 300rpx;
+  overflow: visible;
+}
+
+/* 左右纵轴虚线：与首尾横向网格线齐平，形成闭合矩形 */
+.axis-v {
+  position: absolute;
+  top: 6.25%;
+  bottom: 6.25%;
+  width: 0;
+  border-left: 1px dashed #e5e7eb;
+  z-index: 1;
+}
+.axis-v.left { left: 0; }
+.axis-v.right { right: 0; }
+
+/* 横向网格虚线（层级在色块之下） */
+.grid-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px dashed #e5e7eb;
+  z-index: 1;
+}
+
+/* 相邻色块连线 */
+.connector {
+  position: absolute;
+  width: 2rpx;
+  margin-left: -1rpx;
+  z-index: 2;
+}
+
+/* 阶段色块 */
+.stage-bar {
+  position: absolute;
+  border-radius: 6rpx;
+  z-index: 2;
+}
+
+/* 时间刻度文字 */
+.time-text {
+  position: absolute;
+  top: 100%;
+  margin-top: 8rpx;
+  font-size: 22rpx;
+  color: #9ca3af;
+  z-index: 2;
+}
+.time-text.left { left: 0; }
+.time-text.right { right: 0; }
+
+/* 点击指示线（与网格虚线同色） */
+.indicator-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed #e5e7eb;
+  z-index: 4;
+  pointer-events: none;
+}
+
+/* 提示框 */
+.indicator-tooltip {
+  position: absolute;
+  top: -36rpx;
+  transform: translateX(-50%);
+  background: #ffffff;
+  border-radius: 12rpx;
+  padding: 8rpx 16rpx;
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  white-space: nowrap;
+  z-index: 5;
+  box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.12);
+}
+.tooltip-dot {
+  width: 14rpx;
+  height: 14rpx;
+  border-radius: 50%;
+}
+.tooltip-type {
+  font-size: 24rpx;
+  color: #374151;
+  font-weight: 600;
+}
+.tooltip-time {
+  font-size: 22rpx;
+  color: #6b7280;
+}
+</style>

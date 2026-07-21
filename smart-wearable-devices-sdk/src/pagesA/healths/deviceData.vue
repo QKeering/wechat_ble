@@ -482,7 +482,7 @@ onHide(async () => {
   // Keep measurement alive while WeChat briefly hides the page during native BLE callbacks.
 });
 </script>
-
+<!-- 设备测量数据 -->
 <template>
   <view class="pl-30 pr-30 pt-30 wrapper">
     <uv-navbar placeholder leftIcon="" title="设备测量数据" bgColor="#f1f3f6"></uv-navbar>
@@ -507,7 +507,7 @@ onHide(async () => {
 .wrapper {
   box-sizing: border-box;
 }
-
+// 添加浮动动画
 .floating-image {
   animation: float 3s ease-in-out infinite;
 }

@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// @ts-nocheck
 import { computed, ref, watch } from 'vue';
 const echarts = require('../../../static/echarts.min.js');
 import { calorieOption } from '@/homeDetail/exercise/echartOptions';
@@ -9,7 +8,7 @@ import { formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/mot
 const props = defineProps({
   motionCalorieObj: {
     type: Object as () => motionCalorie,
-    default: () => {}
+    default: () => ({})
   }
 });
 watch(
@@ -34,6 +33,9 @@ const basalCalorie = computed(() => normalizeCalorie(props.motionCalorieObj?.bas
 const totalCalorieText = computed(() => formatMotionCalorieKcal(totalCalorie.value));
 const motionCalorieText = computed(() => formatMotionCalorieKcal(motionCalorie.value));
 const basalCalorieText = computed(() => formatMotionCalorieKcal(basalCalorie.value));
+const hasTotalCalorie = computed(() => totalCalorie.value > 0);
+const hasMotionCalorie = computed(() => motionCalorie.value > 0);
+const hasBasalCalorie = computed(() => basalCalorie.value > 0);
 const getProcessedOption = () => {
   const newOption = cloneDeep(calorieOption);
   const hasMotion = !!props.motionCalorieObj?.motionCalorieChart?.length;
@@ -110,21 +112,21 @@ const initChart = async () => {
       <view class="flex jc-center ai-center">
         <view class="calorie-icon"></view>
         <view>
-          <text class="fs-48">{{ motionCalorieObj?.motionCalorie ? totalCalorieText : '00' }}</text>
+          <text class="fs-48">{{ hasTotalCalorie ? totalCalorieText : '00' }}</text>
           <text class="fs-28 ml-10 t-979797">/{{ motionCalorieObj?.targetCalorie || 500 }}{{ calorieUnit }}</text>
         </view>
       </view>
     </view>
     <view class="flex jc-between pl-50 pr-50">
       <view class="fd-c jc-center ai-center">
-        <view class="fs-48 ta-c">{{ motionCalorieObj?.motionCalorie ? basalCalorieText : '00' }}</view>
+        <view class="fs-48 ta-c">{{ hasBasalCalorie ? basalCalorieText : '00' }}</view>
         <view class="flex ai-center">
           <view class="dot base-dot"></view>
           <text class="fs-24 t-979797">基础代谢</text>
         </view>
       </view>
       <view class="fd-c jc-between ai-center">
-        <view class="fs-48 ta-c">{{ motionCalorieObj?.motionCalorie ? motionCalorieText : '00' }}</view>
+        <view class="fs-48 ta-c">{{ hasMotionCalorie ? motionCalorieText : '00' }}</view>
         <view class="flex ai-center">
           <view class="dot active-dot"></view>
           <text class="fs-24 t-979797">活动消耗</text>
@@ -145,7 +147,6 @@ const initChart = async () => {
   border-radius: 50%;
   margin-right: 8rpx;
 }
-
 .calorie-icon {
   width: 28rpx;
   height: 40rpx;

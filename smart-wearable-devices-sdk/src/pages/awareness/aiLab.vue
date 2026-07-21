@@ -79,8 +79,8 @@ const fetchApplyStatus = async () => {
       jumpUrl.value = url || '';
       remark.value = reason || '';
     }
-  } catch {
-    remark.value = remark.value || '';
+  } catch (error: any) {
+    console.error('获取申请状态失败', error);
   } finally {
     isLoading.value = false;
   }
@@ -105,7 +105,7 @@ onUnload(() => {
     <view class="ai-lab-card">
       <!-- 左侧图标 -->
       <view class="ai-lab-icon">
-        <text class="ai-lab-icon-text">AI</text>
+        <uv-image src="/static/images/brain.png" width="100rpx" height="100rpx"></uv-image>
       </view>
       
       <!-- 中间文字内容 -->
@@ -134,41 +134,32 @@ onUnload(() => {
 <style lang="scss" scoped>
 .ai-lab-container {
   display: flex;
-  flex-direction: column;
   justify-content: center;
-  align-items: stretch;
+  align-items: center;
   // padding: 30rpx 0;
 }
 
 .ai-lab-card {
   display: flex;
   align-items: center;
-  min-height: 116rpx;
-  padding: 22rpx 24rpx;
-  border-radius: 30rpx;
-  background: #ffffff;
-  border: 1rpx solid rgba(46, 112, 252, 0.08);
-  box-shadow: 0 10rpx 24rpx rgba(31, 45, 61, 0.04);
+  background-color: #ffffff;
+  // border-radius: 50rpx;
+  // box-shadow: 0 4rpx 16rpx rgba(0, 0, 0, 0.05);
+  // padding: 20rpx 30rpx;
   width: 100%;
-  box-sizing: border-box;
+  // max-width: 90%;
+  overflow: hidden;
 }
 
 .ai-lab-icon {
   width: 100rpx;
   height: 100rpx;
   border-radius: 50%;
-  background: linear-gradient(180deg, #ff8cc7 0%, #3474ff 100%);
+  background-color: RGB(46,112,252);
   display: flex;
   justify-content: center;
   align-items: center;
   margin-right: 20rpx;
-  box-shadow: 0 12rpx 22rpx rgba(46, 112, 252, 0.18);
-}
-
-.ai-lab-icon-text {
-  color: #ffffff;
-  font-size: 32rpx;
-  font-weight: 800;
 }
 
 .ai-lab-content {

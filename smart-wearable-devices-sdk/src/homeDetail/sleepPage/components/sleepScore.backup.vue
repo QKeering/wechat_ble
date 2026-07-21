@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// @ts-nocheck
 import { ref, computed } from 'vue';
 import ProgressBar from '@/components/progressBar.vue';
 import type { sleepOverview } from '@/types/api/homeDetail';

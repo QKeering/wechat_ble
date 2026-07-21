@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { ref, nextTick, onMounted, computed, watch } from 'vue';
 import { onLoad, onShow, onReady, onHide, onPageScroll, onUnload, onPullDownRefresh } from '@dcloudio/uni-app';
 import { useUserStore } from '@/stores/user';
@@ -1754,7 +1754,7 @@ onPullDownRefresh(async () => {
 <template>
   <page-meta :page-style="fixedPageStyle"></page-meta>
   <view style="position: relative">
-    <uv-navbar placeholder leftIcon="" :title="'\u9996\u9875'" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar placeholder leftIcon="" title="首页" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view v-if="pullDownRefresh" style="position: relative; z-index: 2">
       <view class="wave-progress-wrapper">
         <WaveProgress
@@ -1765,19 +1765,23 @@ onPullDownRefresh(async () => {
           :wave-speed="1.5"
         />
       </view>
+      <!-- <uv-line-progress activeColor="#b0e2cf" inactiveColor="#fafcfb" :percentage="uploadProgress" height="2" :showText="false"></uv-line-progress> -->
     </view>
     <view v-else style="height: 2px; background: transparent"></view>
     <view style="position: absolute; top: 0; left: 0; width: 100%">
       <uv-image src="/static/images/bg01.png" width="100%" mode="widthFix"></uv-image>
     </view>
-
     <view class="pt-30 pr-30 pb-100 pl-30 relative" style="z-index: 1; box-sizing: border-box">
+      <!-- 自定义的步骤条 -->
+      <!-- <custom-steps></custom-steps> -->
       <view class="pt-30 pr-30 pl-30 relative mb-30" style="z-index: 1; box-sizing: border-box">
         <view class="flex jc-between">
           <view class="flex">
             <view
               class="calendar-day flex fd-c jc-center ai-center mr-20"
-              :class="{ 'calendar-day--selected': selectedDayIndex === 3 }"
+              :class="{
+                'calendar-day--selected': selectedDayIndex === 3
+              }"
               @tap="openTimePicker()"
             >
               <view class="calendar-day__label" :class="selectedDayIndex === 3 ? 't-white' : 't-979797'">
@@ -1786,8 +1790,8 @@ onPullDownRefresh(async () => {
                   <view class="ta-c">{{ selectedDateInfo.monthDay }}</view>
                 </template>
                 <template v-else>
-                  <view class="ta-c">{{ '\u9009\u62e9' }}</view>
-                  <view class="ta-c">{{ '\u65e5\u671f' }}</view>
+                  <view class="ta-c">选择</view>
+                  <view class="ta-c">日期</view>
                 </template>
               </view>
             </view>
@@ -1795,9 +1799,12 @@ onPullDownRefresh(async () => {
               v-for="(dateItem, index) in dateList"
               :key="index"
               class="calendar-day flex fd-c jc-center ai-center mr-20"
-              :class="{ 'calendar-day--selected': index === selectedDayIndex }"
+              :class="{
+                'calendar-day--selected': index === selectedDayIndex
+              }"
               @tap="handleDateClick(index)"
             >
+              <!-- @tap="handleDateClick(index)" -->
               <view class="calendar-day__label" :class="index === selectedDayIndex ? 't-white' : 't-979797'">
                 {{ dateItem.info.week }}
               </view>
@@ -1806,36 +1813,72 @@ onPullDownRefresh(async () => {
                   <uv-icon name="arrow-down" color="#fff" size="14" v-if="index === selectedDayIndex"></uv-icon>
                   <uv-icon name="arrow-down" color="#010101" size="14" v-else></uv-icon>
                 </template>
-                <template v-else>{{ dateItem.info.day }}</template>
+                <template v-else>
+                  {{ dateItem.info.day }}
+                </template>
               </view>
             </view>
           </view>
+          <!-- <view class="flex ai-center jc-center">
+            <view v-if="userStore.isReconnecting === '0' || userStore.isReconnecting == ''" class="bluetooth-transition bluetooth-disconnected">
+              <uv-image src="/static/images/mine/bluetooth03.png" width="48rpx" height="48rpx"></uv-image>
+            </view>
+            <view class="flex fd-c ai-center bluetooth-transition bluetooth-connecting" v-else-if="userStore.isReconnecting === '1'">
+              <uv-image src="/static/images/mine/bluetooth01.png" width="48rpx" height="48rpx"></uv-image>
+              <view class="fs-20">
+                <text>连接中</text>
+              </view>
+            </view>
+            <view v-else-if="userStore.isReconnecting === '2'" class="bluetooth-transition bluetooth-connected flex fd-c ai-center">
+              <uv-image src="/static/images/mine/bluetooth02.png" width="48rpx" height="48rpx"></uv-image>
+              <view class="fs-20">{{ latestBattery ? latestBattery.value : '' }}</view>
+            </view>
+          </view> -->
           <view class="flex ai-center jc-center">
+            <!-- 调试信息（可选） -->
+            <!-- <view v-if="false" style="position: absolute; top: -30rpx; left: 0; background: rgba(0,0,0,0.7); color: white; padding: 5rpx; font-size: 20rpx; z-index: 9999;">
+    调试: {{ debugBluetoothInfo }}
+  </view> -->
+
+            <!-- 使用计算属性进行条件渲染 -->
             <view v-if="bluetoothStatus.isDisconnected" class="bluetooth-transition bluetooth-disconnected">
               <uv-image :src="bluetoothStatus.iconPath" width="48rpx" height="48rpx"></uv-image>
             </view>
+
             <view v-else-if="bluetoothStatus.isConnecting" class="bluetooth-transition bluetooth-connecting flex fd-c ai-center">
               <uv-image :src="bluetoothStatus.iconPath" width="48rpx" height="48rpx"></uv-image>
-              <view class="fs-20"><text>{{ bluetoothStatus.statusText }}</text></view>
+              <view class="fs-20">
+                <text>{{ bluetoothStatus.statusText }}</text>
+              </view>
             </view>
+
             <view v-else-if="bluetoothStatus.isConnected" class="bluetooth-transition bluetooth-connected flex fd-c ai-center">
               <uv-image :src="bluetoothStatus.iconPath" width="48rpx" height="48rpx"></uv-image>
-              <view class="fs-20">{{ bluetoothStatus.batteryText }}</view>
+              <uv-loading-icon v-if="userStore.isUploading === '1'" mode="circle" size="16" color="#4C76F1" style="margin-top: 18rpx"></uv-loading-icon>
+              <view v-else class="fs-20">{{ bluetoothStatus.batteryText }}</view>
             </view>
+
+            <!-- 默认状态（可选） -->
+            <!-- <view v-else class="bluetooth-transition bluetooth-disconnected">
+    <uv-image src="/static/images/mine/bluetooth03.png" width="48rpx" height="48rpx"></uv-image>
+  </view> -->
           </view>
         </view>
       </view>
+      <!-- <uv-calendar ref="calendar" :minDate="minDate" :maxDate="maxDate" @confirm="confirm"></uv-calendar> -->
+      <!-- <uv-calendar ref="calendar" mode="single" @confirm="confirm"></uv-calendar> -->
       <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
 
+      <!-- 身心平衡卡片（已隐藏）
       <view class="module-card p-10 bg-white mt-30 r-50">
         <view class="health-section p-30 r-50">
           <view class="health-header mb-40">
             <view class="health-title fs-36">
-              {{ '\u8eab\u5fc3\u5e73\u8861' }}
+              身心平衡
               <DetailInfo id="mind_body_balance" v-model:isPopupActive="isPopupActive"></DetailInfo>
             </view>
             <view class="health-status flex ai-end">
-              <view class="health-status__label t-979797">{{ '\u5f53\u524d\u5065\u5eb7\u72b6\u6001' }}</view>
+              <view class="health-status__label t-979797">当前健康状态</view>
               <view class="health-status__separator ml-10 mr-10">|</view>
               <view class="relative">
                 <view class="health-status__score fs-72 ta-c" style="line-height: 100%; width: 250rpx">{{ healthAvgScore }}</view>
@@ -1850,28 +1893,88 @@ onPullDownRefresh(async () => {
           </view>
         </view>
       </view>
+      -->
 
-      <view class="module-card sleep-module bg-white p-40 mt-30 r-50" @tap="openHomeDetail('sleep')">
+      <!-- 生理期预测卡片 -->
+      <view v-if="showStartGirlCard" class="module-card period-card bg-white p-40 mt-30 r-50">
+        <!-- 右箭头：绝对定位到卡片右上角 -->
+        <view class="period-arrow-right">
+          <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
+        </view>
+        <view class="flex ai-center">
+          <!-- 左侧内容 -->
+          <view class="flex-1">
+            <view class="module-title fs-36 mb-20">生理期管理</view>
+            <view class="fs-28 t-979797 mb-30">开始掌握你的生理周期</view>
+            <view class="period-btn flex ai-center" @tap="$uv.route('/homeDetail/periodQuestionnaire/periodQuestionnaire')">
+              <text class="fs-28 t-white">去开启</text>
+            </view>
+          </view>
+          <!-- 右侧圆形图片 -->
+          <view class="period-icon-wrap">
+            <uv-image src="/static/images/homeDetail/girl.png" width="140rpx" height="140rpx" mode="aspectFill" style="border-radius: 50%; overflow: hidden"></uv-image>
+          </view>
+        </view>
+      </view>
+
+      <!-- 生理期周期详情卡片（点击去开启后展开） -->
+      <view v-if="showPeriodDetail" class="module-card period-detail-card bg-white p-40 mt-20 r-50" @tap="$uv.route('/homeDetail/periodDetail/periodDetail')">
+        <!-- 标题行 -->
+        <view class="flex jc-between ai-center mb-30">
+          <view class="fs-34 fw-bold" style="color: #333">当前周期阶段</view>
+          <view class="fs-24" style="color: #999">{{ periodTodayDate }}</view>
+        </view>
+        <!-- 阶段 Tab  : idx === currentPhaseIndex-->
+        <view class="period-phases flex jc-between mb-30">
+          <view
+            v-for="(phase, idx) in periodPhases"
+            :key="phase.key"
+            class="period-phase-item flex fd-c ai-center jc-center"
+            :class="{ 'period-phase-item--active': idx === currentPhaseIndex }"
+          >
+            <view class="period-phase-icon mb-10">
+              <text class="fs-40" :style="{ color: idx === currentPhaseIndex ? '#ffffff' : idx === 0 ? '#ff80b0' : idx === 2 ? '#ff80b0' : '#999' }">{{ phase.icon }}</text>
+            </view>
+            <view class="fs-24" :style="{ color: idx === currentPhaseIndex ? '#ffffff' : '#666' }">{{ phase.label }}</view>
+          </view>
+        </view>
+        <!-- 提示信息 -->
+        <view class="period-tip flex ai-start">
+          <!--  <text class="period-tip-icon fs-28 mr-10" style="color: #5b9bd5; flex-shrink: 0">ℹ</text> -->
+          <uv-icon name="error-circle-fill" size="13" style="top: 10rpx" color=" #5b9bd5"></uv-icon>
+          <text class="fs-26" style="font-size: 9px; line-height: 1.6">{{ periodTip }}</text>
+        </view>
+      </view>
+
+      <!-- 睡眠模块 -->
+      <view
+        class="module-card sleep-module bg-white p-40 mt-30 r-50"
+        @tap="$uv.route('/homeDetail/sleepPage/sleepPage', { selectedDayIndex: selectedDayIndex, selectedDate: selectData })"
+      >
         <view class="module-header flex jc-between ai-center mb-30">
           <view class="module-icon-title flex ai-center jc-between">
             <uv-image src="/static/images/icon01.png" width="56rpx" height="56rpx"></uv-image>
             <view class="module-title ml-10 fs-36">
-              {{ '\u7761\u7720' }}
+              睡眠
               <DetailInfo id="sleep_score" v-model:isPopupActive="isPopupActive"></DetailInfo>
             </view>
           </view>
-          <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
+          <view class="module-action flex ai-center t-979797">
+            <!-- <view class="module-action flex ai-center t-979797"> -->
+            <!-- <view class="module-date">今天</view> -->
+            <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
+          </view>
         </view>
         <view class="module-content flex ai-end jc-between">
           <view>
             <view class="sleep-detail mb-30">
               <text class="fs-72">{{ getSleepDurationHours(sleepDurationMinutes) }}</text>
-              <text class="fs-24">{{ '\u5c0f\u65f6' }}</text>
+              <text class="fs-24">小时</text>
               <text class="fs-72">{{ getSleepDurationMinutes(sleepDurationMinutes) }}</text>
-              <text class="fs-24">{{ '\u5206\u949f' }}</text>
+              <text class="fs-24">分钟</text>
             </view>
             <view class="mb-10">
-              <text class="fs-24">{{ '\u7761\u7720\u8d28\u91cf' }}</text>
+              <text class="fs-24">睡眠质量</text>
               <text class="quality-level fs-36 ml-10">{{ sleepQualityText }}</text>
             </view>
             <view class="lineProgressStyle mb-10 ml-10">
@@ -1887,17 +1990,24 @@ onPullDownRefresh(async () => {
           </view>
         </view>
       </view>
-
-      <view class="module-card activity-module bg-white p-40 mt-30 r-50" @tap="openHomeDetail('exercise')">
+      <!-- 活动模块 -->
+      <view
+        class="module-card activity-module bg-white p-40 mt-30 r-50"
+        @tap="$uv.route('/homeDetail/exercise/exercise', { selectedDayIndex: selectedDayIndex, selectedDate: selectData })"
+      >
         <view class="module-header flex jc-between ai-center mb-30">
           <view class="module-icon-title flex ai-center">
             <uv-image src="/static/images/icon09.png" width="56rpx" height="56rpx"></uv-image>
+
             <view class="module-title ml-10 fs-36">
-              {{ '\u6d3b\u52a8' }}
+              活动
               <DetailInfo id="activity" v-model:isPopupActive="isPopupActive"></DetailInfo>
             </view>
           </view>
-          <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
+          <view class="module-action">
+            <!-- <view class="module-action"> -->
+            <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
+          </view>
         </view>
         <view class="module-content flex ai-end jc-between">
           <view class="activity-list">
@@ -1905,7 +2015,7 @@ onPullDownRefresh(async () => {
               <uv-image src="/static/images/icon08.png" width="36rpx" height="36rpx"></uv-image>
               <view class="activity-text ml-10">
                 <text class="activity-value fs-36">{{ activityStepValue }}</text>
-                <text class="activity-goal t-979797 fs-24">/{{ activityTargetStep }}{{ '\u6b65' }}</text>
+                <text class="activity-goal t-979797 fs-24">/{{ activityTargetStep }}步</text>
               </view>
             </view>
             <view class="activity-item flex ai-center mb-10">
@@ -1919,7 +2029,7 @@ onPullDownRefresh(async () => {
               <uv-image src="/static/images/icon02.png" width="36rpx" height="36rpx"></uv-image>
               <view class="activity-text ml-10">
                 <text class="activity-value fs-36">{{ activityMotionTimeValue }}</text>
-                <text class="activity-goal t-979797 fs-24">/{{ activityTargetMotionTime }}{{ '\u5206\u949f' }}</text>
+                <text class="activity-goal t-979797 fs-24">/{{ activityTargetMotionTime }}分钟</text>
               </view>
             </view>
           </view>
@@ -1929,44 +2039,60 @@ onPullDownRefresh(async () => {
         </view>
       </view>
 
-      <view class="module-card relax-module bg-white p-40 mt-30 r-50" @tap="openHomeDetail('relax')">
+      <!-- 放松状态模块 -->
+      <view
+        class="module-card relax-module bg-white p-40 mt-30 r-50"
+        @tap="$uv.route('/homeDetail/relaxStatus/relaxStatus', { selectedDayIndex: selectedDayIndex, selectedDate: selectData })"
+      >
         <view class="module-header flex jc-between ai-center mb-30">
           <view class="module-icon-title flex ai-center">
             <uv-image src="/static/images/icon04.png" width="56rpx" height="56rpx"></uv-image>
             <view class="module-title ml-10 fs-36">
-              {{ '\u538b\u529b' }}
+              压力
               <DetailInfo id="stress" v-model:isPopupActive="isPopupActive"></DetailInfo>
             </view>
           </view>
           <view class="module-action flex ai-center">
-            <view class="mr-20"><uv-image :src="activeIcon" width="56rpx" height="56rpx"></uv-image></view>
+            <!-- <view class="module-action flex ai-center"> -->
+            <view class="mr-20">
+              <!-- <uv-image src="/static/images/icon05.png" width="56rpx" height="56rpx"></uv-image> -->
+              <uv-image :src="activeIcon" width="56rpx" height="56rpx"></uv-image>
+            </view>
             <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
           </view>
         </view>
         <view class="module-content flex ai-end jc-between">
           <view class="relax-score">
             <text class="score-number fs-72">{{ relaxStressValue }}</text>
-            <text class="score-label ml-10">{{ relaxStressStatus || '\u5e73\u7a33\u72b6\u6001' }}</text>
+            <text class="score-label ml-10">{{ relaxStressStatus }}</text>
           </view>
           <view class="flex ai-center jc-center flex-1 ml-30">
             <l-echart ref="chartRelaxlRef" @finished="initRelaxChart" style="width: 100%; height: 192rpx; margin: 0"></l-echart>
           </view>
+          <!-- <uv-image src="/static/images/bg03.png" width="336rpx" mode="widthFix"></uv-image> -->
         </view>
       </view>
 
-      <view class="module-card vital-signs-module bg-white p-40 mt-30 r-50" @tap="openHomeDetail('vitalSigns')">
+      <!-- 生命体征模块 -->
+      <view
+        class="module-card vital-signs-module bg-white p-40 mt-30 r-50"
+        @tap="$uv.route('/homeDetail/vitalSigns/vitalSigns', { selectedDayIndex: selectedDayIndex, selectedDate: selectData })"
+      >
         <view class="module-header flex jc-between ai-center mb-30">
+          <!-- <view class="module-header flex jc-between ai-center mb-30"> -->
           <view class="module-icon-title flex ai-center">
             <uv-image src="/static/images/icon03.png" width="56rpx" height="56rpx"></uv-image>
             <view class="module-title ml-10 fs-36">
-              {{ '\u751f\u547d\u4f53\u5f81' }}
+              生命体征
               <DetailInfo id="vital_signs_status" v-model:isPopupActive="isPopupActive"></DetailInfo>
             </view>
           </view>
-          <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
+          <view class="module-action">
+            <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
+          </view>
         </view>
         <view class="module-summary mb-30">
-          <text class="summary-label">{{ '\u7efc\u5408\u5065\u5eb7' }}</text>
+          <text class="summary-label">综合评分</text>
           <text class="summary-score fs-72" style="line-height: 100%">{{ vitalSignObj?.overallScore || '00' }}</text>
         </view>
         <view class="module-content flex ai-end jc-between">
@@ -1975,7 +2101,7 @@ onPullDownRefresh(async () => {
               <uv-image src="/static/images/icon06.png" width="36rpx" height="36rpx"></uv-image>
               <view class="vital-text ml-10">
                 <text class="vital-value fs-36">{{ displayHeartRateValue }}</text>
-                <text class="vital-unit t-979797">{{ '\u6b21/\u5206\u949f' }}</text>
+                <text class="vital-unit t-979797">次/分钟</text>
               </view>
             </view>
             <view class="vital-item flex ai-center mb-10">
@@ -1989,11 +2115,13 @@ onPullDownRefresh(async () => {
           <view class="flex ai-center jc-center flex-1 ml-30">
             <l-echart ref="chartVitalRef" @finished="initVitalChart" style="width: 100%; height: 192rpx; margin: 0"></l-echart>
           </view>
+          <!-- <uv-image src="/static/images/bg04.png" width="336rpx" mode="widthFix"></uv-image> -->
         </view>
       </view>
     </view>
   </view>
 </template>
+
 <style lang="scss" scoped>
 .calendar-day {
   width: 118rpx;
@@ -2029,6 +2157,7 @@ onPullDownRefresh(async () => {
   width: 100%;
 }
 
+// 生理期周期详情卡片
 .period-detail-card {
   .period-phases {
     .period-phase-item {
@@ -2059,7 +2188,7 @@ onPullDownRefresh(async () => {
   }
 }
 
-
+// 生理期预测卡片
 .period-card {
   position: relative;
 
@@ -2083,12 +2212,12 @@ onPullDownRefresh(async () => {
     height: 140rpx;
     border-radius: 50%;
     overflow: hidden;
-    margin-top: 60rpx; 
-    margin-right: 12rpx; 
+    margin-top: 60rpx; /* 往下移 */
+    margin-right: 12rpx; /* 往左移 */
   }
 }
 
-
+// 蓝牙连接状态过渡效果
 .bluetooth-transition {
   transition: all 0.3s ease-in-out;
 }
@@ -2120,13 +2249,13 @@ onPullDownRefresh(async () => {
   transform: translateX(20rpx);
 }
 
-
+// 为每个状态添加特定的动画效果
 .bluetooth-disconnected {
   animation: pulse 2s infinite;
 }
 
 .bluetooth-connecting {
-  animation: bounce 1s infinite;
+  animation: pulseStrong 1.5s infinite;
 }
 
 .bluetooth-connected {
@@ -2142,6 +2271,16 @@ onPullDownRefresh(async () => {
   }
   100% {
     opacity: 0.7;
+  }
+}
+
+@keyframes pulseStrong {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
   }
 }
 
@@ -2167,19 +2306,9 @@ onPullDownRefresh(async () => {
 }
 
 .wave-progress-wrapper {
-  padding: 0;
+  padding: 0; /* 移除上下padding，让波浪只在填充部分显示 */
   background: rgba(255, 255, 255, 0.1);
   border-radius: 2rpx;
-  overflow: hidden;
+  overflow: hidden; /* 确保波浪不会溢出到容器外 */
 }
 </style>
-
-
-
-
-
-
-
-
-
-

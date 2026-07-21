@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// @ts-nocheck
 import { ref, computed } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
 import type { sleepNapType } from '@/types/api/homeDetail';

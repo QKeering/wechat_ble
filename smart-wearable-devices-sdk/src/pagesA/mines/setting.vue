@@ -1,3 +1,4 @@
+<!-- 功能设置 -->
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
@@ -75,109 +76,127 @@ onShow(async () => {
 </script>
 
 <template>
-  <view class="page">
-    <view class="title">功能设置</view>
+  <view class="p-30" :style="{ paddingBottom: paddingBottomVal + 'rpx' }">
+    <view>
+      <view class="mb-50 fs-36 pl-40 pr-40 mb-50">设置目标</view>
+      <view>
+        <!-- 睡眠时长 -->
+        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('sleep')">
+          <view class="" style="width: 50%">
+            <text>睡眠时长</text>
+            <text class="t-979797 fs-24">（小时）</text>
+          </view>
+          <view class="flex ai-center">
+            <text class="mr-20">{{ sleepTarget || '请选择' }}</text>
+            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+          </view>
+        </view>
 
-    <view class="card">
-      <view class="row">
-        <view>
-          <text class="label">连接状态</text>
-          <text class="hint">{{ statusText }}</text>
+        <!-- 步数目标 -->
+        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('step')">
+          <view class="" style="width: 50%">
+            <text>步数目标</text>
+            <text class="t-979797 fs-24">（步数）</text>
+          </view>
+          <view class="flex ai-center">
+            <text class="mr-20">{{ stepTarget || '请选择' }}</text>
+            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+          </view>
         </view>
-        <text class="value">{{ connectionText }}</text>
-      </view>
-      <view class="row">
-        <view>
-          <text class="label">健康监听</text>
-          <text class="hint">{{ monitorText }}</text>
+
+        <!-- 卡路里目标 -->
+        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('calorie')">
+          <view class="" style="width: 60%">
+            <text>卡路里目标</text>
+            <text class="t-979797 fs-24">（千卡）</text>
+          </view>
+          <view class="flex ai-center">
+            <text class="mr-20">{{ calorieTarget || '请选择' }}</text>
+            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+          </view>
         </view>
-        <button class="action" :disabled="isBusy" @tap="enableMonitoring">{{ isBusy ? busyText : '配置' }}</button>
-      </view>
-      <view class="row">
-        <view>
-          <text class="label">历史同步</text>
-          <text class="hint">同步戒指本地健康数据</text>
+
+        <!-- 活动时长目标 -->
+        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('activity')">
+          <view style="width: 80%">
+            <text>活动时长目标</text>
+            <text class="t-979797 fs-24">（分钟）</text>
+          </view>
+          <view class="flex ai-center">
+            <text class="mr-20">{{ activityDurationTarget || '请选择' }}</text>
+            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+          </view>
         </view>
-        <button class="action ghost" :disabled="isBusy" @tap="goHistorySync">同步</button>
+
+        <!-- 设备采集周期 -->
+        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('collect')">
+          <view class="" style="width: 80%">
+            <text>设备采集周期</text>
+            <text class="t-979797 fs-24">（分钟）</text>
+          </view>
+          <view class="flex ai-center">
+            <text class="mr-20">{{ collectPeriodTarget || '请选择' }}</text>
+            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+          </view>
+        </view>
       </view>
+    </view>
+    <view>
+      <view class="mb-50 fs-36 pl-40 pr-40">通用设置</view>
+      <view @click="openConfirmBind">
+        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30">
+          <view class="fs-36">恢复出厂设置</view>
+          <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+        </view>
+      </view>
+      <view @click="jumpOtaUpgrade">
+        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30">
+          <view class="fs-36">OTA升级</view>
+          <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+        </view>
+      </view>
+    </view>
+
+    <!-- Picker选择器 -->
+    <uv-picker
+      ref="pickerRef"
+      :defaultIndex="[pickerValue[0]]"
+      :title="pickerTitle"
+      :columns="pickerColumns"
+      v-model="pickerValue"
+      @confirm="onPickerConfirm"
+      confirmColor="#2e70fc"
+    ></uv-picker>
+
+    <uv-modal ref="modalPopup" :showCancelButton="true" align="center" :content="content" @confirm="confirmBind"></uv-modal>
+    <view class="purchase-section p-30 demo">
+      <view v-if="statusText" class="save-status fs-28 t-979797">{{ statusText }}</view>
+      <uv-button
+        @click="handleOk"
+        :text="isSaving ? '保存中' : '保存'"
+        :loading="isSaving"
+        :disabled="isSaving"
+        shape="circle"
+        color="#2e70fc"
+      ></uv-button>
+      <uv-safe-bottom></uv-safe-bottom>
     </view>
   </view>
 </template>
 
-<style scoped lang="scss">
-.page {
-  min-height: 100vh;
-  padding: 32rpx;
+<style lang="scss" scoped>
+.purchase-section {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 100%;
   background: #f1f3f6;
   box-sizing: border-box;
 }
 
-.title {
-  margin-bottom: 24rpx;
-  color: #111827;
-  font-size: 44rpx;
-  font-weight: 700;
-}
-
-.card {
-  padding: 8rpx 32rpx;
-  border-radius: 24rpx;
-  background: #fff;
-}
-
-.row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 24rpx;
-  min-height: 112rpx;
-  border-bottom: 1rpx solid #f0f2f5;
-}
-
-.row:last-child {
-  border-bottom: 0;
-}
-
-.label,
-.hint {
-  display: block;
-}
-
-.label {
-  color: #111827;
-  font-size: 32rpx;
-  font-weight: 600;
-}
-
-.hint {
-  margin-top: 8rpx;
-  color: #8b93a1;
-  font-size: 26rpx;
-}
-
-.value {
-  flex-shrink: 0;
-  color: #2b6ff6;
-  font-size: 28rpx;
-}
-
-.action {
-  flex-shrink: 0;
-  width: 152rpx;
-  height: 64rpx;
-  line-height: 64rpx;
-  border-radius: 32rpx;
-  background: #2b6ff6;
-  color: #fff;
-  font-size: 28rpx;
-}
-
-.action.ghost {
-  background: #eef3ff;
-  color: #2b6ff6;
-}
-
-.action[disabled] {
-  opacity: 0.55;
+.save-status {
+  margin-bottom: 16rpx;
+  line-height: 40rpx;
+  text-align: center;
 }
 </style>

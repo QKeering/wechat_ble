@@ -9,7 +9,7 @@ import { cloneDeep } from 'lodash-es';
 const props = defineProps({
   stressProportion: {
     type: Object as () => stressProportion,
-    default: () => {}
+    default: () => ({})
   }
 });
 

@@ -519,7 +519,7 @@ onShow(async () => {
     <view class="mb-50">
       <view class="mb-50 fs-36 pl-40 pr-40">设置设备</view>
       <view>
-        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30" @tap="goConnect">
+        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30" @tap="jumpSearch">
           <view class="fs-36">戒指查找</view>
           <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
         </view>
@@ -530,7 +530,7 @@ onShow(async () => {
       </view>
     </view>
 
-    <uv-modal ref="modalPopup" :showCancelButton="true" align="center" content="您确定要解除绑定吗？" @confirm.stop="confirmBind"></uv-modal>
+    <uv-modal ref="modalPopup" :showCancelButton="true" align="center" :content="content" @confirm.stop="confirmBind"></uv-modal>
 
     <view>
       <view class="mb-50 fs-36 pl-40 pr-40">设备信息</view>
@@ -569,29 +569,27 @@ onShow(async () => {
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
           <view>设备名称</view>
-          <view>{{ deviceName }}</view>
+          <view>{{ deviceNameText }}</view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
           <view>Mac地址</view>
           <view class="flex ai-center">
-            <view>{{ deviceMacText }}</view>
+            <view>{{ macText }}</view>
             <view class="copy-button" @click.stop="copyDeviceId">复制</view>
           </view>
         </view>
         <view class="device-action">
           <uv-button
-            :text="isBusy ? busyText || '读取中' : '刷新设备信息'"
+            :text="isBusy ? '读取中' : '刷新设备信息'"
             :loading="isBusy"
             :disabled="isBusy"
             shape="circle"
             color="#2E70FC"
             :customTextStyle="{ 'font-size': '32rpx' }"
             :customStyle="{ padding: '40rpx 0' }"
-            @click="refreshDeviceInfo"
+            @click="refreshDeviceReadings"
           ></uv-button>
-          <view v-if="lastActionText || refreshStatusText" class="device-status mt-20 fs-28 t-979797">
-            {{ lastActionText || refreshStatusText }}
-          </view>
+          <view v-if="readStatusText" class="device-status mt-20 fs-28 t-979797">{{ readStatusText }}</view>
         </view>
       </view>
     </view>
@@ -602,6 +600,7 @@ onShow(async () => {
 .device-action {
   padding: 0 40rpx 40rpx;
 }
+
 .device-status {
   line-height: 40rpx;
   text-align: center;

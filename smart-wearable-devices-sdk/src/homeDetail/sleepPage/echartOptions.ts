@@ -1,4 +1,3 @@
-// @ts-nocheck
 export const sleepTimeOption2 = {
   grid: {
     left: '3%',
@@ -27,7 +26,7 @@ export const sleepTimeOption2 = {
   },
   yAxis: {
     type: 'category',
-    data: ['快速眼动', '深睡', '浅睡', '清醒'],
+    data: ['深睡', '浅睡', '快速眼动', '清醒'],
     axisLine: { show: false },
     axisTick: { show: false },
     axisLabel: {
@@ -40,15 +39,6 @@ export const sleepTimeOption2 = {
     }
   },
   series: [
-    {
-      name: '快速眼动',
-      type: 'bar',
-      stack: 'rem',
-      yAxisIndex: 0,
-      data: [],
-      itemStyle: { color: '#a78bfa', borderRadius: [6, 6, 6, 6] },
-      barWidth: 18
-    },
     {
       name: '深睡',
       type: 'bar',
@@ -65,6 +55,15 @@ export const sleepTimeOption2 = {
       yAxisIndex: 0,
       data: [],
       itemStyle: { color: '#818cf8', borderRadius: [6, 6, 6, 6] },
+      barWidth: 18
+    },
+    {
+      name: '快速眼动',
+      type: 'bar',
+      stack: 'rem',
+      yAxisIndex: 0,
+      data: [],
+      itemStyle: { color: '#a78bfa', borderRadius: [6, 6, 6, 6] },
       barWidth: 18
     },
     {
@@ -122,11 +121,12 @@ export const sleepTimeOption = {
       color: '#979797',
       // 关键：将数值刻度转换为中文
       formatter: function (value) {
+        // 睡眠状态映射（与后端 API 契约一致：1清醒 2快速眼动 3浅睡 4深睡）
         const labelMap = {
           1: '清醒',
-          2: '浅睡',
-          3: '深睡',
-          4: '快速眼动'
+          2: '快速眼动',
+          3: '浅睡',
+          4: '深睡'
         };
         return labelMap[value] || '';
       }
@@ -165,9 +165,9 @@ export const sleepTimeOption = {
           };
           // 关键：根据数值范围匹配睡眠阶段
           let categoryName;
-          if (params.data == 4) categoryName = '快速眼动';
-          else if (params.data == 3) categoryName = '深睡';
-          else if (params.data == 2) categoryName = '浅睡';
+          if (params.data == 4) categoryName = '深睡';
+          else if (params.data == 3) categoryName = '浅睡';
+          else if (params.data == 2) categoryName = '快速眼动';
           else categoryName = '清醒';
           return colorMap[categoryName] || '#e6e5fc';
         }
@@ -201,11 +201,11 @@ export const sleepRageOption = {
       radius: ['30%', '45%'],
       center: ['17%', '53%'],
       data: [
-        { value: 10, name: '清醒', itemStyle: { color: '#e2e1fd', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 22, name: '浅睡', itemStyle: { color: '#c5c2f9', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 8, name: '快速眼动', itemStyle: { color: '#9994f4', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 60, name: '深睡', itemStyle: { color: '#5f57ec', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 11, name: '小睡', itemStyle: { color: '#c5c2f9', borderWidth: 1, borderColor: '#ffffff' } }
+        { value: 10, name: '清醒', itemStyle: { color: '#feba8a', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 22, name: '浅睡', itemStyle: { color: '#8c65f6', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 8, name: '快速眼动', itemStyle: { color: '#baacfb', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 60, name: '深睡', itemStyle: { color: '#4b13be', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 11, name: '小睡', itemStyle: { color: '#8c65f6', borderWidth: 1, borderColor: '#ffffff' } }
       ],
       label: { show: false },
       labelLine: { show: false },
@@ -224,12 +224,13 @@ export const sleepRageOption = {
     itemHeight: 12,
     itemGap: 15,
     show: true,
+    selectedMode: false,
     data: [
-      { name: '深睡', icon: 'circle' },
-      { name: '快速眼动', icon: 'circle' },
-      { name: '浅睡', icon: 'circle' },
       { name: '清醒', icon: 'circle' },
-      { name: '小睡', icon: 'circle' }
+      { name: '快速眼动', icon: 'circle' },
+      { name: '小睡', icon: 'circle' },
+      { name: '浅睡', icon: 'circle' },
+      { name: '深睡', icon: 'circle' }
     ],
     formatter: function (name) {
       let value = '',

@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// @ts-nocheck
 import { ref } from 'vue';
 const echarts = require('../../../static/echarts.min.js');
 import { categoryOption } from '@/homeDetail/exercise/echartOptions';

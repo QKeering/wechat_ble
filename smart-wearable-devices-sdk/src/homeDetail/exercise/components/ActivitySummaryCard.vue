@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// @ts-nocheck
 import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
 const echarts = require('../../../static/echarts.min.js');
@@ -7,10 +6,11 @@ import { todayOption, lastDayOption } from '@/homeDetail/exercise/echartOptions'
 import type { motionSummary, Point } from '@/types/api/homeDetail';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';
 import { cloneDeep } from 'lodash-es';
+import { formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 const props = defineProps({
   motionSummaryObj: {
     type: Object as () => motionSummary,
-    default: () => {}
+    default: () => ({})
   }
 });
 watch(
@@ -25,6 +25,13 @@ watch(
 );
 const todayRef = ref<any>(null);
 const lastDayRef = ref<any>(null);
+const motionCalorieText = computed(() =>
+  formatMotionCalorieKcal(
+    normalizeMotionCalorieKcal(props.motionSummaryObj?.motionCalorie, {
+      unit: (props.motionSummaryObj as any)?.calorieUnit
+    })
+  )
+);
 
 // 计算步数差值
 const stepDifference = computed(() => {
@@ -84,25 +91,28 @@ const getLastWeekDateRange = (): string => {
   return `${formatDate(monday)}-${formatDate(sunday)}`;
 };
 
-const formatTimeData = (data: Point[]): { xData: string[]; seriesData: number[] } => {
-  const xData = data?.map((item: Point) => {
+const formatTimeData = (data: Point[] = []): { xData: string[]; seriesData: number[] } => {
+  const safeData = Array.isArray(data) ? data : [];
+  const xData = safeData.map((item: Point) => {
     if (!item.time) return '00:00';
     return item.time.includes(':') ? item.time : `${item.time.padStart(2, '0')}:00`;
   });
 
-  const seriesData = data?.map((item: Point) => Number(item.value));
+  const seriesData = safeData.map((item: Point) => Number(item.value)).filter((value) => Number.isFinite(value));
 
   return { xData, seriesData };
 };
 
 const configureChartOptions = (newOption: any, xData: string[], seriesData: number[], titleText: string) => {
-  const maxValue = Math.max(...seriesData);
+  const safeXData = xData.length ? xData : ['00:00'];
+  const safeSeriesData = seriesData.length ? seriesData : [0];
+  const maxValue = Math.max(...safeSeriesData);
   const yAxisMax = getYAxisMax(maxValue);
   const yAxisMid = yAxisMax / 2;
 
   // 设置数据
-  newOption.xAxis.data = xData;
-  newOption.series[0].data = seriesData;
+  newOption.xAxis.data = safeXData;
+  newOption.series[0].data = safeSeriesData;
 
   // 设置标题
   newOption.title = {
@@ -265,8 +275,8 @@ onLoad(() => {});
           <text class="fs-28">活动消耗</text>
         </view>
         <view class="">
-          <text class="fs-36">{{ motionSummaryObj?.motionCalorie || '00' }}</text>
-          <text class="fs-24">卡</text>
+          <text class="fs-36">{{ motionCalorieText }}</text>
+          <text class="fs-24">{{ '\u5343\u5361' }}</text>
         </view>
       </view>
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start pl-45">
@@ -326,6 +336,7 @@ onLoad(() => {});
   transform: rotate(180deg);
   transition: transform 0.3s ease;
 }
+
 .trend-arrow {
   width: 0;
   height: 0;

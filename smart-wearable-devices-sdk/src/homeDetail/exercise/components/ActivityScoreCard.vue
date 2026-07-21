@@ -1,15 +1,18 @@
 <script setup lang="ts">
-// @ts-nocheck
 import { ref, computed, watch } from 'vue';
 const echarts = require('../../../static/echarts.min.js');
 import { pressureOption } from '@/homeDetail/exercise/echartOptions';
-import type { motionOverview } from '@/types/api/homeDetail';
+import type { motionOverview, motionSummary } from '@/types/api/homeDetail';
 import { formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 
 const props = defineProps({
   motionOverviewObj: {
     type: Object as () => motionOverview,
-    default: () => {}
+    default: () => ({})
+  },
+  motionSummaryObj: {
+    type: Object as () => motionSummary,
+    default: () => ({})
   }
 });
 watch(
@@ -22,34 +25,41 @@ watch(
   { deep: true }
 );
 const pieRef = ref<any>(null);
-const stepNumber = computed(() => Number(props.motionOverviewObj?.step || 0));
+const toPositiveNumber = (...values: unknown[]) => {
+  for (const value of values) {
+    if (value === null || value === undefined || value === '') continue;
+    const numeric = typeof value === 'number' ? value : Number(String(value).replace(/[^\d.-]/g, ''));
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  }
+  return 0;
+};
+const stepNumber = computed(() => toPositiveNumber(props.motionOverviewObj?.step, props.motionSummaryObj?.todayStep));
+const targetStep = computed(() => toPositiveNumber(props.motionOverviewObj?.targetStep) || 6000);
+const targetCalorie = computed(() => toPositiveNumber(props.motionOverviewObj?.targetCalorie) || 500);
+const targetMotionTime = computed(() => toPositiveNumber(props.motionOverviewObj?.targetMotionTime) || 30);
+const motionTimeNumber = computed(() => toPositiveNumber(props.motionOverviewObj?.motionTime, props.motionSummaryObj?.motionTime));
+const calorieUnit = computed(() => props.motionOverviewObj?.calorieUnit || props.motionSummaryObj?.calorieUnit || '千卡');
 const calorieNumber = computed(
   () =>
-    normalizeMotionCalorieKcal(props.motionOverviewObj?.calorie, {
+    normalizeMotionCalorieKcal(toPositiveNumber(props.motionOverviewObj?.calorie, props.motionSummaryObj?.motionCalorie), {
       stepCount: stepNumber.value,
-      targetCalorie: props.motionOverviewObj?.targetCalorie,
-      unit: props.motionOverviewObj?.calorieUnit
+      targetCalorie: targetCalorie.value,
+      unit: calorieUnit.value
     }) || 0
 );
 const calorieText = computed(() => formatMotionCalorieKcal(calorieNumber.value));
 const firstCricle = computed(() => {
-  const motionTime = props.motionOverviewObj?.step ? calorieNumber.value : 0;
-  const targetMotionTime = props.motionOverviewObj?.targetCalorie || 30;
-  const Percentage = Number(motionTime) / Number(targetMotionTime);
+  const Percentage = calorieNumber.value / targetCalorie.value;
   // 乘以100得到百分比，并限制在0-100之间
   return Math.min(Math.max(Percentage * 100, 0), 100);
 });
 const secoundCricle = computed(() => {
-  const step = props.motionOverviewObj?.step || '00';
-  const targetStep = props.motionOverviewObj?.targetStep || 30;
-  const Percentage = Number(step) / Number(targetStep);
+  const Percentage = stepNumber.value / targetStep.value;
   // 乘以100得到百分比，并限制在0-100之间
   return Math.min(Math.max(Percentage * 100, 0), 100);
 });
 const thirdCricle = computed(() => {
-  const calorie = props.motionOverviewObj?.motionTime || '00';
-  const targetCalorie = props.motionOverviewObj?.targetMotionTime || 500;
-  const Percentage = Number(calorie) / Number(targetCalorie);
+  const Percentage = motionTimeNumber.value / targetMotionTime.value;
   // 乘以100得到百分比，并限制在0-100之间
   return Math.min(Math.max(Percentage * 100, 0), 100);
 });
@@ -115,9 +125,9 @@ const initPie = async () => {
           <text class="fs-24 t-979797">活动热量</text>
         </view>
         <view>
-          <text class="fs-36">{{ motionOverviewObj?.step ? calorieText : '00' }}</text>
-          <text class="fs-24 t-979797">/{{ motionOverviewObj?.targetCalorie || 500 }}</text>
-          <text class="fs-24 t-979797">{{ motionOverviewObj?.calorieUnit || '千卡' }}</text>
+          <text class="fs-36">{{ calorieNumber > 0 ? calorieText : '00' }}</text>
+          <text class="fs-24 t-979797">/{{ targetCalorie }}</text>
+          <text class="fs-24 t-979797">{{ calorieUnit }}</text>
         </view>
       </view>
       <view class="stat-item">
@@ -126,8 +136,8 @@ const initPie = async () => {
           <text class="fs-24 t-979797">活动步数</text>
         </view>
         <view>
-          <text class="fs-36">{{ motionOverviewObj?.step || '00' }}</text>
-          <text class="fs-24 t-979797">/{{ motionOverviewObj?.targetStep || 6000 }}</text>
+          <text class="fs-36">{{ stepNumber || '00' }}</text>
+          <text class="fs-24 t-979797">/{{ targetStep }}</text>
           <text class="fs-24 t-979797">步</text>
         </view>
       </view>
@@ -137,8 +147,8 @@ const initPie = async () => {
           <text class="fs-24 t-979797">活动时间</text>
         </view>
         <view>
-          <text class="fs-36">{{ motionOverviewObj?.motionTime || '00' }}</text>
-          <text class="fs-24 t-979797">/{{ motionOverviewObj?.targetMotionTime || 30 }}</text>
+          <text class="fs-36">{{ motionTimeNumber || '00' }}</text>
+          <text class="fs-24 t-979797">/{{ targetMotionTime }}</text>
           <text class="fs-24 t-979797">分钟</text>
         </view>
       </view>

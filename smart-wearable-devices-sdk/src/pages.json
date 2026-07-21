@@ -1,4 +1,11 @@
 {
+  "easycom": {
+    "autoscan": true,
+    "custom": {
+      "^uv-(.*)": "@/uni_modules/uv-$1/components/uv-$1/uv-$1.vue",
+      "^uni-(.*)": "@/uni_modules/uni-$1/components/uni-$1/uni-$1.vue"
+    }
+  },
   "pages": [
     {
       "path": "pages/awareness/awareness",
@@ -60,14 +67,14 @@
         "navigationStyle": "custom"
       }
     },
-      {
-        "path": "pages/family/elderHome",
-        "style": {
-          "navigationBarTitleText": "长辈模式",
-          "navigationStyle": "custom",
-          "enablePullDownRefresh": true
-        }
-      },
+    {
+      "path": "pages/family/elderHome",
+      "style": {
+        "navigationBarTitleText": "长辈模式",
+        "navigationStyle": "custom",
+        "enablePullDownRefresh": true
+      }
+    },
     {
       "path": "pages/family/elderDevice",
       "style": {
@@ -120,12 +127,26 @@
       "style": {
         "navigationBarTitleText": "用户协议"
       }
+    },
+    {
+      "path": "pages/webview-custom/webview-custom",
+      "style": {
+        "navigationBarTitleText": "",
+        "navigationStyle": "custom"
+      }
     }
   ],
   "subPackages": [
     {
       "root": "pagesA/mines",
       "pages": [
+        {
+          "path": "connectDevice",
+          "style": {
+            "navigationBarTitleText": "连接设备",
+            "navigationBarBackgroundColor": "#ffffff"
+          }
+        },
         {
           "path": "profile",
           "style": {
@@ -154,6 +175,12 @@
           }
         },
         {
+          "path": "otaUpgrade",
+          "style": {
+            "navigationBarTitleText": "OTA升级"
+          }
+        },
+        {
           "path": "guide",
           "style": {
             "navigationBarTitleText": "使用指南",
@@ -168,10 +195,9 @@
           }
         },
         {
-          "path": "connectDevice",
+          "path": "detail",
           "style": {
-            "navigationBarTitleText": "连接设备",
-            "navigationBarBackgroundColor": "#ffffff"
+            "navigationBarTitleText": "详情"
           }
         }
       ]
@@ -206,21 +232,42 @@
     {
       "root": "homeDetail",
       "pages": [
+        // 生命体特征
         {
-          "path": "sleepPage/sleepPage",
+          "path": "vitalSigns/vitalSigns",
           "style": {
             "navigationBarBackgroundColor": "#ffffff",
             "navigationStyle": "custom",
             "enablePullDownRefresh": true
           }
         },
+
+        // 生命体特征详情
         {
-          "path": "sleepPageEdit/sleepPageEdit",
+          "path": "vitalSignsEdit/vitalSignsEdit",
           "style": {
             "navigationBarBackgroundColor": "#ffffff",
             "navigationBarTitleText": "编辑卡片"
           }
         },
+        //放松状态
+        {
+          "path": "relaxStatus/relaxStatus",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationBarTitleText": "放松状态",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
+          "path": "relaxEdit/relaxEdit",
+          "style": {
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationBarTitleText": "编辑卡片"
+          }
+        },
+        //活动模块
         {
           "path": "exercise/exercise",
           "style": {
@@ -236,8 +283,9 @@
             "navigationBarTitleText": "编辑卡片"
           }
         },
+        //睡眠
         {
-          "path": "relaxStatus/relaxStatus",
+          "path": "sleepPage/sleepPage",
           "style": {
             "navigationBarBackgroundColor": "#ffffff",
             "navigationStyle": "custom",
@@ -245,27 +293,13 @@
           }
         },
         {
-          "path": "relaxEdit/relaxEdit",
+          "path": "sleepPageEdit/sleepPageEdit",
           "style": {
             "navigationBarBackgroundColor": "#ffffff",
             "navigationBarTitleText": "编辑卡片"
           }
         },
-        {
-          "path": "vitalSigns/vitalSigns",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        },
-        {
-          "path": "vitalSignsEdit/vitalSignsEdit",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationBarTitleText": "编辑卡片"
-          }
-        },
+        //心率详情
         {
           "path": "vitalSignsHeartDetail/vitalSignsDetail",
           "style": {
@@ -273,6 +307,7 @@
             "navigationStyle": "custom"
           }
         },
+        //血氧详情
         {
           "path": "vitalSignsHeartDetail/oxyGenDetail",
           "style": {
@@ -280,6 +315,7 @@
             "navigationStyle": "custom"
           }
         },
+        //体温详情
         {
           "path": "vitalSignsHeartDetail/temperatureDetail",
           "style": {
@@ -287,30 +323,49 @@
             "navigationStyle": "custom"
           }
         },
+        //心率变异性详情
         {
           "path": "vitalSignsHeartDetail/heartRateVariabilityDetail",
           "style": {
             "navigationBarBackgroundColor": "#ffffff",
             "navigationStyle": "custom"
           }
+        },
+        // 生理期信息问卷
+        {
+          "path": "periodQuestionnaire/periodQuestionnaire",
+          "style": {
+            "navigationBarBackgroundColor": "#f5f0ee",
+            "navigationStyle": "custom"
+          }
+        },
+        // 生理期问卷步骤页
+        {
+          "path": "periodSteps/periodSteps",
+          "style": {
+            "navigationBarBackgroundColor": "#eef0f5",
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "periodDetail/periodDetail",
+          "style": {
+            "navigationBarTitleText": "经期详情",
+            "navigationStyle": "custom"
+          }
         }
       ]
     }
   ],
+  "optimization": {
+    "subPackages": true // 分包优化，隔离依赖
+  },
   "globalStyle": {
     "navigationBarTextStyle": "black",
     "navigationBarTitleText": "智能穿戴设备",
     "navigationBarBackgroundColor": "#F1F3F6",
-    "backgroundColor": "#F1F3F6",
     "enablePullDownRefresh": false,
     "enableShareAppMessage": true
-  },
-  "easycom": {
-    "autoscan": true,
-    "custom": {
-      "^uv-(.*)": "@/uni_modules/uv-$1/components/uv-$1/uv-$1.vue",
-      "^uni-(.*)": "@/uni_modules/uni-$1/components/uni-$1/uni-$1.vue"
-    }
   },
   "tabBar": {
     "custom": false,
@@ -337,5 +392,6 @@
         "text": "我的"
       }
     ]
-  }
+  },
+  "uniIdRouter": {}
 }

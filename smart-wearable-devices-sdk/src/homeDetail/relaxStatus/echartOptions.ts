@@ -1,5 +1,4 @@
-// @ts-nocheck
-// src/utils/echartOptions
+// src/utils/echartOptions.ts
 // 定义 ECharts Option 的类型（若项目中已引入 ECharts 类型，可直接使用）
 const echarts = require('../../static/echarts.min.js');
 // 第一个配置：baseOption

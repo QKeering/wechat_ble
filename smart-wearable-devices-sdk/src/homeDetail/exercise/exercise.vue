@@ -246,7 +246,7 @@ defineExpose({
     </view>
     <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
     <view v-for="cardId in listData" :key="cardId">
-      <ActivityScoreCard v-if="cardId === 'valueFirst'" :motionOverviewObj="motionOverviewObj" />
+      <ActivityScoreCard v-if="cardId === 'valueFirst'" :motionOverviewObj="motionOverviewObj" :motionSummaryObj="motionSummaryObj" />
       <CalorieCard v-else-if="cardId === 'valueSecound'" :motionCalorieObj="motionCalorieObj" >
         <DetailInfo id="daily_calories" v-model:isPopupActive="isPopupActive" style="margin-left: 4rpx;"></DetailInfo>
       </CalorieCard>

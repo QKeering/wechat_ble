@@ -5,26 +5,48 @@ import { useUserStore } from '@/stores/user';
 
 const userStore = useUserStore();
 const nickName = ref('');
+const saving = ref(false);
+
+const decodeRouteParam = (value = '') => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
 
 const updateUserNickName = async () => {
-  if (!nickName.value) {
+  const nextNickName = nickName.value.trim();
+  if (!nextNickName) {
     return uni.showToast({
       title: '请输入昵称',
       icon: 'error'
     });
   }
-  await userStore.refreshUserInfo({
-    nickName: nickName.value
-  });
-  uni.showToast({
-    title: '修改成功',
-    icon: 'success'
-  });
-  uni.navigateBack();
+  if (saving.value) return;
+  saving.value = true;
+  try {
+    await userStore.refreshUserInfo({
+      nickName: nextNickName
+    });
+    nickName.value = nextNickName;
+    uni.showToast({
+      title: '修改成功',
+      icon: 'success'
+    });
+    uni.navigateBack();
+  } catch {
+    uni.showToast({
+      title: '保存失败，请稍后再试',
+      icon: 'none'
+    });
+  } finally {
+    saving.value = false;
+  }
 };
 
 onLoad((e) => {
-  nickName.value = e.nickName || '';
+  nickName.value = decodeRouteParam(e.nickName || '');
 });
 </script>
 
@@ -43,6 +65,7 @@ onLoad((e) => {
           padding: '64rpx 0',
           'box-shadow': '0 8rpx 20rpx 0 #2e70fc80'
         }"
+        :disabled="saving"
         @click="updateUserNickName"
       ></uv-button>
       <uv-safe-bottom></uv-safe-bottom>

@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// @ts-nocheck
 import { ref, watch } from 'vue';
 import { sleepRageOption } from '@/homeDetail/sleepPage/echartOptions';
 import type { sleepSegment, Point } from '@/types/api/homeDetail';
@@ -51,12 +50,23 @@ const areAllValuesZero = (dataArray: any[]): boolean => {
     return item.value === '0' || item.value === 0;
   });
 };
+// 睡眠区间图例显示顺序
+const SLEEP_ORDER = ['清醒', '快速眼动', '小睡', '浅睡', '深睡'];
+// 按指定顺序对睡眠数据进行排序
+const sortBySleepOrder = (dataArray: any[]): any[] => {
+  return [...dataArray].sort((a, b) => {
+    const idxA = SLEEP_ORDER.indexOf(a.time);
+    const idxB = SLEEP_ORDER.indexOf(b.time);
+    return (idxA === -1 ? Infinity : idxA) - (idxB === -1 ? Infinity : idxB);
+  });
+};
 const getProcessedOption = () => {
   // 测试数据
   const testData = {
     chartDataSectionList: [
       { time: '清醒', value: '0' },
       { time: '快速眼动', value: '0' },
+      { time: '小睡', value: '0' },
       { time: '浅睡', value: '0' },
       { time: '深睡', value: '0' }
     ],
@@ -87,6 +97,8 @@ const getProcessedOption = () => {
     // 统一处理图例配置的函数
     const updateLegendConfig = (dataArray: any[]) => {
       if (!dataArray || dataArray.length === 0) return;
+      // 按指定顺序排序后再生成图例
+      dataArray = sortBySleepOrder(dataArray);
 
       // 1. 计算总时长 (用于计算百分比)
       const totalValue = dataArray.reduce((sum, item) => {
@@ -132,6 +144,7 @@ const getProcessedOption = () => {
       if (newOption.legend) {
         newOption.legend.data = legendData;
         newOption.legend.top = legendTop;
+        newOption.legend.selectedMode = false;
 
         // 3. 更新 formatter，加入百分比
         newOption.legend.formatter = function (name: string) {

@@ -187,24 +187,19 @@ defineExpose({
   receiveCardConfig
 });
 </script>
-
 <template>
   <page-meta :page-style="fixedPageStyle"></page-meta>
 
   <view class="relative p-30" style="box-sizing: border-box">
-    <uv-navbar
-      @leftClick="leftClick"
-      placeholder
-      leftIcon="arrow-left"
-      title="放松状态"
-      :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"
-    ></uv-navbar>
+    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" title="放松状态" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view class="bgcWrapper"></view>
     <view class="pt-30 pr-30 pl-30 relative mb-30" style="z-index: 1; box-sizing: border-box">
       <view class="calendar-week flex">
         <view
           class="calendar-day flex fd-c jc-center ai-center mr-20"
-          :class="{ 'calendar-day--selected': selectedDayIndex === 3 }"
+          :class="{
+            'calendar-day--selected': selectedDayIndex === 3
+          }"
           @tap="openTimePicker()"
         >
           <view class="calendar-day__label" :class="selectedDayIndex === 3 ? 't-white' : 't-979797'">
@@ -222,7 +217,9 @@ defineExpose({
           v-for="(dateItem, index) in dateList"
           :key="index"
           class="calendar-day flex fd-c jc-center ai-center mr-20"
-          :class="{ 'calendar-day--selected': index === selectedDayIndex }"
+          :class="{
+            'calendar-day--selected': index === selectedDayIndex
+          }"
           @tap="handleDateClick(index)"
         >
           <view class="calendar-day__label" :class="index === selectedDayIndex ? 't-white' : 't-979797'">
@@ -230,8 +227,8 @@ defineExpose({
           </view>
           <view class="calendar-day__date" :class="index === selectedDayIndex ? 't-white' : ''">
             <template v-if="index === 2">
-              <uv-icon v-if="index === selectedDayIndex" name="arrow-down" color="#fff" size="14"></uv-icon>
-              <uv-icon v-else name="arrow-down" color="#010101" size="14"></uv-icon>
+              <uv-icon name="arrow-down" color="#fff" size="14" v-if="index === selectedDayIndex"></uv-icon>
+              <uv-icon name="arrow-down" color="#010101" size="14" v-else></uv-icon>
             </template>
             <template v-else>
               {{ dateItem.info.day }}
@@ -242,8 +239,8 @@ defineExpose({
     </view>
     <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
     <view v-for="cardId in listData" :key="cardId">
-      <relaxValue v-if="cardId === 'valueFirst'" :stressDetail="stressDetailObj">
-        <DetailInfo id="stress" size="small" v-model:isPopupActive="isPopupActive" style="margin-left: 14rpx"></DetailInfo>
+      <relaxValue v-if="cardId === 'valueFirst'" :stressDetail="stressDetailObj" >
+        <DetailInfo id="stress" size="small" v-model:isPopupActive="isPopupActive" style="margin-left: 14rpx;"></DetailInfo>
       </relaxValue>
       <pressureRatio v-else-if="cardId === 'valueSecound'" :stressProportion="stressProportionObj" />
       <stressSummary v-else-if="cardId === 'valueThird'" :stressSummaryObj="stressSummaryObj" />
@@ -257,7 +254,6 @@ defineExpose({
     <uv-safe-bottom></uv-safe-bottom>
   </view>
 </template>
-
 <style lang="scss" scoped>
 .bgcWrapper {
   position: absolute;

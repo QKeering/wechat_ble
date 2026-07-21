@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// @ts-nocheck
 import { ref, computed, watch } from 'vue';
 import { sleepTimeOption } from '@/homeDetail/sleepPage/echartOptions';
 import type { sleepDetail, Point } from '@/types/api/homeDetail';
