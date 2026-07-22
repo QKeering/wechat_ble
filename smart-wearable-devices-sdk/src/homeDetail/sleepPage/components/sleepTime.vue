@@ -26,10 +26,11 @@ const formattedMinutes = computed(() => sleepDurationMinutes.value.toString().pa
 
 // ===== 阶段配置 =====
 const STAGE_CONFIG: Record<string, { level: number; color: string }> = {
-  清醒: { level: 0, color: '#feba8a' },
-  快速眼动: { level: 1, color: '#baacfb' },
-  浅睡: { level: 2, color: '#8c65f6' },
-  深睡: { level: 3, color: '#4b13be' }
+  快速眼动: { level: 0, color: '#ff9b64' },
+  清醒: { level: 1, color: '#e2e1fd' },
+  浅睡: { level: 2, color: '#b884f6' },
+  深睡: { level: 3, color: '#6a4df0' },
+  小睡: { level: 0, color: '#feba8a' }
 };
 
 // ===== 时间工具 =====
@@ -56,6 +57,24 @@ const getStageDuration = (stageName: string): number => {
   return stage ? parseInt(String(stage.value || '0'), 10) : 0;
 };
 
+const formatCompactDuration = (minutes: number) => ({
+  hours: Math.floor(Math.max(0, minutes) / 60),
+  minutes: Math.max(0, minutes) % 60
+});
+
+const sleepTimeStats = computed(() => {
+  const stages = ['深睡', '浅睡', '快速眼动'];
+  return stages.map((name) => {
+    const duration = formatCompactDuration(getStageDuration(name));
+    const config = STAGE_CONFIG[name] || STAGE_CONFIG['浅睡'];
+    return {
+      name,
+      color: config.color,
+      ...duration
+    };
+  });
+});
+
 // ===== 处理时间段：保证所有时间段首尾连续 =====
 // 1. 缺失 → 清醒填充  2. 交叉 → 对齐  3. 乱序 → 排序
 // 4. 重复时间戳 → 跳过  5. 跨午夜 → 归一化  6. 超范围 → 裁剪  7. 同类型相邻 → 合并
@@ -73,7 +92,7 @@ const processTimeSegments = (): Array<{ start: number; duration: number; type: s
   if (!chartData || !Array.isArray(chartData) || chartData.length === 0) {
     const segments: Array<{ start: number; duration: number; type: string }> = [];
     let currentStart = 0;
-    const stages = ['深睡', '浅睡', '快速眼动', '清醒'];
+    const stages = ['深睡', '浅睡', '快速眼动', '清醒', '小睡'];
     stages.forEach((stage) => {
       const duration = getStageDuration(stage);
       if (duration > 0) {
@@ -410,6 +429,20 @@ const handleChartTouchMove = (e: any) => {
           <text class="time-text right">{{ endTimeLabel }}</text>
         </view>
       </view>
+      <view class="sleep-time-summary">
+        <view v-for="item in sleepTimeStats" :key="item.name" class="sleep-time-summary-item">
+          <view class="sleep-time-summary-value">
+            <text class="sleep-time-summary-hour">{{ item.hours }}</text>
+            <text class="sleep-time-summary-unit">h</text>
+            <text class="sleep-time-summary-minute">{{ item.minutes }}</text>
+            <text class="sleep-time-summary-unit">min</text>
+          </view>
+          <view class="sleep-time-summary-label">
+            <view class="sleep-time-summary-dot" :style="{ backgroundColor: item.color }"></view>
+            <text>{{ item.name }}</text>
+          </view>
+        </view>
+      </view>
     </view>
   </view>
 </template>
@@ -516,5 +549,61 @@ const handleChartTouchMove = (e: any) => {
 .tooltip-time {
   font-size: 22rpx;
   color: #6b7280;
+}
+
+.sleep-time-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  margin-top: 26rpx;
+  padding: 22rpx 4rpx 8rpx;
+  border-top: 1rpx solid rgba(229, 231, 235, 0.75);
+}
+
+.sleep-time-summary-item {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.sleep-time-summary-value {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  color: #111827;
+  line-height: 1;
+}
+
+.sleep-time-summary-hour,
+.sleep-time-summary-minute {
+  font-size: 38rpx;
+  font-weight: 600;
+}
+
+.sleep-time-summary-minute {
+  margin-left: 14rpx;
+}
+
+.sleep-time-summary-unit {
+  margin-left: 4rpx;
+  color: #6b7280;
+  font-size: 22rpx;
+}
+
+.sleep-time-summary-label {
+  display: flex;
+  align-items: center;
+  margin-top: 12rpx;
+  color: #6b7280;
+  font-size: 22rpx;
+}
+
+.sleep-time-summary-dot {
+  width: 14rpx;
+  height: 14rpx;
+  margin-right: 8rpx;
+  border-radius: 50%;
 }
 </style>

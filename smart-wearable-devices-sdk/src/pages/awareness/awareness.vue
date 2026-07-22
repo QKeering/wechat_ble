@@ -36,7 +36,6 @@ import CustomSteps from '@/components/customSteps.vue';
 import ProgressBar from '@/components/progressBar.vue';
 import { submitData } from '@/common/api/homeDetail';
 import { bind, unbind, getBindInfo } from '@/common/api/device';
-import WaveProgress from '@/components/waveProgress.vue';
 import DetailInfo from '@/components/DetailInfo.vue';
 import { usePopupFixer } from '@/hooks/usePopupFixer';
 import { formatBleErrorMessage } from '@/utils/bleError';
@@ -242,12 +241,6 @@ const togglePeriodDetail = () => {
 };
 
 let lastLocalDataLength = 0;
-
-
-const uploadProgress = computed(() => {
-  return pullDownProgress.value;
-});
-
 
 const isIOS = computed(() => {
   const systemInfo = uni.getSystemInfoSync();
@@ -1208,29 +1201,7 @@ const handleDateClick = async (index: number) => {
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
   selectData.value = currentDate;
-  pullDownProgress.value = 40;
-  await getBalanceScoreData(currentDate);
-  pullDownProgress.value = 50;
-  await getSleepOverviewData(currentDate);
-  pullDownProgress.value = 60;
-  await getMotionOverviewData(currentDate);
-  pullDownProgress.value = 70;
-  await getStressInfo(currentDate);
-  pullDownProgress.value = 80;
-  await getVitalSigns(currentDate);
-  pullDownProgress.value = 90;
-  // await Promise.all([
-  //   getBalanceScoreData(currentDate),
-  //   getSleepOverviewData(currentDate),
-  //   getMotionOverviewData(currentDate),
-  //   getStressInfo(currentDate),
-  //   getVitalSigns(currentDate)
-  // ]);
-  await initBalanceChart();
-  await initSportChart();
-  await initVitalChart();
-  await initRelaxChart();
-  await initSleepChart();
+  await refreshAwarenessBusinessOverview(currentDate);
 };
 const openTimePicker = () => {
   calendar.value.open();
@@ -1254,16 +1225,7 @@ const confirm = async (date: any) => {
   selectedDayIndex.value = 3;
   selectData.value = selectedDate;
   const currentDate = selectedDate;
-  await getBalanceScoreData(currentDate);
-  await getSleepOverviewData(currentDate);
-  await getMotionOverviewData(currentDate);
-  await getStressInfo(currentDate);
-  await getVitalSigns(currentDate);
-  await initBalanceChart();
-  await initSportChart();
-  await initVitalChart();
-  await initRelaxChart();
-  await initSleepChart();
+  await refreshAwarenessBusinessOverview(currentDate);
 };
 
 const initBalanceChart = async () => {
@@ -1658,17 +1620,7 @@ onShow(async () => {
           });
         });
     }
-    // pullDownProgress.value = 100;
-
-
     pullDownProgress.value = 100;
-
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    await initBalanceChart();
-    await initSportChart();
-    await initVitalChart();
-    await initRelaxChart();
-    await initSleepChart();
   } catch (error) {
     const typedError = error as { msg?: unknown; errMsg?: unknown; message?: unknown };
     const message = typedError?.msg || typedError?.errMsg || typedError?.message || '';
@@ -1718,7 +1670,6 @@ onPullDownRefresh(async () => {
       pullDownProgress.value = 60;
       await syncRwHomeHistoryAndRefreshOverview(formatLocalDate(new Date()), 'pull-down-refresh', { force: true });
       pullDownProgress.value = 100;
-      await new Promise((resolve) => setTimeout(resolve, 800));
       return;
     }
     if (hasAwarenessCommunicationReady()) {
@@ -1733,23 +1684,10 @@ onPullDownRefresh(async () => {
         snapshot: getAwarenessConnectionSnapshot()
       });
       pullDownProgress.value = 100;
-      await new Promise((resolve) => setTimeout(resolve, 800));
       return;
     }
-    // await Promise.all([getBalanceScoreData(), getSleepOverviewData(), getMotionOverviewData(), getStressInfo(), getVitalSigns()]);
-    await getBalanceScoreData();
-    pullDownProgress.value = 40;
-    await getSleepOverviewData();
-    pullDownProgress.value = 50;
-    await getMotionOverviewData();
-    pullDownProgress.value = 60;
-    await getStressInfo();
-    pullDownProgress.value = 70;
-    await getVitalSigns();
-    pullDownProgress.value = 80;
-    await Promise.all([initBalanceChart(), initSportChart(), initVitalChart(), initRelaxChart(), initSleepChart()]);
+    await refreshAwarenessBusinessOverview(formatLocalDate(new Date()));
     pullDownProgress.value = 100;
-    await new Promise((resolve) => setTimeout(resolve, 800));
 
 
   } catch (error) {
@@ -1782,19 +1720,6 @@ onPullDownRefresh(async () => {
   <page-meta :page-style="fixedPageStyle"></page-meta>
   <view style="position: relative">
     <uv-navbar placeholder leftIcon="" title="首页" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
-    <view v-if="pullDownRefresh" style="position: relative; z-index: 2">
-      <view class="wave-progress-wrapper">
-        <WaveProgress
-          :percentage="uploadProgress"
-          :height="2"
-          fill-color="linear-gradient(90deg, #4C76F1, #6B8EFF)"
-          wave-color="linear-gradient(90deg, rgba(255,255,255,0.4), rgba(255,255,255,0.2))"
-          :wave-speed="1.5"
-        />
-      </view>
-      <!-- <uv-line-progress activeColor="#b0e2cf" inactiveColor="#fafcfb" :percentage="uploadProgress" height="2" :showText="false"></uv-line-progress> -->
-    </view>
-    <view v-else style="height: 2px; background: transparent"></view>
     <view style="position: absolute; top: 0; left: 0; width: 100%">
       <uv-image src="/static/images/bg01.png" width="100%" mode="widthFix"></uv-image>
     </view>
@@ -2113,7 +2038,7 @@ onPullDownRefresh(async () => {
           </view>
           <!-- 右侧圆形图片 -->
           <view class="period-icon-wrap">
-            <uv-image src="/static/images/homeDetail/girl.png" width="140rpx" height="140rpx" mode="aspectFill" style="border-radius: 50%; overflow: hidden"></uv-image>
+            <uv-image src="/static/images/homeDetail/girl.png" width="150rpx" height="150rpx" mode="aspectFit"></uv-image>
           </view>
         </view>
       </view>
@@ -2236,10 +2161,8 @@ onPullDownRefresh(async () => {
 
   .period-icon-wrap {
     flex-shrink: 0;
-    width: 140rpx;
-    height: 140rpx;
-    border-radius: 50%;
-    overflow: hidden;
+    width: 150rpx;
+    height: 150rpx;
     margin-top: 60rpx; /* 往下移 */
     margin-right: 12rpx; /* 往左移 */
   }
@@ -2367,10 +2290,4 @@ onPullDownRefresh(async () => {
   }
 }
 
-.wave-progress-wrapper {
-  padding: 0; /* 移除上下padding，让波浪只在填充部分显示 */
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 2rpx;
-  overflow: hidden; /* 确保波浪不会溢出到容器外 */
-}
 </style>

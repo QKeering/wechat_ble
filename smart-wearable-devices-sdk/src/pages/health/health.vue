@@ -10,7 +10,6 @@ import { useUserStore } from '@/stores/user';
 import { useRingStore } from '@/stores';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { getBindInfo } from '@/common/api/device';
-import WaveProgress from '@/components/waveProgress.vue';
 import AiLab from '../awareness/aiLab.vue';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthLevel, normalizeHealthText } from '@/utils/healthText';
@@ -42,10 +41,6 @@ type itemType = {
 };
 const pullDownRefresh = ref(false);
 const pullDownProgress = ref(0);
-// 上传进度计算
-const uploadProgress = computed(() => {
-  return pullDownProgress.value;
-});
 const habitTrendText = computed(() => normalizeHealthText(healthSummary.value?.habitScore?.trend, '--'));
 const sleepIndicators = computed<itemType[]>(() => [
   {
@@ -242,14 +237,11 @@ onShow(async () => {
   }
   pullDownRefresh.value = true;
   pullDownProgress.value = 0;
-  await new Promise((resolve) => setTimeout(resolve, 500));
   pullDownProgress.value = 50;
   await loadHealthPageSnapshot();
-  await new Promise((resolve) => setTimeout(resolve, 100));
   pullDownProgress.value = 80;
   await initHabitChart();
   pullDownProgress.value = 100;
-  await new Promise((resolve) => setTimeout(resolve, 1000));
   pullDownRefresh.value = false;
   pullDownProgress.value = 0;
 });
@@ -265,9 +257,7 @@ onPullDownRefresh(async () => {
     pullDownProgress.value = 60;
     await initHabitChart();
     pullDownProgress.value = 80;
-    await new Promise((resolve) => setTimeout(resolve, 100));
     pullDownProgress.value = 100;
-    await new Promise((resolve) => setTimeout(resolve, 800));
   } catch (error) {
     uni.showToast({
       title: formatBleErrorMessage(error, '刷新失败，请稍后再试'),
@@ -285,19 +275,6 @@ onPullDownRefresh(async () => {
 <template>
   <view style="position: relative">
     <uv-navbar placeholder leftIcon="" title="健康" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
-    <view v-if="pullDownRefresh" style="position: relative; z-index: 2">
-      <view class="wave-progress-wrapper">
-        <WaveProgress
-          :percentage="uploadProgress"
-          :height="2"
-          fill-color="linear-gradient(90deg, #4C76F1, #6B8EFF)"
-          wave-color="linear-gradient(90deg, rgba(255,255,255,0.4), rgba(255,255,255,0.2))"
-          :wave-speed="1.5"
-        />
-      </view>
-      <!-- <uv-line-progress activeColor="#b0e2cf" inactiveColor="#fafcfb" :percentage="uploadProgress" height="2" :showText="false"></uv-line-progress> -->
-    </view>
-    <view v-else style="height: 2px; background: transparent"></view>
     <view style="position: absolute; top: 0; left: 0; width: 100%">
       <uv-image src="/static/images/bg01.png" width="100%" mode="widthFix"></uv-image>
     </view>

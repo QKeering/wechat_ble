@@ -322,20 +322,45 @@ const querySleepPage = <T>(endpoint: string, currentDate: Date, query: () => Pro
     query
   });
 
+const loadSleepPageData = async (currentDate = new Date()) => {
+  const tasks = [
+    { endpoint: 'sleep-detail', run: () => getSleepDetailInfo(currentDate) },
+    { endpoint: 'sleep-segment', run: () => getSleepSegmentInfo(currentDate) },
+    { endpoint: 'sleep-overview', run: () => getSleepOverviewData(currentDate) },
+    { endpoint: 'sleep-heart-rate', run: () => getRatDetail(currentDate) },
+    { endpoint: 'sleep-hrv', run: () => getHrvDetailData(currentDate) },
+    { endpoint: 'sleep-blood-oxygen', run: () => getOxyGenDetail(currentDate) },
+    { endpoint: 'sleep-temperature', run: () => getTemperatureDetail(currentDate) },
+    { endpoint: 'sleep-nap', run: () => getSleepNapList(currentDate) },
+    { endpoint: 'sleep-summary', run: () => getsleepSummaryData(currentDate) }
+  ];
+
+  const results = await Promise.allSettled(tasks.map((task) => task.run()));
+  const failed = results
+    .map((result, index) =>
+      result.status === 'rejected'
+        ? {
+            endpoint: tasks[index].endpoint,
+            error: String((result.reason as any)?.message || (result.reason as any)?.errMsg || result.reason || '')
+          }
+        : null
+    )
+    .filter(Boolean);
+
+  if (failed.length > 0) {
+    appendSleepPageDiagnosticLog('sleep-page-load-partial-failed', {
+      date: formatLocalDate(currentDate),
+      failed
+    });
+  }
+};
+
 // 点击日期处理函数
 const handleDateClick = async (index: number) => {
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
   try {
-    await getSleepDetailInfo(currentDate);
-    await getSleepSegmentInfo(currentDate);
-    await getSleepOverviewData(currentDate);
-    await getRatDetail(currentDate);
-    await getHrvDetailData(currentDate);
-    await getOxyGenDetail(currentDate);
-    await getTemperatureDetail(currentDate);
-    await getSleepNapList(currentDate);
-    await getsleepSummaryData(currentDate);
+    await loadSleepPageData(currentDate);
   } catch (error) {
     appendSleepPageDiagnosticLog('sleep-page-load-failed', {
       date: formatLocalDate(currentDate),
@@ -510,15 +535,7 @@ const confirm = async (date: any) => {
   const currentDate = selectedDate;
 
   try {
-    await getSleepDetailInfo(currentDate);
-    await getSleepSegmentInfo(currentDate);
-    await getSleepOverviewData(currentDate);
-    await getRatDetail(currentDate);
-    await getHrvDetailData(currentDate);
-    await getOxyGenDetail(currentDate);
-    await getTemperatureDetail(currentDate);
-    await getSleepNapList(currentDate);
-    await getsleepSummaryData(currentDate);
+    await loadSleepPageData(currentDate);
   } catch (error) {
     appendSleepPageDiagnosticLog('sleep-page-load-failed', {
       date: formatLocalDate(currentDate),

@@ -53,7 +53,6 @@ import {
 import { submitData } from '@/common/api/homeDetail';
 import { scan, getBindInfo } from '@/common/api/device';
 import CustomSteps from '@/components/customSteps.vue';
-import WaveProgress from '@/components/waveProgress.vue';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
 import { clearRwDiagnosticCommandLock, setRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
@@ -258,20 +257,6 @@ const MINE_RW_L19_ACCEPTANCE_EXPECTED_KEYS = [
   'history:vital'
 ];
 const local = computed(() => userStore.localData);
-// Upload progress.
-const uploadProgress = computed(() => {
-  if (userStore.uploadingStatus === 'uploading' || userStore.isUploading === true) {
-    return 50;
-  } else if (userStore.uploadingStatus === 'success') {
-    return 100;
-  } else {
-    return 0;
-  }
-});
-// Device upload progress is hidden for now.
-const finalShowProgress = computed(() => {
-  return !shouldHideProgress.value;
-});
 const isIOS = computed(() => {
   const systemInfo = uni.getSystemInfoSync();
   return systemInfo.platform.toLowerCase().includes('ios');
@@ -3970,18 +3955,6 @@ const handleMineRwL19Acceptance = async () => {
 <template>
   <view style="position: relative">
     <uv-navbar placeholder leftIcon="" :title="'\u6211\u7684'" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
-    <view v-if="finalShowProgress">
-      <view class="wave-progress-wrapper">
-        <WaveProgress
-          :percentage="uploadProgress"
-          :height="2"
-          fill-color="linear-gradient(90deg, #4C76F1, #6B8EFF)"
-          wave-color="linear-gradient(90deg, rgba(255,255,255,0.4), rgba(255,255,255,0.2))"
-          :wave-speed="1.5"
-        />
-      </view>
-    </view>
-    <view v-else style="height: 2px; background: transparent"></view>
     <view style="position: absolute; top: 0; left: 0; width: 100%">
       <image class="mine-bg-image" src="/static/images/bg05.png" mode="widthFix"></image>
     </view>
