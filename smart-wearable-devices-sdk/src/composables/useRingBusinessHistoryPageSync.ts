@@ -614,12 +614,14 @@ export const useRingBusinessHistoryPageSync = () => {
     }
   };
 
-  const uploadHistoryPageResult = async (
-    result: Awaited<ReturnType<typeof ringBle.readLocalData>>,
+  const getHistoryPageResultRecords = (result: Awaited<ReturnType<typeof ringBle.readLocalData>>) =>
+    Array.isArray((result as any)?.records) ? ((result as any).records as Array<Record<string, any>>) : [];
+
+  const uploadHistoryPageRecords = async (
+    records: Array<Record<string, any>>,
     details: Record<string, unknown>,
     sinceTimestamp: number
   ) => {
-    const records: Array<Record<string, any>> = Array.isArray((result as any)?.records) ? (result as any).records : [];
     const deviceMac = getRingSubmitDeviceMac(
       userStore,
       getIsIOS(),
@@ -845,7 +847,9 @@ export const useRingBusinessHistoryPageSync = () => {
     const startedAt = Date.now();
     try {
       const result = await ringBle.readLocalData(readAll, historyStartDate, dataTypes, { timeoutMs });
-      const records = Array.isArray((result as any)?.records) ? (result as any).records : [];
+      const records = getHistoryPageResultRecords(result);
+      const uploadRecordGroups: Array<Array<Record<string, any>>> = [records];
+      const fallbackUploadSummaries: Array<Record<string, unknown>> = [];
       const primaryRawMetricCounts = countHistoryPageRecordMetrics(records);
       const primarySubmitRecords = buildRingHistorySubmitRecords(records as any, sinceTimestamp);
       const primarySubmitMetricCounts = countHistoryPageSubmitMetrics(records, sinceTimestamp);
@@ -863,86 +867,69 @@ export const useRingBusinessHistoryPageSync = () => {
         rawRecordSample: records.slice(0, 2).map(summarizeHistoryPageRecord)
       });
 
-      try {
-        await uploadHistoryPageResult(result, logDetails, sinceTimestamp);
-      } catch (uploadError) {
-        appendRingDiagnosticLog('RW PAGE', 'history-page-upload-failed', {
-          ...logDetails,
-          backendUploaded: false,
-          backendSubmitted: false,
-          error: formatBleErrorMessage(uploadError, HISTORY_PAGE_SUBMIT_FAILED_MESSAGE),
-          rawError: getHistoryPageRawError(uploadError)
-        });
-        if (!isExpectedBleRuntimeError(uploadError)) {
-          formatBleErrorMessage(uploadError);
-        }
-      }
-
       const missingStepSleepMetrics = getMissingStepSleepHistoryMetrics(dataTypes, primarySubmitMetricCounts);
       if (!readAll && hasStepOrSleepHistoryDataType(dataTypes) && missingStepSleepMetrics.length > 0) {
         const fallbackDataTypes = getFocusedStepSleepFallbackDataTypes(missingStepSleepMetrics);
         if (fallbackDataTypes.length === 0) {
-          return latestFallbackResult || result;
-        }
-        const fallbackTimeoutMs = Math.max(timeoutMs, EMPTY_HISTORY_FALLBACK_TIMEOUT_MS);
-        const fallbackEvents = records.length === 0
-          ? HISTORY_PAGE_EMPTY_FALLBACK_EVENTS
-          : HISTORY_PAGE_MISSING_STEP_SLEEP_FALLBACK_EVENTS;
-        const fallbackDetails = {
-          ...logDetails,
-          dataTypes: fallbackDataTypes,
-          readAll: true,
-          timeoutMs: fallbackTimeoutMs,
-          fallback: records.length === 0 ? 'empty-primary-step-sleep' : 'missing-primary-step-sleep',
-          fallbackFocus: fallbackDataTypes[0],
-          primaryDataTypes: dataTypes,
-          primarySinceTimestamp: sinceTimestamp,
-          primaryRawMetricCounts,
-          primarySubmitMetricCounts,
-          missingMetrics: missingStepSleepMetrics
-        };
-        appendRingDiagnosticLog('RW PAGE', fallbackEvents.start, fallbackDetails);
-        const fallbackStartedAt = Date.now();
-        try {
-          const fallbackResult = await ringBle.readLocalData(true, historyStartDate, fallbackDataTypes, { timeoutMs: fallbackTimeoutMs });
-          const fallbackRecords = Array.isArray((fallbackResult as any)?.records) ? (fallbackResult as any).records : [];
-          const fallbackSubmitRecords = buildRingHistorySubmitRecords(fallbackRecords as any, sinceTimestamp);
-          appendRingDiagnosticLog('RW PAGE', fallbackEvents.result, {
-            ...fallbackDetails,
-            elapsedMs: Date.now() - fallbackStartedAt,
-            status: (fallbackResult as any)?.status,
-            deviceUploaded: (fallbackResult as any)?.uploaded,
-            recordCount: fallbackRecords.length,
-            submitRecordCount: fallbackSubmitRecords.length,
-            backendUploadPending: fallbackSubmitRecords.length > 0,
-            rawMetricCounts: countHistoryPageRecordMetrics(fallbackRecords),
-            submitMetricCounts: countHistoryPageSubmitMetrics(fallbackRecords, sinceTimestamp),
-            rawRecordSample: fallbackRecords.slice(0, 2).map(summarizeHistoryPageRecord)
+          appendRingDiagnosticLog('RW PAGE', 'history-page-fallback-skip', {
+            ...logDetails,
+            reason: 'empty-step-sleep-fallback-types',
+            missingMetrics: missingStepSleepMetrics
           });
+        } else {
+          const fallbackTimeoutMs = Math.max(timeoutMs, EMPTY_HISTORY_FALLBACK_TIMEOUT_MS);
+          const fallbackEvents = records.length === 0
+            ? HISTORY_PAGE_EMPTY_FALLBACK_EVENTS
+            : HISTORY_PAGE_MISSING_STEP_SLEEP_FALLBACK_EVENTS;
+          const fallbackDetails = {
+            ...logDetails,
+            dataTypes: fallbackDataTypes,
+            readAll: true,
+            timeoutMs: fallbackTimeoutMs,
+            fallback: records.length === 0 ? 'empty-primary-step-sleep' : 'missing-primary-step-sleep',
+            fallbackFocus: fallbackDataTypes[0],
+            primaryDataTypes: dataTypes,
+            primarySinceTimestamp: sinceTimestamp,
+            primaryRawMetricCounts,
+            primarySubmitMetricCounts,
+            missingMetrics: missingStepSleepMetrics
+          };
+          appendRingDiagnosticLog('RW PAGE', fallbackEvents.start, fallbackDetails);
+          const fallbackStartedAt = Date.now();
           try {
-            await uploadHistoryPageResult(fallbackResult, fallbackDetails, sinceTimestamp);
-          } catch (uploadError) {
-            appendRingDiagnosticLog('RW PAGE', fallbackEvents.uploadFailed, {
-              ...fallbackDetails,
-              backendUploaded: false,
-              backendSubmitted: false,
-              error: formatBleErrorMessage(uploadError, HISTORY_PAGE_SUBMIT_FAILED_MESSAGE),
-              rawError: getHistoryPageRawError(uploadError)
+            const fallbackResult = await ringBle.readLocalData(true, historyStartDate, fallbackDataTypes, { timeoutMs: fallbackTimeoutMs });
+            const fallbackRecords = getHistoryPageResultRecords(fallbackResult);
+            const fallbackSubmitRecords = buildRingHistorySubmitRecords(fallbackRecords as any, sinceTimestamp);
+            uploadRecordGroups.push(fallbackRecords);
+            fallbackUploadSummaries.push({
+              fallback: fallbackDetails.fallback,
+              dataTypes: fallbackDataTypes,
+              rawRecordCount: fallbackRecords.length,
+              submitRecordCount: fallbackSubmitRecords.length
             });
-            if (!isExpectedBleRuntimeError(uploadError)) {
-              formatBleErrorMessage(uploadError);
+            appendRingDiagnosticLog('RW PAGE', fallbackEvents.result, {
+              ...fallbackDetails,
+              elapsedMs: Date.now() - fallbackStartedAt,
+              status: (fallbackResult as any)?.status,
+              deviceUploaded: (fallbackResult as any)?.uploaded,
+              recordCount: fallbackRecords.length,
+              submitRecordCount: fallbackSubmitRecords.length,
+              backendUploadPending: fallbackSubmitRecords.length > 0,
+              rawMetricCounts: countHistoryPageRecordMetrics(fallbackRecords),
+              submitMetricCounts: countHistoryPageSubmitMetrics(fallbackRecords, sinceTimestamp),
+              rawRecordSample: fallbackRecords.slice(0, 2).map(summarizeHistoryPageRecord)
+            });
+            if (fallbackRecords.length > 0) latestFallbackResult = fallbackResult;
+          } catch (fallbackError) {
+            appendRingDiagnosticLog('RW PAGE', fallbackEvents.failed, {
+              ...fallbackDetails,
+              elapsedMs: Date.now() - fallbackStartedAt,
+              error: formatBleErrorMessage(fallbackError, HISTORY_PAGE_FALLBACK_READ_FAILED_MESSAGE),
+              rawError: getHistoryPageRawError(fallbackError)
+            });
+            if (!isExpectedBleRuntimeError(fallbackError)) {
+              formatBleErrorMessage(fallbackError);
             }
-          }
-          if (fallbackRecords.length > 0) latestFallbackResult = fallbackResult;
-        } catch (fallbackError) {
-          appendRingDiagnosticLog('RW PAGE', fallbackEvents.failed, {
-            ...fallbackDetails,
-            elapsedMs: Date.now() - fallbackStartedAt,
-            error: formatBleErrorMessage(fallbackError, HISTORY_PAGE_FALLBACK_READ_FAILED_MESSAGE),
-            rawError: getHistoryPageRawError(fallbackError)
-          });
-          if (!isExpectedBleRuntimeError(fallbackError)) {
-            formatBleErrorMessage(fallbackError);
           }
         }
       }
@@ -966,36 +953,29 @@ export const useRingBusinessHistoryPageSync = () => {
           };
           appendRingDiagnosticLog('RW PAGE', HISTORY_PAGE_MISSING_VITAL_FALLBACK_EVENTS.start, fallbackDetails);
           const fallbackStartedAt = Date.now();
-            try {
-              const fallbackResult = await ringBle.readLocalData(true, historyStartDate, fallbackDataTypes, { timeoutMs: fallbackTimeoutMs });
-              const fallbackRecords = Array.isArray((fallbackResult as any)?.records) ? (fallbackResult as any).records : [];
-              const fallbackSubmitRecords = buildRingHistorySubmitRecords(fallbackRecords as any, sinceTimestamp);
-              appendRingDiagnosticLog('RW PAGE', HISTORY_PAGE_MISSING_VITAL_FALLBACK_EVENTS.result, {
-                ...fallbackDetails,
-                elapsedMs: Date.now() - fallbackStartedAt,
-                status: (fallbackResult as any)?.status,
-                deviceUploaded: (fallbackResult as any)?.uploaded,
-                recordCount: fallbackRecords.length,
-                submitRecordCount: fallbackSubmitRecords.length,
-                backendUploadPending: fallbackSubmitRecords.length > 0,
-                rawMetricCounts: countHistoryPageRecordMetrics(fallbackRecords),
-                submitMetricCounts: countHistoryPageSubmitMetrics(fallbackRecords, sinceTimestamp),
-                rawRecordSample: fallbackRecords.slice(0, 2).map(summarizeHistoryPageRecord)
-              });
-            try {
-              await uploadHistoryPageResult(fallbackResult, fallbackDetails, sinceTimestamp);
-            } catch (uploadError) {
-              appendRingDiagnosticLog('RW PAGE', HISTORY_PAGE_MISSING_VITAL_FALLBACK_EVENTS.uploadFailed, {
-                ...fallbackDetails,
-                backendUploaded: false,
-                backendSubmitted: false,
-                error: formatBleErrorMessage(uploadError, HISTORY_PAGE_SUBMIT_FAILED_MESSAGE),
-                rawError: getHistoryPageRawError(uploadError)
-              });
-              if (!isExpectedBleRuntimeError(uploadError)) {
-                formatBleErrorMessage(uploadError);
-              }
-            }
+          try {
+            const fallbackResult = await ringBle.readLocalData(true, historyStartDate, fallbackDataTypes, { timeoutMs: fallbackTimeoutMs });
+            const fallbackRecords = getHistoryPageResultRecords(fallbackResult);
+            const fallbackSubmitRecords = buildRingHistorySubmitRecords(fallbackRecords as any, sinceTimestamp);
+            uploadRecordGroups.push(fallbackRecords);
+            fallbackUploadSummaries.push({
+              fallback: fallbackDetails.fallback,
+              dataTypes: fallbackDataTypes,
+              rawRecordCount: fallbackRecords.length,
+              submitRecordCount: fallbackSubmitRecords.length
+            });
+            appendRingDiagnosticLog('RW PAGE', HISTORY_PAGE_MISSING_VITAL_FALLBACK_EVENTS.result, {
+              ...fallbackDetails,
+              elapsedMs: Date.now() - fallbackStartedAt,
+              status: (fallbackResult as any)?.status,
+              deviceUploaded: (fallbackResult as any)?.uploaded,
+              recordCount: fallbackRecords.length,
+              submitRecordCount: fallbackSubmitRecords.length,
+              backendUploadPending: fallbackSubmitRecords.length > 0,
+              rawMetricCounts: countHistoryPageRecordMetrics(fallbackRecords),
+              submitMetricCounts: countHistoryPageSubmitMetrics(fallbackRecords, sinceTimestamp),
+              rawRecordSample: fallbackRecords.slice(0, 2).map(summarizeHistoryPageRecord)
+            });
             if (fallbackRecords.length > 0) latestFallbackResult = fallbackResult;
           } catch (fallbackError) {
             appendRingDiagnosticLog('RW PAGE', HISTORY_PAGE_MISSING_VITAL_FALLBACK_EVENTS.failed, {
@@ -1008,6 +988,36 @@ export const useRingBusinessHistoryPageSync = () => {
               formatBleErrorMessage(fallbackError);
             }
           }
+        }
+      }
+
+      const combinedUploadRecords = uploadRecordGroups.flat();
+      const combinedSubmitRecords = buildRingHistorySubmitRecords(combinedUploadRecords as any, sinceTimestamp);
+      try {
+        await uploadHistoryPageRecords(
+          combinedUploadRecords,
+          {
+            ...logDetails,
+            uploadMode: 'merged-after-fallback',
+            primaryRawRecordCount: records.length,
+            primarySubmitRecordCount: primarySubmitRecords.length,
+            fallbackUploadSummaries,
+            combinedRawRecordCount: combinedUploadRecords.length,
+            combinedSubmitRecordCount: combinedSubmitRecords.length
+          },
+          sinceTimestamp
+        );
+      } catch (uploadError) {
+        appendRingDiagnosticLog('RW PAGE', 'history-page-upload-failed', {
+          ...logDetails,
+          uploadMode: 'merged-after-fallback',
+          backendUploaded: false,
+          backendSubmitted: false,
+          error: formatBleErrorMessage(uploadError, HISTORY_PAGE_SUBMIT_FAILED_MESSAGE),
+          rawError: getHistoryPageRawError(uploadError)
+        });
+        if (!isExpectedBleRuntimeError(uploadError)) {
+          formatBleErrorMessage(uploadError);
         }
       }
 

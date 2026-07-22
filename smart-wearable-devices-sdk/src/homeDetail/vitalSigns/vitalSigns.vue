@@ -13,30 +13,18 @@ import { useUserStore } from '@/stores/user';
 import { useRingStore } from '@/stores';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingBusinessHistoryPageSync, type HistoryPageSilentRequestConfig } from '@/composables/useRingBusinessHistoryPageSync';
-import { submitData } from '@/common/api/homeDetail';
 import { formatBleErrorMessage, isExpectedBleRuntimeError } from '@/utils/bleError';
-import {
-  buildRingHistorySubmitRecords,
-  getRingHistoryRecordUnixTime,
-  getRingSubmitDeviceMac,
-  isRingHistoryPayload,
-  isRingHistoryReadComplete
-} from '@/composables/useRingHistoryUpload';
 
 import DetailInfo from '@/components/DetailInfo.vue';
 import {usePopupFixer} from '@/hooks/usePopupFixer'
 
-const { isDeviceConnected, autoConnectLastDevice, deviceInfo: ringDeviceInfo, readLocalData, refreshHealthData } = useRingBLE();
+const { isDeviceConnected, autoConnectLastDevice, deviceInfo: ringDeviceInfo, refreshHealthData } = useRingBLE();
 const userStore = useUserStore();
 const ringStore = useRingStore();
 const ringBleBridge = useRingBusinessHistoryPageSync();
 const scrollTop = ref<number>(0);
 
 const { isPopupActive, fixedPageStyle } = usePopupFixer()
-
-
-// 记录上一次的 localData 长度，用于判断是否是新数据
-let lastLocalDataLength = 0;
 
 const calendar = ref<any>(null);
 
@@ -286,26 +274,12 @@ const queryVitalPage = <T>(endpoint: string, query: (requestConfig: HistoryPageS
     query
   });
 
-const local = computed(() => userStore.localData);
-// 是否为iOS的计算属性
-const isIOS = computed(() => {
-  const systemInfo = uni.getSystemInfoSync();
-  return systemInfo.platform.toLowerCase().includes('ios');
-});
 const updateSelectedHistoryDateFromIndex = (index: number) => {
   const targetDate = dateList.value[index]?.date || today.value;
   selectedHistoryDate.value = formatLocalDate(targetDate);
 };
 const syncVitalSignsHistorySafely = async () => {
-  try {
-    if (!isCurrentRwRing()) {
-      await readLocalData(false);
-    }
-  } catch (error) {
-    if (!isExpectedBleRuntimeError(error)) {
-      formatBleErrorMessage(error);
-    }
-  }
+  // 历史数据统一在首页同步/上传；生命体征页只查询后端结果，避免进入详情页重复上传。
   await getExtendedVitalSignData().catch(() => undefined);
 };
 watch(
@@ -315,73 +289,6 @@ watch(
       await syncVitalSignsHistorySafely();
     }
   }
-);
-// 监听 localData 的变化，处理历史数据上传
-watch(
-  () => userStore.localData,
-  async (newData) => {
-    const localData: any = userStore.receivedData?.filter(isRingHistoryPayload);
-    if (!localData || localData.length === 0) {
-      return;
-    }
-
-    const isRwHistoryPayload = localData.some((item: any) => item?.protocol === 'rw' || item?.type === 'rw_upload_file' || item?.type === 'rw_file_list');
-    if (isCurrentRwRing() && isRwHistoryPayload) {
-      return;
-    }
-
-    // 如果是新开始的数据读取（localData 长度变化），显示 loading
-    // if (userStore.localData.length > lastLocalDataLength) {
-    //   uni.showLoading({
-    //     title: '读取设备历史数据中，请勿离开',
-    //     mask: true
-    //   });
-    // }
-    lastLocalDataLength = userStore.localData.length;
-
-    try {
-      if (isRingHistoryReadComplete(localData)) {
-        // 数据读取完成，隐藏 loading
-        // uni.hideLoading();
-
-        const filteredRecords = local.value || [];
-        const submitArray = buildRingHistorySubmitRecords(filteredRecords, userStore.lastReadTimestamp);
-
-        if (submitArray.length !== 0) {
-          uni.showLoading({
-            title: '上传历史数据中...',
-            mask: true
-          });
-          await submitData({
-            deviceMac: getRingSubmitDeviceMac(userStore, isIOS.value),
-            dataList: submitArray
-          });
-
-          const submittedTimestamps = filteredRecords
-            .map((record: any) => getRingHistoryRecordUnixTime(record))
-            .filter(
-              (timestamp): timestamp is number =>
-                Boolean(timestamp && timestamp > 0 && (!userStore.lastReadTimestamp || timestamp >= userStore.lastReadTimestamp))
-            );
-          if (submittedTimestamps.length > 0) {
-            const maxTimestamp = Math.max(...submittedTimestamps);
-            userStore.updateLastReadTimestamp(maxTimestamp);
-          }
-
-          await new Promise((resolve) => setTimeout(resolve, 300));
-          uni.hideLoading();
-        }
-      }
-    } catch (error) {
-      uni.hideLoading();
-      uni.showToast({
-        title: '处理数据失败',
-        icon: 'none',
-        duration: 2000
-      });
-    }
-  },
-  { deep: true }
 );
 // 点击日期处理函数
 const handleDateClick = async (index: number) => {
@@ -571,7 +478,6 @@ onShow(async () => {
     await refreshBleMetricsAfterRestore();
   }
   // await new Promise((resolve) => setTimeout(resolve, 1000));
-  // await readLocalData(false);
 });
 // 下拉刷新事件处理器
 onPullDownRefresh(async () => {

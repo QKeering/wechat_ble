@@ -1924,57 +1924,6 @@ onPullDownRefresh(async () => {
       </view>
       -->
 
-      <!-- 生理期预测卡片 -->
-      <view v-if="showStartGirlCard" class="module-card period-card bg-white p-40 mt-30 r-50">
-        <!-- 右箭头：绝对定位到卡片右上角 -->
-        <view class="period-arrow-right">
-          <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
-        </view>
-        <view class="flex ai-center">
-          <!-- 左侧内容 -->
-          <view class="flex-1">
-            <view class="module-title fs-36 mb-20">生理期管理</view>
-            <view class="fs-28 t-979797 mb-30">开始掌握你的生理周期</view>
-            <view class="period-btn flex ai-center" @tap="$uv.route('/homeDetail/periodQuestionnaire/periodQuestionnaire')">
-              <text class="fs-28 t-white">去开启</text>
-            </view>
-          </view>
-          <!-- 右侧圆形图片 -->
-          <view class="period-icon-wrap">
-            <uv-image src="/static/images/homeDetail/girl.png" width="140rpx" height="140rpx" mode="aspectFill" style="border-radius: 50%; overflow: hidden"></uv-image>
-          </view>
-        </view>
-      </view>
-
-      <!-- 生理期周期详情卡片（点击去开启后展开） -->
-      <view v-if="showPeriodDetail" class="module-card period-detail-card bg-white p-40 mt-20 r-50" @tap="$uv.route('/homeDetail/periodDetail/periodDetail')">
-        <!-- 标题行 -->
-        <view class="flex jc-between ai-center mb-30">
-          <view class="fs-34 fw-bold" style="color: #333">当前周期阶段</view>
-          <view class="fs-24" style="color: #999">{{ periodTodayDate }}</view>
-        </view>
-        <!-- 阶段 Tab  : idx === currentPhaseIndex-->
-        <view class="period-phases flex jc-between mb-30">
-          <view
-            v-for="(phase, idx) in periodPhases"
-            :key="phase.key"
-            class="period-phase-item flex fd-c ai-center jc-center"
-            :class="{ 'period-phase-item--active': idx === currentPhaseIndex }"
-          >
-            <view class="period-phase-icon mb-10">
-              <text class="fs-40" :style="{ color: idx === currentPhaseIndex ? '#ffffff' : idx === 0 ? '#ff80b0' : idx === 2 ? '#ff80b0' : '#999' }">{{ phase.icon }}</text>
-            </view>
-            <view class="fs-24" :style="{ color: idx === currentPhaseIndex ? '#ffffff' : '#666' }">{{ phase.label }}</view>
-          </view>
-        </view>
-        <!-- 提示信息 -->
-        <view class="period-tip flex ai-start">
-          <!--  <text class="period-tip-icon fs-28 mr-10" style="color: #5b9bd5; flex-shrink: 0">ℹ</text> -->
-          <uv-icon name="error-circle-fill" size="13" style="top: 10rpx" color=" #5b9bd5"></uv-icon>
-          <text class="fs-26" style="font-size: 9px; line-height: 1.6">{{ periodTip }}</text>
-        </view>
-      </view>
-
       <!-- 睡眠模块 -->
       <view
         class="module-card sleep-module bg-white p-40 mt-30 r-50"
@@ -2144,6 +2093,57 @@ onPullDownRefresh(async () => {
             <l-echart ref="chartVitalRef" @finished="initVitalChart" style="width: 100%; height: 192rpx; margin: 0"></l-echart>
           </view>
           <!-- <uv-image src="/static/images/bg04.png" width="336rpx" mode="widthFix"></uv-image> -->
+        </view>
+      </view>
+
+      <!-- 生理期预测卡片 -->
+      <view v-if="showStartGirlCard" class="module-card period-card bg-white p-40 mt-30 r-50">
+        <!-- 右箭头：绝对定位到卡片右上角 -->
+        <view class="period-arrow-right">
+          <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
+        </view>
+        <view class="flex ai-center">
+          <!-- 左侧内容 -->
+          <view class="flex-1">
+            <view class="module-title fs-36 mb-20">生理期管理</view>
+            <view class="fs-28 t-979797 mb-30">开始掌握你的生理周期</view>
+            <view class="period-btn flex ai-center" @tap="$uv.route('/homeDetail/periodQuestionnaire/periodQuestionnaire')">
+              <text class="fs-28 t-white">去开启</text>
+            </view>
+          </view>
+          <!-- 右侧圆形图片 -->
+          <view class="period-icon-wrap">
+            <uv-image src="/static/images/homeDetail/girl.png" width="140rpx" height="140rpx" mode="aspectFill" style="border-radius: 50%; overflow: hidden"></uv-image>
+          </view>
+        </view>
+      </view>
+
+      <!-- 生理期周期详情卡片（点击去开启后展开） -->
+      <view v-if="showPeriodDetail" class="module-card period-detail-card bg-white p-40 mt-30 r-50" @tap="$uv.route('/homeDetail/periodDetail/periodDetail')">
+        <!-- 标题行 -->
+        <view class="flex jc-between ai-center mb-30">
+          <view class="fs-34 fw-bold" style="color: #333">当前周期阶段</view>
+          <view class="fs-24" style="color: #999">{{ periodTodayDate }}</view>
+        </view>
+        <!-- 阶段 Tab  : idx === currentPhaseIndex-->
+        <view class="period-phases flex jc-between mb-30">
+          <view
+            v-for="(phase, idx) in periodPhases"
+            :key="phase.key"
+            class="period-phase-item flex fd-c ai-center jc-center"
+            :class="{ 'period-phase-item--active': idx === currentPhaseIndex }"
+          >
+            <view class="period-phase-icon mb-10">
+              <text class="fs-40" :style="{ color: idx === currentPhaseIndex ? '#ffffff' : idx === 0 ? '#ff80b0' : idx === 2 ? '#ff80b0' : '#999' }">{{ phase.icon }}</text>
+            </view>
+            <view class="fs-24" :style="{ color: idx === currentPhaseIndex ? '#ffffff' : '#666' }">{{ phase.label }}</view>
+          </view>
+        </view>
+        <!-- 提示信息 -->
+        <view class="period-tip flex ai-start">
+          <!--  <text class="period-tip-icon fs-28 mr-10" style="color: #5b9bd5; flex-shrink: 0">ℹ</text> -->
+          <uv-icon name="error-circle-fill" size="13" style="top: 10rpx" color=" #5b9bd5"></uv-icon>
+          <text class="fs-26" style="font-size: 9px; line-height: 1.6">{{ periodTip }}</text>
         </view>
       </view>
     </view>
