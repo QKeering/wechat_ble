@@ -7,7 +7,7 @@
 
     <view class="section">
       <text class="section-title">戒指健康数据</text>
-      <text class="section-text">连接戒指后查看电量、版本、心率、血氧、体温状态和历史同步状态。</text>
+      <text class="section-text">连接戒指后查看电量、版本、心率、血氧、皮肤温度状态和历史同步状态。</text>
       <button class="primary-button" @tap="goRingBusiness">进入戒指健康数据</button>
     </view>
   </view>

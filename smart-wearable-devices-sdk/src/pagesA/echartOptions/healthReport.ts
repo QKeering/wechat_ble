@@ -13,7 +13,7 @@ export const healthReportOption = {
       { name: '心率变异性', max: 100 },
       { name: '心率', max: 100 },
       { name: '睡眠', max: 100 },
-      { name: '体温', max: 100 }
+      { name: '皮肤温度', max: 100 }
     ],
     center: ['50%', '50%'],
     radius: '70%'

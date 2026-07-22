@@ -108,7 +108,7 @@
         <button class="command-button" :disabled="!isConnected" @tap="sendBatteryCommand">电量</button>
         <button class="command-button" :disabled="!isConnected" @tap="sendActiveMeasureCommand">心率</button>
         <button class="command-button" :disabled="!isConnected" @tap="sendOxyGenCommand">血氧</button>
-        <button class="command-button" :disabled="!isConnected" @tap="sendBodyTemperatureCommand">体温</button>
+        <button class="command-button" :disabled="!isConnected" @tap="sendBodyTemperatureCommand">皮肤温度</button>
         <button class="command-button" :disabled="!isConnected" @tap="sendFirmwareVersion">硬件版本</button>
         <button class="command-button" :disabled="!isConnected" @tap="sendSoftwareVersion">软件版本</button>
         <button class="command-button" :disabled="!isConnected" @tap="readDeviceTime">读时间</button>
@@ -198,7 +198,7 @@
           <text class="metric-value">{{ businessMetrics.bloodOxygen ?? '-' }}</text>
         </view>
         <view class="metric-item">
-          <text class="metric-label">体温</text>
+          <text class="metric-label">皮肤温度</text>
           <text class="metric-value">{{ (businessMetrics.temperature ?? businessMetrics.temperatureStatus) || '-' }}</text>
         </view>
         <view class="metric-item">

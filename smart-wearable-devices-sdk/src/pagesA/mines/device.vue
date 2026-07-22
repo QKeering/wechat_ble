@@ -11,7 +11,7 @@ import { clearFrontendRingBindingState, getBoundRingIdentityTail, hasBoundRingId
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
-import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
+import { formatBatteryPercentForDisplay, formatBatteryStatusForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
 
 const userStore = useUserStore();
 const ringStore = useRingStore();
@@ -48,9 +48,7 @@ const batteryValue = computed(() =>
     latestBattery.value?.value
   )
 );
-const batteryText = computed(() => singleReadResults.value.battery || formatMetricValue(batteryValue.value, '%'));
-const batteryStatusText = computed(() =>
-  normalizeHealthText(
+const batteryStatusRaw = computed(() =>
     getFirstMetricValue(
       ring.metrics.value.batteryStatus,
       ring.metrics.value.chargingStatusText,
@@ -62,10 +60,10 @@ const batteryStatusText = computed(() =>
       latestBattery.value?.metrics?.chargingStatusText,
       latestBattery.value?.batteryStatus,
       latestBattery.value?.chargingStatusText
-    ),
-    '-'
   )
 );
+const batteryText = computed(() => singleReadResults.value.battery || formatBatteryStatusForDisplay(batteryValue.value, batteryStatusRaw.value, '-'));
+const batteryStatusText = computed(() => normalizeHealthText(batteryStatusRaw.value, '-'));
 const firmwareText = computed(
   () =>
     singleReadResults.value.firmware ||
@@ -295,8 +293,9 @@ const readBatteryOnly = async () => {
     await controller.sendBatteryCommand();
     const parsed = await waitForFirstSuccessful<Record<string, any>>([directWaiter, sharedWaiter], '电量读取超时，请靠近戒指后重试');
     const value = getBatteryReadingValue(parsed);
-    if (value == null) throw new Error('设备返回的电量格式无效');
-    const displayValue = formatBatteryPercentForDisplay(value);
+    const status = getBatteryReadingStatus(parsed);
+    const displayValue = formatBatteryStatusForDisplay(value, status, '-');
+    if (value == null && displayValue === '-') throw new Error('设备返回的电量格式无效');
     singleReadResults.value = { ...singleReadResults.value, battery: displayValue };
     lastActionText.value = `电量读取成功：${displayValue}`;
     appendDeviceDiagnosticLog('battery-read-result', {
@@ -471,6 +470,19 @@ const getBatteryReadingValue = (item: Record<string, any> | null) => {
   return Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
 };
 
+const getBatteryReadingStatus = (item: Record<string, any> | null) =>
+  getFirstMetricValue(
+    item?.metrics?.chargingStatusText,
+    item?.metrics?.batteryStatus,
+    item?.chargingStatusText,
+    item?.chargeStatusText,
+    item?.batteryStatus,
+    item?.status,
+    item?.raw?.chargingStatusText,
+    item?.raw?.batteryStatus,
+    item?.raw?.status
+  );
+
 const findLatestSharedData = (
   types: string[],
   since: number,
@@ -492,7 +504,11 @@ const findLatestSharedData = (
 const waitForSharedBattery = async (since: number, timeoutMs: number) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const parsed = findLatestSharedData(['battery'], since, (item) => getBatteryReadingValue(item) != null);
+    const parsed = findLatestSharedData(
+      ['battery'],
+      since,
+      (item) => getBatteryReadingValue(item) != null || isBatteryChargingLike(getBatteryReadingValue(item), getBatteryReadingStatus(item))
+    );
     if (parsed) return parsed;
     await sleep(200);
   }

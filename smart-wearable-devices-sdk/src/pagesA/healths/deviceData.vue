@@ -51,6 +51,47 @@ let measureStartedAt = 0;
 const DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS = 35000;
 const RW_OPTIONAL_TEMPERATURE_TIMEOUT_MS = 8000;
 
+const measureStatusText = computed(() => {
+  const statusMap = {
+    idle: '准备测量',
+    measuring_hr: '正在测量心率',
+    measuring_spo2: '正在测量血氧',
+    measuring_temp: '正在测量皮肤温度',
+    completed: '测量完成'
+  };
+  return statusMap[measureStatus.value] || '准备测量';
+});
+
+const measureHintText = computed(() => {
+  if (measureStatus.value === 'completed') return '检测完成，正在整理报告';
+  if (measureStatus.value === 'idle') return '正在连接设备，请稍候';
+  return '请保持手部静止，戒指贴合手指，测量期间不要退出页面';
+});
+
+const measureStepItems = computed(() => [
+  {
+    key: 'heart-rate',
+    label: '心率',
+    desc: heartRate.value ? `${heartRate.value} bpm` : '等待数据',
+    active: measureStatus.value === 'measuring_hr',
+    done: ['measuring_spo2', 'measuring_temp', 'completed'].includes(measureStatus.value) || Boolean(heartRate.value)
+  },
+  {
+    key: 'spo2',
+    label: '血氧',
+    desc: spo2Value.value ? `${spo2Value.value}%` : '等待数据',
+    active: measureStatus.value === 'measuring_spo2',
+    done: ['measuring_temp', 'completed'].includes(measureStatus.value) || Boolean(spo2Value.value)
+  },
+  {
+    key: 'skin-temperature',
+    label: '皮肤温度',
+    desc: temperature.value ? `${temperature.value}°C` : '等待数据',
+    active: measureStatus.value === 'measuring_temp',
+    done: measureStatus.value === 'completed' || Boolean(temperature.value)
+  }
+]);
+
 const isIOS = computed(() => {
   const systemInfo = uni.getSystemInfoSync();
   return systemInfo.platform.toLowerCase().includes('ios');
@@ -210,13 +251,13 @@ const completeMeasurement = () => {
   measureStatus.value = 'completed';
 };
 
-const showOtherStatusToast = (receivedData: any[], status: boolean, type: '心率' | '血氧' | '体温') => {
+const showOtherStatusToast = (receivedData: any[], status: boolean, type: '心率' | '血氧' | '皮肤温度') => {
   if (!status) return;
 
   const typeMap = {
     心率: 'active_measure',
     血氧: 'active_OxyGenMeasure',
-    体温: 'active_Temperature'
+    皮肤温度: 'active_Temperature'
   } as const;
   const latestValidResult = receivedData.find((item: any) => item.type === typeMap[type]);
   clearMeasureTimeout();
@@ -274,7 +315,7 @@ watch(
 
     showOtherStatusToast(receivedData, hasCompletedMeasureH, '心率');
     showOtherStatusToast(receivedData, hasCompletedMeasureO, '血氧');
-    showOtherStatusToast(receivedData, hasCompletedMeasureT, '体温');
+    showOtherStatusToast(receivedData, hasCompletedMeasureT, '皮肤温度');
   },
   { deep: true }
 );
@@ -482,62 +523,245 @@ onHide(async () => {
   // Keep measurement alive while WeChat briefly hides the page during native BLE callbacks.
 });
 </script>
-<!-- 设备测量数据 -->
 <template>
-  <view class="pl-30 pr-30 pt-30 wrapper">
-    <uv-navbar placeholder leftIcon="" title="设备测量数据" bgColor="#f1f3f6"></uv-navbar>
-    <view class="flex ai-center jc-center pl-70 pr-70 floating-image">
-      <view class="measure-visual">
+  <view class="measure-page">
+    <uv-navbar placeholder leftIcon="" title="全面测量" bgColor="#f1f3f6"></uv-navbar>
+
+    <view class="measure-hero">
+      <view class="measure-hero-copy">
+        <text class="measure-eyebrow">智能戒指健康检测</text>
+        <text class="measure-title">{{ measureStatusText }}</text>
+        <text class="measure-desc">{{ measureHintText }}</text>
+      </view>
+      <view class="measure-orbit">
         <view class="measure-ring"></view>
-        <view class="measure-dot"></view>
+        <view class="measure-core">
+          <text class="measure-percent">{{ measureProgress }}</text>
+          <text class="measure-percent-unit">%</text>
+        </view>
       </view>
     </view>
-    <view>
-      <view class="ta-c mt-50" style="color: #2e70fc">
-        <text class="" style="font-size: 96rpx">{{ measureProgress }}</text>
-        <text class="fs-36">%</text>
+
+    <view class="progress-card">
+      <view class="progress-header">
+        <text>测量进度</text>
+        <text>{{ measureProgress }}%</text>
       </view>
-      <view class="ta-c fs-36 mt-30">正在为您测量中...</view>
-      <view class="ta-c fs-28 t-979797 mt-10">测量时间较长，请您耐心等待~</view>
+      <view class="progress-track">
+        <view class="progress-fill" :style="{ width: `${measureProgress}%` }"></view>
+      </view>
+      <view class="step-list">
+        <view
+          v-for="item in measureStepItems"
+          :key="item.key"
+          class="step-item"
+          :class="{ 'step-item--active': item.active, 'step-item--done': item.done }"
+        >
+          <view class="step-dot"></view>
+          <view class="step-copy">
+            <text class="step-label">{{ item.label }}</text>
+            <text class="step-desc">{{ item.desc }}</text>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <view class="tips-card">
+      <text class="tips-title">测量小提示</text>
+      <text class="tips-text">保持手指放松、戒指贴合，测量中请不要频繁移动或切换页面。</text>
     </view>
   </view>
 </template>
 
 <style lang="scss">
-.wrapper {
+.measure-page {
+  min-height: 100vh;
   box-sizing: border-box;
-}
-// 添加浮动动画
-.floating-image {
-  animation: float 3s ease-in-out infinite;
+  padding: 30rpx;
+  background: #f1f3f6;
 }
 
-.measure-visual {
+.measure-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 360rpx;
+  margin-top: 20rpx;
+  padding: 42rpx 34rpx;
+  border-radius: 42rpx;
+  background: linear-gradient(135deg, #2e70fc 0%, #6b8eff 58%, #9ab5ff 100%);
+  color: #ffffff;
+  box-shadow: 0 24rpx 48rpx rgba(46, 112, 252, 0.18);
+}
+
+.measure-hero-copy {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-right: 28rpx;
+}
+
+.measure-eyebrow {
+  font-size: 24rpx;
+  opacity: 0.82;
+}
+
+.measure-title {
+  margin-top: 18rpx;
+  font-size: 46rpx;
+  font-weight: 700;
+  line-height: 1.18;
+}
+
+.measure-desc {
+  margin-top: 18rpx;
+  font-size: 26rpx;
+  line-height: 1.5;
+  opacity: 0.9;
+}
+
+.measure-orbit {
   position: relative;
-  width: 420rpx;
-  height: 420rpx;
+  width: 220rpx;
+  height: 220rpx;
+  flex: 0 0 220rpx;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(46, 112, 252, 0.14) 0%, rgba(46, 112, 252, 0.04) 58%, transparent 60%);
+  background: rgba(255, 255, 255, 0.18);
+  animation: float 3s ease-in-out infinite;
 }
 
 .measure-ring {
   position: absolute;
-  inset: 96rpx;
-  border: 18rpx solid rgba(46, 112, 252, 0.78);
-  border-top-color: rgba(46, 112, 252, 0.18);
+  inset: 16rpx;
+  border: 10rpx solid rgba(255, 255, 255, 0.32);
+  border-top-color: #ffffff;
   border-radius: 50%;
-  animation: spin 1.8s linear infinite;
+  animation: spin 1.5s linear infinite;
 }
 
-.measure-dot {
+.measure-core {
   position: absolute;
-  top: 190rpx;
-  left: 190rpx;
-  width: 40rpx;
-  height: 40rpx;
+  inset: 48rpx;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  background: #ffffff;
+  color: #2e70fc;
   border-radius: 50%;
+  box-shadow: 0 16rpx 28rpx rgba(12, 45, 120, 0.16);
+}
+
+.measure-percent {
+  font-size: 48rpx;
+  font-weight: 800;
+}
+
+.measure-percent-unit {
+  margin-left: 4rpx;
+  font-size: 24rpx;
+}
+
+.progress-card,
+.tips-card {
+  margin-top: 28rpx;
+  padding: 34rpx;
+  border-radius: 34rpx;
+  background: #ffffff;
+  box-shadow: 0 14rpx 32rpx rgba(31, 41, 55, 0.05);
+}
+
+.progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #111827;
+  font-size: 30rpx;
+  font-weight: 700;
+}
+
+.progress-track {
+  height: 18rpx;
+  margin-top: 26rpx;
+  overflow: hidden;
+  border-radius: 999rpx;
+  background: #e8efff;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 999rpx;
+  background: linear-gradient(90deg, #2e70fc, #7aa0ff);
+  transition: width 0.25s ease;
+}
+
+.step-list {
+  margin-top: 30rpx;
+}
+
+.step-item {
+  display: flex;
+  align-items: center;
+  padding: 24rpx 0;
+  border-bottom: 1rpx solid #f1f3f6;
+}
+
+.step-item:last-child {
+  border-bottom: 0;
+}
+
+.step-dot {
+  width: 22rpx;
+  height: 22rpx;
+  margin-right: 22rpx;
+  border-radius: 50%;
+  background: #d1d5db;
+}
+
+.step-item--active .step-dot {
   background: #2e70fc;
-  box-shadow: 0 0 28rpx rgba(46, 112, 252, 0.5);
+  box-shadow: 0 0 0 10rpx rgba(46, 112, 252, 0.12);
+}
+
+.step-item--done .step-dot {
+  background: #27c184;
+}
+
+.step-copy {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.step-label {
+  color: #111827;
+  font-size: 30rpx;
+  font-weight: 600;
+}
+
+.step-desc {
+  color: #8b95a5;
+  font-size: 26rpx;
+}
+
+.tips-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+
+.tips-title {
+  color: #111827;
+  font-size: 30rpx;
+  font-weight: 700;
+}
+
+.tips-text {
+  color: #6b7280;
+  font-size: 26rpx;
+  line-height: 1.6;
 }
 
 @keyframes float {

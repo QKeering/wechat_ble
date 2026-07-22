@@ -320,7 +320,7 @@ onPullDownRefresh(async () => {
 
       <view class="measure-guide mt-30 r-50 bg-white p-40">
         <view class="guide-title fs-36">全面测量</view>
-        <view class="guide-desc mt-40 fs-32" style="color: #3d3d3d">我将从运动、体温、睡眠、心率、心率变异性、血氧、压力各项指标全面开始测量。</view>
+        <view class="guide-desc mt-40 fs-32" style="color: #3d3d3d">我将从运动、皮肤温度、睡眠、心率、心率变异性、血氧、压力各项指标全面开始测量。</view>
         <view class="guide-action mt-90 flex jc-center ai-center relative" @click="jumpMeasureDetail">
           <view class="absolute center-xy flex fd-c ai-center" style="z-index: 1">
             <view class="t-white fs-60">测量</view>

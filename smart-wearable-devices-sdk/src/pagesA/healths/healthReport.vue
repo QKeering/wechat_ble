@@ -29,7 +29,7 @@ const metricCards = computed(() => [
   },
   {
     key: 'temperature',
-    label: '体温',
+    label: '皮肤温度',
     value: metrics.value.temperature || '设备未返回',
     unit: metrics.value.temperature ? '°C' : ''
   },

@@ -322,20 +322,38 @@ const querySleepPage = <T>(endpoint: string, currentDate: Date, query: () => Pro
     query
   });
 
-const loadSleepPageData = async (currentDate = new Date()) => {
-  const tasks = [
-    { endpoint: 'sleep-detail', run: () => getSleepDetailInfo(currentDate) },
-    { endpoint: 'sleep-segment', run: () => getSleepSegmentInfo(currentDate) },
-    { endpoint: 'sleep-overview', run: () => getSleepOverviewData(currentDate) },
-    { endpoint: 'sleep-heart-rate', run: () => getRatDetail(currentDate) },
-    { endpoint: 'sleep-hrv', run: () => getHrvDetailData(currentDate) },
-    { endpoint: 'sleep-blood-oxygen', run: () => getOxyGenDetail(currentDate) },
-    { endpoint: 'sleep-temperature', run: () => getTemperatureDetail(currentDate) },
-    { endpoint: 'sleep-nap', run: () => getSleepNapList(currentDate) },
-    { endpoint: 'sleep-summary', run: () => getsleepSummaryData(currentDate) }
-  ];
+let sleepPageLoadId = 0;
+const isCurrentSleepPageLoad = (loadId?: number) => loadId == null || loadId === sleepPageLoadId;
 
-  const results = await Promise.allSettled(tasks.map((task) => task.run()));
+const runSleepLoadTask = async (endpoint: string, currentDate: Date, task: () => Promise<unknown>) => {
+  const startedAt = Date.now();
+  try {
+    await task();
+    appendSleepPageDiagnosticLog('sleep-page-endpoint-timing', {
+      endpoint,
+      date: formatLocalDate(currentDate),
+      elapsedMs: Date.now() - startedAt,
+      ok: true
+    });
+  } catch (error) {
+    appendSleepPageDiagnosticLog('sleep-page-endpoint-timing', {
+      endpoint,
+      date: formatLocalDate(currentDate),
+      elapsedMs: Date.now() - startedAt,
+      ok: false,
+      error: String((error as any)?.message || (error as any)?.errMsg || error || '')
+    });
+    throw error;
+  }
+};
+
+const settleSleepTasks = async (
+  tasks: Array<{ endpoint: string; run: () => Promise<unknown> }>,
+  currentDate: Date,
+  phase: 'critical' | 'secondary'
+) => {
+  const startedAt = Date.now();
+  const results = await Promise.allSettled(tasks.map((task) => runSleepLoadTask(task.endpoint, currentDate, task.run)));
   const failed = results
     .map((result, index) =>
       result.status === 'rejected'
@@ -347,11 +365,64 @@ const loadSleepPageData = async (currentDate = new Date()) => {
     )
     .filter(Boolean);
 
+  appendSleepPageDiagnosticLog('sleep-page-load-phase-done', {
+    date: formatLocalDate(currentDate),
+    phase,
+    elapsedMs: Date.now() - startedAt,
+    endpointCount: tasks.length,
+    failedCount: failed.length,
+    failed
+  });
+
   if (failed.length > 0) {
     appendSleepPageDiagnosticLog('sleep-page-load-partial-failed', {
       date: formatLocalDate(currentDate),
+      phase,
       failed
     });
+  }
+};
+
+const loadSleepPageData = async (currentDate = new Date(), options: { waitSecondary?: boolean; trigger?: string } = {}) => {
+  const loadId = ++sleepPageLoadId;
+  const startedAt = Date.now();
+  const date = formatLocalDate(currentDate);
+  appendSleepPageDiagnosticLog('sleep-page-load-start', {
+    date,
+    trigger: options.trigger || 'unknown',
+    loadId
+  });
+
+  const criticalTasks = [
+    { endpoint: 'sleep-detail', run: () => getSleepDetailInfo(currentDate, loadId) },
+    { endpoint: 'sleep-segment', run: () => getSleepSegmentInfo(currentDate, loadId) },
+    { endpoint: 'sleep-overview', run: () => getSleepOverviewData(currentDate, loadId) }
+  ];
+  const secondaryTasks = [
+    { endpoint: 'sleep-heart-rate', run: () => getRatDetail(currentDate, loadId) },
+    { endpoint: 'sleep-hrv', run: () => getHrvDetailData(currentDate, loadId) },
+    { endpoint: 'sleep-blood-oxygen', run: () => getOxyGenDetail(currentDate, loadId) },
+    { endpoint: 'sleep-temperature', run: () => getTemperatureDetail(currentDate, loadId) },
+    { endpoint: 'sleep-nap', run: () => getSleepNapList(currentDate, loadId) },
+    { endpoint: 'sleep-summary', run: () => getsleepSummaryData(currentDate, loadId) }
+  ];
+
+  await settleSleepTasks(criticalTasks, currentDate, 'critical');
+
+  const secondaryRun = settleSleepTasks(secondaryTasks, currentDate, 'secondary').finally(() => {
+    appendSleepPageDiagnosticLog('sleep-page-load-done', {
+      date,
+      trigger: options.trigger || 'unknown',
+      loadId,
+      waitSecondary: Boolean(options.waitSecondary),
+      elapsedMs: Date.now() - startedAt
+    });
+  });
+
+  if (options.waitSecondary) {
+    await secondaryRun;
+  } else {
+    void secondaryRun;
   }
 };
 
@@ -360,7 +431,7 @@ const handleDateClick = async (index: number) => {
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
   try {
-    await loadSleepPageData(currentDate);
+    await loadSleepPageData(currentDate, { trigger: 'date-click' });
   } catch (error) {
     appendSleepPageDiagnosticLog('sleep-page-load-failed', {
       date: formatLocalDate(currentDate),
@@ -375,7 +446,7 @@ const receiveCardConfig = (config: { listDatal: string[]; visibleCards: string[]
   cardForm.value = config.form;
 };
 // 睡眠详情
-const getSleepDetailInfo = async (currentDate = new Date()) => {
+const getSleepDetailInfo = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   // 计算offset：如果是自定义日期（selectedDayIndex为3），计算与今天的差值
   let offset = 0;
@@ -399,12 +470,12 @@ const getSleepDetailInfo = async (currentDate = new Date()) => {
     date: isoDate,
     response: summarizeSleepPageResponse(res)
   });
-  if (res) {
+  if (res && isCurrentSleepPageLoad(loadId)) {
     sleepDetailObj.value = res;
   }
 };
 // 睡眠区间
-const getSleepSegmentInfo = async (currentDate = new Date()) => {
+const getSleepSegmentInfo = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   const res = await querySleepPage('sleep-segment', currentDate, (requestConfig) => getSleepSegment({ date: isoDate }, requestConfig));
   appendSleepPageDiagnosticLog('sleep-page-query-result', {
@@ -412,12 +483,12 @@ const getSleepSegmentInfo = async (currentDate = new Date()) => {
     date: isoDate,
     response: summarizeSleepPageResponse(res)
   });
-  if (res) {
+  if (res && isCurrentSleepPageLoad(loadId)) {
     sleepSegmentObj.value = res;
   }
 };
 // 睡眠总览-睡眠评分
-const getSleepOverviewData = async (currentDate = new Date()) => {
+const getSleepOverviewData = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   const res = await querySleepPage('sleep-overview', currentDate, (requestConfig) => getSleepOverview({ date: isoDate }, requestConfig));
   appendSleepPageDiagnosticLog('sleep-page-query-result', {
@@ -425,43 +496,43 @@ const getSleepOverviewData = async (currentDate = new Date()) => {
     date: isoDate,
     response: summarizeSleepPageResponse(res)
   });
-  if (res) {
+  if (res && isCurrentSleepPageLoad(loadId)) {
     sleepOverviewObj.value = res;
   }
 };
 // 获取心率详情
-const getRatDetail = async (currentDate = new Date()) => {
+const getRatDetail = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   const res = await querySleepPage('sleep-heart-rate', currentDate, (requestConfig) => getSleepHeartRateDetail({
     date: isoDate
   }, requestConfig));
-  if (res) {
+  if (res && isCurrentSleepPageLoad(loadId)) {
     heartRateObj.value = res;
   }
 };
 // 获取心率变异性详情
-const getHrvDetailData = async (currentDate = new Date()) => {
+const getHrvDetailData = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   const res = await querySleepPage('sleep-hrv', currentDate, (requestConfig) => getSleepHrvDetail({
     date: isoDate
   }, requestConfig));
-  if (res) {
+  if (res && isCurrentSleepPageLoad(loadId)) {
     hrvObj.value = res;
   }
 };
 // 获取血氧详情
-const getOxyGenDetail = async (currentDate = new Date()) => {
+const getOxyGenDetail = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   const res = await querySleepPage('sleep-blood-oxygen', currentDate, (requestConfig) => getSleepBloodOxygenDetail({
     date: isoDate
   }, requestConfig));
-  if (res) {
+  if (res && isCurrentSleepPageLoad(loadId)) {
     oxyGenObj.value = res;
   }
 };
 
 // 获取温度详情
-const getTemperatureDetail = async (currentDate = new Date()) => {
+const getTemperatureDetail = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   let offset = 0;
   if (selectedDayIndex.value === 3) {
@@ -479,12 +550,12 @@ const getTemperatureDetail = async (currentDate = new Date()) => {
     type: 'day',
     offset
   }, requestConfig));
-  if (res) {
+  if (res && isCurrentSleepPageLoad(loadId)) {
     temperatureObj.value = res;
   }
 };
 // 获取小睡列表
-const getSleepNapList = async (currentDate = new Date()) => {
+const getSleepNapList = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   const res = await querySleepPage('sleep-nap', currentDate, (requestConfig) => getSleepNap({
     date: isoDate
@@ -494,12 +565,12 @@ const getSleepNapList = async (currentDate = new Date()) => {
     date: isoDate,
     response: summarizeSleepPageResponse(res)
   });
-  if (res) {
+  if (res && isCurrentSleepPageLoad(loadId)) {
     sleepNapList.value = res;
   }
 };
 // 获取睡眠活动总结
-const getsleepSummaryData = async (currentDate = new Date()) => {
+const getsleepSummaryData = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   const res = await querySleepPage('sleep-summary', currentDate, (requestConfig) => getsleepSummary({
     date: isoDate
@@ -509,7 +580,7 @@ const getsleepSummaryData = async (currentDate = new Date()) => {
     date: isoDate,
     response: summarizeSleepPageResponse(res)
   });
-  if (res) {
+  if (res && isCurrentSleepPageLoad(loadId)) {
     sleepSummaryObj.value = res;
   }
 };
@@ -535,7 +606,7 @@ const confirm = async (date: any) => {
   const currentDate = selectedDate;
 
   try {
-    await loadSleepPageData(currentDate);
+    await loadSleepPageData(currentDate, { trigger: 'calendar-confirm' });
   } catch (error) {
     appendSleepPageDiagnosticLog('sleep-page-load-failed', {
       date: formatLocalDate(currentDate),
@@ -576,7 +647,8 @@ onShow(async () => {});
 // 下拉刷新事件处理器
 onPullDownRefresh(async () => {
   try {
-    await handleDateClick(selectedDayIndex.value);
+    const currentDate = selectedDayIndex.value === 3 ? new Date(selectedDateInfo.value.year + '-' + selectedDateInfo.value.monthDay) : dateList.value[selectedDayIndex.value].date;
+    await loadSleepPageData(currentDate, { waitSecondary: true, trigger: 'pull-down-refresh' });
   } catch (error) {
     appendSleepPageDiagnosticLog('sleep-page-refresh-failed', {
       error: String((error as any)?.message || (error as any)?.errMsg || error || '')

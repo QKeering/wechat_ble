@@ -34,7 +34,7 @@ const temperature = ref(0);
 const currentDate = ref(new Date());
 
 const heartRateList = ref([
-  { label: '平均体温', value: '43' },
+  { label: '平均皮肤温度', value: '43' },
   { label: '平均范围', value: '76' }
 ]);
 
@@ -275,14 +275,14 @@ const getTemperatureDetail = async () => {
   if (res) {
     heartRateObj.value = res;
     heartRateList.value = [
-      { label: '平均体温', value: heartRateObj.value.avgValue || '0' },
+      { label: '平均皮肤温度', value: heartRateObj.value.avgValue || '0' },
       { label: '平均范围', value: heartRateObj.value.avgValueRange || '0' }
     ];
     chartData.value = heartRateObj.value.chartData || [];
     const latestPoint = [...chartData.value].reverse().find((item) => normalizeTemperatureDisplay(item.value) > 0);
     temperature.value = normalizeTemperatureDisplay(heartRateObj.value.newValue ?? latestPoint?.value ?? heartRateObj.value.avgValue ?? temperature.value);
     heartRateList.value = [
-      { label: '平均体温', value: heartRateObj.value.avgValue || '0' },
+      { label: '平均皮肤温度', value: heartRateObj.value.avgValue || '0' },
       { label: '平均范围', value: heartRateObj.value.avgValueRange || '0' }
     ];
   }
@@ -306,7 +306,7 @@ onUnload(() => {
 </script>
 <template>
   <view class="relative p-30">
-    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" title="体温详情" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" title="皮肤温度详情" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view class="bgcWrapper"></view>
     <view class="content">
       <uv-subsection
@@ -329,8 +329,8 @@ onUnload(() => {
       </view>
       <view class="health-card p-30 bg-white r-50 mt-40">
         <view class="flex ai-center jc-between mb-20">
-          <text class="fs-36 fw-400">体温</text>
-          <text class="fs-28 t-979797">当前体温值</text>
+          <text class="fs-36 fw-400">皮肤温度</text>
+          <text class="fs-28 t-979797">当前皮肤温度值</text>
         </view>
         <view class="flex ai-center jc-between">
           <view class="flex ai-center">

@@ -54,7 +54,7 @@
           <text class="mini-value">{{ batteryStatusText }}</text>
         </view>
         <view class="mini-card">
-          <text class="mini-label">体温</text>
+          <text class="mini-label">皮肤温度</text>
           <text class="mini-value">{{ temperatureText }}</text>
         </view>
         <view class="mini-card">
@@ -167,7 +167,7 @@ import { getRingBusinessDeviceKey, getRingBusinessDeviceName, getRingBusinessDev
 import { ensureRingBusinessPageReady, useRingBusinessController } from '@/features/ring';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
-import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
+import { formatBatteryStatusForDisplay } from '@/utils/batteryDisplay';
 import type { RingDeviceInfo } from '@/sdk/ring-ble';
 
 const ring = useRingBusinessController();
@@ -177,7 +177,7 @@ const currentDeviceName = computed(() => (ring.isReady.value ? getRingBusinessDe
 const currentDeviceTail = computed(() => `尾号 ${getRingBusinessDeviceTail(ring.deviceInfo.value)}`);
 const heartRateText = computed(() => metrics.value.heartRate ?? normalizeHealthText(metrics.value.heartRateStatus, '-'));
 const bloodOxygenText = computed(() => metrics.value.bloodOxygen ?? normalizeHealthText(metrics.value.bloodOxygenStatus, '-'));
-const batteryText = computed(() => formatBatteryPercentForDisplay(metrics.value.battery));
+const batteryText = computed(() => formatBatteryStatusForDisplay(metrics.value.battery, metrics.value.batteryStatus || metrics.value.chargingStatusText));
 const batteryStatusText = computed(() => normalizeHealthText(metrics.value.batteryStatus, '-'));
 const temperatureText = computed(() => metrics.value.temperature ?? normalizeHealthText(metrics.value.temperatureStatus, '-'));
 const hrvText = computed(() => metrics.value.hrv ?? normalizeHealthText(metrics.value.hrvStatus, '-'));
@@ -254,8 +254,8 @@ const getRefreshStepText = (step: string) => {
     software: '软件版本',
     heart_rate: '心率',
     blood_oxygen: '血氧',
-    temperature: '体温',
-    temperature_pending: '体温状态',
+    temperature: '皮肤温度',
+    temperature_pending: '皮肤温度状态',
     last_data: '最新数据',
     collect_period: '监听状态',
     history_snapshot: '历史快照',

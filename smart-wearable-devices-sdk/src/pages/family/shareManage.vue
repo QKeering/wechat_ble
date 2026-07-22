@@ -22,7 +22,7 @@ const hasGuardians = computed(() => guardians.value.length > 0);
 
 const permissionOptions = [
   { key: 'deviceStatus', title: '设备状态', desc: '电量、同步时间和设备是否正常' },
-  { key: 'vitalSigns', title: '生命体征', desc: '心率、血氧、体温等关键指标' },
+  { key: 'vitalSigns', title: '生命体征', desc: '心率、血氧、皮肤温度等关键指标' },
   { key: 'sleep', title: '睡眠', desc: '睡眠时长、评分和质量' },
   { key: 'motion', title: '活动', desc: '步数、活动时间和运动评分' },
   { key: 'alerts', title: '异常提醒', desc: '低电量、未同步和异常指标提醒' },

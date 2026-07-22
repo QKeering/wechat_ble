@@ -45,7 +45,7 @@ import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionC
 import { useRingBusinessHistoryPageSync } from '@/composables/useRingBusinessHistoryPageSync';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
-import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
+import { formatBatteryStatusForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
 import {
   buildRingHistorySubmitRecords,
   countRingHistoryRecordMetrics,
@@ -419,6 +419,13 @@ const thirdCricle = computed(() => {
 });
 const getBatteryDisplaySourceValue = (item: Record<string, any> | null | undefined) =>
   item?.metrics?.battery ?? item?.metrics?.batteryValue ?? item?.metrics?.value ?? item?.battery ?? item?.batteryValue ?? item?.value;
+const getBatteryDisplayStatusValue = (item: Record<string, any> | null | undefined) =>
+  item?.metrics?.chargingStatusText ??
+  item?.metrics?.batteryStatus ??
+  item?.chargingStatusText ??
+  item?.chargeStatusText ??
+  item?.batteryStatus ??
+  item?.status;
 const isValidBatteryDisplayValue = (value: unknown) => {
   if (value == null || value === '') return false;
   const numeric = Number(String(value).replace('%', '').trim());
@@ -432,7 +439,10 @@ const latestBattery = computed(() => {
       const item = source[index] as Record<string, any>;
       const type = item?.type || item?.dataType || item?.sourceType;
       if (type !== 'battery' && type !== 'firmware_version') continue;
-      if (isValidBatteryDisplayValue(getBatteryDisplaySourceValue(item))) return item;
+      if (
+        isValidBatteryDisplayValue(getBatteryDisplaySourceValue(item)) ||
+        isBatteryChargingLike(getBatteryDisplaySourceValue(item), getBatteryDisplayStatusValue(item))
+      ) return item;
     }
   }
   return null;
@@ -444,7 +454,15 @@ const displayBatteryValue = computed(() => {
     userStore.latestMetrics?.battery ??
     ringStore.healthData?.battery ??
     ringStore.latestMetrics?.battery;
-  return formatBatteryPercentForDisplay(value, '');
+  const status =
+    getBatteryDisplayStatusValue(latestBattery.value as Record<string, any> | null) ??
+    userStore.healthData?.chargingStatusText ??
+    userStore.latestMetrics?.chargingStatusText ??
+    userStore.healthData?.batteryStatus ??
+    ringStore.healthData?.chargingStatusText ??
+    ringStore.latestMetrics?.chargingStatusText ??
+    ringStore.healthData?.batteryStatus;
+  return formatBatteryStatusForDisplay(value, status, '');
 });
 const getDisplayMetricValue = (...values: unknown[]) => {
   for (const value of values) {
@@ -1201,7 +1219,7 @@ const handleDateClick = async (index: number) => {
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
   selectData.value = currentDate;
-  await refreshAwarenessBusinessOverview(currentDate);
+  await refreshAwarenessBusinessOverview(formatLocalDate(currentDate));
 };
 const openTimePicker = () => {
   calendar.value.open();
@@ -1224,7 +1242,7 @@ const confirm = async (date: any) => {
   hasSelectedDate.value = true;
   selectedDayIndex.value = 3;
   selectData.value = selectedDate;
-  const currentDate = selectedDate;
+  const currentDate = formatLocalDate(selectedDate);
   await refreshAwarenessBusinessOverview(currentDate);
 };
 

@@ -77,8 +77,8 @@ defineExpose({
   <view class="score-card r-50 bg-white p-30">
     <view>
       <!-- 标题栏 -->
-      <view class="flex jc-between ai-center">
-        <view>
+      <view class="chart-card-header flex jc-between ai-center">
+        <view class="chart-card-title">
           <text v-if="showCardTitle" class="fs-36">{{ cardTitle }}</text>
           <text v-if="showCardSmallTitle" class="fs-28 ml-10">{{ cardSmallTitle }}</text>
         </view>
@@ -88,7 +88,7 @@ defineExpose({
         </view>
       </view>
 
-      <view style="width: 100%" v-if="showChartTitle">
+      <view class="chart-value" v-if="showChartTitle">
         <view class="flex ai-center jc-center">
           <uv-image v-if="imageSrc" :src="imageSrc" width="45rpx" height="45rpx"></uv-image>
           <view class="ml-15">
@@ -97,14 +97,14 @@ defineExpose({
           </view>
         </view>
       </view>
-      <view class="flex jc-around ai-center mt-30" v-if="showTopCard">
+      <view class="top-stats flex jc-around ai-center mt-30" v-if="showTopCard">
         <view class="ta-c" v-for="(item, index) in stats" :key="index">
           <view class="fs-36 fw-600">{{ item.value }}</view>
           <view class="fs-24 mt-10">{{ item.label }}</view>
         </view>
       </view>
-      <view class="flex ai-center jc-center">
-        <l-echart :ref="(el: any) => (chartRef = el)" @finished="$emit('chart-finished', chartRef)" style="width: 100%; height: 424rpx; margin: 0"></l-echart>
+      <view class="chart-area flex ai-center jc-center">
+        <l-echart :ref="(el: any) => (chartRef = el)" @finished="$emit('chart-finished', chartRef)" class="chart-canvas"></l-echart>
       </view>
 
       <!-- 统计信息 -->
@@ -120,11 +120,22 @@ defineExpose({
 
 <style lang="scss" scoped>
 .score-card {
+  position: relative;
   margin-top: 30rpx;
   border-radius: 50rpx;
   background-color: #fff;
   padding: 30rpx;
   box-sizing: border-box;
+  overflow: hidden;
+}
+
+.chart-card-header,
+.chart-card-title,
+.chart-value,
+.top-stats,
+.stats {
+  position: relative;
+  z-index: 2;
 }
 
 .textBox {
@@ -136,6 +147,33 @@ defineExpose({
   justify-content: space-between;
   align-items: center;
   cursor: pointer;
+}
+
+.chart-value {
+  width: 100%;
+  margin-top: 20rpx;
+}
+
+.top-stats {
+  min-height: 96rpx;
+  padding: 18rpx 12rpx;
+  border-radius: 28rpx;
+  background: #f8faff;
+}
+
+.chart-area {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 320rpx;
+  margin-top: 18rpx;
+  overflow: hidden;
+}
+
+.chart-canvas {
+  width: 100%;
+  height: 320rpx;
+  margin: 0;
 }
 
 .stats {

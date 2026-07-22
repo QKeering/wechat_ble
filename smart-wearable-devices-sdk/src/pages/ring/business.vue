@@ -58,7 +58,7 @@
       </view>
       <view class="metric-grid">
         <view class="metric-card">
-          <text class="metric-label">体温</text>
+          <text class="metric-label">皮肤温度</text>
           <text class="metric-value">{{ temperatureText }}</text>
         </view>
         <view class="metric-card">
@@ -156,7 +156,7 @@ import { getRingDeviceStableIdentity } from '@/composables/useRingBleSdk';
 import { ensureRingBusinessPageReady, getRingBusinessDeviceKey, getRingBusinessDeviceName, getRingBusinessDeviceTail, useRingBusinessController } from '@/features/ring';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
-import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
+import { formatBatteryStatusForDisplay } from '@/utils/batteryDisplay';
 import type { RingDeviceInfo } from '@/sdk/ring-ble';
 
 const ring = useRingBusinessController();
@@ -183,7 +183,7 @@ const wornText = computed(() => {
 });
 const fatigueText = computed(() => healthStatusText(metrics.value.fatigueLevel || metrics.value.fatigue));
 const anxietyText = computed(() => healthStatusText(metrics.value.anxietyLevel || metrics.value.anxiety));
-const batteryText = computed(() => formatBatteryPercentForDisplay(metrics.value.battery));
+const batteryText = computed(() => formatBatteryStatusForDisplay(metrics.value.battery, metrics.value.batteryStatus || metrics.value.chargingStatusText));
 const batteryStatusText = computed(() => normalizeHealthText(metrics.value.batteryStatus, '电量'));
 const monitoringStatusText = computed(() => healthStatusText(metrics.value.monitoringStatus));
 const currentDeviceName = computed(() => (ring.isReady.value ? getRingBusinessDeviceName(ring.deviceInfo.value) : '未连接戒指'));
@@ -248,8 +248,8 @@ const getRefreshStepText = (step: string) => {
     software: '软件版本',
     heart_rate: '心率',
     blood_oxygen: '血氧',
-    temperature: '体温',
-    temperature_pending: '体温状态',
+    temperature: '皮肤温度',
+    temperature_pending: '皮肤温度状态',
     last_data: '最新数据',
     collect_period: '监听状态',
     collect_period_pending: '监听状态',
