@@ -83,14 +83,14 @@ defineExpose({
           <text v-if="showCardSmallTitle" class="fs-28 ml-10">{{ cardSmallTitle }}</text>
         </view>
         <view v-if="showRigntBox" class="textBox r-30 p-20 flex jc-between ai-center" @click="$emit('measure-click')">
-          <uv-image v-if="imageSrc" :src="imageSrc" width="45rpx" height="45rpx"></uv-image>
+<uv-image v-if="imageSrc" :src="imageSrc" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
           <text style="color: #ff5959">{{ measureBtnText }}</text>
         </view>
       </view>
 
       <view class="chart-value" v-if="showChartTitle">
         <view class="flex ai-center jc-center">
-          <uv-image v-if="imageSrc" :src="imageSrc" width="45rpx" height="45rpx"></uv-image>
+<uv-image v-if="imageSrc" :src="imageSrc" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
           <view class="ml-15">
             <text class="fs-48">{{ currentRate }}</text>
             <text class="t-979797 fs-24">{{ rateUnit }}</text>

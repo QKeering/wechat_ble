@@ -10,7 +10,7 @@
     </view>
     <!-- 图片 -->
     <view class="flex jc-center mb-20">
-      <uv-image :src="imageSrc" width="200rpx" height="120rpx"></uv-image>
+      <uv-image :src="imageSrc" width="120rpx" height="120rpx" mode="aspectFit"></uv-image>
     </view>
     <!-- 提示文字 -->
     <view class="ta-c mb-20">

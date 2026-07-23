@@ -317,14 +317,14 @@ onUnload(() => {
         <slot></slot>
       </view>
       <view v-if="isHeartTate" class="textBox" @click.stop="handleMeasure">
-        <uv-image src="/static/images/homeDetail/love.png" width="45rpx" height="45rpx"></uv-image>
+<uv-image src="/static/images/homeDetail/love.png" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
         <text style="color: #ff5959">{{ measureText }}</text>
       </view>
     </view>
     <view @click="jumpDetail">
       <view style="width: 100%" v-if="isHeartTate">
         <view class="flex ai-center jc-center">
-          <uv-image src="/static/images/homeDetail/love.png" width="45rpx" height="45rpx"></uv-image>
+<uv-image src="/static/images/homeDetail/love.png" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
           <view class="ml-15">
             <text class="fs-48">{{ heartRateData?.newValue || '00' }}</text>
             <text class="t-979797 fs-24">次/分钟</text>
@@ -361,7 +361,7 @@ onUnload(() => {
       <view class="p-30 flex fd-c ai-center" style="background: #030305e6">
         <!-- 添加heartbeat-animation类名 -->
         <view class="heartbeat-animation">
-          <uv-image src="/static/images/homeDetail/love.png" width="45rpx" height="45rpx"></uv-image>
+<uv-image src="/static/images/homeDetail/love.png" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
         </view>
         <view class="ml-20 t-white">测量中...</view>
       </view>

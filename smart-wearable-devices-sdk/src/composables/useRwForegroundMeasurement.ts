@@ -23,7 +23,7 @@ export type RwForegroundMetric =
 
 export const RW_FOREGROUND_METRIC_RESULT_TIMEOUT_MS = 45000;
 export const RW_FOREGROUND_METRIC_READ_AT_MS = [1500, 8000, 18000, 28000] as const;
-export const RW_DIAGNOSTIC_BUILD_TAG = 'rw-visible-build-tag-20260721-sleep-quiet-01';
+export const RW_DIAGNOSTIC_BUILD_TAG = 'rw-visible-build-tag-20260723-upload-dedup-01';
 const RW_FOREGROUND_METRIC_READ_AT_MS_BY_METRIC: Partial<Record<RwForegroundMetric, readonly number[]>> = {
   temperature: [12000, 24000, 38000, 52000],
   hrv: [1500, 8000, 18000, 28000, 40000, 52000]
