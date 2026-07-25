@@ -2,15 +2,26 @@
 import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow, onUnload } from '@dcloudio/uni-app';
 import { baseOption } from '@/homeDetail/vitalSigns/echartOptions';
+import {
+  applyMetricSleepRangeAxisStyle,
+  buildMetricSleepTimelineAxis,
+  compactMetricTimelineTicks,
+  getMetricTimelineTicks
+} from '@/homeDetail/vitalSigns/metricSleepTimelineAxis';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useUserStore } from '@/stores/user';
 import { submitData } from '@/common/api/homeDetail';
-import type { heartRateDetail, Point } from '@/types/api/homeDetail';
+import type { heartRateDetail, Point, sleepSegment } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
 import Action from '@/components/action.vue';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { formatMetricRecordTime, getLatestHrvReading, getSubmitDeviceMac, requestMetricRefresh } from '@/composables/useRingMetricReadings';
 import { useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
+import {
+  getRemainingVitalMeasurementMs,
+  MIN_VITAL_MEASUREMENT_DURATION_MS,
+  MAX_VITAL_MEASUREMENT_DURATION_MS
+} from '@/utils/measurementDuration';
 const userStore = useUserStore();
 const { sendActiveMeasureCommand, refreshHealthData } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
@@ -23,6 +34,10 @@ const props = defineProps({
   isHeartTate: {
     type: Boolean,
     default: true
+  },
+  sleepSegmentObj: {
+    type: Object as () => sleepSegment,
+    default: () => ({})
   }
 });
 const popup1 = ref<any>(null);
@@ -33,7 +48,7 @@ const agreementChecked = ref(false);
 // 测量状态：'idle' | 'measuring' | 'completed'
 const measureStatus = ref('idle');
 watch(
-  () => props.hrvData,
+  () => [props.hrvData, props.sleepSegmentObj],
   async (newVal, oldVal) => {
     if (newVal !== oldVal) {
       // 当sleepDetailObj变化时，重新初始化图表
@@ -46,16 +61,28 @@ const isIOS = computed(() => {
   const systemInfo = uni.getSystemInfoSync();
   return systemInfo.platform.toLowerCase().includes('ios');
 });
+const metricAxisTicks = computed(() => {
+  const chartData = Array.isArray(props.hrvData?.chartData) ? props.hrvData.chartData : [];
+  return getMetricTimelineTicks(chartData, props.sleepSegmentObj, !props.isHeartTate);
+});
+const visibleMetricAxisTicks = computed(() => (props.isHeartTate ? compactMetricTimelineTicks(metricAxisTicks.value) : metricAxisTicks.value));
+const metricChartKey = computed(() => {
+  const chartData = Array.isArray(props.hrvData?.chartData) ? props.hrvData.chartData : [];
+  const lastPoint = chartData[chartData.length - 1] as any;
+  const tickKey = visibleMetricAxisTicks.value.map((item) => item.label).join('|');
+  return `${props.isHeartTate ? 'hrv' : 'sleep-hrv'}-${chartData.length}-${lastPoint?.time || ''}-${lastPoint?.value || ''}-${tickKey}`;
+});
 const getProcessedOption = () => {
   const newOption = cloneDeep(baseOption);
+  const chartData = Array.isArray(props.hrvData?.chartData) ? props.hrvData.chartData : [];
   let fullXData: string[] = [];
   let fullSeriesData: (number | null)[] = [];
-  if (props.hrvData?.chartData && props.hrvData.chartData.length > 0) {
+  if (chartData.length > 0) {
     // 有数据时使用实际数据
-    fullXData = props.hrvData?.chartData?.map((item: Point) => item.time?.toString() || '00:00') || [];
+    fullXData = chartData.map((item: Point) => item.time?.toString() || '00:00');
     // fullSeriesData = props.hrvData?.chartData?.map((item: Point) => Number(item.value)) || [];
     fullSeriesData =
-      props.hrvData?.chartData?.map((item: Point) => {
+      chartData.map((item: Point) => {
         const value = Number(item.value);
         // 将0值替换为null，让ECharts跳过这些点
         return value === 0 ? null : value;
@@ -68,6 +95,8 @@ const getProcessedOption = () => {
     });
   }
   // 替换xAxis.data和series.data为完整数据
+  // 波形仍使用接口原始点位；睡眠区间只用于外置时间轴标签，避免重采样导致折线消失。
+  const axisData = buildMetricSleepTimelineAxis(chartData, props.sleepSegmentObj, false);
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = fullSeriesData as any;
   // 超过100，则y轴最大刻度显示120，6个刻度
@@ -122,6 +151,7 @@ const getProcessedOption = () => {
       }
     }
   } as any;
+  applyMetricSleepRangeAxisStyle(newOption, axisData);
   return newOption;
 };
 const initChart = async () => {
@@ -135,13 +165,33 @@ const initChart = async () => {
 };
 
 let measureTimeout: any = null;
+let measureCompleteTimer: any = null;
+let isMeasureCompletePending = false;
 let measureStartedAt = 0;
 const isRwDevice = () => userStore.deviceInfo?.protocol === 'rw';
+const clearMeasureCompleteTimer = () => {
+  if (!measureCompleteTimer) return;
+  clearTimeout(measureCompleteTimer);
+  measureCompleteTimer = null;
+};
 const completeMeasureWithLatestReading = async () => {
+  if (measureStatus.value !== 'measuring' || isMeasureCompletePending) return;
+  const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt);
+  if (remainingMs > 0) {
+    isMeasureCompletePending = true;
+    clearMeasureCompleteTimer();
+    measureCompleteTimer = setTimeout(() => {
+      measureCompleteTimer = null;
+      isMeasureCompletePending = false;
+      void completeMeasureWithLatestReading();
+    }, remainingMs);
+    return;
+  }
   if (measureTimeout) {
     clearTimeout(measureTimeout);
     measureTimeout = null;
   }
+  clearMeasureCompleteTimer();
   popup1.value?.close();
   if (isRwDevice()) {
     await stopActiveRwMeasurement('RW VITAL');
@@ -170,6 +220,8 @@ const startMeasure = async () => {
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
 
   measureStatus.value = 'measuring';
   measureStartedAt = Date.now();
@@ -183,6 +235,8 @@ const startMeasure = async () => {
     if (isRwDevice()) {
       await runRwForegroundMeasurement('hrv', {
         startedAt: measureStartedAt,
+        timeoutMs: MAX_VITAL_MEASUREMENT_DURATION_MS,
+        minActiveMs: MIN_VITAL_MEASUREMENT_DURATION_MS,
         measureStatus: () => measureStatus.value,
         source: 'RW VITAL'
       });
@@ -202,11 +256,9 @@ const startMeasure = async () => {
   }
 
   measureTimeout = setTimeout(() => {
-    // uni.hideLoading();
-    popup1.value.close();
-    measureStatus.value = 'completed';
+    void completeMeasureWithLatestReading();
     measureTimeout = null; // 清空引用
-  }, 35000);
+  }, MAX_VITAL_MEASUREMENT_DURATION_MS);
 };
 
 // 监听 userStore.receivedData 变化
@@ -277,12 +329,16 @@ const jumpDetail = () => {
 
 onLoad(() => {});
 onShow(async () => {
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
   measureStatus.value = 'idle';
 });
 onUnload(() => {
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
   void stopActiveRwMeasurement('RW VITAL');
 });
 </script>
@@ -317,8 +373,19 @@ onUnload(() => {
           </view>
         </view>
       </view>
-      <view class="flex ai-center jc-center">
-        <l-echart ref="chartRef" @finished="initChart" style="width: 100%; height: 424rpx; margin: 0"></l-echart>
+      <view class="metric-chart-wrap">
+        <view class="metric-echart-box flex ai-center jc-center">
+          <l-echart :key="metricChartKey" ref="chartRef" @finished="initChart" style="width: 100%; height: 424rpx; margin: 0"></l-echart>
+        </view>
+        <view v-if="visibleMetricAxisTicks.length" class="metric-time-axis">
+          <text
+            v-for="tick in visibleMetricAxisTicks"
+            :key="tick.key"
+            class="metric-time-tick"
+            :class="{ 'is-first': tick.isFirst, 'is-last': tick.isLast }"
+            :style="{ left: tick.left + '%' }"
+          >{{ tick.label }}</text>
+        </view>
       </view>
 
       <!-- 统计信息 -->
@@ -409,5 +476,40 @@ onUnload(() => {
   font-size: 24rpx;
   color: #999;
   margin-top: 8rpx;
+}
+
+.metric-chart-wrap {
+  width: 100%;
+}
+
+.metric-echart-box {
+  width: 100%;
+}
+
+.metric-time-axis {
+  position: relative;
+  height: 44rpx;
+  margin: 4rpx 10rpx 0;
+  color: #9ca3af;
+  font-size: 18rpx;
+  line-height: 1;
+}
+
+.metric-time-tick {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
+  transform: translateX(-50%) rotate(-35deg);
+  transform-origin: top center;
+}
+
+.metric-time-tick.is-first {
+  transform: rotate(-35deg);
+  transform-origin: top left;
+}
+
+.metric-time-tick.is-last {
+  transform: translateX(-100%) rotate(-35deg);
+  transform-origin: top right;
 }
 </style>

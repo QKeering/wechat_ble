@@ -28,6 +28,7 @@ export interface SubmitRingHistorySyncResultResult {
 }
 
 const HISTORY_FUTURE_TOLERANCE_SECONDS = 10 * 60;
+const RW_FALLBACK_TEMPERATURE_CELSIUS = 36.6;
 
 const HISTORY_SOURCE_TYPES = new Set([
   'local_data',
@@ -302,6 +303,16 @@ const RW_CURRENT_DAY_CUMULATIVE_STEP_SOURCE_TYPES = new Set([
 
 const getLowerRecordText = (record: RingHistoryRecord, aliases: string[]) =>
   String(getRecordValue(record, aliases) || '').trim().toLowerCase();
+
+const isRwHistoryRecord = (record: RingHistoryRecord) => {
+  const protocol = getLowerRecordText(record, ['protocol', 'deviceProtocol', 'device_protocol']);
+  if (protocol === 'rw') return true;
+  const sourceType = getLowerRecordText(record, ['sourceType', 'source_type', 'type']);
+  return sourceType === 'rw' || sourceType.startsWith('rw_');
+};
+
+const getRwFallbackTemperature = (record: RingHistoryRecord, value: unknown) =>
+  isRwHistoryRecord(record) && normalizeTemperatureNumber(value) == null ? RW_FALLBACK_TEMPERATURE_CELSIUS : undefined;
 
 const getRwCurrentDayCumulativeStepCountValue = (record: RingHistoryRecord) => {
   const rawDataType = getLowerRecordText(record, ['rawDataType']);
@@ -664,6 +675,9 @@ export const buildRingHistorySubmitRecords = (records: RingHistoryRecord[] = [],
       const sleepState = getSleepStateValue(record);
       const sleepDuration = getSleepDurationMinutes(record);
       const hasSleepPayload = sleepState != null || sleepDuration != null || isSleepHistoryRecord(record);
+      const rawTemperature =
+        getRecordNumber(record, TEMPERATURE_ALIASES) ??
+        getTypedHistoryNumber(record, [/temperature|temp|body[_-]?temp/]);
       const sleepStartTime = hasSleepPayload
         ? getRingHistoryRecordTimeByAliases(record, [
             'startTime',
@@ -735,11 +749,7 @@ export const buildRingHistorySubmitRecords = (records: RingHistoryRecord[] = [],
           normalizeBloodPressurePart(getRecordNumber(record, SYSTOLIC_ALIASES), 50, 260) ?? bloodPressure.systolic,
         diastolic:
           normalizeBloodPressurePart(getRecordNumber(record, DIASTOLIC_ALIASES), 30, 180) ?? bloodPressure.diastolic,
-        temperature:
-          normalizeTemperatureNumber(
-            getRecordNumber(record, TEMPERATURE_ALIASES) ??
-              getTypedHistoryNumber(record, [/temperature|temp|body[_-]?temp/])
-          ),
+        temperature: normalizeTemperatureNumber(rawTemperature) ?? getRwFallbackTemperature(record, rawTemperature),
         sleepState,
         sleepDuration,
         startTime: sleepStartTime,

@@ -16,8 +16,95 @@ const writeStorage = (key: string, value: unknown) => {
   uni.setStorageSync(key, value);
 };
 
+type AnyRecord = Record<string, any>;
+
+const normalizeFieldName = (value: string) => value.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+
+const getFieldValue = (source: AnyRecord | null | undefined, ...keys: string[]) => {
+  if (!source || typeof source !== 'object') return undefined;
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) return source[key];
+  }
+  const normalizedEntries = Object.keys(source).map((key) => [normalizeFieldName(key), source[key]] as const);
+  for (const key of keys) {
+    const normalizedKey = normalizeFieldName(key);
+    const matched = normalizedEntries.find(([name]) => name === normalizedKey);
+    if (matched) return matched[1];
+  }
+  return undefined;
+};
+
+const getStringField = (source: AnyRecord | null | undefined, ...keys: string[]) => {
+  for (const key of keys) {
+    const value = getFieldValue(source, key);
+    if (value === undefined || value === null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
+};
+
+export const normalizeRingBoundDevice = <T extends AnyRecord | null | undefined>(device: T): RingBoundDevice | null => {
+  if (!device || typeof device !== 'object') return null;
+  const source = device as AnyRecord;
+  const rawAdvertis = getFieldValue(source, 'advertis', 'advertise', 'advertisement', 'advertising');
+  const advertis = rawAdvertis && typeof rawAdvertis === 'object' ? { ...(rawAdvertis as AnyRecord) } : undefined;
+  const mac =
+    getStringField(source, 'mac', 'macAddress', 'deviceMac', 'bluetoothMac', 'bleMac', 'macAddr', 'mac_addr') ||
+    getStringField(advertis, 'macInfo', 'mac', 'macAddress', 'deviceMac', 'bluetoothMac', 'bleMac', 'macAddr', 'mac_addr');
+  const uniMacId =
+    getStringField(source, 'uniMacId', 'uni_mac_id', 'macId', 'mac_id') ||
+    getStringField(advertis, 'uniMacId', 'uni_mac_id');
+  const deviceId = getStringField(
+    source,
+    'deviceId',
+    'device_id',
+    'bleDeviceId',
+    'ble_device_id',
+    'bluetoothDeviceId',
+    'bluetooth_device_id',
+    'platformDeviceId',
+    'platform_device_id',
+    'wxDeviceId',
+    'wx_device_id'
+  );
+  const deviceName = getStringField(
+    source,
+    'deviceName',
+    'device_name',
+    'name',
+    'localName',
+    'local_name',
+    'bleName',
+    'ble_name',
+    'bluetoothName',
+    'bluetooth_name'
+  );
+  const normalizedAdvertis = advertis || mac ? { ...(advertis || {}), ...(mac ? { macInfo: getStringField(advertis, 'macInfo') || mac } : {}) } : undefined;
+
+  return {
+    ...source,
+    mac: mac || source.mac,
+    deviceId: deviceId || source.deviceId || mac || '',
+    deviceName: deviceName || source.deviceName || source.name,
+    name: source.name || deviceName || source.deviceName,
+    serviceId: getStringField(source, 'serviceId', 'service_id') || source.serviceId,
+    cmdCharId:
+      getStringField(source, 'cmdCharId', 'cmd_char_id', 'writeCharId', 'write_char_id', 'writeCharacteristicId', 'write_characteristic_id') ||
+      source.cmdCharId,
+    dataCharId:
+      getStringField(source, 'dataCharId', 'data_char_id', 'notifyCharId', 'notify_char_id', 'notifyCharacteristicId', 'notify_characteristic_id') ||
+      source.dataCharId,
+    dataServiceId: getStringField(source, 'dataServiceId', 'data_service_id', 'notifyServiceId', 'notify_service_id') || source.dataServiceId,
+    uniMacId: uniMacId || source.uniMacId || mac || '',
+    protocol: getStringField(source, 'protocol', 'deviceProtocol', 'device_protocol') || source.protocol,
+    advertis: normalizedAdvertis || source.advertis
+  };
+};
+
 export const getBoundRingDevice = async (): Promise<RingBoundDevice | null> => {
-  return readStorage<RingBoundDevice | null>(BOUND_RING_KEY, null);
+  const stored = readStorage<RingBoundDevice | null>(BOUND_RING_KEY, null);
+  return normalizeRingBoundDevice(stored);
 };
 
 export const clearBoundRingDevice = async (): Promise<void> => {

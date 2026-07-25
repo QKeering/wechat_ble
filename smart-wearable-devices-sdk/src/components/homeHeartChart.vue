@@ -53,6 +53,10 @@ const props = defineProps({
       { label: '平均心率', value: 43 },
       { label: '最大心率', value: 76 }
     ]
+  },
+  timeTicks: {
+    type: Array as () => Array<{ key: string; label: string; left: number; isFirst?: boolean; isLast?: boolean }>,
+    default: () => []
   }
 });
 
@@ -105,6 +109,15 @@ defineExpose({
       </view>
       <view class="chart-area flex ai-center jc-center">
         <l-echart :ref="(el: any) => (chartRef = el)" @finished="$emit('chart-finished', chartRef)" class="chart-canvas"></l-echart>
+      </view>
+      <view v-if="timeTicks.length" class="chart-time-axis">
+        <text
+          v-for="tick in timeTicks"
+          :key="tick.key"
+          class="chart-time-tick"
+          :class="{ 'is-first': tick.isFirst, 'is-last': tick.isLast }"
+          :style="{ left: tick.left + '%' }"
+        >{{ tick.label }}</text>
       </view>
 
       <!-- 统计信息 -->
@@ -174,6 +187,34 @@ defineExpose({
   width: 100%;
   height: 320rpx;
   margin: 0;
+}
+
+.chart-time-axis {
+  position: relative;
+  z-index: 2;
+  height: 42rpx;
+  margin: 2rpx 12rpx 0;
+  color: #9ca3af;
+  font-size: 20rpx;
+  line-height: 1;
+}
+
+.chart-time-tick {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
+  transform: translateX(-50%) rotate(-28deg);
+  transform-origin: top center;
+}
+
+.chart-time-tick.is-first {
+  transform: rotate(-28deg);
+  transform-origin: top left;
+}
+
+.chart-time-tick.is-last {
+  transform: translateX(-100%) rotate(-28deg);
+  transform-origin: top right;
 }
 
 .stats {

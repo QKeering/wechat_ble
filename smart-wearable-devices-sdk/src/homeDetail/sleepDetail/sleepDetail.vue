@@ -7,6 +7,8 @@ import { formatDate, calculateOffset, getPrevDate, getNextDate, formatLocalDate 
 import type { sleepDetail, sleepSegment, heartRateDetail, sleepOverview } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
 import { heartRateOption, sleepTimeOption, sleepRageOption } from '@/homeDetail/sleepDetail/echartOptions';
+import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
+import { formatBleErrorMessage } from '@/utils/bleError';
 const echarts = require('../../static/echarts.min.js');
 const list = ref(['日', '周', '月']);
 const current = ref<number>(0);
@@ -35,6 +37,80 @@ const sleepTimeRef = ref<any>(null);
 const healthNumber = ref(56);
 const sleepScore = ref(0);
 const currentDate = ref(new Date());
+let sleepDetailLoadSerial = 0;
+const isCurrentSleepDetailLoad = (loadId?: number) => loadId == null || loadId === sleepDetailLoadSerial;
+const appendSleepDetailPageLog = (event: string, details: Record<string, any> = {}) => {
+  appendRingDiagnosticLog('RW PAGE', event, {
+    buildTag: RW_DIAGNOSTIC_BUILD_TAG,
+    page: 'sleepDetail',
+    ...details
+  });
+};
+const runSleepDetailEndpointTask = async <T>(
+  endpoint: string,
+  date: string,
+  loadId: number,
+  task: () => Promise<T>
+) => {
+  const startedAt = Date.now();
+  try {
+    const result = await task();
+    appendSleepDetailPageLog('sleep-detail-page-endpoint-timing', {
+      endpoint,
+      date,
+      loadId,
+      ok: true,
+      elapsedMs: Date.now() - startedAt
+    });
+    return result;
+  } catch (error) {
+    appendSleepDetailPageLog('sleep-detail-page-endpoint-timing', {
+      endpoint,
+      date,
+      loadId,
+      ok: false,
+      elapsedMs: Date.now() - startedAt,
+      error: formatBleErrorMessage(error, '睡眠详情接口请求失败')
+    });
+    throw error;
+  }
+};
+const updateSleepDetailCharts = () => {
+  chartInstanceF.value?.setOption(getHeartRateOption());
+  chartInstanceS.value?.setOption(getProcessedOption());
+  chartInstanceT.value?.setOption(getSleepRangOption());
+};
+const loadSleepDetailData = async (trigger = 'manual') => {
+  const loadId = ++sleepDetailLoadSerial;
+  const targetDate = currentDate.value;
+  const date = formatLocalDate(targetDate);
+  const startedAt = Date.now();
+  appendSleepDetailPageLog('sleep-detail-page-load-start', {
+    trigger,
+    date,
+    type: currentName.value,
+    offset: offset.value,
+    loadId
+  });
+  const results = await Promise.allSettled([
+    runSleepDetailEndpointTask('sleep-detail', date, loadId, () => getSleepDetailInfo(targetDate, loadId)),
+    runSleepDetailEndpointTask('sleep-segment', date, loadId, () => getSleepSegmentInfo(targetDate, loadId)),
+    runSleepDetailEndpointTask('heart-rate-detail', date, loadId, () => getRatDetail(targetDate, loadId))
+  ]);
+  if (isCurrentSleepDetailLoad(loadId)) {
+    updateSleepDetailCharts();
+  }
+  appendSleepDetailPageLog('sleep-detail-page-load-done', {
+    trigger,
+    date,
+    type: currentName.value,
+    offset: offset.value,
+    loadId,
+    current: isCurrentSleepDetailLoad(loadId),
+    elapsedMs: Date.now() - startedAt,
+    failedCount: results.filter((item) => item.status === 'rejected').length
+  });
+};
 
 // 计算属性：将分钟数拆分为小时和分钟
 const sleepDurationHours = computed(() => {
@@ -96,12 +172,7 @@ const change = async (index: number) => {
   currentName.value = currentList.value[index];
   currentDate.value = new Date();
   offset.value = 0;
-  await getSleepDetailInfo();
-  await getSleepSegmentInfo();
-  await getRatDetail();
-  chartInstanceF.value.setOption(getHeartRateOption());
-  chartInstanceS.value.setOption(getProcessedOption());
-  chartInstanceT.value.setOption(getSleepRangOption());
+  await loadSleepDetailData('range-change');
 };
 const formatDateLocal = (date: Date, timeString: string) => {
   return formatDate(date, timeString);
@@ -114,56 +185,46 @@ const calculateOffsetLocal = () => {
 const prevDay = async () => {
   currentDate.value = getPrevDate(currentDate.value, current.value);
   calculateOffsetLocal();
-  await getSleepDetailInfo();
-  await getSleepSegmentInfo();
-  await getRatDetail();
-  chartInstanceF.value.setOption(getHeartRateOption());
-  chartInstanceS.value.setOption(getProcessedOption());
-  chartInstanceT.value.setOption(getSleepRangOption());
+  await loadSleepDetailData('prev-day');
 };
 const nextDay = async () => {
   const nextDate = getNextDate(currentDate.value, current.value);
   if (nextDate) {
     currentDate.value = nextDate;
     calculateOffsetLocal();
-    await getSleepDetailInfo();
-    await getSleepSegmentInfo();
-    await getRatDetail();
-    chartInstanceF.value.setOption(getHeartRateOption());
-    chartInstanceS.value.setOption(getProcessedOption());
-    chartInstanceT.value.setOption(getSleepRangOption());
+    await loadSleepDetailData('next-day');
   } else {
     (uni as any).$uv.toast('不能导航到未来的日期');
   }
 };
 // 睡眠详情
-const getSleepDetailInfo = async (currentDate = new Date()) => {
-  const isoDate = formatLocalDate(currentDate);
+const getSleepDetailInfo = async (targetDate = new Date(), loadId?: number) => {
+  const isoDate = formatLocalDate(targetDate);
   const res = await getSleepDetail({
     date: isoDate,
     type: currentName.value,
     offset: offset.value
   });
-  if (res) {
+  if (res && isCurrentSleepDetailLoad(loadId)) {
     sleepDetailObj.value = res;
   }
 };
 // 睡眠区间
-const getSleepSegmentInfo = async (currentDate = new Date()) => {
-  const res = await getSleepSegment({ date: formatLocalDate(currentDate) });
-  if (res) {
+const getSleepSegmentInfo = async (targetDate = new Date(), loadId?: number) => {
+  const res = await getSleepSegment({ date: formatLocalDate(targetDate) });
+  if (res && isCurrentSleepDetailLoad(loadId)) {
     sleepSegmentObj.value = res;
   }
 };
 // 获取心率详情
-const getRatDetail = async (currentDate = new Date()) => {
-  const isoDate = formatLocalDate(currentDate);
+const getRatDetail = async (targetDate = new Date(), loadId?: number) => {
+  const isoDate = formatLocalDate(targetDate);
   const res = await getHeartRateDetail({
     date: isoDate,
     type: currentName.value,
     offset: offset.value
   });
-  if (res) {
+  if (res && isCurrentSleepDetailLoad(loadId)) {
     heartRateObj.value = res;
     heartRateList.value = [
       { label: '平均心率', value: heartRateObj.value.avgValue || '0' },
@@ -321,12 +382,19 @@ const getSleepRangOption = () => {
     if ((chartData && chartData.length === 0) || areAllValuesZero(chartData) || areAllValuesZero(chartDataSection)) {
       // 使用chartDataSectionList生成单一颜色饼图
       if (newOption.series && newOption.series[0]) {
+        const emptyColorMap = {
+          清醒: '#F4A340',
+          快速眼动: '#48A7E8',
+          浅睡: '#9B93F5',
+          深睡: '#5146D8',
+          小睡: '#58C7B1'
+        };
         newOption.series[0].data = testData.chartDataSectionList.map((item) => ({
           value: item.value || 0,
           itemStyle: {
-            color: '#e2e1fd',
+            color: emptyColorMap[item.time as keyof typeof emptyColorMap] || '#eef0ff',
             borderWidth: 1,
-            borderColor: '#e2e1fd'
+            borderColor: '#ffffff'
           },
           name: item.time || ''
         }));
@@ -341,11 +409,11 @@ const getSleepRangOption = () => {
     if (chartData && chartData.length > 0) {
       // 颜色映射
       const colorMap = {
-        清醒: '#e2e1fd',
-        快速眼动: '#c5c2f9',
-        浅睡: '#9994f4',
-        深睡: '#5f57ec',
-        小睡: '#332b99'
+        清醒: '#F4A340',
+        快速眼动: '#48A7E8',
+        浅睡: '#9B93F5',
+        深睡: '#5146D8',
+        小睡: '#58C7B1'
       };
 
       // 生成饼图数据
@@ -453,9 +521,7 @@ const leftClick = () => {
 };
 onLoad(async (options) => {
   sleepScore.value = options?.sleepScore || 0;
-  await getSleepDetailInfo();
-  await getSleepSegmentInfo();
-  await getRatDetail();
+  await loadSleepDetailData('page-load');
 });
 onPageScroll((e) => {
   scrollTop.value = e.scrollTop;

@@ -7,7 +7,7 @@ import { useRingBusinessController } from '@/composables/useRingBusinessControll
 import { useRingBusinessData } from '@/composables/useRingBusinessData';
 import { useRingStore } from '@/stores';
 import { useUserStore } from '@/stores/user';
-import { clearFrontendRingBindingState, getBoundRingIdentityTail, hasBoundRingIdentity } from '@/utils/ringBinding';
+import { clearFrontendRingBindingState, getBoundRingIdentity, getBoundRingIdentityTail, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
@@ -18,6 +18,7 @@ const ringStore = useRingStore();
 const ring = useRingBusinessData();
 const controller = useRingBusinessController();
 const DEVICE_INFO_SNAPSHOT_WAIT_MS = 12000;
+const DEVICE_INFO_EMPTY_TEXT = '-';
 
 const modalPopup = ref<any>(null);
 const boundInfo = ref<Record<string, any> | null>(null);
@@ -27,7 +28,7 @@ const singleReadResults = ref<Record<string, string>>({});
 
 const isBusy = computed(() => Boolean(busyText.value) || controller.isRefreshingBusinessData.value || controller.isRestoringDevice.value);
 const connectionText = computed(() => (ring.isConnected.value ? '已连接' : '未连接'));
-const deviceName = computed(() => ring.currentDeviceName.value || boundInfo.value?.deviceName || boundInfo.value?.name || '未连接');
+const deviceName = computed(() => getFirstDeviceInfoValue(ring.currentDeviceName.value, boundInfo.value?.deviceName, boundInfo.value?.name));
 const deviceIdentity = computed(() => {
   const currentTail = ring.currentDeviceTail.value;
   if (currentTail && currentTail !== '-') return currentTail;
@@ -62,12 +63,17 @@ const batteryStatusRaw = computed(() =>
       latestBattery.value?.chargingStatusText
   )
 );
-const batteryText = computed(() => singleReadResults.value.battery || formatBatteryStatusForDisplay(batteryValue.value, batteryStatusRaw.value, '-'));
-const batteryStatusText = computed(() => normalizeHealthText(batteryStatusRaw.value, '-'));
+const batteryText = computed(
+  () =>
+    normalizeDeviceInfoDisplayText(
+      singleReadResults.value.battery || formatBatteryStatusForDisplay(batteryValue.value, batteryStatusRaw.value, DEVICE_INFO_EMPTY_TEXT)
+    )
+);
+const batteryStatusText = computed(() => normalizeDeviceInfoDisplayText(normalizeHealthText(batteryStatusRaw.value, DEVICE_INFO_EMPTY_TEXT)));
 const firmwareText = computed(
   () =>
-    singleReadResults.value.firmware ||
-    getFirstMetricValue(
+    getFirstDeviceInfoValue(
+      singleReadResults.value.firmware,
       ring.metrics.value.firmwareVersion,
       ring.metrics.value.hardwareVersion,
       ring.healthData.value?.firmwareVersion,
@@ -80,13 +86,12 @@ const firmwareText = computed(
       latestFirmware.value?.metrics?.hardwareVersion,
       latestFirmware.value?.firmwareVersion,
       latestFirmware.value?.hardwareVersion
-    ) ||
-    '-'
+    )
 );
 const softwareText = computed(
   () =>
-    singleReadResults.value.software ||
-    getFirstMetricValue(
+    getFirstDeviceInfoValue(
+      singleReadResults.value.software,
       ring.metrics.value.softwareVersion,
       ring.metrics.value.uiVersion,
       ring.healthData.value?.softwareVersion,
@@ -99,27 +104,33 @@ const softwareText = computed(
       latestFirmware.value?.metrics?.uiVersion,
       latestFirmware.value?.softwareVersion,
       latestFirmware.value?.uiVersion
-    ) ||
-    '-'
+    )
 );
-const ringSizeText = computed(() => getFirstMetricValue(boundInfo.value?.deviceSize, boundInfo.value?.ringSize, '未连接'));
-const deviceVersionText = computed(() => getFirstMetricValue(boundInfo.value?.deviceVersion, boundInfo.value?.version, '未连接'));
-const serialText = computed(() => getFirstMetricValue(boundInfo.value?.sn, boundInfo.value?.serialNumber, '未连接'));
+const ringSizeText = computed(() => getFirstDeviceInfoValue(boundInfo.value?.deviceSize, boundInfo.value?.ringSize));
+const deviceVersionText = computed(() => getFirstDeviceInfoValue(boundInfo.value?.deviceVersion, boundInfo.value?.version));
+const serialText = computed(() => getFirstDeviceInfoValue(boundInfo.value?.sn, boundInfo.value?.serialNumber));
 const deviceMacText = computed(() =>
-  getFirstMetricValue(
-    ring.currentDeviceIdentity.value,
-    boundInfo.value?.mac,
-    boundInfo.value?.deviceId,
+  getFirstDeviceInfoValue(
+    getDeviceMacFromInfo(ring.deviceInfo.value as Record<string, any> | null | undefined),
+    getDeviceMacFromInfo(ringStore.deviceInfo as Record<string, any> | null | undefined),
+    getDeviceMacFromInfo(userStore.deviceInfo as Record<string, any> | null | undefined),
+    getDeviceMacFromInfo(boundInfo.value),
+    ring.normalMac.value,
+    ring.iosMacId.value,
     userStore.normalMac,
-    userStore.deviceInfo?.deviceId,
-    '未连接'
+    userStore.iosMacId,
+    getBoundRingIdentity(boundInfo.value),
+    ring.currentDeviceIdentity.value
   )
 );
+const deviceNameText = computed(() => deviceName.value || DEVICE_INFO_EMPTY_TEXT);
+const macText = computed(() => deviceMacText.value || DEVICE_INFO_EMPTY_TEXT);
 const refreshStatusText = computed(() => {
   if (busyText.value) return busyText.value;
   if (controller.refreshFailedText.value) return controller.refreshFailedText.value;
   return ring.businessDataFreshnessText.value;
 });
+const readStatusText = computed(() => lastActionText.value || controller.refreshFailedText.value || '');
 
 const summarizeDevice = (device: Record<string, any> | null | undefined) => ({
   deviceId: device?.deviceId,
@@ -359,7 +370,7 @@ const goConnect = () => {
 
 const copyDeviceId = () => {
   const value = deviceMacText.value;
-  if (!value || value === '未连接') {
+  if (!value || value === DEVICE_INFO_EMPTY_TEXT) {
     uni.showToast({ title: '暂无设备ID', icon: 'none' });
     return;
   }
@@ -409,6 +420,41 @@ const formatMetricValue = (value: unknown, suffix = '') => {
 };
 
 const getFirstMetricValue = (...values: any[]) => values.find((value) => value != null && value !== '');
+const EMPTY_DEVICE_INFO_VALUE_TEXTS = new Set(['-', '--', '未连接', '未连接戒指']);
+const SEPARATED_BLE_MAC_TEXT = /^[0-9a-fA-F]{2}([:-][0-9a-fA-F]{2}){2,5}$/;
+
+const normalizeDeviceInfoDisplayText = (value: unknown) => {
+  const text = String(value ?? '').trim();
+  return text && !EMPTY_DEVICE_INFO_VALUE_TEXTS.has(text) ? text : DEVICE_INFO_EMPTY_TEXT;
+};
+
+const getFirstDeviceInfoValue = (...values: any[]) => {
+  const value = values.find((item) => normalizeDeviceInfoDisplayText(item) !== DEVICE_INFO_EMPTY_TEXT);
+  return normalizeDeviceInfoDisplayText(value);
+};
+
+const getSeparatedBleMacValue = (value: unknown) => {
+  const text = normalizeDeviceInfoDisplayText(value);
+  return SEPARATED_BLE_MAC_TEXT.test(text) ? text : '';
+};
+
+const getDeviceMacFromInfo = (device: Record<string, any> | null | undefined) =>
+  getFirstDeviceInfoValue(
+    device?.mac,
+    device?.deviceMac,
+    device?.macAddress,
+    device?.bleMac,
+    device?.bluetoothMac,
+    device?.advertis?.macInfo,
+    device?.advertis?.mac,
+    device?.advertis?.macAddress,
+    device?.raw?.mac,
+    device?.raw?.deviceMac,
+    device?.raw?.macAddress,
+    device?.raw?.advertis?.macInfo,
+    getSeparatedBleMacValue(device?.uniMacId),
+    getSeparatedBleMacValue(device?.deviceId)
+  );
 
 const isBatteryChargedLike = (value: unknown) => {
   if (value == null || value === '') return false;

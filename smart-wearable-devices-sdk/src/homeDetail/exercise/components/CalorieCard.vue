@@ -5,14 +5,20 @@ import { calorieOption } from '@/homeDetail/exercise/echartOptions';
 import type { motionCalorie, Point } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
 import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+import { useUserStore } from '@/stores/user';
+const userStore = useUserStore();
 const props = defineProps({
   motionCalorieObj: {
     type: Object as () => motionCalorie,
     default: () => ({})
+  },
+  sleepDurationMinutes: {
+    type: Number,
+    default: 0
   }
 });
 watch(
-  () => props.motionCalorieObj,
+  () => [props.motionCalorieObj, props.sleepDurationMinutes],
   async (newVal, oldVal) => {
     if (newVal !== oldVal) {
       await initChart();
@@ -21,15 +27,58 @@ watch(
   { deep: true }
 );
 const chartRef = ref<any>(null);
+const toPositiveNumber = (value: unknown) => {
+  if (value == null || value === '') return 0;
+  const numeric = Number(String(value).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+};
 const normalizeCalorie = (value: unknown) =>
   normalizeMotionCalorieKcal(value, {
     targetCalorie: props.motionCalorieObj?.targetCalorie,
     unit: props.motionCalorieObj?.calorieUnit
   }) || 0;
 const calorieUnit = computed(() => MOTION_CALORIE_DISPLAY_UNIT);
-const totalCalorie = computed(() => normalizeCalorie(props.motionCalorieObj?.totalCalorie));
+const getAgeFromBirthday = (birthday: unknown) => {
+  const birthdayText = String(birthday || '').trim();
+  if (!birthdayText) return 30;
+  const birthDate = new Date(birthdayText.replace(/-/g, '/'));
+  if (Number.isNaN(birthDate.getTime())) return 30;
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) age -= 1;
+  return Math.min(100, Math.max(12, age || 30));
+};
+const estimateDailyBasalCalorie = computed(() => {
+  const profile = userStore.userInfo || {};
+  const weight = toPositiveNumber(profile.weight) || 60;
+  const height = toPositiveNumber(profile.height) || 165;
+  const age = getAgeFromBirthday(profile.birthday || profile.birthDay);
+  const sex = String(profile.sex ?? profile.gender ?? '').trim();
+  const isFemale = sex === '1' || sex.toLowerCase() === 'female';
+  const isMale = sex === '0' || sex.toLowerCase() === 'male';
+  const adjustment = isFemale ? -161 : isMale ? 5 : -78;
+  return Math.max(900, Math.round(10 * weight + 6.25 * height - 5 * age + adjustment));
+});
+const basalActiveRatio = computed(() => {
+  const sleepMinutes = Number(props.sleepDurationMinutes) || 0;
+  if (sleepMinutes <= 0) return 1;
+  return Math.min(1, Math.max(0, (1440 - Math.min(sleepMinutes, 1440)) / 1440));
+});
+const rawBasalCalorie = computed(() => normalizeCalorie(props.motionCalorieObj?.basalCalorie));
+const dailyBasalCalorie = computed(() => rawBasalCalorie.value > 0 ? rawBasalCalorie.value : estimateDailyBasalCalorie.value);
 const motionCalorie = computed(() => normalizeCalorie(props.motionCalorieObj?.motionCalorie));
-const basalCalorie = computed(() => normalizeCalorie(props.motionCalorieObj?.basalCalorie));
+const basalCalorie = computed(() => dailyBasalCalorie.value * basalActiveRatio.value);
+const totalCalorie = computed(() => {
+  const rawTotal = normalizeCalorie(props.motionCalorieObj?.totalCalorie);
+  if (rawTotal > 0 && rawBasalCalorie.value > 0) {
+    return Math.max(0, rawTotal - rawBasalCalorie.value + basalCalorie.value);
+  }
+  if (motionCalorie.value > 0 || basalCalorie.value > 0) {
+    return motionCalorie.value + basalCalorie.value;
+  }
+  return rawTotal;
+});
 const totalCalorieText = computed(() => formatMotionCalorieKcal(totalCalorie.value));
 const motionCalorieText = computed(() => formatMotionCalorieKcal(motionCalorie.value));
 const basalCalorieText = computed(() => formatMotionCalorieKcal(basalCalorie.value));
@@ -38,16 +87,23 @@ const hasMotionCalorie = computed(() => motionCalorie.value > 0);
 const hasBasalCalorie = computed(() => basalCalorie.value > 0);
 const getProcessedOption = () => {
   const newOption = cloneDeep(calorieOption);
-  const hasMotion = !!props.motionCalorieObj?.motionCalorieChart?.length;
+  const hasBasalChart = !!props.motionCalorieObj?.basalCalorieChart?.length;
 
   // 1. 根据数据生成完整的x轴数据
-  const firstFullXData = props.motionCalorieObj?.motionCalorieChart?.map((item: Point) => item.time?.toString() || '00:00') || [];
+  const firstFullXData =
+    props.motionCalorieObj?.motionCalorieChart?.map((item: Point) => item.time?.toString() || '00:00') ||
+    props.motionCalorieObj?.basalCalorieChart?.map((item: Point) => item.time?.toString() || '00:00') ||
+    Array.from({ length: 24 }, (_, index) => `${index.toString().padStart(2, '0')}:00`);
   // 2. 生成完整的series数据（数值类型）
   // const firstFullSeriesData = [0, 50, 48, 69, 31, 53, 60, 65, 80, 68, 76, 72, 78, 82, 85, 83, 80, 77, 75, 73, 70, 68, 65, 63];
-  const firstFullSeriesData = props.motionCalorieObj?.motionCalorieChart?.map((item: Point) => normalizeCalorie(item.value)) || [];
+  const firstFullSeriesData =
+    props.motionCalorieObj?.motionCalorieChart?.map((item: Point) => normalizeCalorie(item.value)) ||
+    firstFullXData.map(() => 0);
   // 给第二条线生成完整的series数据（数值类型）
   // const secoundFullSeriesData = [0, 60, 58, 59, 61, 63, 70, 75, 80, 78, 76, 72, 78, 82, 85, 83, 80, 77, 75, 73, 70, 68, 65, 63];
-  const secoundFullSeriesData = (hasMotion && props.motionCalorieObj?.basalCalorieChart?.map((item: Point) => normalizeCalorie(item.value))) || [];
+  const secoundFullSeriesData =
+    (hasBasalChart && props.motionCalorieObj?.basalCalorieChart?.map((item: Point) => normalizeCalorie(item.value) * basalActiveRatio.value)) ||
+    firstFullXData.map(() => Number((basalCalorie.value / Math.max(firstFullXData.length, 1)).toFixed(1)));
   // 3. 替换xAxis.data和series.data为完整数据
   newOption.xAxis.data = firstFullXData;
   newOption.series[0].data = firstFullSeriesData;

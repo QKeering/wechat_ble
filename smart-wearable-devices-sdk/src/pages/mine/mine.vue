@@ -211,6 +211,15 @@ const menuList = [
     path: '/pagesA/mines/question'
   }
 ];// const pullDownProgress// const pullDownProgress = ref(0);
+const mineMenuNavigating = ref(false);
+const handleMineMenuTap = (item: { path?: string }) => {
+  if (!item?.path || mineMenuNavigating.value) return;
+  mineMenuNavigating.value = true;
+  (uni as any).$uv.route(item.path);
+  setTimeout(() => {
+    mineMenuNavigating.value = false;
+  }, 800);
+};
 const scrollTop = ref(0);
 // Delay hiding upload progress so success state remains visible briefly.
 const shouldHideProgress = ref(false);
@@ -3959,7 +3968,7 @@ const handleMineRwL19Acceptance = async () => {
       <image class="mine-bg-image" src="/static/images/bg05.png" mode="widthFix"></image>
     </view>
 
-    <view class="p-30 pb-100 relative" style="z-index: 1; box-sizing: border-box">
+    <view class="p-30 pb-100 relative mine-content" style="z-index: 1; box-sizing: border-box">
       <view class="pl-30 pr-30">
         <view class="user-section mb-50">
           <view v-if="userStore.userInfo.id" @click="$uv.route('/pagesA/mines/profile')" class="user-card user-card--logged flex ai-center">
@@ -4104,7 +4113,7 @@ const handleMineRwL19Acceptance = async () => {
       </view>
 
       <view class="menu-section">
-        <view class="menu-item flex jc-between ai-center bg-white r-50 mb-30 pt-30 pr-40 pb-30 pl-40" v-for="(item, index) in menuList" :key="index" @click="$uv.route(item.path)">
+        <view class="menu-item flex jc-between ai-center bg-white r-50 mb-30 pt-30 pr-40 pb-30 pl-40" v-for="(item, index) in menuList" :key="index" @tap.stop="handleMineMenuTap(item)">
           <view class="menu-item__content flex ai-center">
             <image class="menu-icon" :src="item.icon" mode="aspectFit"></image>
             <view class="menu-title fs-36 ml-30">{{ item.title }}</view>
@@ -4120,6 +4129,13 @@ const handleMineRwL19Acceptance = async () => {
   &:last-child {
     margin-bottom: 0;
   }
+}
+.mine-content {
+  display: flex;
+  flex-direction: column;
+}
+.menu-section {
+  order: 10;
 }
 .mine-bg-image {
   display: block;
@@ -4158,6 +4174,7 @@ const handleMineRwL19Acceptance = async () => {
 }
 .rw-diagnostic-panel {
   box-sizing: border-box;
+  order: 99;
 }
 .rw-diagnostic-title {
   color: #111827;

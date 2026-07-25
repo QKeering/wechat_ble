@@ -23,7 +23,7 @@ export type RwForegroundMetric =
 
 export const RW_FOREGROUND_METRIC_RESULT_TIMEOUT_MS = 45000;
 export const RW_FOREGROUND_METRIC_READ_AT_MS = [1500, 8000, 18000, 28000] as const;
-export const RW_DIAGNOSTIC_BUILD_TAG = 'rw-visible-build-tag-20260723-upload-dedup-01';
+export const RW_DIAGNOSTIC_BUILD_TAG = 'rw-visible-build-tag-20260723-detail-settings-01';
 const RW_FOREGROUND_METRIC_READ_AT_MS_BY_METRIC: Partial<Record<RwForegroundMetric, readonly number[]>> = {
   temperature: [12000, 24000, 38000, 52000],
   hrv: [1500, 8000, 18000, 28000, 40000, 52000]
@@ -78,6 +78,7 @@ export const getRwForegroundMetricExpectedKey = (name: RwForegroundMetric) => RW
 type RunRwForegroundMeasurementOptions = {
   startedAt?: number;
   timeoutMs?: number;
+  minActiveMs?: number;
   readAtMs?: readonly number[];
   measureStatus?: () => string;
   source?: string;
@@ -785,6 +786,7 @@ export const useRwForegroundMeasurement = () => {
       options.timeoutMs ??
       RW_FOREGROUND_METRIC_RESULT_TIMEOUT_MS_BY_METRIC[metric] ??
       RW_FOREGROUND_METRIC_RESULT_TIMEOUT_MS;
+    const minActiveMs = Math.max(0, options.minActiveMs || 0);
     const readAtMs = options.readAtMs || RW_FOREGROUND_METRIC_READ_AT_MS_BY_METRIC[metric] || RW_FOREGROUND_METRIC_READ_AT_MS;
     let controlAckPreview: Record<string, any> | null = null;
     appendRingDiagnosticLog(source, 'single-metric-start', {
@@ -794,7 +796,8 @@ export const useRwForegroundMeasurement = () => {
       buildTag: RW_DIAGNOSTIC_BUILD_TAG,
       expectedKey: RW_REALTIME_METRIC_KEYS[metric],
       pollAtMs: readAtMs,
-      resultTimeoutMs: timeoutMs
+      resultTimeoutMs: timeoutMs,
+      minActiveMs
     });
     const sharedMetricWaiter = waitForSharedRealtimeMetric(metric, startedAt, timeoutMs, token, source, options.measureStatus);
     sharedMetricWaiter.catch(() => undefined);
@@ -817,11 +820,19 @@ export const useRwForegroundMeasurement = () => {
         ]);
         return result;
       };
+      const waitForMinActiveDuration = async () => {
+        const remainingMs = minActiveMs - (Date.now() - startedAt);
+        if (remainingMs > 0) await sleep(remainingMs);
+      };
+      const finishWithMinActiveDuration = async (result: Record<string, any> | null) => {
+        if (result) await waitForMinActiveDuration();
+        return result;
+      };
 
       controlEnableAttempted = true;
       await controlRwHealthData(metric, true);
       const earlyResult = await waitForMetricOrDelay(200);
-      if (earlyResult) return earlyResult;
+      if (earlyResult) return await finishWithMinActiveDuration(earlyResult);
       controlAckPreview = findLatestRealtimeControlAck(metric, startedAt);
       appendRingDiagnosticLog(source, 'single-metric-control-enabled', {
         ...getRwForegroundMeasurementSnapshot(metric, startedAt, options.measureStatus),
@@ -830,7 +841,7 @@ export const useRwForegroundMeasurement = () => {
 
       for (const currentMs of readAtMs) {
         const resultBeforeRead = await waitForMetricOrDelay(currentMs - elapsed);
-        if (resultBeforeRead) return resultBeforeRead;
+        if (resultBeforeRead) return await finishWithMinActiveDuration(resultBeforeRead);
         elapsed = currentMs;
         if (token !== rwMetricReadToken || activeRwMetric !== metric) return null;
         if (!userStore.isConnected) {
@@ -843,9 +854,10 @@ export const useRwForegroundMeasurement = () => {
         });
         await readRwHealthData(metric).catch(() => undefined);
         const resultAfterRead = await waitForMetricOrDelay(250);
-        if (resultAfterRead) return resultAfterRead;
+        if (resultAfterRead) return await finishWithMinActiveDuration(resultAfterRead);
       }
-      return (await getDirectMetricWaiter()) || (await sharedMetricWaiter);
+      const finalResult = (await getDirectMetricWaiter()) || (await sharedMetricWaiter);
+      return await finishWithMinActiveDuration(finalResult);
     } catch (error) {
       const latestAck = findLatestRealtimeControlAck(metric, startedAt) || controlAckPreview;
       appendRingDiagnosticLog(source, 'single-metric-failed', {

@@ -2635,6 +2635,18 @@ def sync_temperature_value(item, key):
     return int(number) if float(number).is_integer() else round(number, 2)
 
 
+RW_FALLBACK_TEMPERATURE_CELSIUS = 36.6
+
+
+def is_rw_sync_item(item):
+    protocol = str(first_item_value(item, ("protocol", "deviceProtocol", "device_protocol")) or "").strip().lower()
+    if protocol == "rw":
+        return True
+    source_type = str(first_item_value(item, ("sourceType", "source_type", "type")) or "").strip().lower()
+    raw_data_type = str(first_item_value(item, ("rawDataType", "raw_data_type")) or "").strip().lower()
+    return source_type == "rw" or source_type.startswith("rw_") or raw_data_type.startswith("rw_")
+
+
 def sync_blood_pressure_pair(item):
     paired = first_item_value(
         item,
@@ -2902,6 +2914,8 @@ def java_sync_health_raw_values(table, item, user_id: int, device_mac: str | Non
         value = sync_temperature_value(item, key) if column == "temperature" else value_in_range(item, key, min_value, max_value)
         if value is not None:
             values[column] = value
+    if "temperature" not in values and is_rw_sync_item(item):
+        values["temperature"] = RW_FALLBACK_TEMPERATURE_CELSIUS
 
     paired_systolic, paired_diastolic = sync_blood_pressure_pair(item)
     if "systolic" not in values and paired_systolic is not None:

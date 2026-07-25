@@ -1,4 +1,4 @@
-import { bindRingDevice, clearBoundRingDevice, getBoundRingDevice, unbindRingDevice } from '@/api';
+import { bindRingDevice, clearBoundRingDevice, getBoundRingDevice, normalizeRingBoundDevice, unbindRingDevice } from '@/api';
 import type { RingBindPayload } from '@/sdk/ring-ble';
 import type { DeviceInfo, DeviceModel } from '@/types/api/device';
 import { hasBoundRingIdentity } from '@/utils/ringBinding';
@@ -38,6 +38,18 @@ const getBindInfoFingerprint = (device: DeviceInfo | null | undefined) => {
     .join('|');
 };
 
+const normalizeBindInfoResponse = (payload: unknown): DeviceInfo | null => {
+  const direct = normalizeRingBoundDevice(payload as any) as DeviceInfo | null;
+  if (hasBoundRingIdentity(direct)) return direct;
+  const source = payload as Record<string, any> | null | undefined;
+  if (!source || typeof source !== 'object') return null;
+  for (const key of ['data', 'result', 'device', 'current', 'currentDevice']) {
+    const nested = normalizeRingBoundDevice(source[key] as any) as DeviceInfo | null;
+    if (hasBoundRingIdentity(nested)) return nested;
+  }
+  return null;
+};
+
 const getRemoteBindInfo = async (
   config: HttpRequestConfigCompat,
   useCache: boolean,
@@ -63,7 +75,7 @@ const getRemoteBindInfo = async (
         custom: { toast: false, catch: true },
         ...config
       });
-      const value = hasBoundRingIdentity(remote) ? remote : null;
+      const value = normalizeBindInfoResponse(remote);
       if (useCache) {
         remoteBindInfoCache = {
           value,

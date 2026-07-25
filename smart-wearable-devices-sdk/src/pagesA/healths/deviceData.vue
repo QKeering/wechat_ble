@@ -16,6 +16,7 @@ import {
 } from '@/composables/useRingMetricReadings';
 import { isRwForegroundMetric, useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
 import { formatBleErrorMessage, isExpectedBleRuntimeError } from '@/utils/bleError';
+import { getRemainingVitalMeasurementMs } from '@/utils/measurementDuration';
 import { submitData } from '@/common/api/homeDetail';
 import type { submitDataType } from '@/types/api/homeDetail';
 
@@ -31,7 +32,7 @@ const {
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
 const userStore = useUserStore();
 
-const measureStatus = ref<'idle' | 'measuring_hr' | 'measuring_spo2' | 'measuring_temp' | 'completed'>('idle');
+const measureStatus = ref<'idle' | 'measuring_hr' | 'measuring_hrv' | 'measuring_spo2' | 'measuring_temp' | 'completed'>('idle');
 const heartRate = ref<number | null>(null);
 const heartRateVariability = ref<number | null>(null);
 const stressIndex = ref<number | null>(null);
@@ -46,6 +47,7 @@ let progressAnimationTimer: ReturnType<typeof setInterval> | null = null;
 let progressIntervals: ReturnType<typeof setInterval>[] = [];
 let measureTimeout: ReturnType<typeof setTimeout> | null = null;
 let rwAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
+let completionDelayTimer: ReturnType<typeof setTimeout> | null = null;
 let measureStartedAt = 0;
 
 const DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS = 35000;
@@ -55,6 +57,7 @@ const measureStatusText = computed(() => {
   const statusMap = {
     idle: '准备测量',
     measuring_hr: '正在测量心率',
+    measuring_hrv: '正在测量心率变异性',
     measuring_spo2: '正在测量血氧',
     measuring_temp: '正在测量皮肤温度',
     completed: '测量完成'
@@ -74,7 +77,14 @@ const measureStepItems = computed(() => [
     label: '心率',
     desc: heartRate.value ? `${heartRate.value} bpm` : '等待数据',
     active: measureStatus.value === 'measuring_hr',
-    done: ['measuring_spo2', 'measuring_temp', 'completed'].includes(measureStatus.value) || Boolean(heartRate.value)
+    done: ['measuring_hrv', 'measuring_spo2', 'measuring_temp', 'completed'].includes(measureStatus.value) || Boolean(heartRate.value)
+  },
+  {
+    key: 'hrv',
+    label: '心率变异性',
+    desc: heartRateVariability.value ? `${heartRateVariability.value} ms` : '等待数据',
+    active: measureStatus.value === 'measuring_hrv',
+    done: ['measuring_spo2', 'measuring_temp', 'completed'].includes(measureStatus.value) || Boolean(heartRateVariability.value)
   },
   {
     key: 'spo2',
@@ -126,9 +136,16 @@ const clearRwAdvanceTimer = () => {
   rwAdvanceTimer = null;
 };
 
+const clearCompletionDelayTimer = () => {
+  if (!completionDelayTimer) return;
+  clearTimeout(completionDelayTimer);
+  completionDelayTimer = null;
+};
+
 const stopMeasurementFlow = () => {
   clearMeasureTimeout();
   clearRwAdvanceTimer();
+  clearCompletionDelayTimer();
   if (progressAnimationTimer) {
     clearInterval(progressAnimationTimer);
     progressAnimationTimer = null;
@@ -207,10 +224,29 @@ const startHrMeasurement = () => {
   measureStatus.value = 'measuring_hr';
   measureProgress.value = 0;
   clearAllProgressIntervals();
-  void sendMeasurementCommand(sendActiveMeasureCommand, 'heart_rate');
-  pushProgressInterval(33, 'measuring_hr');
+  void sendMeasurementCommand(sendActiveMeasureCommand, 'heart_rate').then(() => {
+    if (isRwDevice() && measureStatus.value === 'measuring_hr' && getLatestHeartRateData()?.heartRate) {
+      startHrvMeasurement();
+    }
+  });
+  pushProgressInterval(25, 'measuring_hr');
   measureTimeout = setTimeout(() => {
-    if (measureStatus.value === 'measuring_hr') startSpo2Measurement();
+    if (measureStatus.value === 'measuring_hr') startHrvMeasurement();
+  }, DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS);
+};
+
+const startHrvMeasurement = () => {
+  measureStatus.value = 'measuring_hrv';
+  clearAllProgressIntervals();
+  clearMeasureTimeout();
+  void sendMeasurementCommand(sendActiveMeasureCommand, 'hrv').then(() => {
+    if (isRwDevice() && measureStatus.value === 'measuring_hrv' && getLatestHrvData()?.heartRateVariability) {
+      startSpo2Measurement();
+    }
+  });
+  pushProgressInterval(50, 'measuring_hrv');
+  measureTimeout = setTimeout(() => {
+    if (measureStatus.value === 'measuring_hrv') startSpo2Measurement();
   }, DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS);
 };
 
@@ -218,8 +254,12 @@ const startSpo2Measurement = () => {
   measureStatus.value = 'measuring_spo2';
   clearAllProgressIntervals();
   clearMeasureTimeout();
-  void sendMeasurementCommand(sendOxyGenCommand, 'blood_oxygen');
-  pushProgressInterval(66, 'measuring_spo2');
+  void sendMeasurementCommand(sendOxyGenCommand, 'blood_oxygen').then(() => {
+    if (isRwDevice() && measureStatus.value === 'measuring_spo2' && getLatestSpo2Data()?.bloodOxygen) {
+      startTemperatureMeasurement();
+    }
+  });
+  pushProgressInterval(75, 'measuring_spo2');
   measureTimeout = setTimeout(() => {
     if (measureStatus.value === 'measuring_spo2') {
       startTemperatureMeasurement();
@@ -231,7 +271,11 @@ const startTemperatureMeasurement = () => {
   measureStatus.value = 'measuring_temp';
   clearAllProgressIntervals();
   clearMeasureTimeout();
-  void sendMeasurementCommand(sendBodyTemperatureCommand, 'temperature');
+  void sendMeasurementCommand(sendBodyTemperatureCommand, 'temperature').then(() => {
+    if (isRwDevice() && measureStatus.value === 'measuring_temp' && getLatestTemperatureData()?.temperature) {
+      completeMeasurement();
+    }
+  });
   pushProgressInterval(100, 'measuring_temp');
   measureTimeout = setTimeout(() => {
     if (measureStatus.value === 'measuring_temp') completeMeasurement();
@@ -239,8 +283,19 @@ const startTemperatureMeasurement = () => {
 };
 
 const completeMeasurement = () => {
+  if (measureStatus.value === 'completed') return;
+  const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt);
+  if (remainingMs > 0) {
+    if (completionDelayTimer) return;
+    completionDelayTimer = setTimeout(() => {
+      completionDelayTimer = null;
+      completeMeasurement();
+    }, remainingMs);
+    return;
+  }
   clearMeasureTimeout();
   clearRwAdvanceTimer();
+  clearCompletionDelayTimer();
   if (progressAnimationTimer) {
     clearInterval(progressAnimationTimer);
     progressAnimationTimer = null;
@@ -249,6 +304,11 @@ const completeMeasurement = () => {
   void stopActiveRwMeasurement('RW PAGE');
   measureProgress.value = 100;
   measureStatus.value = 'completed';
+};
+
+const isCollectingMeasureResult = (data: any) => {
+  const statusText = String(data?.status ?? data?.message ?? data?.msg ?? data?.desc ?? '').toLowerCase();
+  return statusText.includes('采集中') || statusText.includes('测量中') || statusText.includes('collect');
 };
 
 const showOtherStatusToast = (receivedData: any[], status: boolean, type: '心率' | '血氧' | '皮肤温度') => {
@@ -260,6 +320,7 @@ const showOtherStatusToast = (receivedData: any[], status: boolean, type: '心�
     皮肤温度: 'active_Temperature'
   } as const;
   const latestValidResult = receivedData.find((item: any) => item.type === typeMap[type]);
+  if (!latestValidResult || isCollectingMeasureResult(latestValidResult)) return;
   clearMeasureTimeout();
   uni.showToast({ title: `${type}测量状态：${latestValidResult?.status || '未返回有效值'}`, icon: 'none', duration: 1500 });
   measureStatus.value = 'idle';
@@ -271,19 +332,27 @@ const showOtherStatusToast = (receivedData: any[], status: boolean, type: '心�
 watch(
   () => [userStore.receivedData, userStore.latestMetrics, userStore.healthData],
   () => {
-    if (!['measuring_temp', 'measuring_hr', 'measuring_spo2'].includes(measureStatus.value)) return;
+    if (!['measuring_temp', 'measuring_hr', 'measuring_hrv', 'measuring_spo2'].includes(measureStatus.value)) return;
     const receivedData = userStore.receivedData || [];
 
     if (isRwDevice() && measureStatus.value === 'measuring_hr' && getLatestHeartRateData()?.heartRate) {
-      measureProgress.value = Math.max(measureProgress.value, 50);
+      measureProgress.value = Math.max(measureProgress.value, 25);
       advanceRwMeasureSoon(() => {
-        if (measureStatus.value === 'measuring_hr') startSpo2Measurement();
+        if (measureStatus.value === 'measuring_hr') startHrvMeasurement();
       });
       return;
     }
 
+    if (isRwDevice() && measureStatus.value === 'measuring_hrv' && getLatestHrvData()?.heartRateVariability) {
+      measureProgress.value = Math.max(measureProgress.value, 50);
+      advanceRwMeasureSoon(() => {
+        if (measureStatus.value === 'measuring_hrv') startSpo2Measurement();
+      }, 500);
+      return;
+    }
+
     if (isRwDevice() && measureStatus.value === 'measuring_spo2' && hasRwRealtimeCoreData()) {
-      measureProgress.value = Math.max(measureProgress.value, 66);
+      measureProgress.value = Math.max(measureProgress.value, 75);
       advanceRwMeasureSoon(() => {
         if (measureStatus.value === 'measuring_spo2') startTemperatureMeasurement();
       }, 500);
@@ -300,9 +369,20 @@ watch(
 
     if (isRwDevice()) return;
 
-    const hasCompletedMeasureH = receivedData.some((data: any) => data.type === 'active_measure' && data.heartbeatStatus !== 0x03);
-    const hasCompletedMeasureO = receivedData.some((data: any) => data.type === 'active_OxyGenMeasure' && data.bloodOxygenStatus !== 0x03);
-    const hasCompletedMeasureT = receivedData.some((data: any) => data.type === 'active_Temperature' && data.temperatureStatus !== 0x00 && data.temperatureStatus !== 0x01);
+    const hasCompletedMeasureH = receivedData.some(
+      (data: any) => data.type === 'active_measure' && data.heartbeatStatus != null && data.heartbeatStatus !== 0x03 && !isCollectingMeasureResult(data)
+    );
+    const hasCompletedMeasureO = receivedData.some(
+      (data: any) => data.type === 'active_OxyGenMeasure' && data.bloodOxygenStatus != null && data.bloodOxygenStatus !== 0x03 && !isCollectingMeasureResult(data)
+    );
+    const hasCompletedMeasureT = receivedData.some(
+      (data: any) =>
+        data.type === 'active_Temperature' &&
+        data.temperatureStatus != null &&
+        data.temperatureStatus !== 0x00 &&
+        data.temperatureStatus !== 0x01 &&
+        !isCollectingMeasureResult(data)
+    );
     const hasCompletedStatus = receivedData.some((data: any) => data.type === 'active_Temperature' && data.temperatureStatus === 0x01);
 
     if (hasCompletedStatus) {
@@ -474,6 +554,7 @@ const handleMeasure = async () => {
   const { deviceId, serviceId } = userStore.deviceInfo;
   try {
     resetMeasurementValues();
+    clearCompletionDelayTimer();
     measureStartedAt = Date.now();
 
     if (deviceId) {

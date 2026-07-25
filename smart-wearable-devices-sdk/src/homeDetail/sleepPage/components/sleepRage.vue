@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue';
 import { cloneDeep } from 'lodash-es';
 import { sleepRageOption } from '@/homeDetail/sleepPage/echartOptions';
 import type { sleepSegment, Point } from '@/types/api/homeDetail';
+import { SLEEP_STAGE_COLORS, SLEEP_STAGE_ORDER, type SleepStageName } from '@/homeDetail/sleepPage/sleepStageColors';
 
 const echarts = require('../../../static/echarts.min.js');
 
@@ -12,17 +13,6 @@ const props = defineProps({
     default: () => ({})
   }
 });
-
-type SleepStageName = '深睡' | '浅睡' | '快速眼动' | '清醒' | '小睡';
-
-const SLEEP_ORDER: SleepStageName[] = ['深睡', '浅睡', '快速眼动', '清醒', '小睡'];
-const SLEEP_COLORS: Record<SleepStageName, string> = {
-  深睡: '#5f57ec',
-  浅睡: '#c5c2f9',
-  快速眼动: '#9994f4',
-  清醒: '#e2e1fd',
-  小睡: '#feba8a'
-};
 
 const STAGE_NAME_MAP: Record<string, SleepStageName> = {
   '1': '清醒',
@@ -44,6 +34,7 @@ const STAGE_NAME_MAP: Record<string, SleepStageName> = {
 };
 
 const chartRef = ref<any>(null);
+const chartInstance = ref<any>(null);
 
 const normalizeStageName = (value: unknown): SleepStageName | '' => {
   const key = String(value ?? '').trim();
@@ -57,14 +48,14 @@ const normalizeMinutes = (value: unknown) => {
 };
 
 const formatMinutesToTime = (minutes: number): string => {
-  if (!Number.isFinite(minutes) || minutes <= 0) return '0小时00分钟';
+  if (!Number.isFinite(minutes) || minutes <= 0) return '0小时00分';
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
-  return `${hours}小时${remainingMinutes.toString().padStart(2, '0')}分钟`;
+  return `${hours}小时${remainingMinutes.toString().padStart(2, '0')}分`;
 };
 
 const collectStageTotals = (data: Point[] = []) => {
-  const totals = SLEEP_ORDER.reduce(
+  const totals = SLEEP_STAGE_ORDER.reduce(
     (result, stage) => {
       result[stage] = 0;
       return result;
@@ -84,7 +75,7 @@ const collectStageTotals = (data: Point[] = []) => {
 const stageTotals = computed(() => {
   const section = Array.isArray(props.sleepSegmentObj?.chartDataSection) ? props.sleepSegmentObj.chartDataSection : [];
   const sectionTotals = collectStageTotals(section);
-  const hasSectionData = SLEEP_ORDER.some((stage) => sectionTotals[stage] > 0);
+  const hasSectionData = SLEEP_STAGE_ORDER.some((stage) => sectionTotals[stage] > 0);
   if (hasSectionData) return sectionTotals;
 
   const chartData = Array.isArray(props.sleepSegmentObj?.chartData) ? props.sleepSegmentObj.chartData : [];
@@ -92,10 +83,10 @@ const stageTotals = computed(() => {
 });
 
 const stageStats = computed(() => {
-  const values = SLEEP_ORDER.map((name) => ({
+  const values = SLEEP_STAGE_ORDER.map((name) => ({
     name,
     minutes: stageTotals.value[name] || 0,
-    color: SLEEP_COLORS[name]
+    color: SLEEP_STAGE_COLORS[name]
   }));
   const total = values.reduce((sum, item) => sum + item.minutes, 0);
   return values.map((item) => ({
@@ -156,17 +147,28 @@ const initChart = async () => {
   if (!chartRef.value) return;
   try {
     const pie = await chartRef.value.init(echarts);
+    chartInstance.value = pie;
     pie.setOption(getProcessedOption(), true);
   } catch (error) {
     console.error('睡眠区间图表初始化失败', error);
   }
 };
 
+const refreshChart = async () => {
+  await nextTick();
+  if (chartInstance.value) {
+    chartInstance.value.setOption(getProcessedOption(), true);
+    return;
+  }
+  setTimeout(() => {
+    void initChart();
+  }, 80);
+};
+
 watch(
   () => props.sleepSegmentObj,
   async () => {
-    await nextTick();
-    await initChart();
+    await refreshChart();
   },
   { deep: true, immediate: true }
 );
@@ -212,13 +214,14 @@ watch(
   display: flex;
   align-items: center;
   width: 100%;
-  min-height: 340rpx;
+  min-height: 330rpx;
   margin-top: 18rpx;
 }
 
 .sleep-range-chart {
-  width: 300rpx;
-  flex: 0 0 300rpx;
+  width: 292rpx;
+  height: 320rpx;
+  flex: 0 0 292rpx;
 }
 
 .sleep-stage-stats {
@@ -242,7 +245,10 @@ watch(
 }
 
 .sleep-stage-name {
+  flex: 0 0 138rpx;
+  min-width: 0;
   color: #010101;
+  white-space: nowrap;
 }
 
 .sleep-stage-dot {
@@ -253,13 +259,17 @@ watch(
 }
 
 .sleep-stage-value {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-end;
   color: #010101;
+  font-size: 22rpx;
   white-space: nowrap;
 }
 
 .sleep-stage-percent {
-  width: 78rpx;
-  margin-left: 12rpx;
+  width: 66rpx;
+  margin-left: 8rpx;
   color: #979797;
   text-align: right;
 }

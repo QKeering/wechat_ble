@@ -36,6 +36,7 @@ import CustomSteps from '@/components/customSteps.vue';
 import ProgressBar from '@/components/progressBar.vue';
 import { submitData } from '@/common/api/homeDetail';
 import { bind, unbind, getBindInfo } from '@/common/api/device';
+import { getGoalInfo } from '@/common/api/user';
 import DetailInfo from '@/components/DetailInfo.vue';
 import { usePopupFixer } from '@/hooks/usePopupFixer';
 import { formatBleErrorMessage } from '@/utils/bleError';
@@ -46,6 +47,7 @@ import { useRingBusinessHistoryPageSync } from '@/composables/useRingBusinessHis
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 import { formatBatteryStatusForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
+import { getAppForegroundSessionId } from '@/utils/appForegroundSession';
 import {
   buildRingHistorySubmitRecords,
   countRingHistoryRecordMetrics,
@@ -99,6 +101,7 @@ const motionSummaryObj = ref<motionSummary>();
 const stressSummaryObj = ref<stressSummaryType>();
 const vitalSignObj = ref<vitalSignType>();
 const balanceScoreObj = ref<balanceScoreType>();
+const homeGoalInfo = ref<Record<string, any>>({});
 
 const healthAvgScore = computed(() => {
   const sleepScore = balanceScoreObj.value?.sleepScore || 0;
@@ -126,6 +129,7 @@ let awarenessProcessedRefreshPromise: Promise<void> | null = null;
 let lastAwarenessRefreshAt = 0;
 let lastAwarenessHistorySyncAt = 0;
 let lastAwarenessDeviceTimeSyncAt = 0;
+let lastAwarenessHomeUploadSessionKey = '';
 let lastLegacyLocalDataUploadKey = '';
 let lastLegacyLocalDataUploadAt = 0;
 let lastAwarenessProcessedRefreshAt = 0;
@@ -178,6 +182,39 @@ const getAwarenessConnectionSnapshot = () => ({
   storeDevice: summarizeAwarenessDevice(ringStore.deviceInfo as Record<string, any>),
   userDevice: summarizeAwarenessDevice(userStore.deviceInfo as Record<string, any>)
 });
+const getAwarenessHomeUploadDeviceKey = () => {
+  const device = (userStore.deviceInfo || ringStore.deviceInfo || {}) as Record<string, any>;
+  return String(
+    device.deviceId ||
+      device.uniMacId ||
+      device.mac ||
+      device.advertis?.macInfo ||
+      device.deviceName ||
+      device.name ||
+      'unknown-device'
+  );
+};
+const getAwarenessHomeUploadSessionKey = () => `${getAppForegroundSessionId() || 'unknown-session'}:${getAwarenessHomeUploadDeviceKey()}`;
+const claimAwarenessHomeSyncSession = (trigger: string, options: { force?: boolean } = {}) => {
+  const uploadSessionKey = getAwarenessHomeUploadSessionKey();
+  if (!options.force && lastAwarenessHomeUploadSessionKey === uploadSessionKey) {
+    appendAwarenessDiagnosticLog('home-sync-session-skipped', {
+      reason: 'same-app-foreground-session',
+      trigger,
+      uploadSessionKey,
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+    return false;
+  }
+  lastAwarenessHomeUploadSessionKey = uploadSessionKey;
+  appendAwarenessDiagnosticLog('home-sync-session-claimed', {
+    trigger,
+    force: options.force === true,
+    uploadSessionKey,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+  return true;
+};
 const getLocalDayStartUnixTimestamp = (date = new Date()) => Math.floor(new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime() / 1000);
 const formatUnixTimestampForLog = (timestamp?: number) => {
   if (!timestamp) return '';
@@ -322,6 +359,19 @@ const getPositiveMetricNumber = (...values: unknown[]) => {
   }
   return 0;
 };
+const unwrapAwarenessApiData = (source: any) => {
+  const first = source?.data ?? source?.result ?? source;
+  return first?.goalInfo ?? first?.userGoal ?? first?.data ?? first?.result ?? first ?? {};
+};
+const getAwarenessValueByKeys = (source: Record<string, any>, keys: string[]) => {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  return undefined;
+};
+const getHomeGoalNumber = (keys: string[], fallback: unknown) =>
+  getPositiveMetricNumber(getAwarenessValueByKeys(homeGoalInfo.value, keys), fallback);
 const isPendingMetricStatus = (value: unknown) => /[\u91c7\u96c6\u4e2d\u6d4b\u91cf\u8bfb\u53d6\u8bf7\u6c42\u7b49\u5f85]/.test(String(value ?? ''));
 const getRelaxStatusByScore = (score: number) => {
   if (score >= 80) return '\u5e73\u7a33\u72b6\u6001';
@@ -408,7 +458,11 @@ const activityCalorieNumber = computed(
   () =>
     normalizeMotionCalorieKcal(activityCalorieRawNumber.value, {
       stepCount: activityStepNumber.value,
-      targetCalorie: motionOverviewObj.value?.targetCalorie
+      targetCalorie:
+        getHomeGoalNumber(
+          ['calorie', 'calorieTarget', 'targetCalorie', 'caloriesTarget', 'targetCalories'],
+          motionOverviewObj.value?.targetCalorie
+        ) || 500
     }) || 0
 );
 const activityMotionTimeNumber = computed(() =>
@@ -424,9 +478,18 @@ const activityStepValue = computed(() => (activityStepNumber.value > 0 ? `${acti
 const activityCalorieValue = computed(() => formatMotionCalorieKcal(activityCalorieNumber.value));
 const activityCalorieUnit = computed(() => MOTION_CALORIE_DISPLAY_UNIT);
 const activityMotionTimeValue = computed(() => (activityMotionTimeNumber.value > 0 ? `${activityMotionTimeNumber.value}` : '00'));
-const activityTargetStep = computed(() => getPositiveMetricNumber(motionOverviewObj.value?.targetStep) || 6000);
-const activityTargetCalorie = computed(() => getPositiveMetricNumber(motionOverviewObj.value?.targetCalorie) || 500);
-const activityTargetMotionTime = computed(() => getPositiveMetricNumber(motionOverviewObj.value?.targetMotionTime) || 30);
+const activityTargetStep = computed(() =>
+  getHomeGoalNumber(['step', 'stepTarget', 'targetStep', 'stepsTarget'], motionOverviewObj.value?.targetStep) || 6000
+);
+const activityTargetCalorie = computed(() =>
+  getHomeGoalNumber(['calorie', 'calorieTarget', 'targetCalorie', 'caloriesTarget', 'targetCalories'], motionOverviewObj.value?.targetCalorie) || 500
+);
+const activityTargetMotionTime = computed(() =>
+  getHomeGoalNumber(
+    ['motionTime', 'activityDurationTarget', 'targetActivityDuration', 'targetMotionTime', 'motionTimeTarget'],
+    motionOverviewObj.value?.targetMotionTime
+  ) || 30
+);
 const firstCricle = computed(() => {
   const Percentage = activityStepNumber.value / activityTargetStep.value;
 
@@ -596,7 +659,9 @@ async function restoreAwarenessDeviceSnapshot(options: { refreshAfterRestore?: b
     userStore.updateReconnectingStatus('2');
     const shouldRefreshAfterRestore = options.refreshAfterRestore ?? !isAwarenessRwRing();
     if (shouldRefreshAfterRestore) {
-      await executeCommandsSequentially();
+      if (claimAwarenessHomeSyncSession('restore-ready')) {
+        await executeCommandsSequentially();
+      }
     } else {
       appendAwarenessDiagnosticLog('restore-rw-home-sync-started', {
         snapshot: getAwarenessConnectionSnapshot()
@@ -630,7 +695,9 @@ watch(
         userStore.updateReconnectingStatus('2');
         await new Promise((resolve) => setTimeout(resolve, 500));
         if (!isAwarenessRwRing()) {
-          await executeCommandsSequentially();
+          if (claimAwarenessHomeSyncSession('reconnect-result-ready')) {
+            await executeCommandsSequentially();
+          }
         } else {
           appendAwarenessDiagnosticLog('reconnect-result-rw-home-sync-started', {
             snapshot: getAwarenessConnectionSnapshot()
@@ -686,7 +753,9 @@ watch(
                 snapshot: getAwarenessConnectionSnapshot()
               });
               if (!isAwarenessRwRing()) {
-                await executeCommandsSequentially();
+                if (claimAwarenessHomeSyncSession('bluetooth-ready-already-connected')) {
+                  await executeCommandsSequentially();
+                }
               } else {
                 appendAwarenessDiagnosticLog('bluetooth-ready-rw-home-sync-started', {
                   snapshot: getAwarenessConnectionSnapshot()
@@ -1045,6 +1114,15 @@ const getMotionOverviewData = async (currentDate = new Date()) => {
   }
 };
 
+const getHomeGoalInfoData = async (currentDate = new Date()) => {
+  const res = await requestAwarenessAuxiliary('goalInfo', currentDate, () =>
+    getGoalInfo({}, getAwarenessSilentRequestConfig())
+  );
+  if (res) {
+    homeGoalInfo.value = unwrapAwarenessApiData(res);
+  }
+};
+
 
 const getStressInfo = async (currentDate = new Date()) => {
 
@@ -1098,6 +1176,7 @@ const getVitalSigns = async (currentDate = new Date()) => {
 const refreshAwarenessBusinessOverview = async (date: string) => {
   const currentDate = parseLocalDate(date);
   await Promise.all([
+    getHomeGoalInfoData(currentDate),
     getBalanceScoreData(currentDate),
     getSleepOverviewData(currentDate),
     getMotionOverviewData(currentDate),
@@ -1202,6 +1281,7 @@ const syncRwHomeHistoryAndRefreshOverview = async (
   options: { force?: boolean } = {}
 ) => {
   if (!isAwarenessRwRing()) return;
+  if (!claimAwarenessHomeSyncSession(reason, options)) return;
 
   const now = Date.now();
   if (awarenessHistorySyncPromise) {
@@ -1631,16 +1711,19 @@ onShow(async () => {
     today.value = new Date();
     yesterday.value = getYesterday(today.value);
     beforeYesterday.value = getBeforeYesterday(today.value);
-    const systemSync = await requestAwarenessAuxiliary('unhealthDict', today.value, () =>
+    void requestAwarenessAuxiliary('unhealthDict', today.value, () =>
       getSystemUnhealthDict({}, getAwarenessSilentRequestConfig())
-    );
-    if (systemSync) uni.setStorageSync('unhealthDict', systemSync);
-    const ruleTypeSync = await requestAwarenessAuxiliary('ruleTypeDict', today.value, () =>
+    ).then((systemSync) => {
+      if (systemSync) uni.setStorageSync('unhealthDict', systemSync);
+    });
+    void requestAwarenessAuxiliary('ruleTypeDict', today.value, () =>
       getSystemRuleTypeDict({}, getAwarenessSilentRequestConfig())
-    );
-    if (ruleTypeSync) uni.setStorageSync('ruleTypeDict', ruleTypeSync);
+    ).then((ruleTypeSync) => {
+      if (ruleTypeSync) uni.setStorageSync('ruleTypeDict', ruleTypeSync);
+    });
     const userInfo = uni.getStorageSync('userInfo');
     if (userInfo.sex == 1) {
+      void (async () => {
       const detailData = await requestAwarenessAuxiliary('userGirlHealthAll', today.value, () =>
         getUserGirlHealthAll({}, getAwarenessSilentRequestConfig())
       );
@@ -1683,6 +1766,11 @@ onShow(async () => {
         showStartGirlCard.value = false;
         showPeriodDetail.value = true;
       }
+      })().catch((error) => {
+        appendAwarenessDiagnosticLog('girl-health-background-load-failed', {
+          error: formatBleErrorMessage(error, 'girl health background load failed')
+        });
+      });
 
     }
 
@@ -1715,23 +1803,25 @@ onShow(async () => {
     if (isAwarenessRwRing()) {
       void syncRwHomeHistoryAndRefreshOverview(getSelectedDetailDate(), 'page-show');
     } else if (hasAwarenessCommunicationReady()) {
-      appendAwarenessDiagnosticLog('legacy-home-page-show-sync-started', {
-        snapshot: getAwarenessConnectionSnapshot()
-      });
-      void executeCommandsSequentially()
-        .then(() => refreshAwarenessBusinessOverview(getSelectedDetailDate()))
-        .then(() => {
-          appendAwarenessDiagnosticLog('legacy-home-page-show-sync-result', {
-            snapshot: getAwarenessConnectionSnapshot()
-          });
-        })
-        .catch((syncError) => {
-          appendAwarenessDiagnosticLog('legacy-home-page-show-sync-failed', {
-            error: formatBleErrorMessage(syncError, 'legacy home sync failed'),
-            rawError: getAwarenessRawError(syncError),
-            snapshot: getAwarenessConnectionSnapshot()
-          });
+      if (claimAwarenessHomeSyncSession('legacy-page-show')) {
+        appendAwarenessDiagnosticLog('legacy-home-page-show-sync-started', {
+          snapshot: getAwarenessConnectionSnapshot()
         });
+        void executeCommandsSequentially()
+          .then(() => refreshAwarenessBusinessOverview(getSelectedDetailDate()))
+          .then(() => {
+            appendAwarenessDiagnosticLog('legacy-home-page-show-sync-result', {
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+          })
+          .catch((syncError) => {
+            appendAwarenessDiagnosticLog('legacy-home-page-show-sync-failed', {
+              error: formatBleErrorMessage(syncError, 'legacy home sync failed'),
+              rawError: getAwarenessRawError(syncError),
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+          });
+      }
     }
     pullDownProgress.value = 100;
   } catch (error) {

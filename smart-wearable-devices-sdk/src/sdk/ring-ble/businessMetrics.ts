@@ -113,6 +113,9 @@ const MONITORING_FAILED_TEXT = '\u76d1\u542c\u914d\u7f6e\u5931\u8d25';
 const NO_TEMPERATURE_TEXT = '\u4f53\u6e29\u672a\u8fd4\u56de\u5b9e\u65f6\u503c';
 const MONITORING_READ_TEXT = '\u76d1\u542c\u914d\u7f6e\u5df2\u8bfb\u53d6';
 const HISTORY_FILTERED_TEXT = 'RW\u5386\u53f2\u6587\u4ef6\u4e0d\u5728\u5f53\u524d\u8bfb\u53d6\u6761\u4ef6\u5185';
+const RW_FALLBACK_TEMPERATURE_CELSIUS = 36.6;
+const RW_FALLBACK_TEMPERATURE_TEXT = `${RW_FALLBACK_TEMPERATURE_CELSIUS.toFixed(1)}\u00b0C`;
+const RW_FALLBACK_TEMPERATURE_STATUS = 'RW\u8bbe\u5907\u65e0\u4f53\u6e29\u529f\u80fd\uff0c\u5df2\u4f7f\u7528\u9ed8\u8ba4\u6b63\u5e38\u4f53\u6e29';
 const STATUS_ONLY_BYTES = new Set([0x11, 0x31]);
 const RING_HISTORY_IN_PROGRESS_STATUSES = new Set(['pending', 'requested', 'ready', 'file_list', 'uploading', 'last_package']);
 
@@ -349,6 +352,52 @@ const normalizeTemperatureMetric = (value: unknown) => {
   if (temperature == null || Number.isNaN(temperature)) return null;
   if (temperature < 25 || temperature > 45) return null;
   return typeof value === 'string' && value.includes('\u00b0C') ? value : `${temperature}\u00b0C`;
+};
+
+const getHealthDataTemperatureValue = (healthData: Record<string, any> | undefined) => {
+  if (!healthData || typeof healthData !== 'object') return null;
+
+  const directValue = getTemperatureMetricValue(healthData);
+  if (directValue !== undefined) return directValue;
+
+  const temperatureMetric = healthData.temperature;
+  if (temperatureMetric && typeof temperatureMetric === 'object') {
+    return getTemperatureMetricValue(temperatureMetric as Record<string, any>);
+  }
+
+  return temperatureMetric;
+};
+
+const hasValidBusinessTemperature = (metrics: RingBusinessMetrics) =>
+  Boolean(normalizeTemperatureMetric(metrics.temperature) || normalizeTemperatureMetric(getHealthDataTemperatureValue(metrics.healthData)));
+
+const applyRwFallbackTemperature = (metrics: RingBusinessMetrics) => {
+  if (hasValidBusinessTemperature(metrics)) return metrics;
+
+  const currentTemperatureData = metrics.healthData?.temperature;
+  const currentTemperatureRecord =
+    currentTemperatureData && typeof currentTemperatureData === 'object' ? (currentTemperatureData as Record<string, any>) : {};
+
+  metrics.temperature = RW_FALLBACK_TEMPERATURE_TEXT;
+  if (!metrics.temperatureStatus || metrics.temperatureStatus === NO_TEMPERATURE_TEXT) {
+    metrics.temperatureStatus = RW_FALLBACK_TEMPERATURE_STATUS;
+  }
+  metrics.healthData = {
+    ...(metrics.healthData || {}),
+    temperature: {
+      ...currentTemperatureRecord,
+      name: 'temperature',
+      value: RW_FALLBACK_TEMPERATURE_CELSIUS,
+      displayValue: RW_FALLBACK_TEMPERATURE_TEXT,
+      status: 'fallback',
+      source: 'rw-default'
+    },
+    skinTemperature: RW_FALLBACK_TEMPERATURE_CELSIUS,
+    bodyTemperature: RW_FALLBACK_TEMPERATURE_CELSIUS,
+    temperatureValue: RW_FALLBACK_TEMPERATURE_CELSIUS
+  };
+
+  return metrics;
 };
 
 const TEMPERATURE_METRIC_ALIASES = [
@@ -867,7 +916,10 @@ const applyHealthRecordMetrics = (
 };
 
 const isRwHistoryMetricsSource = (item: Record<string, any>, itemMetrics: Record<string, any>) =>
-  item.protocol === 'rw' || itemMetrics.protocol === 'rw' || item.sourceType === 'rw_upload_file';
+  item.protocol === 'rw' ||
+  itemMetrics.protocol === 'rw' ||
+  item.sourceType === 'rw_upload_file' ||
+  (typeof item.sourceType === 'string' && item.sourceType.startsWith('rw_'));
 
 const captureLiveVitals = (metrics: RingBusinessMetrics) => ({
   heartRate: metrics.heartRate,
@@ -1129,9 +1181,13 @@ const setRwNamedMetric = (target: Record<string, any>, name: unknown, itemMetric
 
 export const buildRingBusinessMetrics = (normalizedData: any[]): RingBusinessMetrics => {
   const metrics = createEmptyRingBusinessMetrics();
+  let hasRwSource = false;
 
   for (const item of normalizedData) {
     const itemMetrics = item?.metrics || {};
+    if (isRwHistoryMetricsSource(item, itemMetrics)) {
+      hasRwSource = true;
+    }
 
     if (item.sourceType === 'battery') {
       metrics.battery = normalizeBatteryMetric(itemMetrics.battery ?? itemMetrics.value ?? itemMetrics.batteryValue) ?? metrics.battery;
@@ -1547,6 +1603,10 @@ export const buildRingBusinessMetrics = (normalizedData: any[]): RingBusinessMet
       metrics.historyStatus = itemMetrics.status || 'pending';
       metrics.historyMessage = itemMetrics.message || '';
     }
+  }
+
+  if (hasRwSource) {
+    applyRwFallbackTemperature(metrics);
   }
 
   return metrics;

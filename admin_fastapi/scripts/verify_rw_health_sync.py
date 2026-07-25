@@ -243,6 +243,32 @@ assert frontend_contract_values["motion_intensity"] == 2
 assert frontend_contract_values["perfusion_index"] == 8
 assert frontend_contract_values["rr_intervals"] == "[810,790,805]"
 
+rw_without_temperature_values = java_sync_health_raw_values(
+    health_raw,
+    {
+        "recordTime": "2026-07-17 06:53:45",
+        "protocol": "rw",
+        "heartRate": 76,
+    },
+    user_id=7,
+    device_mac="3E:00:00:00:05:1B",
+)
+assert rw_without_temperature_values is not None
+assert rw_without_temperature_values["temperature"] == 36.6
+
+non_rw_without_temperature_values = java_sync_health_raw_values(
+    health_raw,
+    {
+        "recordTime": "2026-07-17 06:53:46",
+        "protocol": "qkeer_v2",
+        "heartRate": 76,
+    },
+    user_id=7,
+    device_mac="3E:00:00:00:05:1C",
+)
+assert non_rw_without_temperature_values is not None
+assert "temperature" not in non_rw_without_temperature_values
+
 rw_sleep_status_raw_values = java_sync_health_raw_values(
     health_raw,
     {

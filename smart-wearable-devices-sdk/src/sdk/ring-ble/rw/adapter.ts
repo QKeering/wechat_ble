@@ -685,16 +685,18 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   const createBleConnectionWithRetry = async (deviceId: string, deviceName = '') => {
     let lastError: unknown;
     const maxAttempts = RW_CREATE_CONNECTION_RETRY_DELAYS_MS.length + 1;
+    const connectStartedAt = Date.now();
     for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
       const isAdapterResetAttempt = attemptIndex === RW_CREATE_CONNECTION_RETRY_DELAYS_MS.length;
       const delayMs = RW_CREATE_CONNECTION_RETRY_DELAYS_MS[attemptIndex] || 0;
+      const attempt = attemptIndex + 1;
       if (isAdapterResetAttempt) {
         await resetBluetoothAdapterForReconnect(deviceId, deviceName, lastError);
       } else if (delayMs > 0) {
         rwBleLog('connect-retry-cleanup', {
           deviceId,
           deviceName,
-          attempt: attemptIndex + 1,
+          attempt,
           delayMs,
           previousMessage: formatError(lastError)
         });
@@ -703,36 +705,83 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       }
 
       try {
+        const attemptStartedAt = Date.now();
+        rwBleLog('connect-attempt-start', {
+          deviceId,
+          deviceName,
+          attempt,
+          maxAttempts,
+          adapterResetAttempt: isAdapterResetAttempt,
+          timeoutMs: RW_CREATE_CONNECTION_TIMEOUT_MS,
+          elapsedTotalMs: attemptStartedAt - connectStartedAt,
+          previousMessage: formatError(lastError)
+        });
         await new Promise((resolve, reject) => {
           uni.createBLEConnection({
             deviceId,
             timeout: RW_CREATE_CONNECTION_TIMEOUT_MS,
             success: (result) => {
-              rwBleLog('connect-created', { deviceId, deviceName, attempt: attemptIndex + 1 });
+              rwBleLog('connect-created', {
+                deviceId,
+                deviceName,
+                attempt,
+                maxAttempts,
+                elapsedAttemptMs: Date.now() - attemptStartedAt,
+                elapsedTotalMs: Date.now() - connectStartedAt
+              });
               resolve(result);
             },
             fail: (error) => {
               const message = `${(error as any)?.errMsg || ''}`.toLowerCase();
               if (message.includes('already connect') || message.includes('already connected')) {
-                rwBleLog('connect-created', { deviceId, deviceName, alreadyConnected: true, attempt: attemptIndex + 1 });
+                rwBleLog('connect-created', {
+                  deviceId,
+                  deviceName,
+                  alreadyConnected: true,
+                  attempt,
+                  maxAttempts,
+                  elapsedAttemptMs: Date.now() - attemptStartedAt,
+                  elapsedTotalMs: Date.now() - connectStartedAt
+                });
                 resolve(error);
                 return;
               }
+              const retriable = isTransientCreateConnectionFailure(error);
               rwBleLog('connect-fail', {
                 deviceId,
                 deviceName,
-                attempt: attemptIndex + 1,
-                retriable: isTransientCreateConnectionFailure(error),
+                attempt,
+                maxAttempts,
+                retriable,
+                elapsedAttemptMs: Date.now() - attemptStartedAt,
+                elapsedTotalMs: Date.now() - connectStartedAt,
+                errCode: (error as any)?.errCode,
+                errno: (error as any)?.errno,
                 message: formatError(error)
               });
               reject(error);
             }
           });
         });
+        rwBleLog('connect-attempt-success', {
+          deviceId,
+          deviceName,
+          attempt,
+          maxAttempts,
+          elapsedTotalMs: Date.now() - connectStartedAt
+        });
         return;
       } catch (error) {
         lastError = error;
         if (!isTransientCreateConnectionFailure(error) || attemptIndex >= maxAttempts - 1) {
+          rwBleLog('connect-attempt-giveup', {
+            deviceId,
+            deviceName,
+            attempt,
+            maxAttempts,
+            elapsedTotalMs: Date.now() - connectStartedAt,
+            message: formatError(error)
+          });
           throw error;
         }
       }
@@ -860,14 +909,42 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   };
 
   const connectAndDiscover = async (deviceId: string, deviceName = '', sourceDevice?: RingDeviceInfo) => {
+    const handshakeStartedAt = Date.now();
     try {
+      rwBleLog('handshake-start', {
+        deviceId,
+        deviceName,
+        sourceDevice: summarizeScanDeviceForRwBleLog(sourceDevice || ({ deviceId, name: deviceName, protocol: 'rw' } as RingDeviceInfo))
+      });
       await connectDevice(deviceId, deviceName, sourceDevice);
+      rwBleLog('handshake-link-created', {
+        deviceId,
+        deviceName,
+        elapsedMs: Date.now() - handshakeStartedAt
+      });
       try {
         await setMTU(deviceId);
-      } catch {
+        rwBleLog('handshake-mtu-ok', {
+          deviceId,
+          elapsedMs: Date.now() - handshakeStartedAt
+        });
+      } catch (error) {
         // Some Android stacks report setBLEMTU:fail:internal even after the BLE link is usable.
+        rwBleLog('handshake-mtu-skip', {
+          deviceId,
+          elapsedMs: Date.now() - handshakeStartedAt,
+          message: formatError(error)
+        });
       }
       const device = await discoverServicesAndChars(deviceId, deviceName, sourceDevice);
+      rwBleLog('handshake-discovery-ok', {
+        deviceId,
+        serviceId: device.serviceId,
+        cmdCharId: device.cmdCharId,
+        dataServiceId: device.dataServiceId,
+        dataCharId: device.dataCharId,
+        elapsedMs: Date.now() - handshakeStartedAt
+      });
       const notifyCandidates = uniqueNotifyCandidates([
         ...(device.dataServiceId && device.dataCharId
           ? [{ serviceId: device.dataServiceId || device.serviceId || '', characteristicId: device.dataCharId }]
@@ -880,6 +957,12 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       }
 
       const enabledNotify = await enablePrimaryNotifyChannel(deviceId, notifyCandidates);
+      rwBleLog('handshake-notify-ok', {
+        deviceId,
+        serviceId: enabledNotify.serviceId,
+        characteristicId: enabledNotify.characteristicId,
+        elapsedMs: Date.now() - handshakeStartedAt
+      });
       rwBleLog('notify-primary-enabled', {
         deviceId,
         serviceId: enabledNotify.serviceId,
@@ -900,11 +983,25 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       void readStandardDeviceInformationVersions('connect-ready');
       void readStandardHeartRateMeasurement('connect-ready');
       void readStandardPulseOximeterMeasurement('connect-ready');
+      rwBleLog('handshake-ready', {
+        deviceId,
+        deviceName,
+        elapsedMs: Date.now() - handshakeStartedAt,
+        serviceId: currentDevice.serviceId,
+        cmdCharId: currentDevice.cmdCharId,
+        dataServiceId: currentDevice.dataServiceId,
+        dataCharId: currentDevice.dataCharId
+      });
       return currentDevice;
     } catch (error) {
       currentDevice = {};
       runtime?.onDeviceReady?.({} as RingDeviceInfo);
-      rwBleLog('connect-discover-fail', { deviceId, deviceName, message: formatError(error) });
+      rwBleLog('connect-discover-fail', {
+        deviceId,
+        deviceName,
+        elapsedMs: Date.now() - handshakeStartedAt,
+        message: formatError(error)
+      });
       await disconnect(deviceId);
       throw error;
     }

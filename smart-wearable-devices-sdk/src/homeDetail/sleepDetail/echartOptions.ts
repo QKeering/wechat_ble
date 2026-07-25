@@ -110,10 +110,10 @@ export const sleepTimeOption = {
       itemStyle: {
         color: function (params) {
           const colorMap = {
-            深睡: '#e2e1fd',
-            浅睡: '#c5c2f9',
-            快速眼动: '#9994f4',
-            清醒: ' #5f57ec'
+            深睡: '#5146D8',
+            浅睡: '#9B93F5',
+            快速眼动: '#48A7E8',
+            清醒: '#F4A340'
           };
           // 关键：根据数值范围匹配睡眠阶段
           let categoryName;
@@ -153,10 +153,10 @@ export const sleepRageOption = {
       radius: ['40%', '55%'],
       center: ['15%', '53%'],
       data: [
-        { value: 10, name: '清醒', itemStyle: { color: '#e2e1fd', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 8, name: '快速眼动', itemStyle: { color: '#c5c2f9', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 22, name: '浅睡', itemStyle: { color: '#9994f4', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 60, name: '深睡', itemStyle: { color: '#5f57ec', borderWidth: 1, borderColor: '#ffffff' } }
+        { value: 10, name: '清醒', itemStyle: { color: '#F4A340', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 8, name: '快速眼动', itemStyle: { color: '#48A7E8', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 22, name: '浅睡', itemStyle: { color: '#9B93F5', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 60, name: '深睡', itemStyle: { color: '#5146D8', borderWidth: 1, borderColor: '#ffffff' } }
       ],
       label: { show: false },
       labelLine: { show: false },

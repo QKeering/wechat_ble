@@ -15,6 +15,8 @@ import temperature from '@/homeDetail/vitalSigns/components/temperature.vue';
 import eventSummary from '@/homeDetail/sleepPage/components/eventSummary.vue';
 import { useRingBusinessHistoryPageSync } from '@/composables/useRingBusinessHistoryPageSync';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
+import { useUserStore } from '@/stores/user';
+import { useRingStore } from '@/stores';
 
 import type { sleepOverview, sleepDetail, sleepSegment, heartRateDetail, sleepNapType, sleepSummaryData } from '@/types/api/homeDetail';
 import {
@@ -34,6 +36,8 @@ import { usePopupFixer } from '@/hooks/usePopupFixer';
 
 const { isPopupActive, fixedPageStyle } = usePopupFixer();
 const ringBleBridge = useRingBusinessHistoryPageSync();
+const userStore = useUserStore();
+const ringStore = useRingStore();
 
 const scrollTop = ref<number>(0);
 
@@ -48,6 +52,11 @@ const listData = ref<string[]>([
   'napRecord',
   'activitySummary'
 ]);
+const getCurrentRingProtocol = () => ringStore.deviceInfo?.protocol || userStore.deviceInfo?.protocol;
+const isCurrentRwRing = () => getCurrentRingProtocol() === 'rw';
+const visibleListData = computed(() =>
+  isCurrentRwRing() ? listData.value.filter((cardId) => cardId !== 'skinTemperature') : listData.value
+);
 const visibleCards = ref<string[]>([]);
 const cardForm = ref({});
 
@@ -104,8 +113,53 @@ const normalizeTimelineMinutes = (value: unknown, anchorMinutes: number | null) 
   return minutes;
 };
 
+const normalizeSleepStageText = (value: unknown) => {
+  const key = String(value ?? '').trim();
+  if (!key) return '';
+  return SLEEP_STAGE_NAMES[key] || SLEEP_STAGE_NAMES[key.toLowerCase()] || '';
+};
+
+const hasExplicitSleepType = (point: any) =>
+  point?.sleepType !== undefined ||
+  point?.sleep_type !== undefined ||
+  point?.sleepTypeName !== undefined ||
+  point?.sleep_type_name !== undefined;
+
+const getExplicitSleepStageValue = (point: any) => {
+  const candidates = [
+    point?.sleepType,
+    point?.sleep_type,
+    point?.sleepTypeName,
+    point?.sleep_type_name
+  ];
+  return candidates.find((item) => item !== undefined && item !== null && String(item).trim() !== '');
+};
+
+const getSleepStageRawValue = (point: any) => {
+  const explicitValue = getExplicitSleepStageValue(point);
+  if (explicitValue !== undefined) return String(explicitValue ?? '').trim();
+
+  const candidates = [
+    point?.sleepState,
+    point?.sleep_state,
+    point?.sleepStatus,
+    point?.sleep_status,
+    point?.sleepStage,
+    point?.sleep_stage,
+    point?.stageName,
+    point?.status,
+    point?.state,
+    point?.stage,
+    point?.type,
+    point?.name,
+    point?.value
+  ];
+  const value = candidates.find((item) => item !== undefined && item !== null && String(item).trim() !== '');
+  return String(value ?? '').trim();
+};
+
 const isSleepStagePoint = (point: any) => {
-  const value = String(point?.value ?? '').trim();
+  const value = getSleepStageRawValue(point);
   return value === '2' || value === '3' || value === '4' || ['深睡', '浅睡', '快速眼动'].includes(value);
 };
 
@@ -114,17 +168,35 @@ const SLEEP_STAGE_NAMES: Record<string, string> = {
   '2': '快速眼动',
   '3': '浅睡',
   '4': '深睡',
+  '5': '小睡',
   清醒: '清醒',
   快速眼动: '快速眼动',
   浅睡: '浅睡',
-  深睡: '深睡'
+  深睡: '深睡',
+  小睡: '小睡'
 };
 const MAIN_SLEEP_GAP_MINUTES = 90;
 const DEFAULT_STAGE_SAMPLE_MINUTES = 10;
 
-const getSleepStageName = (point: any) => SLEEP_STAGE_NAMES[String(point?.value ?? '').trim()] || '';
+Object.assign(SLEEP_STAGE_NAMES, {
+  awake: '清醒',
+  wake: '清醒',
+  rem: '快速眼动',
+  REM: '快速眼动',
+  light: '浅睡',
+  deep: '深睡',
+  nap: '小睡'
+});
+
+const getSleepStageName = (point: any) => {
+  const value = getSleepStageRawValue(point);
+  return normalizeSleepStageText(value);
+};
 const isNapStagePoint = (point: any) => {
-  const value = String(point?.value ?? '').trim();
+  if (hasExplicitSleepType(point)) {
+    return normalizeSleepStageText(getExplicitSleepStageValue(point)) === '小睡';
+  }
+  const value = getSleepStageRawValue(point);
   return value === '5' || value === '小睡';
 };
 
@@ -174,7 +246,8 @@ const getMainSleepAnalysis = (detail?: sleepDetail, segment?: sleepSegment) => {
   if (segmentEnd != null) mainEnd = Math.min(mainEnd, segmentEnd);
 
   const mainPoints = points.slice(0, cutoffIndex).filter((entry: any) => !isNapStagePoint(entry.item));
-  if (!mainPoints.some((entry: any) => getSleepStageName(entry.item))) {
+  const mainStagePoints = mainPoints.filter((entry: any) => Boolean(getSleepStageName(entry.item)));
+  if (!mainStagePoints.length) {
     const sourceSection = Array.isArray(segment?.chartDataSection) ? segment.chartDataSection : [];
     const chartDataSection = ['清醒', '快速眼动', '浅睡', '深睡'].map((time) => {
       const source = sourceSection.find((item: any) => item?.time === time);
@@ -191,10 +264,10 @@ const getMainSleepAnalysis = (detail?: sleepDetail, segment?: sleepSegment) => {
     };
   }
   const stageMinutes: Record<string, number> = { 清醒: 0, 快速眼动: 0, 浅睡: 0, 深睡: 0 };
-  mainPoints.forEach((entry: any, index: number) => {
+  mainStagePoints.forEach((entry: any, index: number) => {
     const stageName = getSleepStageName(entry.item);
     if (!stageName) return;
-    const nextMinute = mainPoints[index + 1]?.minute ?? mainEnd;
+    const nextMinute = mainStagePoints[index + 1]?.minute ?? mainEnd;
     const duration = Math.max(0, Math.min(nextMinute, mainEnd) - entry.minute);
     stageMinutes[stageName] += duration;
   });
@@ -205,7 +278,7 @@ const getMainSleepAnalysis = (detail?: sleepDetail, segment?: sleepSegment) => {
   }));
   return {
     endTime: mainEnd > (segmentStart ?? -1) ? formatClockMinutes(mainEnd) : '',
-    chartData: mainPoints.map((entry: any) => entry.item),
+    chartData: mainStagePoints.map((entry: any) => entry.item),
     chartDataSection
   };
 };
@@ -217,9 +290,11 @@ const shouldPreferOverviewSleepDuration = (detailMinutes = 0) => {
   return detailMinutes > MAX_MAIN_SLEEP_MINUTES || detailMinutes > overviewMinutes + MAIN_SLEEP_OVERVIEW_TOLERANCE_MINUTES;
 };
 
+const mainSleepAnalysis = computed(() => getMainSleepAnalysis(sleepDetailObj.value, sleepSegmentObj.value));
+
 const displaySleepDetailObj = computed(() => {
   const detail = sleepDetailObj.value || {};
-  const analysis = getMainSleepAnalysis(detail, sleepSegmentObj.value);
+  const analysis = mainSleepAnalysis.value;
   const detailMinutes = toPositiveNumber(detail.sleepDuration);
   if (!shouldPreferOverviewSleepDuration(detailMinutes)) {
     return {
@@ -236,7 +311,7 @@ const displaySleepDetailObj = computed(() => {
 
 const displaySleepSegmentObj = computed(() => {
   const segment = sleepSegmentObj.value || {};
-  const analysis = getMainSleepAnalysis(sleepDetailObj.value, segment);
+  const analysis = mainSleepAnalysis.value;
   return {
     ...segment,
     endTime: analysis.endTime || segment.endTime,
@@ -244,6 +319,60 @@ const displaySleepSegmentObj = computed(() => {
     chartDataSection: analysis.chartDataSection.length ? analysis.chartDataSection : segment.chartDataSection
   };
 });
+
+const getDisplayMetricNumber = (value: unknown) => {
+  if (value == null || value === '') return null;
+  const numeric = Number(String(value).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+};
+
+const formatIntegerDisplayMetric = (value: unknown, fallback = '00') => {
+  const numeric = getDisplayMetricNumber(value);
+  return numeric ? String(Math.round(numeric)) : fallback;
+};
+
+const formatIntegerRangeDisplayMetric = (value: unknown, fallback = '00') => {
+  if (value == null || value === '') return fallback;
+  const text = String(value);
+  if (!/\d/.test(text)) return fallback;
+  return text.replace(/-?\d+(?:\.\d+)?/g, (matched) => {
+    const numeric = Number(matched);
+    return Number.isFinite(numeric) ? String(Math.round(numeric)) : matched;
+  });
+};
+
+const formatTemperatureDisplayMetric = (value: unknown, fallback = '00') => {
+  const numeric = getDisplayMetricNumber(value);
+  return numeric ? `${numeric.toFixed(1)}°C` : fallback;
+};
+
+const displayHeartRateObj = computed(() => ({
+  ...(heartRateObj.value || {}),
+  avgValue: formatIntegerDisplayMetric((heartRateObj.value as any)?.avgValue),
+  maxValue: formatIntegerDisplayMetric((heartRateObj.value as any)?.maxValue)
+} as heartRateDetail));
+
+const displayOxyGenObj = computed(() => ({
+  ...(oxyGenObj.value || {}),
+  avgValue: formatIntegerDisplayMetric((oxyGenObj.value as any)?.avgValue),
+  avgValueRange: formatIntegerRangeDisplayMetric((oxyGenObj.value as any)?.avgValueRange)
+} as heartRateDetail));
+
+const displayHrvObj = computed(() => ({
+  ...(hrvObj.value || {}),
+  avgValue: formatIntegerDisplayMetric((hrvObj.value as any)?.avgValue)
+} as heartRateDetail));
+
+const displayTemperatureObj = computed(() => ({
+  ...(temperatureObj.value || {}),
+  avgValue: formatTemperatureDisplayMetric((temperatureObj.value as any)?.avgValue),
+  baseValue: getDisplayMetricNumber((temperatureObj.value as any)?.baseValue)
+    ? formatTemperatureDisplayMetric((temperatureObj.value as any)?.baseValue)
+    : (temperatureObj.value as any)?.baseValue,
+  diffValue: getDisplayMetricNumber((temperatureObj.value as any)?.diffValue)
+    ? formatTemperatureDisplayMetric((temperatureObj.value as any)?.diffValue)
+    : (temperatureObj.value as any)?.diffValue
+} as heartRateDetail));
 
 const getSleepPayloadObject = (response: unknown) => {
   if (!response || typeof response !== 'object' || Array.isArray(response)) return null;
@@ -278,6 +407,77 @@ const summarizeSleepPageResponse = (response: unknown) => {
     chartDataSection: Array.isArray(payload?.chartDataSection) ? payload.chartDataSection.slice(0, 8) : undefined,
     sample: payloadArray?.slice(0, 2)
   };
+};
+
+const getObjectValueByKeys = (source: Record<string, any> | null | undefined, keys: string[]) => {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  return undefined;
+};
+
+const getFirstArrayByKeys = (source: any, keys: string[]) => {
+  if (!source || typeof source !== 'object') return undefined;
+  for (const key of keys) {
+    const value = source[key];
+    if (Array.isArray(value)) return value;
+  }
+  return undefined;
+};
+
+const getSleepMetricChartArray = (response: unknown) => {
+  if (Array.isArray(response)) return response;
+  const root = response as Record<string, any>;
+  const payload = getSleepPayloadObject(response);
+  const candidates = [
+    root,
+    root?.data,
+    root?.result,
+    payload,
+    payload?.data,
+    payload?.result
+  ];
+  for (const candidate of candidates) {
+    const chartData = getFirstArrayByKeys(candidate, ['chartData', 'list', 'records', 'items', 'points', 'data']);
+    if (chartData) return chartData;
+  }
+  return [];
+};
+
+const normalizeSleepMetricPoint = (item: any, index: number, valueKeys: string[]) => {
+  if (!item || typeof item !== 'object') {
+    return { time: `${index}`, value: item };
+  }
+  const time = getObjectValueByKeys(item, [
+    'time',
+    'recordTime',
+    'record_time',
+    'collectTime',
+    'collect_time',
+    'createTime',
+    'create_time',
+    'dateTime',
+    'datetime',
+    'timestamp',
+    'x',
+    'name'
+  ]);
+  const value = getObjectValueByKeys(item, valueKeys.concat(['value', 'y', 'data']));
+  return {
+    ...item,
+    time: time ?? item.time ?? '',
+    value: value ?? item.value ?? ''
+  };
+};
+
+const normalizeSleepMetricDetail = (response: unknown, valueKeys: string[]) => {
+  const payload = getSleepPayloadObject(response) || {};
+  const chartData = getSleepMetricChartArray(response).map((item, index) => normalizeSleepMetricPoint(item, index, valueKeys));
+  return {
+    ...(payload as Record<string, any>),
+    chartData
+  } as heartRateDetail;
 };
 
 const appendSleepPageDiagnosticLog = (event: string, details: Record<string, unknown>) => {
@@ -327,6 +527,10 @@ const isCurrentSleepPageLoad = (loadId?: number) => loadId == null || loadId ===
 
 const runSleepLoadTask = async (endpoint: string, currentDate: Date, task: () => Promise<unknown>) => {
   const startedAt = Date.now();
+  appendSleepPageDiagnosticLog('sleep-page-endpoint-start', {
+    endpoint,
+    date: formatLocalDate(currentDate)
+  });
   try {
     await task();
     appendSleepPageDiagnosticLog('sleep-page-endpoint-timing', {
@@ -402,10 +606,18 @@ const loadSleepPageData = async (currentDate = new Date(), options: { waitSecond
     { endpoint: 'sleep-heart-rate', run: () => getRatDetail(currentDate, loadId) },
     { endpoint: 'sleep-hrv', run: () => getHrvDetailData(currentDate, loadId) },
     { endpoint: 'sleep-blood-oxygen', run: () => getOxyGenDetail(currentDate, loadId) },
-    { endpoint: 'sleep-temperature', run: () => getTemperatureDetail(currentDate, loadId) },
     { endpoint: 'sleep-nap', run: () => getSleepNapList(currentDate, loadId) },
     { endpoint: 'sleep-summary', run: () => getsleepSummaryData(currentDate, loadId) }
   ];
+  if (!isCurrentRwRing()) {
+    secondaryTasks.splice(3, 0, { endpoint: 'sleep-temperature', run: () => getTemperatureDetail(currentDate, loadId) });
+  } else {
+    temperatureObj.value = undefined;
+    appendSleepPageDiagnosticLog('sleep-page-temperature-skip', {
+      reason: 'rw-device-no-temperature',
+      date
+    });
+  }
 
   await settleSleepTasks(criticalTasks, currentDate, 'critical');
 
@@ -506,8 +718,16 @@ const getRatDetail = async (currentDate = new Date(), loadId?: number) => {
   const res = await querySleepPage('sleep-heart-rate', currentDate, (requestConfig) => getSleepHeartRateDetail({
     date: isoDate
   }, requestConfig));
+  const normalized = normalizeSleepMetricDetail(res, ['heartRate', 'heart_rate', 'heartRateValue', 'heart_rate_value', 'bpm']);
+  appendSleepPageDiagnosticLog('sleep-page-query-result', {
+    endpoint: 'sleep-heart-rate',
+    date: isoDate,
+    response: summarizeSleepPageResponse(res),
+    normalizedChartDataCount: normalized.chartData?.length,
+    normalizedChartDataHead: normalized.chartData?.slice?.(0, 5)
+  });
   if (res && isCurrentSleepPageLoad(loadId)) {
-    heartRateObj.value = res;
+    heartRateObj.value = normalized;
   }
 };
 // 获取心率变异性详情
@@ -516,8 +736,16 @@ const getHrvDetailData = async (currentDate = new Date(), loadId?: number) => {
   const res = await querySleepPage('sleep-hrv', currentDate, (requestConfig) => getSleepHrvDetail({
     date: isoDate
   }, requestConfig));
+  const normalized = normalizeSleepMetricDetail(res, ['hrv', 'hrvValue', 'hrv_value', 'heartRateVariability', 'heart_rate_variability']);
+  appendSleepPageDiagnosticLog('sleep-page-query-result', {
+    endpoint: 'sleep-hrv',
+    date: isoDate,
+    response: summarizeSleepPageResponse(res),
+    normalizedChartDataCount: normalized.chartData?.length,
+    normalizedChartDataHead: normalized.chartData?.slice?.(0, 5)
+  });
   if (res && isCurrentSleepPageLoad(loadId)) {
-    hrvObj.value = res;
+    hrvObj.value = normalized;
   }
 };
 // 获取血氧详情
@@ -526,13 +754,29 @@ const getOxyGenDetail = async (currentDate = new Date(), loadId?: number) => {
   const res = await querySleepPage('sleep-blood-oxygen', currentDate, (requestConfig) => getSleepBloodOxygenDetail({
     date: isoDate
   }, requestConfig));
+  const normalized = normalizeSleepMetricDetail(res, ['bloodOxygen', 'blood_oxygen', 'bloodOxygenValue', 'blood_oxygen_value', 'oxygen', 'spo2', 'SpO2']);
+  appendSleepPageDiagnosticLog('sleep-page-query-result', {
+    endpoint: 'sleep-blood-oxygen',
+    date: isoDate,
+    response: summarizeSleepPageResponse(res),
+    normalizedChartDataCount: normalized.chartData?.length,
+    normalizedChartDataHead: normalized.chartData?.slice?.(0, 5)
+  });
   if (res && isCurrentSleepPageLoad(loadId)) {
-    oxyGenObj.value = res;
+    oxyGenObj.value = normalized;
   }
 };
 
 // 获取温度详情
 const getTemperatureDetail = async (currentDate = new Date(), loadId?: number) => {
+  if (isCurrentRwRing()) {
+    if (isCurrentSleepPageLoad(loadId)) temperatureObj.value = undefined;
+    appendSleepPageDiagnosticLog('sleep-page-temperature-skip', {
+      reason: 'rw-device-no-temperature',
+      date: formatLocalDate(currentDate)
+    });
+    return;
+  }
   const isoDate = formatLocalDate(currentDate);
   let offset = 0;
   if (selectedDayIndex.value === 3) {
@@ -715,7 +959,7 @@ defineExpose({
       </view>
     </view>
     <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
-    <view v-for="cardId in listData" :key="cardId">
+    <view v-for="cardId in visibleListData" :key="cardId">
       <sleepTime v-if="cardId === 'subjectiveSleepScore'" :sleepDetailObj="displaySleepDetailObj" :sleepSegmentObj="displaySleepSegmentObj">
         <DetailInfo id="sleep_duration" v-model:isPopupActive="isPopupActive" size="small" style="margin-left: 6rpx"></DetailInfo>
       </sleepTime>
@@ -725,16 +969,16 @@ defineExpose({
       <sleepScore v-else-if="cardId === 'sleepScore'" :sleepOverviewObj="sleepOverviewObj" :sleepSegmentObj="displaySleepSegmentObj">
         <DetailInfo id="sleep_score" v-model:isPopupActive="isPopupActive" style="margin-left: 2rpx"></DetailInfo>
       </sleepScore>
-      <HeartRate v-else-if="cardId === 'heartRate'" :heartRateData="heartRateObj" :isHeartTate="false">
+      <HeartRate v-else-if="cardId === 'heartRate'" :heartRateData="displayHeartRateObj" :isHeartTate="false" :sleepSegmentObj="displaySleepSegmentObj">
         <DetailInfo id="heart_rate" v-model:isPopupActive="isPopupActive" style="margin-left: 6rpx"></DetailInfo>
       </HeartRate>
-      <oxyGen v-else-if="cardId === 'bloodOxygenSaturation'" :oxyGenData="oxyGenObj" :isHeartTate="false">
+      <oxyGen v-else-if="cardId === 'bloodOxygenSaturation'" :oxyGenData="displayOxyGenObj" :isHeartTate="false" :sleepSegmentObj="displaySleepSegmentObj">
         <DetailInfo id="blood_oxygen_saturation" v-model:isPopupActive="isPopupActive" style="margin-left: 6rpx"></DetailInfo>
       </oxyGen>
-      <heartRateVariability v-else-if="cardId === 'heartRateVariability'" :hrvData="hrvObj" :isHeartTate="false">
+      <heartRateVariability v-else-if="cardId === 'heartRateVariability'" :hrvData="displayHrvObj" :isHeartTate="false" :sleepSegmentObj="displaySleepSegmentObj">
         <DetailInfo id="heart_rate_variability" v-model:isPopupActive="isPopupActive" style="margin-left: 6rpx"></DetailInfo>
       </heartRateVariability>
-      <temperature v-else-if="cardId === 'skinTemperature'" :temperatureData="temperatureObj" :isHeartTate="false" />
+      <temperature v-else-if="cardId === 'skinTemperature'" :temperatureData="displayTemperatureObj" :isHeartTate="false" />
       <sleepNap v-else-if="cardId === 'napRecord'" @refresh="getSleepNapList" :sleepNapList="sleepNapList" />
       <eventSummary v-else-if="cardId === 'activitySummary'" :sleepSummaryObj="sleepSummaryObj" />
     </view>

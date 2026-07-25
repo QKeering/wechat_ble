@@ -14,6 +14,7 @@ import { useRingStore } from '@/stores';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingBusinessHistoryPageSync, type HistoryPageSilentRequestConfig } from '@/composables/useRingBusinessHistoryPageSync';
 import { formatBleErrorMessage, isExpectedBleRuntimeError } from '@/utils/bleError';
+import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 
 import DetailInfo from '@/components/DetailInfo.vue';
 import {usePopupFixer} from '@/hooks/usePopupFixer'
@@ -64,27 +65,125 @@ const getFirstObjectMetricValue = (sources: unknown[], keys: string[]) => {
 };
 const getExtendedVitalValue = (...keys: string[]) => getFirstObjectMetricValue([extendedVitalObj.value], keys);
 const getCachedMetricValue = (...keys: string[]) => getFirstObjectMetricValue([userStore.healthData, userStore.latestMetrics], keys);
+const getObjectValueByKeys = (source: Record<string, any> | null | undefined, keys: string[]) => {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  return undefined;
+};
+const formatIntegerMetricValue = (value: unknown, fallback = '00') => {
+  const metric = getMetricNumber(value);
+  return metric ? String(Math.round(metric)) : fallback;
+};
+const formatTemperatureValue = (value: unknown, fallback = '00') => {
+  const metric = getMetricNumber(value);
+  return metric ? `${metric.toFixed(1)}°C` : fallback;
+};
 const withMetricFallback = (source: heartRateDetail, value: unknown, extra: Record<string, any> = {}) => {
   const metric = getMetricNumber(value);
   if (!metric) return source;
-  const hasChartData = Array.isArray((source as any)?.chartData) && (source as any).chartData.length > 0;
   return {
     ...source,
     newValue: getMetricNumber((source as any)?.newValue) ? (source as any).newValue : metric,
     avgValue: getMetricNumber((source as any)?.avgValue) ? (source as any).avgValue : metric,
     maxValue: getMetricNumber((source as any)?.maxValue) ? (source as any).maxValue : metric,
-    chartData: hasChartData ? (source as any).chartData : [{ time: 'now', value: metric }],
     ...extra
   } as heartRateDetail;
 };
-const heartRateDisplayObj = computed(() =>
-  withMetricFallback(
+const getVitalMetricPayloadObject = (response: unknown) => {
+  if (!response || typeof response !== 'object' || Array.isArray(response)) return null;
+  const root = response as Record<string, any>;
+  const payload = root.data ?? root.result ?? root.body ?? root.payload ?? root;
+  return payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, any>) : root;
+};
+const getFirstArrayByKeys = (source: any, keys: string[]) => {
+  if (!source || typeof source !== 'object') return undefined;
+  if (Array.isArray(source)) return source;
+  for (const key of keys) {
+    const value = source[key];
+    if (Array.isArray(value)) return value;
+  }
+  return undefined;
+};
+const getVitalMetricChartArray = (response: unknown) => {
+  if (Array.isArray(response)) return response;
+  const root = response as Record<string, any>;
+  const payload = getVitalMetricPayloadObject(response);
+  const candidates = [
+    root,
+    root?.data,
+    root?.result,
+    root?.body,
+    root?.payload,
+    payload,
+    payload?.data,
+    payload?.result,
+    payload?.body,
+    payload?.payload
+  ];
+  for (const candidate of candidates) {
+    const chartData = getFirstArrayByKeys(candidate, ['chartData', 'chart_data', 'list', 'records', 'items', 'points', 'data']);
+    if (chartData) return chartData;
+  }
+  return [];
+};
+const normalizeVitalMetricPoint = (item: any, index: number, valueKeys: string[]) => {
+  if (!item || typeof item !== 'object') {
+    return { time: `${index}`, value: item };
+  }
+  const time = getObjectValueByKeys(item, [
+    'time',
+    'recordTime',
+    'record_time',
+    'collectTime',
+    'collect_time',
+    'createTime',
+    'create_time',
+    'dateTime',
+    'datetime',
+    'timestamp',
+    'x',
+    'name'
+  ]);
+  const value = getObjectValueByKeys(item, valueKeys.concat(['value', 'y', 'data']));
+  return {
+    ...item,
+    time: time ?? item.time ?? '',
+    value: value ?? item.value ?? ''
+  };
+};
+const normalizeVitalMetricDetail = (response: unknown, valueKeys: string[]) => {
+  const payload = getVitalMetricPayloadObject(response) || {};
+  const chartData = getVitalMetricChartArray(response).map((item, index) => normalizeVitalMetricPoint(item, index, valueKeys));
+  return {
+    ...(payload as Record<string, any>),
+    chartData
+  } as heartRateDetail;
+};
+const summarizeVitalMetricResponse = (response: unknown) => {
+  const payload = getVitalMetricPayloadObject(response);
+  const chartArray = getVitalMetricChartArray(response);
+  return {
+    hasResponse: response !== null && response !== undefined,
+    rootType: Array.isArray(response) ? 'array' : typeof response,
+    payloadKeys: payload ? Object.keys(payload).slice(0, 18) : [],
+    sourceChartDataCount: chartArray.length,
+    sourceChartDataHead: chartArray.slice(0, 3)
+  };
+};
+const heartRateDisplayObj = computed(() => {
+  const data = withMetricFallback(
     heartRateObj.value,
     getExtendedVitalValue('heartRateAvg', 'heartRate') ?? userStore.healthData?.heartRate ?? userStore.latestMetrics?.heartRate
-  )
-);
-const oxyGenDisplayObj = computed(() =>
-  withMetricFallback(
+  );
+  return {
+    ...data,
+    avgValue: formatIntegerMetricValue((data as any)?.avgValue)
+  } as heartRateDetail;
+});
+const oxyGenDisplayObj = computed(() => {
+  const data = withMetricFallback(
     oxyGenObj.value,
     getExtendedVitalValue('spo2Avg', 'spo2', 'bloodOxygen', 'bloodOxygenSaturation') ??
       userStore.healthData?.bloodOxygen ??
@@ -93,10 +192,14 @@ const oxyGenDisplayObj = computed(() =>
     {
       avgValueRange: (oxyGenObj.value as any)?.avgValueRange || '95-100'
     }
-  )
-);
-const hrvDisplayObj = computed(() =>
-  withMetricFallback(
+  );
+  return {
+    ...data,
+    avgValue: formatIntegerMetricValue((data as any)?.avgValue)
+  } as heartRateDetail;
+});
+const hrvDisplayObj = computed(() => {
+  const data = withMetricFallback(
     hrvObj.value,
     getExtendedVitalValue('hrvAvg', 'hrv', 'heartRateVariability') ??
       userStore.healthData?.hrv ??
@@ -105,8 +208,12 @@ const hrvDisplayObj = computed(() =>
     {
       avgValueRange: (hrvObj.value as any)?.avgValueRange || '--'
     }
-  )
-);
+  );
+  return {
+    ...data,
+    avgValue: formatIntegerMetricValue((data as any)?.avgValue)
+  } as heartRateDetail;
+});
 const temperatureDisplayObj = computed(() => {
   const metric = getMetricNumber(
     getExtendedVitalValue('temperatureAvg', 'temperature', 'skinTemperature') ??
@@ -114,12 +221,20 @@ const temperatureDisplayObj = computed(() => {
       userStore.healthData?.skinTemperature ??
       userStore.latestMetrics?.temperature
   );
-  if (!metric) return temperatureObj.value;
+  const avgSource = getMetricNumber((temperatureObj.value as any)?.avgValue)
+    ? (temperatureObj.value as any)?.avgValue
+    : metric;
+  const baseSource = getMetricNumber((temperatureObj.value as any)?.baseValue)
+    ? (temperatureObj.value as any)?.baseValue
+    : metric;
+  if (!avgSource && !baseSource) return temperatureObj.value;
   return {
     ...temperatureObj.value,
-    avgValue: getMetricNumber((temperatureObj.value as any)?.avgValue) ? (temperatureObj.value as any).avgValue : `${metric}°C`,
-    baseValue: getMetricNumber((temperatureObj.value as any)?.baseValue) ? (temperatureObj.value as any).baseValue : `${metric}°C`,
-    diffValue: (temperatureObj.value as any)?.diffValue || '0°C'
+    avgValue: formatTemperatureValue(avgSource),
+    baseValue: formatTemperatureValue(baseSource),
+    diffValue: getMetricNumber((temperatureObj.value as any)?.diffValue)
+      ? formatTemperatureValue((temperatureObj.value as any)?.diffValue)
+      : '0.0°C'
   } as heartRateDetail;
 });
 const isSelectedToday = computed(() => selectedHistoryDate.value === formatLocalDate(new Date()));
@@ -273,6 +388,43 @@ const queryVitalPage = <T>(endpoint: string, query: (requestConfig: HistoryPageS
     endpoint,
     query
   });
+let vitalSignsLoadSerial = 0;
+const appendVitalSignsPageLog = (event: string, details: Record<string, any> = {}) => {
+  appendRingDiagnosticLog('RW PAGE', event, {
+    buildTag: RW_DIAGNOSTIC_BUILD_TAG,
+    page: 'vitalSigns',
+    ...details
+  });
+};
+const runVitalSignsEndpointTask = async <T>(
+  endpoint: string,
+  date: string,
+  loadId: number,
+  task: () => Promise<T>
+) => {
+  const startedAt = Date.now();
+  try {
+    const result = await task();
+    appendVitalSignsPageLog('vital-signs-endpoint-timing', {
+      endpoint,
+      date,
+      loadId,
+      ok: true,
+      elapsedMs: Date.now() - startedAt
+    });
+    return result;
+  } catch (error) {
+    appendVitalSignsPageLog('vital-signs-endpoint-timing', {
+      endpoint,
+      date,
+      loadId,
+      ok: false,
+      elapsedMs: Date.now() - startedAt,
+      error: formatBleErrorMessage(error, '详情接口请求失败')
+    });
+    throw error;
+  }
+};
 
 const updateSelectedHistoryDateFromIndex = (index: number) => {
   const targetDate = dateList.value[index]?.date || today.value;
@@ -286,7 +438,7 @@ watch(
   () => userStore.reconnectResult, // 监听的目标属性
   async (newValue, oldValue) => {
     if (newValue === true) {
-      await syncVitalSignsHistorySafely();
+      await loadVitalSignsData(new Date(), 'reconnect');
     }
   }
 );
@@ -295,11 +447,7 @@ const handleDateClick = async (index: number) => {
   selectedDayIndex.value = index;
   updateSelectedHistoryDateFromIndex(index);
   const currentDate = dateList.value[index]?.date || today.value;
-  await syncVitalSignsHistorySafely();
-  await getRatDetail(currentDate);
-  await getOxyGenDetail(currentDate);
-  await getTemperatureDetail(currentDate);
-  await getHrvData(currentDate);
+  await loadVitalSignsData(currentDate, 'date-click');
 };
 
 const normalizeSelectedDayIndex = (value: unknown) => {
@@ -308,6 +456,9 @@ const normalizeSelectedDayIndex = (value: unknown) => {
 };
 
 const listData = ref<string[]>(['heartRate', 'bloodOxygenSaturation', 'heartRateVariability', 'skinTemperature']);
+const visibleListData = computed(() =>
+  isCurrentRwRing() ? listData.value.filter((cardId) => cardId !== 'skinTemperature') : listData.value
+);
 const visibleCards = ref<string[]>([]);
 const cardForm = ref();
 
@@ -335,7 +486,15 @@ const getRatDetail = async (currentDate = new Date()) => {
     offset
   }, requestConfig));
   if (res) {
-    heartRateObj.value = res;
+    const normalized = normalizeVitalMetricDetail(res, ['heartRate', 'heart_rate', 'heartRateValue', 'heart_rate_value', 'bpm']);
+    appendVitalSignsPageLog('vital-signs-query-result', {
+      endpoint: 'heart-rate-detail',
+      date: isoDate,
+      response: summarizeVitalMetricResponse(res),
+      normalizedChartDataCount: normalized.chartData?.length,
+      normalizedChartDataHead: normalized.chartData?.slice?.(0, 5)
+    });
+    heartRateObj.value = normalized;
   }
 };
 // 获取心率变异性详情
@@ -358,7 +517,15 @@ const getHrvData = async (currentDate = new Date()) => {
     offset
   }, requestConfig));
   if (res) {
-    hrvObj.value = res;
+    const normalized = normalizeVitalMetricDetail(res, ['hrv', 'hrvValue', 'hrv_value', 'heartRateVariability', 'heart_rate_variability']);
+    appendVitalSignsPageLog('vital-signs-query-result', {
+      endpoint: 'hrv-detail',
+      date: isoDate,
+      response: summarizeVitalMetricResponse(res),
+      normalizedChartDataCount: normalized.chartData?.length,
+      normalizedChartDataHead: normalized.chartData?.slice?.(0, 5)
+    });
+    hrvObj.value = normalized;
   }
 };
 // 获取血氧详情
@@ -381,12 +548,28 @@ const getOxyGenDetail = async (currentDate = new Date()) => {
     offset
   }, requestConfig));
   if (res) {
-    oxyGenObj.value = res;
+    const normalized = normalizeVitalMetricDetail(res, ['bloodOxygen', 'blood_oxygen', 'bloodOxygenValue', 'blood_oxygen_value', 'oxygen', 'spo2', 'SpO2']);
+    appendVitalSignsPageLog('vital-signs-query-result', {
+      endpoint: 'blood-oxygen-detail',
+      date: isoDate,
+      response: summarizeVitalMetricResponse(res),
+      normalizedChartDataCount: normalized.chartData?.length,
+      normalizedChartDataHead: normalized.chartData?.slice?.(0, 5)
+    });
+    oxyGenObj.value = normalized;
   }
 };
 
 // 获取温度详情
 const getTemperatureDetail = async (currentDate = new Date()) => {
+  if (isCurrentRwRing()) {
+    temperatureObj.value = {};
+    appendVitalSignsPageLog('vital-signs-temperature-skip', {
+      reason: 'rw-device-no-temperature',
+      date: formatLocalDate(currentDate)
+    });
+    return;
+  }
   const isoDate = formatLocalDate(currentDate);
   // const index = selectedDayIndex.value - 2;
   let offset = 0;
@@ -405,8 +588,45 @@ const getTemperatureDetail = async (currentDate = new Date()) => {
     offset
   }, requestConfig));
   if (res) {
-    temperatureObj.value = res;
+    const normalized = normalizeVitalMetricDetail(res, ['temperature', 'skinTemperature', 'bodyTemperature', 'temperatureValue', 'skin_temperature']);
+    appendVitalSignsPageLog('vital-signs-query-result', {
+      endpoint: 'temperature-detail',
+      date: isoDate,
+      response: summarizeVitalMetricResponse(res),
+      normalizedChartDataCount: normalized.chartData?.length,
+      normalizedChartDataHead: normalized.chartData?.slice?.(0, 5)
+    });
+    temperatureObj.value = normalized;
   }
+};
+const loadVitalSignsData = async (currentDate = new Date(), trigger = 'manual') => {
+  const loadId = ++vitalSignsLoadSerial;
+  const date = formatLocalDate(currentDate);
+  const startedAt = Date.now();
+  appendVitalSignsPageLog('vital-signs-load-start', {
+    trigger,
+    date,
+    loadId
+  });
+  const tasks = [
+    runVitalSignsEndpointTask('vital-sign', date, loadId, () => getExtendedVitalSignData()),
+    runVitalSignsEndpointTask('heart-rate-detail', date, loadId, () => getRatDetail(currentDate)),
+    runVitalSignsEndpointTask('blood-oxygen-detail', date, loadId, () => getOxyGenDetail(currentDate)),
+    runVitalSignsEndpointTask('hrv-detail', date, loadId, () => getHrvData(currentDate))
+  ];
+  if (!isCurrentRwRing()) {
+    tasks.push(runVitalSignsEndpointTask('temperature-detail', date, loadId, () => getTemperatureDetail(currentDate)));
+  } else {
+    temperatureObj.value = {};
+  }
+  const results = await Promise.allSettled(tasks);
+  appendVitalSignsPageLog('vital-signs-load-done', {
+    trigger,
+    date,
+    loadId,
+    elapsedMs: Date.now() - startedAt,
+    failedCount: results.filter((item) => item.status === 'rejected').length
+  });
 };
 const confirm = async (date: any) => {
   // 处理选择的日期，date可能是数组或单个日期对象
@@ -426,11 +646,7 @@ const confirm = async (date: any) => {
   selectedDayIndex.value = 3;
   const currentDate = selectedDate;
   selectedHistoryDate.value = formatLocalDate(currentDate);
-  await syncVitalSignsHistorySafely();
-  await getRatDetail(currentDate);
-  await getOxyGenDetail(currentDate);
-  await getTemperatureDetail(currentDate);
-  await getHrvData(currentDate);
+  await loadVitalSignsData(currentDate, 'calendar-confirm');
 };
 const receiveCardConfig = (config: { listDatal: string[]; visibleCards: string[]; form: any }) => {
   listData.value = config.listDatal;
@@ -495,11 +711,7 @@ onPullDownRefresh(async () => {
     if (!isCurrentRwRing()) {
       await refreshBleMetricsAfterRestore();
     }
-    await syncVitalSignsHistorySafely();
-    await getRatDetail();
-    await getOxyGenDetail();
-    await getTemperatureDetail();
-    await getHrvData();
+    await loadVitalSignsData(new Date(), 'pull-down-refresh');
   } catch (error) {
     uni.showToast({
       title: formatBleErrorMessage(error, '刷新失败，请稍后再试'),
@@ -571,7 +783,7 @@ const openTimePicker = () => {
       </view>
     </view>
     <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
-    <view v-for="cardId in listData" :key="cardId">
+    <view v-for="cardId in visibleListData" :key="cardId">
       <HeartRate v-if="cardId === 'heartRate'" :heartRateData="heartRateDisplayObj" >
         <DetailInfo id="heart_rate" v-model:isPopupActive="isPopupActive" style="margin-left: 14rpx;"></DetailInfo>
       </HeartRate>

@@ -4,6 +4,7 @@ import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingBusinessController } from '@/composables/useRingBusinessController';
 import { useUserStore } from '@/stores/user';
 import { installFrontendErrorPromptGuard } from '@/utils/errorPrompt';
+import { refreshAppForegroundSessionId } from '@/utils/appForegroundSession';
 
 onLaunch(() => {
   installFrontendErrorPromptGuard();
@@ -11,6 +12,7 @@ onLaunch(() => {
 
 onShow(() => {
   installFrontendErrorPromptGuard();
+  refreshAppForegroundSessionId();
   setTimeout(() => {
     try {
       const { initBluetooth, registerGlobalListeners } = useRingBLE();

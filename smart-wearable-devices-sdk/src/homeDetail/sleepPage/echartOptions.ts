@@ -45,7 +45,7 @@ export const sleepTimeOption2 = {
       stack: 'deep',
       yAxisIndex: 0,
       data: [],
-      itemStyle: { color: '#4f46e5', borderRadius: [6, 6, 6, 6] },
+      itemStyle: { color: '#5146D8', borderRadius: [6, 6, 6, 6] },
       barWidth: 18
     },
     {
@@ -54,7 +54,7 @@ export const sleepTimeOption2 = {
       stack: 'light',
       yAxisIndex: 0,
       data: [],
-      itemStyle: { color: '#818cf8', borderRadius: [6, 6, 6, 6] },
+      itemStyle: { color: '#9B93F5', borderRadius: [6, 6, 6, 6] },
       barWidth: 18
     },
     {
@@ -63,7 +63,7 @@ export const sleepTimeOption2 = {
       stack: 'rem',
       yAxisIndex: 0,
       data: [],
-      itemStyle: { color: '#a78bfa', borderRadius: [6, 6, 6, 6] },
+      itemStyle: { color: '#48A7E8', borderRadius: [6, 6, 6, 6] },
       barWidth: 18
     },
     {
@@ -72,7 +72,7 @@ export const sleepTimeOption2 = {
       stack: 'awake',
       yAxisIndex: 0,
       data: [],
-      itemStyle: { color: '#fb923c', borderRadius: [6, 6, 6, 6] },
+      itemStyle: { color: '#F4A340', borderRadius: [6, 6, 6, 6] },
       barWidth: 18
     }
   ],
@@ -158,10 +158,10 @@ export const sleepTimeOption = {
       itemStyle: {
         color: function (params) {
           const colorMap = {
-            清醒: '#e2e1fd',
-            浅睡: '#c5c2f9',
-            深睡: '#9994f4',
-            快速眼动: '#5f57ec'
+            清醒: '#F4A340',
+            浅睡: '#9B93F5',
+            深睡: '#5146D8',
+            快速眼动: '#48A7E8'
           };
           // 关键：根据数值范围匹配睡眠阶段
           let categoryName;
@@ -201,11 +201,11 @@ export const sleepRageOption = {
       radius: ['30%', '45%'],
       center: ['17%', '53%'],
       data: [
-        { value: 10, name: '清醒', itemStyle: { color: '#feba8a', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 22, name: '浅睡', itemStyle: { color: '#8c65f6', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 8, name: '快速眼动', itemStyle: { color: '#baacfb', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 60, name: '深睡', itemStyle: { color: '#4b13be', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 11, name: '小睡', itemStyle: { color: '#8c65f6', borderWidth: 1, borderColor: '#ffffff' } }
+        { value: 10, name: '清醒', itemStyle: { color: '#F4A340', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 22, name: '浅睡', itemStyle: { color: '#9B93F5', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 8, name: '快速眼动', itemStyle: { color: '#48A7E8', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 60, name: '深睡', itemStyle: { color: '#5146D8', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 11, name: '小睡', itemStyle: { color: '#58C7B1', borderWidth: 1, borderColor: '#ffffff' } }
       ],
       label: { show: false },
       labelLine: { show: false },

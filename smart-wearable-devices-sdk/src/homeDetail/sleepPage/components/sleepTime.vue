@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, getCurrentInstance } from 'vue';
 import type { sleepDetail, sleepSegment, Point } from '@/types/api/homeDetail';
+import { SLEEP_STAGE_COLORS, type SleepStageName } from '@/homeDetail/sleepPage/sleepStageColors';
 
 const props = defineProps({
   sleepDetailObj: {
@@ -26,26 +27,100 @@ const formattedMinutes = computed(() => sleepDurationMinutes.value.toString().pa
 
 // ===== 阶段配置 =====
 const STAGE_CONFIG: Record<string, { level: number; color: string }> = {
-  快速眼动: { level: 0, color: '#ff9b64' },
-  清醒: { level: 1, color: '#e2e1fd' },
-  浅睡: { level: 2, color: '#b884f6' },
-  深睡: { level: 3, color: '#6a4df0' },
-  小睡: { level: 0, color: '#feba8a' }
+  快速眼动: { level: 0, color: SLEEP_STAGE_COLORS['快速眼动'] },
+  清醒: { level: 1, color: SLEEP_STAGE_COLORS['清醒'] },
+  浅睡: { level: 2, color: SLEEP_STAGE_COLORS['浅睡'] },
+  深睡: { level: 3, color: SLEEP_STAGE_COLORS['深睡'] },
+  小睡: { level: 0, color: SLEEP_STAGE_COLORS['小睡'] }
+};
+
+const STAGE_ALIASES: Record<string, string> = {
+  '1': '清醒',
+  awake: '清醒',
+  wake: '清醒',
+  清醒: '清醒',
+  '2': '快速眼动',
+  rem: '快速眼动',
+  REM: '快速眼动',
+  快速眼动: '快速眼动',
+  眼动: '快速眼动',
+  '3': '浅睡',
+  light: '浅睡',
+  浅睡: '浅睡',
+  '4': '深睡',
+  deep: '深睡',
+  深睡: '深睡',
+  '5': '小睡',
+  nap: '小睡',
+  小睡: '小睡'
+};
+
+type SleepTimelineSegment = { start: number; duration: number; type: string };
+type SleepTimelineTick = { key: string; label: string; left: number; isFirst: boolean; isLast: boolean };
+
+const normalizeStageType = (...values: unknown[]) => {
+  for (const value of values) {
+    const key = String(value ?? '').trim();
+    if (!key) continue;
+    const normalized = STAGE_ALIASES[key] || STAGE_ALIASES[key.toLowerCase()];
+    if (normalized) return normalized;
+  }
+  return '';
+};
+
+const hasExplicitSleepType = (item: any) =>
+  item?.sleepType !== undefined ||
+  item?.sleep_type !== undefined ||
+  item?.sleepTypeName !== undefined ||
+  item?.sleep_type_name !== undefined;
+
+const getPointStageType = (item: any) => {
+  const explicitStage = normalizeStageType(
+    item?.sleepType,
+    item?.sleep_type,
+    item?.sleepTypeName,
+    item?.sleep_type_name
+  );
+  if (explicitStage) return explicitStage;
+  // sleep-detail 明细会返回 sleepType 文案，同时 value 可能固定为 5。
+  // sleepType 存在但不是阶段文案时，不能再把 value=5 误判为“小睡”。
+  if (hasExplicitSleepType(item)) return '';
+
+  return normalizeStageType(
+    item?.sleepState,
+    item?.sleep_state,
+    item?.sleepStatus,
+    item?.sleep_status,
+    item?.sleepStage,
+    item?.sleep_stage,
+    item?.stageName,
+    item?.status,
+    item?.state,
+    item?.stage,
+    item?.type,
+    item?.name,
+    item?.value
+  );
 };
 
 // ===== 时间工具 =====
 const parseTimeToMinutes = (timeStr: string): number => {
   if (!timeStr) return 0;
-  const parts = timeStr.split(':');
-  const hours = parseInt(parts[0], 10) || 0;
-  const minutes = parseInt(parts[1], 10) || 0;
-  const seconds = parseInt(parts[2], 10) || 0;
+  const match = String(timeStr).match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return 0;
+  const hours = parseInt(match[1], 10) || 0;
+  const minutes = parseInt(match[2], 10) || 0;
+  const seconds = parseInt(match[3] || '0', 10) || 0;
+  if (hours > 23 || minutes > 59 || seconds > 59) return 0;
   return hours * 60 + minutes + Math.floor(seconds / 60);
 };
 
+const hasClockTime = (timeStr: unknown) => /(\d{1,2}):(\d{2})(?::(\d{2}))?/.test(String(timeStr ?? ''));
+
 const formatTime = (minutes: number): string => {
-  const h = Math.floor(minutes / 60) % 24;
-  const m = Math.floor(minutes % 60);
+  const normalized = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  const h = Math.floor(normalized / 60);
+  const m = normalized % 60;
   return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
 };
 
@@ -53,8 +128,10 @@ const formatTime = (minutes: number): string => {
 const getStageDuration = (stageName: string): number => {
   const chartDataSection = props.sleepSegmentObj?.chartDataSection;
   if (!chartDataSection || !Array.isArray(chartDataSection)) return 0;
-  const stage = chartDataSection.find((item: Point) => item.time === stageName);
-  return stage ? parseInt(String(stage.value || '0'), 10) : 0;
+  return chartDataSection.reduce((total: number, item: Point) => {
+    if (normalizeStageType(item.time) !== stageName) return total;
+    return total + (parseInt(String(item.value || '0'), 10) || 0);
+  }, 0);
 };
 
 const formatCompactDuration = (minutes: number) => ({
@@ -63,7 +140,7 @@ const formatCompactDuration = (minutes: number) => ({
 });
 
 const sleepTimeStats = computed(() => {
-  const stages = ['深睡', '浅睡', '快速眼动'];
+  const stages: SleepStageName[] = ['深睡', '浅睡', '快速眼动'];
   return stages.map((name) => {
     const duration = formatCompactDuration(getStageDuration(name));
     const config = STAGE_CONFIG[name] || STAGE_CONFIG['浅睡'];
@@ -78,98 +155,125 @@ const sleepTimeStats = computed(() => {
 // ===== 处理时间段：保证所有时间段首尾连续 =====
 // 1. 缺失 → 清醒填充  2. 交叉 → 对齐  3. 乱序 → 排序
 // 4. 重复时间戳 → 跳过  5. 跨午夜 → 归一化  6. 超范围 → 裁剪  7. 同类型相邻 → 合并
-const processTimeSegments = (): Array<{ start: number; duration: number; type: string }> => {
-  const chartData = props.sleepDetailObj?.chartData;
-  // 睡眠状态映射（与后端 API 契约一致：0无效 1清醒 2快速眼动 3浅睡 4深睡 5小睡）
-  const stateMap: Record<number, string> = {
-    1: '清醒',
-    2: '快速眼动',
-    3: '浅睡',
-    4: '深睡',
-    5: '小睡'
-  };
-
-  if (!chartData || !Array.isArray(chartData) || chartData.length === 0) {
-    const segments: Array<{ start: number; duration: number; type: string }> = [];
-    let currentStart = 0;
-    const stages = ['深睡', '浅睡', '快速眼动', '清醒', '小睡'];
-    stages.forEach((stage) => {
-      const duration = getStageDuration(stage);
-      if (duration > 0) {
-        segments.push({ start: currentStart, duration, type: stage });
-        currentStart += duration;
+const mergeTimelineSegments = (segments: SleepTimelineSegment[]) => {
+  const merged: SleepTimelineSegment[] = [];
+  segments
+    .filter((seg) => seg.duration > 0 && STAGE_CONFIG[seg.type])
+    .sort((a, b) => a.start - b.start)
+    .forEach((seg) => {
+      const last = merged[merged.length - 1];
+      if (last && last.type === seg.type && Math.abs(last.start + last.duration - seg.start) <= 0.01) {
+        last.duration += seg.duration;
+      } else {
+        merged.push({ ...seg });
       }
     });
-    return segments;
+  return merged;
+};
+
+const getFallbackStartMinutes = () => {
+  const segmentStart = parseTimeToMinutes(props.sleepSegmentObj?.startTime || '');
+  if (hasClockTime(props.sleepSegmentObj?.startTime)) return segmentStart;
+  const firstPoint = props.sleepDetailObj?.chartData?.[0] as any;
+  return parseTimeToMinutes(firstPoint?.time || firstPoint?.startTime || firstPoint?.start_time || '');
+};
+
+const getFallbackSegmentsFromSummary = (): SleepTimelineSegment[] => {
+  const segments: SleepTimelineSegment[] = [];
+  let currentStart = getFallbackStartMinutes();
+  const stages = ['深睡', '浅睡', '快速眼动', '清醒', '小睡'];
+  stages.forEach((stage) => {
+    const duration = getStageDuration(stage);
+    if (duration > 0) {
+      segments.push({ start: currentStart, duration, type: stage });
+      currentStart += duration;
+    }
+  });
+  return segments;
+};
+
+const getTypicalPointGap = (points: Array<{ time: number; type: string }>) => {
+  const gaps = points
+    .slice(0, -1)
+    .map((point, index) => points[index + 1].time - point.time)
+    .filter((gap) => gap > 0 && gap <= 90)
+    .sort((a, b) => a - b);
+  return gaps.length ? gaps[Math.floor(gaps.length / 2)] : 10;
+};
+
+const processTimeSegments = (): SleepTimelineSegment[] => {
+  const chartData = props.sleepDetailObj?.chartData;
+  if (!Array.isArray(chartData) || chartData.length === 0) {
+    return getFallbackSegmentsFromSummary();
   }
 
-  const startStr = props.sleepSegmentObj?.startTime || '';
-  const endStr = props.sleepSegmentObj?.endTime || '';
-  const startMins = parseTimeToMinutes(startStr);
-  const endMins = parseTimeToMinutes(endStr);
-  const firstDataMins = parseTimeToMinutes(chartData[0]?.time || '');
-  const lastDataMins = parseTimeToMinutes(chartData[chartData.length - 1]?.time || '');
-
-  const refStart = startMins > 0 ? startMins : firstDataMins;
-  const refEnd = endMins > 0 ? endMins : lastDataMins;
+  const startMins = parseTimeToMinutes(props.sleepSegmentObj?.startTime || '');
+  const endMins = parseTimeToMinutes(props.sleepSegmentObj?.endTime || '');
+  const hasStartTime = hasClockTime(props.sleepSegmentObj?.startTime);
+  const hasEndTime = hasClockTime(props.sleepSegmentObj?.endTime);
+  const rawPointTimes = chartData
+    .map((item: any) => {
+      const rawTime = item?.time || item?.startTime || item?.start_time || '';
+      return hasClockTime(rawTime) ? parseTimeToMinutes(rawTime) : null;
+    })
+    .filter((time): time is number => time != null)
+    .filter((time) => Number.isFinite(time));
+  const firstPointTime = rawPointTimes[0] ?? 0;
+  const refStart = hasStartTime ? startMins : firstPointTime;
+  const refEnd = hasEndTime ? endMins : (rawPointTimes[rawPointTimes.length - 1] ?? refStart);
   const crossesMidnight = refStart > refEnd;
 
-  const normalizeTime = (minutes: number): number => {
-    if (crossesMidnight && minutes < refStart) return minutes + 1440;
-    return minutes;
-  };
+  const normalizeTime = (minutes: number) => (crossesMidnight && minutes < refStart ? minutes + 1440 : minutes);
 
-  const sleepStart = normalizeTime(refStart);
-  const sleepEnd = normalizeTime(refEnd);
+  const detailPoints = chartData
+    .map((item: any) => {
+      const rawTimeText = item?.time || item?.startTime || item?.start_time || '';
+      if (!hasClockTime(rawTimeText)) return null;
+      const rawTime = parseTimeToMinutes(rawTimeText);
+      const type = getPointStageType(item);
+      if (!Number.isFinite(rawTime) || !type) return null;
+      return {
+        time: normalizeTime(rawTime),
+        type
+      };
+    })
+    .filter(Boolean)
+    .sort((a: any, b: any) => a.time - b.time) as Array<{ time: number; type: string }>;
 
-  const sortedPoints = chartData
-    .map((item: any) => ({
-      time: normalizeTime(parseTimeToMinutes(item.time || '')),
-      value: item.value || ''
-    }))
-    .sort((a: any, b: any) => a.time - b.time);
-
-  const segments: Array<{ start: number; duration: number; type: string }> = [];
-  let cursor = sleepStart;
-
-  for (let i = 0; i < sortedPoints.length; i++) {
-    const point = sortedPoints[i];
-    if (point.time >= sleepEnd) break;
-
-    const rawSegEnd = i < sortedPoints.length - 1 ? sortedPoints[i + 1].time : sleepEnd;
-    const segEnd = Math.min(rawSegEnd, sleepEnd);
-
-    if (point.time > cursor) {
-      segments.push({ start: cursor, duration: point.time - cursor, type: '清醒' });
-      cursor = point.time;
-    }
-
-    const segStart = Math.max(point.time, cursor);
-    const duration = segEnd - segStart;
-
-    if (duration > 0) {
-      const numValue = parseInt(String(point.value), 10);
-      const type = stateMap[numValue] || '清醒';
-      segments.push({ start: segStart, duration, type });
-      cursor = segStart + duration;
-    }
+  if (!detailPoints.length) {
+    return getFallbackSegmentsFromSummary();
   }
 
-  if (cursor < sleepEnd) {
-    segments.push({ start: cursor, duration: sleepEnd - cursor, type: '清醒' });
+  const typicalGap = getTypicalPointGap(detailPoints);
+  const sleepStart = hasStartTime ? normalizeTime(refStart) : detailPoints[0].time;
+  const sleepEndCandidate = hasEndTime ? normalizeTime(refEnd) : detailPoints[detailPoints.length - 1].time + typicalGap;
+  const sleepEnd = Math.max(sleepStart + 1, sleepEndCandidate);
+  const segments: SleepTimelineSegment[] = [];
+
+  if (detailPoints[0].time > sleepStart) {
+    segments.push({
+      start: sleepStart,
+      duration: detailPoints[0].time - sleepStart,
+      type: detailPoints[0].type
+    });
   }
 
-  const merged: Array<{ start: number; duration: number; type: string }> = [];
-  for (const seg of segments) {
-    const last = merged[merged.length - 1];
-    if (last && last.type === seg.type && last.start + last.duration === seg.start) {
-      last.duration += seg.duration;
-    } else {
-      merged.push({ ...seg });
+  detailPoints.forEach((point, index) => {
+    if (point.time >= sleepEnd) return;
+    const nextTime = detailPoints[index + 1]?.time ?? sleepEnd;
+    const segStart = Math.max(point.time, sleepStart);
+    const segEnd = Math.min(nextTime > segStart ? nextTime : segStart + typicalGap, sleepEnd);
+    if (segEnd > segStart) {
+      segments.push({
+        start: segStart,
+        duration: segEnd - segStart,
+        type: point.type
+      });
     }
-  }
+  });
 
-  return merged;
+  const merged = mergeTimelineSegments(segments);
+  return merged.length ? merged : getFallbackSegmentsFromSummary();
 };
 
 // ===== 时间范围 =====
@@ -179,15 +283,26 @@ const timeRange = computed(() => {
   const startMins = parseTimeToMinutes(startStr);
   const endMins = parseTimeToMinutes(endStr);
 
-  if (startMins > 0 && endMins > 0) {
+  if (hasClockTime(startStr) && hasClockTime(endStr)) {
     return { min: startMins, max: endMins > startMins ? endMins : endMins + 1440 };
+  }
+
+  if (hasClockTime(startStr)) {
+    const summaryDuration = ['深睡', '浅睡', '快速眼动', '清醒', '小睡'].reduce((total, stage) => total + getStageDuration(stage), 0);
+    if (summaryDuration > 0) {
+      return { min: startMins, max: startMins + summaryDuration };
+    }
   }
 
   const chartData = props.sleepDetailObj?.chartData;
   if (chartData && chartData.length > 0) {
-    const first = parseTimeToMinutes(chartData[0]?.time || '');
-    const last = parseTimeToMinutes(chartData[chartData.length - 1]?.time || '');
-    return { min: first, max: last > first ? last : last + 1440 };
+    const firstRaw = chartData[0]?.time || '';
+    const lastRaw = chartData[chartData.length - 1]?.time || '';
+    if (hasClockTime(firstRaw) && hasClockTime(lastRaw)) {
+      const first = parseTimeToMinutes(firstRaw);
+      const last = parseTimeToMinutes(lastRaw);
+      return { min: first, max: last > first ? last : last + 1440 };
+    }
   }
 
   return { min: 0, max: 1 };
@@ -270,8 +385,55 @@ const connectors = computed(() => {
 });
 
 // ===== 时间标签 =====
-const startTimeLabel = computed(() => formatTime(timeRange.value.min));
-const endTimeLabel = computed(() => formatTime(timeRange.value.max));
+const sleepTimeTicks = computed<SleepTimelineTick[]>(() => {
+  const { min, max } = timeRange.value;
+  const span = Math.max(1, max - min);
+  const minutesList: number[] = [min, max];
+  const segments = processTimeSegments();
+
+  segments.forEach((segment) => {
+    minutesList.push(segment.start, segment.start + segment.duration);
+  });
+
+  const uniqueMinutes = Array.from(new Set(minutesList.filter((item) => Number.isFinite(item))))
+    .filter((minutes) => minutes >= min && minutes <= max)
+    .sort((a, b) => a - b);
+  const rawTicks = uniqueMinutes.map((minutes, index) => ({
+    key: `${minutes}-${index}`,
+    label: formatTime(minutes),
+    left: Math.max(0, Math.min(100, ((minutes - min) / span) * 100)),
+    isFirst: false,
+    isLast: false
+  }));
+  if (rawTicks.length <= 2) {
+    return rawTicks.map((tick, index, list) => ({
+      ...tick,
+      isFirst: index === 0,
+      isLast: index === list.length - 1
+    }));
+  }
+
+  const minGapPercent = 9;
+  const lastTick = rawTicks[rawTicks.length - 1];
+  const filtered: SleepTimelineTick[] = [rawTicks[0]];
+  rawTicks.slice(1, -1).forEach((tick) => {
+    const prev = filtered[filtered.length - 1];
+    if (tick.left - prev.left < minGapPercent) return;
+    if (lastTick.left - tick.left < minGapPercent) return;
+    filtered.push(tick);
+  });
+  const prev = filtered[filtered.length - 1];
+  if (lastTick.left - prev.left < minGapPercent && filtered.length > 1) {
+    filtered.pop();
+  }
+  filtered.push(lastTick);
+
+  return filtered.map((tick, index, list) => ({
+    ...tick,
+    isFirst: index === 0,
+    isLast: index === list.length - 1
+  }));
+});
 
 // ===== 点击指示器 =====
 const instance = getCurrentInstance();
@@ -425,8 +587,13 @@ const handleChartTouchMove = (e: any) => {
           </view>
 
           <!-- 时间刻度 -->
-          <text class="time-text left">{{ startTimeLabel }}</text>
-          <text class="time-text right">{{ endTimeLabel }}</text>
+          <text
+            v-for="tick in sleepTimeTicks"
+            :key="tick.key"
+            class="time-tick"
+            :class="{ 'is-first': tick.isFirst, 'is-last': tick.isLast }"
+            :style="{ left: tick.left + '%' }"
+          >{{ tick.label }}</text>
         </view>
       </view>
       <view class="sleep-time-summary">
@@ -452,7 +619,7 @@ const handleChartTouchMove = (e: any) => {
   position: relative;
   width: 100%;
   margin-top: 25rpx;
-  padding-bottom: 50rpx;
+  padding-bottom: 78rpx;
 }
 
 .chart-body {
@@ -499,16 +666,25 @@ const handleChartTouchMove = (e: any) => {
 }
 
 /* 时间刻度文字 */
-.time-text {
+.time-tick {
   position: absolute;
   top: 100%;
   margin-top: 8rpx;
-  font-size: 22rpx;
+  font-size: 18rpx;
   color: #9ca3af;
   z-index: 2;
+  white-space: nowrap;
+  transform: translateX(-50%) rotate(-35deg);
+  transform-origin: top center;
 }
-.time-text.left { left: 0; }
-.time-text.right { right: 0; }
+.time-tick.is-first {
+  transform: rotate(-35deg);
+  transform-origin: top left;
+}
+.time-tick.is-last {
+  transform: translateX(-100%) rotate(-35deg);
+  transform-origin: top right;
+}
 
 /* 点击指示线（与网格虚线同色） */
 .indicator-line {

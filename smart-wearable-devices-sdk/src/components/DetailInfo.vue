@@ -1,7 +1,14 @@
 <template>
   <view :class="['detail-info', size]">
-    
-    <view class="icon-container" @tap.stop="openPanel">i</view>
+    <view
+      class="detail-info__hit"
+      hover-class="detail-info__hit--pressed"
+      :hover-start-time="0"
+      :hover-stay-time="100"
+      @tap.stop="openPanel"
+    >
+      <uv-icon class="detail-info__icon" name="info-circle" size="16px"></uv-icon>
+    </view>
 
 
     <!-- 底部弹出层 -->
@@ -82,42 +89,46 @@ const onChange = (e:any) => {
 
 <style lang="scss" scoped>
 .detail-info {
-  display: inline-block;
-  color: #afafaf;    /* 图标颜色，例如信息蓝 */
-  vertical-align: baseline;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 32px;
+  height: 32px;
+  margin-left: 6px !important;
+  color: #a7abb3;
+  vertical-align: middle;
+  line-height: 1;
+  flex: 0 0 32px;
 
   &.normal {
-    width: 16px;
-    height: 16px;
-
-    .icon-container {
-      line-height: 16px;
-      font-size: 24rpx;
-      transform: translateY(-2rpx);
-    }
+    width: 32px;
+    height: 32px;
   }
 
   &.small {
-    width: 12px;
-    height: 12px;
-    // vertical-align: text-top;
-
-    .icon-container {
-      line-height: 12px;
-      font-size: 14rpx;
-      transform: translateY(-4rpx);
-    }
+    width: 32px;
+    height: 32px;
   }
 
-  
-  .icon-container {
-    display: block;
-    width: 100%;
-    height: 100%;
-    border-radius: 200px;
-    border: 2px solid #afafaf;
-    text-align: center;
-    font-weight: bold;
+  .detail-info__hit {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    width: 32px;
+    height: 32px;
+    color: #a7abb3;
+    border-radius: 16px;
+  }
+
+  .detail-info__hit--pressed {
+    color: #2e70fc !important;
+  }
+
+  :deep(.uv-icon),
+  :deep(.uv-icon__icon) {
+    color: currentColor !important;
+    font-size: 16px !important;
+    line-height: 16px !important;
   }
 
 }

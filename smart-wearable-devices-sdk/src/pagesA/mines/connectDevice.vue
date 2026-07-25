@@ -8,8 +8,9 @@ import {
   useRingBusinessController
 } from '@/composables/useRingBusinessController';
 import { getRingDeviceStableIdentity, isSameRingDevice } from '@/composables/useRingBleSdk';
-import { deviceModelList } from '@/common/api/device';
+import { deviceModelList, getBindInfo } from '@/common/api/device';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { hasBoundRingIdentity } from '@/utils/ringBinding';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import type { DeviceModel } from '@/types/api/device';
 
@@ -24,6 +25,10 @@ const deviceName = ref('');
 const iosDeviceIds = ref('');
 const selectedDevice = ref<ScanDeviceInfo | null>(null);
 const connecting = ref(false);
+const boundInfo = ref<ScanDeviceInfo | null>(null);
+const boundInfoLoaded = ref(false);
+const autoReconnectStatus = ref<'idle' | 'connecting' | 'success' | 'failed'>('idle');
+const autoReconnectMessage = ref('');
 
 const picker = ref<any>(null);
 const columns = ref([['全部']]);
@@ -74,6 +79,19 @@ const getConnectPageSnapshot = () => ({
 });
 
 const isReadyCurrentDevice = () => ring.isConnected.value && ring.isReady.value && Boolean(ring.deviceInfo.value.deviceId);
+const hasBoundDevice = computed(() => boundInfoLoaded.value && hasBoundRingIdentity(boundInfo.value));
+const showScanArea = computed(() => boundInfoLoaded.value && !hasBoundDevice.value);
+const autoReconnectTitle = computed(() => {
+  if (autoReconnectStatus.value === 'success') return '已连接绑定设备';
+  if (autoReconnectStatus.value === 'failed') return '绑定设备连接失败';
+  return '正在连接绑定设备';
+});
+const autoReconnectDesc = computed(() => {
+  if (autoReconnectMessage.value) return autoReconnectMessage.value;
+  if (autoReconnectStatus.value === 'success') return '设备已恢复连接，即将返回。';
+  if (autoReconnectStatus.value === 'failed') return '未连接到已绑定设备，请靠近戒指后重试。';
+  return '已检测到当前账号有绑定设备，正在自动恢复连接。';
+});
 
 const devices = computed(() => {
   const filters = type.value.filter(Boolean);
@@ -104,6 +122,13 @@ const devices = computed(() => {
 });
 
 const scanBusinessDevices = (options: { force?: boolean; reason?: string } = {}) => {
+  if (hasBoundDevice.value) {
+    appendConnectPageDiagnosticLog('connect-page-scan-hidden-bound-device', {
+      reason: options.reason || 'bound-device',
+      snapshot: getConnectPageSnapshot()
+    });
+    return Promise.resolve();
+  }
   if (!options.force && isReadyCurrentDevice()) {
     appendConnectPageDiagnosticLog('connect-page-scan-skipped-ready', {
       reason: options.reason || 'ready-device',
@@ -117,6 +142,59 @@ const scanBusinessDevices = (options: { force?: boolean; reason?: string } = {})
     snapshot: getConnectPageSnapshot()
   });
   return ring.scanForBusinessDevices();
+};
+const loadBoundInfo = async () => {
+  try {
+    const info = await getBindInfo();
+    boundInfo.value = (info || null) as ScanDeviceInfo | null;
+    appendConnectPageDiagnosticLog('connect-page-bound-info-loaded', {
+      hasBoundDevice: hasBoundRingIdentity(info),
+      boundDevice: summarizeConnectPageDevice(info as ScanDeviceInfo),
+      snapshot: getConnectPageSnapshot()
+    });
+  } catch (error) {
+    boundInfo.value = null;
+    appendConnectPageDiagnosticLog('connect-page-bound-info-load-failed', {
+      message: formatBleErrorMessage(error, '绑定信息读取失败'),
+      snapshot: getConnectPageSnapshot()
+    });
+  } finally {
+    boundInfoLoaded.value = true;
+  }
+};
+const retryBoundReconnect = async () => {
+  if (!hasBoundDevice.value || autoReconnectStatus.value === 'connecting') return;
+  autoReconnectStatus.value = 'connecting';
+  autoReconnectMessage.value = '正在按绑定设备自动重连，请保持戒指靠近手机。';
+  appendConnectPageDiagnosticLog('connect-page-bound-reconnect-start', {
+    boundDevice: summarizeConnectPageDevice(boundInfo.value),
+    snapshot: getConnectPageSnapshot()
+  });
+  try {
+    const restored = await ring.restoreLastBusinessDevice({ refreshAfterRestore: false });
+    if (restored && isReadyCurrentDevice()) {
+      autoReconnectStatus.value = 'success';
+      autoReconnectMessage.value = '绑定设备已恢复连接，即将返回。';
+      appendConnectPageDiagnosticLog('connect-page-bound-reconnect-success', getConnectPageSnapshot());
+      setTimeout(() => {
+        uni.navigateBack();
+      }, 800);
+      return;
+    }
+    autoReconnectStatus.value = 'failed';
+    autoReconnectMessage.value = '未找到已绑定设备，或连接握手未完成。请靠近戒指后重试。';
+    appendConnectPageDiagnosticLog('connect-page-bound-reconnect-failed', {
+      restored,
+      snapshot: getConnectPageSnapshot()
+    });
+  } catch (error) {
+    autoReconnectStatus.value = 'failed';
+    autoReconnectMessage.value = formatBleErrorMessage(error, '绑定设备重连失败，请靠近戒指后重试');
+    appendConnectPageDiagnosticLog('connect-page-bound-reconnect-error', {
+      message: autoReconnectMessage.value,
+      snapshot: getConnectPageSnapshot()
+    });
+  }
 };
 const isConnectedBusinessDevice = (device: ScanDeviceInfo) =>
   ring.isConnected.value && ring.isReady.value && ring.isCurrentBusinessDevice(device as any);
@@ -230,8 +308,13 @@ const loadDeviceModelsSafely = async () => {
   }
 };
 
-onLoad(() => {
-  scanBusinessDevices({ reason: 'page-load' });
+onLoad(async () => {
+  await loadBoundInfo();
+  if (hasBoundDevice.value) {
+    void retryBoundReconnect();
+  } else {
+    scanBusinessDevices({ reason: 'page-load-no-bound-device' });
+  }
   loadDeviceModelsSafely();
 });
 onUnload(() => {
@@ -241,20 +324,39 @@ onUnload(() => {
 
 <template>
   <view class="p-30 bg-white min-h-screen">
+    <view v-if="hasBoundDevice" class="bound-reconnect-card r-50 p-40">
+      <view class="bound-status-icon" :class="autoReconnectStatus"></view>
+      <view class="bound-title fs-40 mt-30">{{ autoReconnectTitle }}</view>
+      <view class="bound-desc fs-30 mt-20">{{ autoReconnectDesc }}</view>
+      <view class="bound-device mt-30">
+        <view class="bound-device-name">{{ getRingBusinessDeviceName(boundInfo || {}) || copy.unknownDevice }}</view>
+        <view class="bound-device-id mt-10">{{ getRingBusinessDeviceTail(boundInfo || {}) || '-' }}</view>
+      </view>
+      <view v-if="autoReconnectStatus === 'failed'" class="bound-actions flex jc-center mt-40">
+        <uv-button
+          text="重试连接"
+          shape="circle"
+          color="#2E70FC"
+          :customTextStyle="{ 'font-size': '34rpx' }"
+          :customStyle="{ padding: '42rpx 0', width: '220rpx' }"
+          @click="retryBoundReconnect"
+        ></uv-button>
+      </view>
+    </view>
     <!-- 搜索中状态 -->
-    <view class="search-loading flex fd-c ai-center mb-50">
+    <view v-if="showScanArea" class="search-loading flex fd-c ai-center mb-50">
       <uv-image :src="isScanning ? `${apiBase}/image/load.webp` : `${apiBase}/image/loads.png`" width="390rpx" height="390rpx" customStyle="opacity: 0.5;"></uv-image>
       <view class="loading-title fs-36">{{ isScanning ? '正在搜索设备…' : '搜索已完成' }}</view>
       <view class="loading-desc t-979797 mt-10">{{ isScanning ? '正在查找附近的可用设备（约10秒）' : '点击下方搜索结果可重新搜索' }}</view>
     </view>
 
     <!-- 搜索结果区域 -->
-    <view class="search-results">
+    <view v-if="showScanArea" class="search-results">
       <!-- 结果信息区 -->
       <view class="results-info flex jc-between ai-center">
         <!-- 结果头部 -->
         <!-- <view class="results flex ai-center" @click="startScan"> -->
-        <view class="results flex ai-center" @click="restartScan()">
+        <view class="results flex ai-center" @click="scanBusinessDevices({ force: true, reason: 'manual-reload' })">
           <view class="results-title fs-36 mr-20">搜索结果</view>
           <uv-image src="/static/images/mine/reload.png" width="36rpx" height="36rpx"></uv-image>
         </view>
@@ -294,7 +396,7 @@ onUnload(() => {
       </view>
     </view>
 
-    <uv-popup ref="popup" round="50rpx">
+    <uv-popup v-if="showScanArea" ref="popup" round="50rpx">
       <view class="pt-50 pl-40 pr-40 pb-40">
         <!-- 图标与标题 -->
         <view class="popup-header flex fd-c ai-center mb-70">
@@ -332,11 +434,76 @@ onUnload(() => {
       </view>
     </uv-popup>
 
-    <uv-picker ref="picker" :columns="columns" @confirm="confirmType" confirmColor="#2e70fc"></uv-picker>
+    <uv-picker v-if="showScanArea" ref="picker" :columns="columns" @confirm="confirmType" confirmColor="#2e70fc"></uv-picker>
   </view>
 </template>
 
 <style lang="scss" scoped>
+.bound-reconnect-card {
+  margin-top: 80rpx;
+  text-align: center;
+  background: #f7f9ff;
+  box-shadow: 0 12rpx 30rpx rgba(46, 112, 252, 0.12);
+}
+
+.bound-status-icon {
+  width: 96rpx;
+  height: 96rpx;
+  margin: 0 auto;
+  border-radius: 50%;
+  background: #dbe7ff;
+  border: 10rpx solid #2e70fc;
+  box-sizing: border-box;
+}
+
+.bound-status-icon.connecting,
+.bound-status-icon.idle {
+  border-color: #2e70fc #dbe7ff #dbe7ff #2e70fc;
+  animation: bound-reconnect-spin 1s linear infinite;
+}
+
+.bound-status-icon.success {
+  background: #eaf7ef;
+  border-color: #35c56a;
+}
+
+.bound-status-icon.failed {
+  background: #fff1f1;
+  border-color: #ff5959;
+}
+
+.bound-title {
+  color: #111827;
+  font-weight: 600;
+}
+
+.bound-desc,
+.bound-device-id {
+  color: #7b8494;
+  line-height: 1.6;
+}
+
+.bound-device {
+  padding: 24rpx;
+  border-radius: 28rpx;
+  background: #ffffff;
+}
+
+.bound-device-name {
+  color: #111827;
+  font-size: 34rpx;
+  font-weight: 600;
+}
+
+@keyframes bound-reconnect-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .filter {
   background-color: #f1f3f6;
 }

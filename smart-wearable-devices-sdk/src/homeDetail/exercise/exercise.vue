@@ -9,7 +9,7 @@ import StandTimeCard from '@/homeDetail/exercise/components/StandTimeCard.vue';
 import ActivityIntensityCard from '@/homeDetail/exercise/components/ActivityIntensityCard.vue';
 import ActivitySummaryCard from '@/homeDetail/exercise/components/ActivitySummaryCard.vue';
 import { getDateInfo, getYesterday, getBeforeYesterday, formatLocalDate } from '@/utils/utils.js';
-import { getMotionOverview, getMotionCalorie, getMotionIntensity, getMotionSummary } from '@/common/api/homeDetail';
+import { getMotionOverview, getMotionCalorie, getMotionIntensity, getMotionSummary, getSleepDetail } from '@/common/api/homeDetail';
 import type { motionOverview, motionCalorie, motionIntensity, motionSummary } from '@/types/api/homeDetail';
 import DetailInfo from '@/components/DetailInfo.vue';
 import {usePopupFixer} from '@/hooks/usePopupFixer'
@@ -64,15 +64,19 @@ const motionOverviewObj = ref<motionOverview>();
 const motionCalorieObj = ref<motionCalorie>();
 const motionIntensityObj = ref<motionIntensity>();
 const motionSummaryObj = ref<motionSummary>();
+const sleepDurationMinutes = ref(0);
 
 // 点击日期处理函数
 const handleDateClick = async (index: number) => {
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
-  await getMotionOverviewData(currentDate);
-  await getMotionCalorieData(currentDate);
-  await getMotionIntensityData(currentDate);
-  await getMotionSummaryData(currentDate);
+  await Promise.all([
+    getMotionOverviewData(currentDate),
+    getMotionCalorieData(currentDate),
+    getMotionIntensityData(currentDate),
+    getMotionSummaryData(currentDate),
+    getSleepDurationForBasalCalorie(currentDate)
+  ]);
 };
 
 const receiveCardConfig = (config: { listDatal: string[]; visibleCards: string[]; form: any }) => {
@@ -112,6 +116,18 @@ const getMotionSummaryData = async (currentDate = new Date()) => {
     motionSummaryObj.value = res;
   }
 };
+const getSleepDurationForBasalCalorie = async (currentDate = new Date()) => {
+  const isoDate = formatLocalDate(currentDate);
+  try {
+    const res = await queryActivityPage('sleep-detail-for-basal-calorie', currentDate, (requestConfig) =>
+      getSleepDetail({ date: isoDate, type: 'day' }, requestConfig)
+    );
+    const duration = Number(res?.sleepDuration);
+    sleepDurationMinutes.value = Number.isFinite(duration) && duration > 0 ? Math.min(duration, 1440) : 0;
+  } catch {
+    sleepDurationMinutes.value = 0;
+  }
+};
 const openTimePicker = () => {
   calendar.value.open();
 };
@@ -132,10 +148,13 @@ const confirm = async (date: any) => {
   hasSelectedDate.value = true;
   selectedDayIndex.value = 3;
   const currentDate = selectedDate;
-  await getMotionOverviewData(currentDate);
-  await getMotionCalorieData(currentDate);
-  await getMotionIntensityData(currentDate);
-  await getMotionSummaryData(currentDate);
+  await Promise.all([
+    getMotionOverviewData(currentDate),
+    getMotionCalorieData(currentDate),
+    getMotionIntensityData(currentDate),
+    getMotionSummaryData(currentDate),
+    getSleepDurationForBasalCalorie(currentDate)
+  ]);
 };
 const jumpEdit = () => {
   (uni as any).$uv.route('/homeDetail/exerciseEdit/exerciseEdit', { cardForm: JSON.stringify(cardForm.value), visibleCards: JSON.stringify(visibleCards.value) });
@@ -173,10 +192,13 @@ onLoad(async (options) => {
 onPullDownRefresh(async () => {
   try {
     selectedDayIndex.value = 2;
-    await getMotionOverviewData();
-    await getMotionCalorieData();
-    await getMotionIntensityData();
-    await getMotionSummaryData();
+    await Promise.all([
+      getMotionOverviewData(),
+      getMotionCalorieData(),
+      getMotionIntensityData(),
+      getMotionSummaryData(),
+      getSleepDurationForBasalCalorie()
+    ]);
   } catch (error) {
     uni.showToast({
       title: '刷新失败，请稍后再试',
@@ -247,7 +269,7 @@ defineExpose({
     <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
     <view v-for="cardId in listData" :key="cardId">
       <ActivityScoreCard v-if="cardId === 'valueFirst'" :motionOverviewObj="motionOverviewObj" :motionSummaryObj="motionSummaryObj" />
-      <CalorieCard v-else-if="cardId === 'valueSecound'" :motionCalorieObj="motionCalorieObj" >
+      <CalorieCard v-else-if="cardId === 'valueSecound'" :motionCalorieObj="motionCalorieObj" :sleepDurationMinutes="sleepDurationMinutes" >
         <DetailInfo id="daily_calories" v-model:isPopupActive="isPopupActive" style="margin-left: 4rpx;"></DetailInfo>
       </CalorieCard>
       <!-- <StandTimeCard v-else-if="cardId === 'valueThird'" /> -->

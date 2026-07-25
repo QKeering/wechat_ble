@@ -10,6 +10,7 @@ import type { HistoryPageSilentRequestConfig } from '@/composables/useRingBusine
 import { cloneDeep } from 'lodash-es';
 import { useUserStore } from '@/stores/user';
 import { pickMetricNumber, withMetricDetailFallback } from './metricFallback';
+import { buildDetailTimeTicks } from './detailTimeAxis';
 const userStore = useUserStore();
 const echarts = require('../../static/echarts.min.js');
 const getVitalDetailSilentRequestConfig = (): HistoryPageSilentRequestConfig => ({
@@ -41,6 +42,7 @@ const heartRateList = ref([
 
 const heartRateObj = ref<heartRateDetail>({});
 const chartData = ref<Point[]>([]);
+const chartTimeTicks = computed(() => buildDetailTimeTicks(chartData.value));
 watch(
   chartData,
   (newData, oldData) => {
@@ -341,6 +343,7 @@ onPageScroll((e) => {
           :showChartTitle="false"
           :showButtomCard="false"
           :showTopCard="true"
+          :time-ticks="chartTimeTicks"
           @chart-finished="(chartRef) => initChart(chartRef)"
         />
       </view>
