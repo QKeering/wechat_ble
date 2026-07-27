@@ -5,7 +5,6 @@ import {
   createFamilyInvite,
   deleteFamilyRelation,
   getFamilyGuardians,
-  updateFamilyRelation,
   type FamilyGuardian
 } from '@/common/api/family';
 
@@ -13,21 +12,11 @@ const loading = ref(false);
 const guardians = ref<FamilyGuardian[]>([]);
 const invitePhone = ref('');
 const inviting = ref(false);
-const savingRelationId = ref<number | null>(null);
 const generatedInvite = ref('');
 const inviteExpireTime = ref('');
 const invitedPhone = ref('');
 
 const hasGuardians = computed(() => guardians.value.length > 0);
-
-const permissionOptions = [
-  { key: 'deviceStatus', title: '设备状态', desc: '电量、同步时间和设备是否正常' },
-  { key: 'vitalSigns', title: '生命体征', desc: '心率、血氧、皮肤温度等关键指标' },
-  { key: 'sleep', title: '睡眠', desc: '睡眠时长、评分和质量' },
-  { key: 'motion', title: '活动', desc: '步数、活动时间和运动评分' },
-  { key: 'alerts', title: '异常提醒', desc: '低电量、未同步和异常指标提醒' },
-  { key: 'aiSummary', title: 'AI 摘要', desc: '每日总结、周报月报和看护建议' }
-];
 
 const relationText = (relation?: string) => {
   const map: Record<string, string> = {
@@ -41,29 +30,9 @@ const relationText = (relation?: string) => {
   return map[relation || ''] || '家人';
 };
 
-const enabledPermissionText = (guardian: FamilyGuardian) => {
-  const permissions = guardian.permissions || {};
-  const labels = [
-    permissions.deviceStatus !== false ? '设备状态' : '',
-    permissions.vitalSigns !== false ? '生命体征' : '',
-    permissions.sleep !== false ? '睡眠' : '',
-    permissions.motion !== false ? '活动' : '',
-    permissions.alerts !== false ? '异常提醒' : '',
-    permissions.aiSummary !== false ? 'AI 摘要' : ''
-  ].filter(Boolean);
-  return labels.length ? labels.join('、') : '未开启数据权限';
-};
-
-const isPaused = (guardian: FamilyGuardian) => guardian.status === 'paused' || Number(guardian.relationStatus) === 2;
-
-const isPermissionEnabled = (guardian: FamilyGuardian, key: string) => {
-  const permissions = guardian.permissions || {};
-  return permissions[key] !== false;
-};
-
 const shareStatusText = (guardian: FamilyGuardian) => {
   if (guardian.statusText) return guardian.statusText;
-  return isPaused(guardian) ? '已暂停' : '生效';
+  return '共享中';
 };
 
 const fetchGuardians = async () => {
@@ -75,69 +44,6 @@ const fetchGuardians = async () => {
   }
 };
 
-const updateLocalGuardianPermissions = (relationId: number, permissions: Record<string, boolean>) => {
-  guardians.value = guardians.value.map((item) =>
-    Number(item.relationId || 0) === relationId
-      ? {
-          ...item,
-          permissions
-        }
-      : item
-  );
-};
-
-const setGuardianPermission = async (guardian: FamilyGuardian, key: string, event: any) => {
-  const relationId = Number(guardian.relationId || 0);
-  if (!relationId) {
-    uni.showToast({ title: '缺少共享关系编号', icon: 'none' });
-    return;
-  }
-  const nextPermissions = {
-    deviceStatus: true,
-    vitalSigns: true,
-    sleep: true,
-    motion: true,
-    alerts: true,
-    aiSummary: true,
-    ...(guardian.permissions || {}),
-    [key]: Boolean(event?.detail?.value)
-  };
-  const previousPermissions = { ...(guardian.permissions || {}) };
-  updateLocalGuardianPermissions(relationId, nextPermissions);
-  savingRelationId.value = relationId;
-  try {
-    await updateFamilyRelation(relationId, { permissionScope: nextPermissions });
-    uni.showToast({ title: '授权已更新', icon: 'success' });
-  } catch (error) {
-    updateLocalGuardianPermissions(relationId, previousPermissions);
-    throw error;
-  } finally {
-    savingRelationId.value = null;
-  }
-};
-
-const toggleShare = (guardian: FamilyGuardian) => {
-  if (!guardian.relationId) {
-    uni.showToast({ title: '缺少共享关系编号', icon: 'none' });
-    return;
-  }
-  const paused = isPaused(guardian);
-  uni.showModal({
-    title: paused ? '恢复共享' : '暂停共享',
-    content: paused
-      ? '恢复后，这位家人可以继续查看您授权范围内的健康数据。'
-      : '暂停后，这位家人暂时不能查看您的健康数据，您可以随时恢复。',
-    confirmText: paused ? '恢复共享' : '暂停共享',
-    confirmColor: paused ? '#2563EB' : '#F59E0B',
-    success: async (res) => {
-      if (!res.confirm) return;
-      await updateFamilyRelation(Number(guardian.relationId), { status: paused ? 'active' : 'paused' });
-      uni.showToast({ title: paused ? '已恢复共享' : '已暂停共享', icon: 'success' });
-      fetchGuardians();
-    }
-  });
-};
-
 const cancelShare = (guardian: FamilyGuardian) => {
   if (!guardian.relationId) {
     uni.showToast({ title: '缺少共享关系编号', icon: 'none' });
@@ -146,14 +52,14 @@ const cancelShare = (guardian: FamilyGuardian) => {
   const guardianName = guardian.guardianName || guardian.guardianPhoneMasked || '该家人';
   uni.showModal({
     title: '取消共享',
-    content: `取消后，${guardianName} 将不能再查看您的历史和最新健康数据。`,
+    content: `取消后，${guardianName} 将不能再查看您的历史和最新健康数据；如需再次共享，必须重新申请。`,
     confirmText: '继续取消',
     confirmColor: '#DC2626',
     success: async (res) => {
       if (!res.confirm) return;
       uni.showModal({
         title: '再次确认',
-        content: `请确认要关闭 ${guardianName} 的共享权限。关闭后如需恢复，需要重新邀请或重新授权。`,
+        content: `请确认要取消 ${guardianName} 的共享关系。取消后不能直接恢复，需要重新发起申请并确认。`,
         confirmText: '确定关闭',
         confirmColor: '#DC2626',
         success: async (second) => {
@@ -227,7 +133,7 @@ onPullDownRefresh(async () => {
 
     <view class="header">
       <view class="title">谁在查看我的数据</view>
-      <view class="desc">您可以随时暂停、恢复或取消共享。暂停后，家人暂时不能查看您的健康数据。</view>
+      <view class="desc">这里展示正在查看您健康数据的家人。取消后不能直接恢复，需要重新申请。</view>
     </view>
 
     <view class="invite-card">
@@ -278,36 +184,13 @@ onPullDownRefresh(async () => {
             <view class="name">{{ guardian.guardianName || guardian.guardianPhoneMasked || '家人' }}</view>
             <view class="relation">{{ relationText(guardian.relation) }} · {{ shareStatusText(guardian) }}</view>
           </view>
-          <view class="status-pill" :class="{ paused: isPaused(guardian) }">{{ shareStatusText(guardian) }}</view>
-        </view>
-        <view class="permission-text">{{ enabledPermissionText(guardian) }}</view>
-        <view class="permission-panel">
-          <view class="permission-panel-title">允许查看的数据</view>
-          <view v-for="item in permissionOptions" :key="item.key" class="permission-row">
-            <view class="permission-info">
-              <view class="permission-name">{{ item.title }}</view>
-              <view class="permission-desc">{{ item.desc }}</view>
-            </view>
-            <switch
-              :checked="isPermissionEnabled(guardian, item.key)"
-              :disabled="savingRelationId === Number(guardian.relationId || 0)"
-              color="#2E70FC"
-              @change="setGuardianPermission(guardian, item.key, $event)"
-            />
-          </view>
+          <view class="status-pill">{{ shareStatusText(guardian) }}</view>
         </view>
         <view class="action-row">
           <uv-button
-            :text="isPaused(guardian) ? '恢复共享' : '暂停共享'"
-            :color="isPaused(guardian) ? '#E8F0FF' : '#FFF7E6'"
-            :customStyle="{ flex: 1, height: '86rpx' }"
-            :customTextStyle="{ color: isPaused(guardian) ? '#2563EB' : '#B45309', fontSize: '32rpx' }"
-            @click="toggleShare(guardian)"
-          />
-          <uv-button
             text="取消共享"
             color="#FFF0F0"
-            :customStyle="{ flex: 1, height: '86rpx', marginLeft: '18rpx' }"
+            :customStyle="{ width: '100%', height: '86rpx' }"
             :customTextStyle="{ color: '#DC2626', fontSize: '32rpx' }"
             @click="cancelShare(guardian)"
           />
@@ -346,8 +229,7 @@ onPullDownRefresh(async () => {
 }
 .desc,
 .empty-desc,
-.relation,
-.permission-text {
+.relation {
   margin-top: 14rpx;
   color: #6b7280;
   font-size: 30rpx;
@@ -406,50 +288,6 @@ onPullDownRefresh(async () => {
   font-size: 36rpx;
   font-weight: 800;
 }
-.permission-text {
-  padding: 20rpx 22rpx;
-  border-radius: 18rpx;
-  background: #f8fafc;
-  color: #374151;
-}
-.permission-panel {
-  margin-top: 22rpx;
-  padding: 24rpx;
-  border-radius: 20rpx;
-  background: #f8fafc;
-}
-.permission-panel-title {
-  font-size: 30rpx;
-  font-weight: 800;
-  color: #111827;
-}
-.permission-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 22rpx 0;
-  border-bottom: 1rpx solid #e5eaf2;
-}
-.permission-row:last-child {
-  border-bottom: 0;
-  padding-bottom: 0;
-}
-.permission-info {
-  flex: 1;
-  min-width: 0;
-  padding-right: 20rpx;
-}
-.permission-name {
-  font-size: 30rpx;
-  font-weight: 800;
-  color: #111827;
-}
-.permission-desc {
-  margin-top: 8rpx;
-  color: #6b7280;
-  font-size: 26rpx;
-  line-height: 1.45;
-}
 .status-pill {
   flex-shrink: 0;
   padding: 10rpx 18rpx;
@@ -458,10 +296,6 @@ onPullDownRefresh(async () => {
   color: #2563eb;
   font-size: 26rpx;
   font-weight: 800;
-}
-.status-pill.paused {
-  background: #fff7e6;
-  color: #b45309;
 }
 .action-row {
   display: flex;

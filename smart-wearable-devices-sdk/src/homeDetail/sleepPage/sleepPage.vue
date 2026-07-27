@@ -346,26 +346,50 @@ const formatTemperatureDisplayMetric = (value: unknown, fallback = '00') => {
   return numeric ? `${numeric.toFixed(1)}°C` : fallback;
 };
 
+const formatTemperatureRangeDisplayMetric = (value: unknown, fallback = '00') => {
+  if (value == null || value === '') return fallback;
+  const text = String(value);
+  if (!/\d/.test(text)) return fallback;
+  return text.replace(/-?\d+(?:\.\d+)?/g, (matched) => {
+    const numeric = Number(matched);
+    return Number.isFinite(numeric) ? numeric.toFixed(1) : matched;
+  });
+};
+
 const displayHeartRateObj = computed(() => ({
   ...(heartRateObj.value || {}),
+  newValue: formatIntegerDisplayMetric((heartRateObj.value as any)?.newValue),
   avgValue: formatIntegerDisplayMetric((heartRateObj.value as any)?.avgValue),
+  minValue: formatIntegerDisplayMetric((heartRateObj.value as any)?.minValue),
+  avgValueRange: formatIntegerRangeDisplayMetric((heartRateObj.value as any)?.avgValueRange),
   maxValue: formatIntegerDisplayMetric((heartRateObj.value as any)?.maxValue)
 } as heartRateDetail));
 
 const displayOxyGenObj = computed(() => ({
   ...(oxyGenObj.value || {}),
+  newValue: formatIntegerDisplayMetric((oxyGenObj.value as any)?.newValue),
   avgValue: formatIntegerDisplayMetric((oxyGenObj.value as any)?.avgValue),
+  minValue: formatIntegerDisplayMetric((oxyGenObj.value as any)?.minValue),
+  maxValue: formatIntegerDisplayMetric((oxyGenObj.value as any)?.maxValue),
   avgValueRange: formatIntegerRangeDisplayMetric((oxyGenObj.value as any)?.avgValueRange)
 } as heartRateDetail));
 
 const displayHrvObj = computed(() => ({
   ...(hrvObj.value || {}),
-  avgValue: formatIntegerDisplayMetric((hrvObj.value as any)?.avgValue)
+  newValue: formatIntegerDisplayMetric((hrvObj.value as any)?.newValue),
+  avgValue: formatIntegerDisplayMetric((hrvObj.value as any)?.avgValue),
+  minValue: formatIntegerDisplayMetric((hrvObj.value as any)?.minValue),
+  maxValue: formatIntegerDisplayMetric((hrvObj.value as any)?.maxValue),
+  avgValueRange: formatIntegerRangeDisplayMetric((hrvObj.value as any)?.avgValueRange)
 } as heartRateDetail));
 
 const displayTemperatureObj = computed(() => ({
   ...(temperatureObj.value || {}),
+  newValue: formatTemperatureDisplayMetric((temperatureObj.value as any)?.newValue),
   avgValue: formatTemperatureDisplayMetric((temperatureObj.value as any)?.avgValue),
+  minValue: formatTemperatureDisplayMetric((temperatureObj.value as any)?.minValue),
+  maxValue: formatTemperatureDisplayMetric((temperatureObj.value as any)?.maxValue),
+  avgValueRange: formatTemperatureRangeDisplayMetric((temperatureObj.value as any)?.avgValueRange),
   baseValue: getDisplayMetricNumber((temperatureObj.value as any)?.baseValue)
     ? formatTemperatureDisplayMetric((temperatureObj.value as any)?.baseValue)
     : (temperatureObj.value as any)?.baseValue,

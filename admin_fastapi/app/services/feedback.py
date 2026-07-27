@@ -170,6 +170,9 @@ def normalize_snapshot(payload: dict[str, Any], header_user_id: str | None = Non
     correction = payload.get("correction") or {}
     context = payload.get("context") or {}
     user_id = str(payload.get("userId") or header_user_id or "").strip()
+    request_body = payload.get("requestBody")
+    if isinstance(request_body, dict) and user_id:
+        request_body = {**request_body, "user_id": user_id}
     snapshot_id = str(payload.get("snapshotId") or "").strip()
     endpoint = str(payload.get("endpoint") or "").strip()
     field_path = str(correction.get("fieldPath") or "").strip()
@@ -180,7 +183,7 @@ def normalize_snapshot(payload: dict[str, Any], header_user_id: str | None = Non
         "snapshotId": snapshot_id,
         "userId": user_id,
         "endpoint": endpoint,
-        "requestBody": payload.get("requestBody"),
+        "requestBody": request_body,
         "responseBody": payload.get("responseBody"),
         "correction.fieldPath": field_path,
         "correction.displayedAs": displayed_as,
@@ -204,7 +207,7 @@ def normalize_snapshot(payload: dict[str, Any], header_user_id: str | None = Non
         "original_value": json_dumps(correction.get("originalValue")),
         "corrected_value": json_dumps(correction.get("correctedValue")),
         "reason": reason,
-        "request_body": json_dumps(payload.get("requestBody")),
+        "request_body": json_dumps(request_body),
         "response_body": json_dumps(payload.get("responseBody")),
         "context": json_dumps(context),
         "device_id": context.get("deviceId"),
@@ -337,6 +340,27 @@ def algorithm_path(endpoint: str) -> str:
     return urljoin(base, path.lstrip("/"))
 
 
+def algorithm_user_name_from_id(db: Session, user_id: Any) -> str:
+    if user_id in (None, ""):
+        return ""
+    try:
+        normalized_user_id = int(user_id)
+    except (TypeError, ValueError):
+        return ""
+    try:
+        row = db.execute(
+            text("select nick_name from app_user where id=:id and del_flag=0 limit 1"),
+            {"id": normalized_user_id},
+        ).first()
+        if row:
+            nick_name = str(row._mapping.get("nick_name") or "").strip()
+            if nick_name:
+                return nick_name
+    except SQLAlchemyError:
+        return ""
+    return f"用户{normalized_user_id}"
+
+
 def recalculate_snapshot(db: Session, snapshot_id: str | int) -> dict[str, Any]:
     snapshot = get_snapshot(db, snapshot_id)
     if not snapshot:
@@ -347,6 +371,16 @@ def recalculate_snapshot(db: Session, snapshot_id: str | int) -> dict[str, Any]:
     if not settings.other_api_base_url:
         raise ValueError("未配置算法服务 OTHER_API_BASE_URL")
     request_body = snapshot.get("requestBody") or {}
+    if isinstance(request_body, dict):
+        user_id = request_body.get("user_id") or snapshot.get("userId")
+        user_name = str(request_body.get("user_name") or "").strip()
+        if not user_name:
+            user_name = algorithm_user_name_from_id(db, user_id)
+        request_body = {
+            **request_body,
+            "user_id": user_id,
+            "user_name": user_name,
+        }
     url = algorithm_path(endpoint)
     data = json.dumps(request_body, ensure_ascii=False, default=str).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")

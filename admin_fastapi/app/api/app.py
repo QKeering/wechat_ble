@@ -1,8 +1,11 @@
 ﻿import csv
 import io
+import hashlib
+import hmac
 import json
 import logging
 import math
+import random
 import re
 import urllib.error
 import urllib.request
@@ -48,6 +51,24 @@ def write_algorithm_log(event: str, **data) -> None:
     record = {"time": datetime.now().isoformat(timespec="seconds"), "event": event, **data}
     try:
         algorithm_logger.info(json.dumps(record, ensure_ascii=False, default=str))
+    except Exception:
+        pass
+
+
+SMS_LOG_PATH = ALGORITHM_LOG_DIR / "sms.log"
+sms_logger = logging.getLogger("qkeer.sms")
+if not sms_logger.handlers:
+    sms_handler = RotatingFileHandler(SMS_LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    sms_handler.setFormatter(logging.Formatter("%(message)s"))
+    sms_logger.addHandler(sms_handler)
+    sms_logger.setLevel(logging.INFO)
+    sms_logger.propagate = False
+
+
+def write_sms_log(event: str, **data) -> None:
+    record = {"time": datetime.now().isoformat(timespec="seconds"), "event": event, **data}
+    try:
+        sms_logger.info(json.dumps(record, ensure_ascii=False, default=str))
     except Exception:
         pass
 
@@ -445,11 +466,25 @@ def stress_counts(rows) -> dict[str, int]:
     return values
 
 
+def format_raw_point_value(field: str, value) -> str:
+    if value in (None, ""):
+        return "0"
+    if field not in {"heart_rate", "spo2", "hrv", "temperature"}:
+        return str(value or 0)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if field == "temperature":
+        return f"{number:.1f}"
+    return str(int(round(number)))
+
+
 def raw_points(db: Session, user_id: int, date_value: str | None, field: str) -> list[dict]:
     return [
         {
             "time": str(item.get("recordTime") or "")[11:16],
-            "value": str(item.get("value") or 0),
+            "value": format_raw_point_value(field, item.get("value")),
         }
         for item in raw_series(db, user_id, date_value, field)
     ]
@@ -496,6 +531,18 @@ def summary_metric_or_raw(summary: dict | None, key: str, stats: dict, zero_inva
     return stats.get("avg")
 
 
+def rounded_metric(value, digits: int = 0):
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    if digits <= 0:
+        return int(round(number))
+    return round(number, digits)
+
+
 def build_vital_sign_payload(db: Session, user_id: int, date_value: str | None) -> dict:
     summary = daily_summary(db, user_id, date_value) or {}
     heart_stats = raw_metric_stats(db, user_id, date_value, "heart_rate")
@@ -507,10 +554,10 @@ def build_vital_sign_payload(db: Session, user_id: int, date_value: str | None) 
     systolic_stats = raw_metric_stats(db, user_id, date_value, "systolic")
     diastolic_stats = raw_metric_stats(db, user_id, date_value, "diastolic")
 
-    heart_rate_avg = summary_metric_or_raw(summary, "heartRateAvg", heart_stats)
-    spo2_avg = summary_metric_or_raw(summary, "spo2Avg", spo2_stats)
-    hrv_avg = summary_metric_or_raw(summary, "hrvAvg", hrv_stats)
-    temperature_avg = summary_metric_or_raw(summary, "temperatureAvg", temperature_stats)
+    heart_rate_avg = rounded_metric(summary_metric_or_raw(summary, "heartRateAvg", heart_stats))
+    spo2_avg = rounded_metric(summary_metric_or_raw(summary, "spo2Avg", spo2_stats))
+    hrv_avg = rounded_metric(summary_metric_or_raw(summary, "hrvAvg", hrv_stats))
+    temperature_avg = rounded_metric(summary_metric_or_raw(summary, "temperatureAvg", temperature_stats), 1)
     stress_avg = summary_metric_or_raw(summary, "stressAvg", stress_stats, zero_invalid=False)
     blood_sugar_avg = summary_metric_or_raw(summary, "bloodSugarAvg", blood_sugar_stats)
     systolic_avg = summary_metric_or_raw(summary, "systolicAvg", systolic_stats)
@@ -526,14 +573,14 @@ def build_vital_sign_payload(db: Session, user_id: int, date_value: str | None) 
     vital_scores = [item for item in vital_scores if item is not None]
     return {
         "overallScore": round(sum(vital_scores) / len(vital_scores)) if vital_scores else summary.get("healthScore"),
-        "heartRate": round(float(heart_rate_avg or 0)),
-        "spo2": round(float(spo2_avg or 0)),
+        "heartRate": rounded_metric(heart_rate_avg) or 0,
+        "spo2": rounded_metric(spo2_avg) or 0,
         "heartRateChart": raw_points(db, user_id, date_value, "heart_rate"),
         "heartRateAvg": heart_rate_avg,
         "hrv": hrv_avg,
         "hrvAvg": hrv_avg,
-        "hrvMin": summary.get("hrvMin") if summary.get("hrvMin") is not None else hrv_stats["min"],
-        "hrvMax": summary.get("hrvMax") if summary.get("hrvMax") is not None else hrv_stats["max"],
+        "hrvMin": rounded_metric(summary.get("hrvMin") if summary.get("hrvMin") is not None else hrv_stats["min"]),
+        "hrvMax": rounded_metric(summary.get("hrvMax") if summary.get("hrvMax") is not None else hrv_stats["max"]),
         "hrvChart": raw_points(db, user_id, date_value, "hrv"),
         "spo2Avg": spo2_avg,
         "temperatureAvg": temperature_avg,
@@ -574,17 +621,30 @@ def data_detail_response(
     min_value = min(values) if values else None
     max_value = max(values) if values else None
     new_value = values[-1] if values else None
+    digits = 1 if field == "temperature" else 0
+
+    def format_detail_metric(value, fallback: str = "0") -> str:
+        if value in (None, ""):
+            return fallback
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if digits <= 0:
+            return str(int(round(number)))
+        return f"{number:.1f}"
+
     return localize_payload_levels({
         "healthScore": summary.get(score_field) if score_field else summary.get("healthScore"),
         "latestDesc": latest_desc or summary.get("healthLevel"),
-        "minValue": str(round(min_value, 2)) if min_value is not None else "0",
-        "maxValue": str(round(max_value, 2)) if max_value is not None else "0",
-        "newValue": str(round(new_value, 2)) if new_value is not None else "0",
-        "avgValue": str(round(float(avg_value or 0), 2)),
-        "avgValueRange": f"{round(float(min_value or 0), 2)}-{round(float(max_value or 0), 2)}",
-        "baseValue": str(round(float(avg_value or 0), 2)),
-        "baseValueMax": str(round(float(max_value or 0), 2)),
-        "baseValueMin": str(round(float(min_value or 0), 2)),
+        "minValue": format_detail_metric(min_value),
+        "maxValue": format_detail_metric(max_value),
+        "newValue": format_detail_metric(new_value),
+        "avgValue": format_detail_metric(avg_value),
+        "avgValueRange": f"{format_detail_metric(min_value)}-{format_detail_metric(max_value)}",
+        "baseValue": format_detail_metric(avg_value),
+        "baseValueMax": format_detail_metric(max_value),
+        "baseValueMin": format_detail_metric(min_value),
         "diffValue": "0",
         "type": "day",
         "granularity": "hour",
@@ -613,10 +673,10 @@ def motion_intensity_counts(db: Session, user_id: int, date_value: str | None) -
 def health_report_payload(db: Session, user: dict, request: Request) -> dict:
     user_id = int(user["id"])
     summary = daily_summary(db, user_id, date.today().isoformat()) or {}
-    heart_rate = request.query_params.get("heartRate") or summary.get("heartRateAvg") or 0
-    hrv = request.query_params.get("hrv") or summary.get("hrvAvg") or 0
-    spo2 = request.query_params.get("spo2") or summary.get("spo2Avg") or 0
-    temperature = request.query_params.get("temperature") or summary.get("temperatureAvg") or 0
+    heart_rate = rounded_metric(request.query_params.get("heartRate") or summary.get("heartRateAvg")) or 0
+    hrv = rounded_metric(request.query_params.get("hrv") or summary.get("hrvAvg")) or 0
+    spo2 = rounded_metric(request.query_params.get("spo2") or summary.get("spo2Avg")) or 0
+    temperature = rounded_metric(request.query_params.get("temperature") or summary.get("temperatureAvg"), 1) or 0
     stress = request.query_params.get("stress") or summary.get("stressAvg") or 0
     score_value = int(summary.get("healthScore") or 0)
     return {
@@ -1293,7 +1353,53 @@ def algorithm_path(path: str) -> str:
     return base_url + path
 
 
+def algorithm_user_name_from_id(user_id) -> str:
+    if user_id in (None, ""):
+        return ""
+    try:
+        normalized_user_id = int(user_id)
+    except (TypeError, ValueError):
+        return ""
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            text("select nick_name from app_user where id=:id and del_flag=0 limit 1"),
+            {"id": normalized_user_id},
+        ).first()
+        if row:
+            nick_name = str(row._mapping.get("nick_name") or "").strip()
+            if nick_name:
+                return nick_name
+    except Exception as exc:
+        write_algorithm_log("user_name_lookup_error", user_id=normalized_user_id, error=str(exc))
+    finally:
+        db.close()
+    return f"用户{normalized_user_id}"
+
+
+def algorithm_payload_with_user_id(payload: dict, context: dict | None = None) -> dict:
+    context = context or {}
+    user_id = payload.get("user_id") or context.get("user_id") or context.get("userId")
+    if user_id not in (None, ""):
+        payload["user_id"] = user_id
+    user_name = (
+        payload.get("user_name")
+        or context.get("user_name")
+        or context.get("userName")
+        or context.get("nick_name")
+        or context.get("nickName")
+    )
+    if user_name not in (None, ""):
+        user_name = str(user_name).strip()
+    if not user_name and user_id not in (None, ""):
+        user_name = algorithm_user_name_from_id(user_id)
+    if user_name:
+        payload["user_name"] = user_name
+    return payload
+
+
 def call_algorithm(path: str, payload: dict, default: dict | None = None, context: dict | None = None, timeout: int = 20) -> dict:
+    payload = algorithm_payload_with_user_id(payload, context)
     if not algorithm_enabled():
         write_algorithm_log("disabled", path=path, context=context or {}, payload=payload)
         return default or {}
@@ -1577,7 +1683,7 @@ def algorithm_report(db: Session, user_id: int, start: date, end: date) -> dict:
     rhythm_records_payload = algorithm_records(regularity_rows, "rhythm")
     activation_records_payload = algorithm_records(day_rows, "activation")
     lifestyle_records_payload = algorithm_records(lifestyle_rows, "lifestyle")
-    context = {"source": "algorithm_report", "userId": user_id, "start": start.isoformat(), "end": end.isoformat()}
+    context = {"source": "algorithm_report", "userId": user_id, "userName": algorithm_user_name_from_id(user_id), "start": start.isoformat(), "end": end.isoformat()}
     write_algorithm_log(
         "build",
         context=context,
@@ -1725,21 +1831,285 @@ def wechat_phone_number(phone_code: str) -> str:
     return phone
 
 
+def tencent_sms_configured() -> bool:
+    return all(
+        [
+            str(settings.tencent_sms_secret_id or "").strip(),
+            str(settings.tencent_sms_secret_key or "").strip(),
+            str(settings.tencent_sms_sdk_app_id or "").strip(),
+            str(settings.sms_sign_name or "").strip(),
+            str(settings.sms_template_code or "").strip(),
+        ]
+    )
+
+
+def tencent_sms_missing_config_fields() -> list[str]:
+    checks = {
+        "TENCENT_SMS_SECRET_ID": settings.tencent_sms_secret_id,
+        "TENCENT_SMS_SECRET_KEY": settings.tencent_sms_secret_key,
+        "TENCENT_SMS_SDK_APP_ID": settings.tencent_sms_sdk_app_id,
+        "SMS_SIGN_NAME": settings.sms_sign_name,
+        "SMS_TEMPLATE_CODE": settings.sms_template_code,
+    }
+    return [name for name, value in checks.items() if not str(value or "").strip()]
+
+
+def sms_gateway_configured() -> bool:
+    return tencent_sms_configured() or bool(str(settings.sms_api_url or "").strip())
+
+
+def sms_send_succeeded(data: dict) -> bool:
+    if data.get("success") is True:
+        return True
+    code = str(data.get("code") or data.get("Code") or data.get("status") or data.get("Status") or "").strip().lower()
+    if code in {"0", "ok", "success", "200"}:
+        return True
+    message = str(data.get("msg") or data.get("message") or data.get("Message") or "").strip().lower()
+    return message in {"ok", "success", "操作成功", "发送成功"}
+
+
+def normalize_tencent_sms_phone(phone: str) -> str:
+    raw = str(phone or "").strip()
+    if raw.startswith("+"):
+        return raw
+    digits = re.sub(r"\D+", "", raw)
+    if digits.startswith("00"):
+        return f"+{digits[2:]}"
+    if digits.startswith("86") and len(digits) == 13:
+        return f"+{digits}"
+    nation_code = str(settings.tencent_sms_nation_code or "+86").strip() or "+86"
+    if not nation_code.startswith("+"):
+        nation_code = f"+{nation_code}"
+    return f"{nation_code}{digits}"
+
+
+def tencent_hmac_sha256(key: bytes, msg: str) -> bytes:
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+
+def tencent_sms_send_succeeded(data: dict) -> bool:
+    response = data.get("Response") if isinstance(data, dict) else None
+    if not isinstance(response, dict):
+        return False
+    if response.get("Error"):
+        return False
+    statuses = response.get("SendStatusSet") or []
+    if not statuses:
+        return False
+    return all(str(item.get("Code") or "").strip().lower() == "ok" for item in statuses if isinstance(item, dict))
+
+
+def tencent_sms_error_message(data: dict) -> str:
+    response = data.get("Response") if isinstance(data, dict) else None
+    if isinstance(response, dict):
+        error_data = response.get("Error")
+        if isinstance(error_data, dict):
+            return str(error_data.get("Message") or error_data.get("Code") or "腾讯云短信发送失败")
+        statuses = response.get("SendStatusSet") or []
+        for item in statuses:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("Code") or "").strip().lower() != "ok":
+                return str(item.get("Message") or item.get("Code") or "腾讯云短信发送失败")
+    return "腾讯云短信发送失败"
+
+
+def build_tencent_sms_template_params(code: str) -> list[str]:
+    names = [
+        item.strip().lower()
+        for item in str(settings.tencent_sms_template_params or "code").split(",")
+        if item.strip()
+    ]
+    if not names:
+        names = ["code"]
+    values = {
+        "code": str(code),
+        "expire": str(settings.tencent_sms_code_expire_minutes),
+        "expires": str(settings.tencent_sms_code_expire_minutes),
+        "expire_minute": str(settings.tencent_sms_code_expire_minutes),
+        "expire_minutes": str(settings.tencent_sms_code_expire_minutes),
+        "minutes": str(settings.tencent_sms_code_expire_minutes),
+        "minute": str(settings.tencent_sms_code_expire_minutes),
+    }
+    return [values.get(name, name) for name in names]
+
+
+def send_tencent_phone_code_sms(phone: str, code: str) -> dict:
+    if not tencent_sms_configured():
+        write_sms_log(
+            "phone_code_sms_tencent_missing_config",
+            phone=phone,
+            env=settings.env,
+            provider=settings.sms_provider,
+            missing=tencent_sms_missing_config_fields(),
+        )
+        raise app_auth.AppAuthError("腾讯云短信服务未配置")
+
+    host = str(settings.tencent_sms_endpoint or "sms.tencentcloudapi.com").strip()
+    url = host if host.startswith("http://") or host.startswith("https://") else f"https://{host}"
+    host = host.replace("https://", "").replace("http://", "").strip("/")
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    date_text = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d")
+    service = "sms"
+    action = "SendSms"
+    version = "2021-01-11"
+    region = str(settings.tencent_sms_region or "ap-guangzhou").strip() or "ap-guangzhou"
+    payload = {
+        "PhoneNumberSet": [normalize_tencent_sms_phone(phone)],
+        "SmsSdkAppId": str(settings.tencent_sms_sdk_app_id).strip(),
+        "SignName": str(settings.sms_sign_name).strip(),
+        "TemplateId": str(settings.sms_template_code).strip(),
+        "TemplateParamSet": build_tencent_sms_template_params(code),
+    }
+    payload_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    hashed_payload = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+    canonical_headers = f"content-type:application/json; charset=utf-8\nhost:{host}\nx-tc-action:{action.lower()}\n"
+    signed_headers = "content-type;host;x-tc-action"
+    canonical_request = "\n".join(["POST", "/", "", canonical_headers, signed_headers, hashed_payload])
+    credential_scope = f"{date_text}/{service}/tc3_request"
+    hashed_canonical_request = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    string_to_sign = "\n".join(["TC3-HMAC-SHA256", str(timestamp), credential_scope, hashed_canonical_request])
+    secret_date = tencent_hmac_sha256(("TC3" + str(settings.tencent_sms_secret_key)).encode("utf-8"), date_text)
+    secret_service = tencent_hmac_sha256(secret_date, service)
+    secret_signing = tencent_hmac_sha256(secret_service, "tc3_request")
+    signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    authorization = (
+        "TC3-HMAC-SHA256 "
+        f"Credential={str(settings.tencent_sms_secret_id).strip()}/{credential_scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+    headers = {
+        "Authorization": authorization,
+        "Content-Type": "application/json; charset=utf-8",
+        "Host": host,
+        "X-TC-Action": action,
+        "X-TC-Timestamp": str(timestamp),
+        "X-TC-Version": version,
+        "X-TC-Region": region,
+    }
+    request = urllib.request.Request(url, data=payload_text.encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=settings.sms_timeout_seconds) as response:
+            body = response.read().decode("utf-8", errors="ignore")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        write_sms_log("phone_code_sms_tencent_http_error", phone=phone, status=exc.code, body=body[:500])
+        raise app_auth.AppAuthError(f"腾讯云短信发送失败: HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        write_sms_log("phone_code_sms_tencent_url_error", phone=phone, reason=str(exc.reason))
+        raise app_auth.AppAuthError("腾讯云短信发送失败，请稍后重试") from exc
+    except Exception as exc:
+        write_sms_log("phone_code_sms_tencent_error", phone=phone, error=str(exc))
+        raise app_auth.AppAuthError("腾讯云短信发送失败，请稍后重试") from exc
+
+    try:
+        data = json.loads(body) if body else {}
+    except json.JSONDecodeError as exc:
+        write_sms_log("phone_code_sms_tencent_bad_json", phone=phone, body=body[:500])
+        raise app_auth.AppAuthError("腾讯云短信服务返回异常") from exc
+
+    if not tencent_sms_send_succeeded(data):
+        write_sms_log("phone_code_sms_tencent_failed", phone=phone, response=data)
+        raise app_auth.AppAuthError(tencent_sms_error_message(data))
+
+    response = data.get("Response") if isinstance(data, dict) else {}
+    statuses = response.get("SendStatusSet") if isinstance(response, dict) else []
+    write_sms_log("phone_code_sms_tencent_sent", phone=phone, response={"SendStatusSet": statuses})
+    return data
+
+
+def send_phone_code_sms(phone: str, code: str) -> dict:
+    provider = str(settings.sms_provider or "").strip().strip('"').strip("'").lower()
+    if provider == "tencent":
+        return send_tencent_phone_code_sms(phone, code)
+
+    if not sms_gateway_configured():
+        if settings.env.lower() == "development":
+            write_sms_log("phone_code_sms_mock", phone=phone)
+            return {"mock": True}
+        write_sms_log("phone_code_sms_missing_config", phone=phone)
+        raise app_auth.AppAuthError("短信服务未配置")
+
+    if not provider and tencent_sms_configured():
+        return send_tencent_phone_code_sms(phone, code)
+
+    payload = {
+        "phone": phone,
+        "code": code,
+        "templateParam": {"code": code},
+    }
+    if settings.sms_sign_name:
+        payload["signName"] = settings.sms_sign_name
+    if settings.sms_template_code:
+        payload["templateCode"] = settings.sms_template_code
+
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if settings.sms_api_token:
+        headers["Authorization"] = f"Bearer {settings.sms_api_token}"
+
+    request = urllib.request.Request(
+        settings.sms_api_url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=settings.sms_timeout_seconds) as response:
+            body = response.read().decode("utf-8", errors="ignore")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        write_sms_log("phone_code_sms_http_error", phone=phone, status=exc.code, body=body[:500])
+        raise app_auth.AppAuthError(f"短信发送失败: HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        write_sms_log("phone_code_sms_url_error", phone=phone, reason=str(exc.reason))
+        raise app_auth.AppAuthError("短信发送失败，请稍后重试") from exc
+    except Exception as exc:
+        write_sms_log("phone_code_sms_error", phone=phone, error=str(exc))
+        raise app_auth.AppAuthError("短信发送失败，请稍后重试") from exc
+
+    try:
+        data = json.loads(body) if body else {}
+    except json.JSONDecodeError as exc:
+        write_sms_log("phone_code_sms_bad_json", phone=phone, body=body[:500])
+        raise app_auth.AppAuthError("短信服务返回异常") from exc
+
+    if not sms_send_succeeded(data):
+        write_sms_log("phone_code_sms_failed", phone=phone, response=data)
+        message = str(data.get("msg") or data.get("message") or data.get("Message") or "短信发送失败")
+        raise app_auth.AppAuthError(message)
+
+    write_sms_log("phone_code_sms_sent", phone=phone, response={k: v for k, v in data.items() if k.lower() not in {"code"}})
+    return data
+
+
 @router.post("/login/getPhoneCode")
 async def get_phone_code(request: Request, redis: Redis | None = Depends(get_redis)):
     payload = await request.json()
     phone = str(payload.get("phone") or "").strip()
     if not phone:
         return error("请输入手机号")
-    code = "".join(__import__("random").choice("0123456789") for _ in range(6))
-    if redis:
+    if redis is None:
+        return error("验证码服务不可用")
+    code = "".join(random.choice("0123456789") for _ in range(6))
+    key = f"{app_auth.PHONE_CODE_KEY}{phone}"
+    try:
+        redis.setex(key, 300, code)
+    except Exception as exc:
+        write_sms_log("phone_code_redis_error", phone=phone, error=str(exc))
+        return error(f"验证码服务异常: {exc}")
+    try:
+        sms_result = send_phone_code_sms(phone, code)
+    except app_auth.AppAuthError as exc:
         try:
-            redis.setex(f"{app_auth.PHONE_CODE_KEY}{phone}", 300, code)
-        except Exception as exc:
-            return error(f"楠岃瘉鐮佹湇鍔″紓甯? {exc}")
+            redis.delete(key)
+        except Exception:
+            pass
+        return error(str(exc))
     data = success("sent")
     if settings.env.lower() == "development":
         data["debugCode"] = code
+    if sms_result.get("mock"):
+        data["smsMode"] = "mock"
     return data
 
 
@@ -2016,7 +2386,40 @@ def current_device(user: dict = Depends(app_user), db: Session = Depends(get_db)
 
 @router.get("/device/bind")
 def bind_device(mac: str, serviceId: str = "", deviceName: str = "", user: dict = Depends(app_user), db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
-    result = db.execute(text("update device set user_id=:user_id, device_name=coalesce(nullif(:device_name,''), device_name), update_time=now() where mac=:mac and del_flag=0"), {"user_id": user["id"], "device_name": deviceName, "mac": mac})
+    mac = str(mac or "").strip()
+    if not mac:
+        return error("设备 MAC 不能为空")
+    current_user_id = int(user["id"])
+    device_row = db.execute(
+        text(
+            """
+            select id, user_id from device
+            where lower(mac)=lower(:mac) and del_flag=0
+            order by id desc limit 1
+            """
+        ),
+        {"mac": mac},
+    ).first()
+    if device_row:
+        bound_user_id = device_row._mapping.get("user_id")
+        if bound_user_id and int(bound_user_id) != current_user_id:
+            return error("该设备已被其他用户绑定，请先解除原绑定")
+    family_binding = db.execute(
+        text(
+            """
+            select data_user_id
+            from family_member_device
+            where lower(device_mac)=lower(:mac) and del_flag=0 and status='active'
+            order by update_time desc limit 1
+            """
+        ),
+        {"mac": mac},
+    ).first()
+    if family_binding:
+        family_data_user_id = family_binding._mapping.get("data_user_id")
+        if family_data_user_id and int(family_data_user_id) != current_user_id:
+            return error("该设备已被其他用户绑定，请先解除原绑定")
+    result = db.execute(text("update device set user_id=:user_id, device_name=coalesce(nullif(:device_name,''), device_name), update_time=now() where lower(mac)=lower(:mac) and del_flag=0"), {"user_id": current_user_id, "device_name": deviceName, "mac": mac})
     redis_delete_key(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}")
     redis_set_text(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}", serviceId)
     redis_delete_key(redis, f"{app_auth.DEVICE_NAME_KEY}{user['id']}")
@@ -3326,9 +3729,9 @@ def growth_girlfriend_context_payload(db: Session, user_id: int) -> dict:
             "growth": growth_score,
         },
         "metrics": {
-            "heartRate": heart_rate,
-            "spo2": spo2,
-            "hrv": hrv,
+            "heartRate": rounded_metric(heart_rate) or 0,
+            "spo2": rounded_metric(spo2) or 0,
+            "hrv": rounded_metric(hrv) or 0,
             "stress": stress,
             "steps": steps,
             "sleepMinutes": sleep_minutes,
@@ -4122,7 +4525,7 @@ def get_user_girl_health_all(user: dict = Depends(app_user), db: Session = Depen
         "/physicalHealth/ovulationPrediction",
         payload,
         payload,
-        context={"source": "getUserGirlHealthAll", "userId": int(user["id"])},
+        context={"source": "getUserGirlHealthAll", "userId": int(user["id"]), "userName": user.get("nickName")},
     )
     predicted_cycle = response.get("predictedCycle") if isinstance(response, dict) else None
     luteal = predicted_cycle.get("luteal") if isinstance(predicted_cycle, dict) else None

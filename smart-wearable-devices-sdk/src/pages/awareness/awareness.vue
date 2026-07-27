@@ -78,6 +78,7 @@ const ringBusinessBridge = useRingBusinessHistoryPageSync();
 const RW_HOME_HISTORY_SYNC_TIMEOUT_MS = 30000;
 const LEGACY_HOME_DEVICE_INFO_TIMEOUT_MS = 12000;
 const LEGACY_HOME_HISTORY_SYNC_TIMEOUT_MS = 30000;
+const LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS = 45000;
 const RW_HOME_HISTORY_DATA_TYPES: RwHistoryDataName[] = [
   'lastData',
   'sleepData',
@@ -138,6 +139,7 @@ const RW_AWARENESS_HISTORY_DEDUP_MS = 45000;
 const RW_AWARENESS_DEVICE_TIME_SYNC_DEDUP_MS = 10 * 60 * 1000;
 const LEGACY_LOCAL_DATA_UPLOAD_DEDUP_MS = 60 * 1000;
 const AWARENESS_PROCESSED_REFRESH_DEDUP_MS = 3000;
+const LEGACY_SLEEP_UPLOAD_LOOKBACK_SECONDS = 12 * 60 * 60;
 const hasAwarenessCommunicationReady = () =>
   hasAnyRingCommunicationReady(userStore.deviceInfo, ringStore.deviceInfo);
 const isAwarenessRwRing = () => userStore.deviceInfo?.protocol === 'rw' || ringStore.deviceInfo?.protocol === 'rw';
@@ -229,7 +231,7 @@ const formatUnixTimestampForLog = (timestamp?: number) => {
 };
 const getAwarenessHistoryUploadSinceTimestamp = (isRwRing: boolean) => {
   if (isRwRing) return userStore.lastReadTimestamp;
-  return getLocalDayStartUnixTimestamp(new Date());
+  return Math.max(0, getLocalDayStartUnixTimestamp(new Date()) - LEGACY_SLEEP_UPLOAD_LOOKBACK_SECONDS);
 };
 
 const pullDownRefresh = ref(false);
@@ -556,7 +558,7 @@ const getDisplayMetricValue = (...values: unknown[]) => {
   for (const value of values) {
     if (value == null || value === '') continue;
     const numeric = getPositiveMetricNumber(value);
-    if (Number.isFinite(numeric) && numeric > 0) return `${numeric}`;
+    if (Number.isFinite(numeric) && numeric > 0) return `${Math.round(numeric)}`;
     const text = String(value).trim();
     if (text && text !== '--' && text !== '-' && text !== '00') return text;
   }
@@ -950,6 +952,7 @@ watch(
           appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
             protocol,
             reason: 'empty-submit-array',
+            deferredRefresh: homeDataSyncing.value,
             localDataCount: localData.length,
             filteredRecordCount: filteredRecords.length,
             lastReadTimestamp: userStore.lastReadTimestamp,
@@ -959,7 +962,9 @@ watch(
             submitMetricCounts,
             snapshot: getAwarenessConnectionSnapshot()
           });
-          await refreshAwarenessAfterDataProcessed('legacy-local-data-no-submit');
+          if (!homeDataSyncing.value) {
+            await refreshAwarenessAfterDataProcessed('legacy-local-data-no-submit');
+          }
         }
       } else {
         // userStore.updateIsSending(false);
@@ -1649,6 +1654,35 @@ const executeCommandsSequentially = async () => {
           sample: records.slice(0, 2),
           snapshot: getAwarenessConnectionSnapshot()
         });
+        if (records.length === 0) {
+          const fallbackStartedAt = Date.now();
+          appendAwarenessDiagnosticLog('legacy-home-history-empty-fallback-start', {
+            protocol,
+            date: historyDate,
+            readAll: true,
+            reason: 'empty-primary-history',
+            timeoutMs: LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS,
+            snapshot: getAwarenessConnectionSnapshot()
+          });
+          const fallbackResult = await readLocalData(true, historyDate, undefined, {
+            timeoutMs: LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS
+          });
+          const fallbackRecords = Array.isArray((fallbackResult as any)?.records) ? (fallbackResult as any).records : [];
+          appendAwarenessDiagnosticLog('legacy-home-history-empty-fallback-result', {
+            protocol,
+            date: historyDate,
+            readAll: true,
+            elapsedMs: Date.now() - fallbackStartedAt,
+            status: (fallbackResult as any)?.status,
+            uploaded: (fallbackResult as any)?.uploaded,
+            recordCount: fallbackRecords.length,
+            receivedCount: Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0,
+            localDataLength: Array.isArray(userStore.localData) ? userStore.localData.length : 0,
+            rawMetricCounts: countRingHistoryRecordMetrics(fallbackRecords as Array<Record<string, any>>),
+            sample: fallbackRecords.slice(0, 2),
+            snapshot: getAwarenessConnectionSnapshot()
+          });
+        }
       }
       lastAwarenessRefreshAt = Date.now();
       userStore.updateIsSending(false);
@@ -1808,9 +1842,9 @@ onShow(async () => {
           snapshot: getAwarenessConnectionSnapshot()
         });
         void executeCommandsSequentially()
-          .then(() => refreshAwarenessBusinessOverview(getSelectedDetailDate()))
           .then(() => {
             appendAwarenessDiagnosticLog('legacy-home-page-show-sync-result', {
+              reason: 'overview-refresh-deferred-to-upload-result',
               snapshot: getAwarenessConnectionSnapshot()
             });
           })

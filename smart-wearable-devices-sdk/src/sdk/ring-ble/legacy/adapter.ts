@@ -164,7 +164,7 @@ export interface LegacyReadLocalDataOptions {
   dataTypes?: string[];
 }
 
-const DEFAULT_SCAN_PREFIXES = ['HR', 'IF', 'QKeeRing', 'PPlus'];
+const DEFAULT_SCAN_PREFIXES = ['HR', 'IF', 'QK', 'QKeeRing', 'PPlus'];
 const LEGACY_SERVICE_MARKERS = ['BAE8', '4F05-4503-8E65-3AF1F7329D1F'];
 const SERVICE_CACHE_KEY = 'deviceServiceCache';
 
@@ -187,7 +187,8 @@ const ensureWriteDevice = (runtime: RingBleRuntime) => {
 
 const isTargetDevice = (name: string | undefined, prefixes: string[]) => {
   if (!name) return false;
-  return prefixes.some((prefix) => name.startsWith(prefix));
+  const normalizedName = `${name}`.trim().toUpperCase();
+  return prefixes.some((prefix) => normalizedName.startsWith(`${prefix}`.trim().toUpperCase()));
 };
 
 const getMacFromAdvertisData = (buffer?: ArrayBuffer) => {

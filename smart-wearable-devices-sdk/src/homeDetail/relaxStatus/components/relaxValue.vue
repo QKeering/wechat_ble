@@ -32,8 +32,13 @@ const stressValue = computed(() => {
 });
 
 const stressLevel = computed(() => props.stressDetail?.stressLevel || '压力');
-const latestHrvValue = computed(() => props.stressDetail?.latestHrvValue ?? props.stressDetail?.hrv ?? '00');
-const dailyAvgHrvValue = computed(() => props.stressDetail?.dailyAvgHrvValue ?? props.stressDetail?.avgHrvValue ?? '00');
+const formatIntegerMetric = (value: unknown, fallback = '00') => {
+  if (value == null || value === '') return fallback;
+  const numeric = Number(String(value).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? String(Math.round(numeric)) : fallback;
+};
+const latestHrvValue = computed(() => formatIntegerMetric(props.stressDetail?.latestHrvValue ?? props.stressDetail?.hrv));
+const dailyAvgHrvValue = computed(() => formatIntegerMetric(props.stressDetail?.dailyAvgHrvValue ?? props.stressDetail?.avgHrvValue));
 
 const getProcessedOption = () => {
   const newOption = cloneDeep(baseOption);

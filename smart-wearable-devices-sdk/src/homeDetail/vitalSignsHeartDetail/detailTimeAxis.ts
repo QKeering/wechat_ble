@@ -11,6 +11,7 @@ export type DetailTimeTick = {
 const formatTickLabel = (value: unknown) => {
   const text = String(value ?? '').trim();
   if (!text) return '--';
+  if (/^0+$/.test(text)) return '';
   const timeMatch = text.match(/(\d{1,2}):(\d{2})(?::\d{2})?/);
   if (timeMatch) {
     return `${timeMatch[1].padStart(2, '0')}:${timeMatch[2]}`;
@@ -20,6 +21,24 @@ const formatTickLabel = (value: unknown) => {
     return `${dateMatch[1].padStart(2, '0')}-${dateMatch[2].padStart(2, '0')}`;
   }
   return text.length > 5 ? text.slice(0, 5) : text;
+};
+
+const isVisibleTickLabel = (label: string) => {
+  const text = String(label ?? '').trim();
+  return Boolean(text && text !== '--' && !/^0+$/.test(text));
+};
+
+const DAILY_DETAIL_TICK_LABELS = ['00:00', '06:00', '12:00', '18:00', '24:00'];
+
+export const buildDailyDetailTimeTicks = (): DetailTimeTick[] => {
+  const lastIndex = DAILY_DETAIL_TICK_LABELS.length - 1;
+  return DAILY_DETAIL_TICK_LABELS.map((label, index) => ({
+    key: `daily-${label}`,
+    label,
+    left: lastIndex <= 0 ? 0 : (index / lastIndex) * 100,
+    isFirst: index === 0,
+    isLast: index === lastIndex
+  }));
 };
 
 const getDisplayIndexes = (length: number) => {
@@ -43,10 +62,16 @@ export const buildDetailTimeTicks = (chartData?: Point[]): DetailTimeTick[] => {
   const indexes = getDisplayIndexes(labels.length);
   const lastIndex = Math.max(1, labels.length - 1);
 
-  return indexes.map((dataIndex, order, list) => ({
-    key: `${dataIndex}-${labels[dataIndex]}`,
-    label: labels[dataIndex],
-    left: Math.max(0, Math.min(100, (dataIndex / lastIndex) * 100)),
+  const ticks = indexes
+    .map((dataIndex) => ({
+      key: `${dataIndex}-${labels[dataIndex]}`,
+      label: labels[dataIndex],
+      left: Math.max(0, Math.min(100, (dataIndex / lastIndex) * 100))
+    }))
+    .filter((tick, index, list) => isVisibleTickLabel(tick.label) && !(index === list.length - 1 && tick.label === '00'));
+
+  return ticks.map((tick, order, list) => ({
+    ...tick,
     isFirst: order === 0,
     isLast: order === list.length - 1
   }));

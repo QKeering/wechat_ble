@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -36,6 +37,14 @@ RELATION_STATUS_TEXT = {
     3: "已取消",
     4: "已拒绝",
 }
+
+
+def _default_care_template_ids() -> list[str]:
+    return [
+        item.strip()
+        for item in os.getenv("FAMILY_CARE_TEMPLATE_IDS", os.getenv("VITE_FAMILY_CARE_TEMPLATE_IDS", "")).split(",")
+        if item.strip()
+    ]
 
 INVITE_STATUS = {
     "pending": 0,
@@ -216,6 +225,11 @@ def initialize_schema(db: Session) -> None:
         )
     )
     _backfill_relations(db)
+    _dedupe_family_account_pairs(db)
+    try:
+        _backfill_member_devices_from_health(db)
+    except Exception:
+        db.rollback()
     db.execute(
         text(
             """
@@ -356,6 +370,121 @@ def _backfill_relations(db: Session) -> None:
         db.execute(text("update family_member set relation_id=:relation_id where id=:id"), {"relation_id": relation_id, "id": member["id"]})
 
 
+def _dedupe_family_account_pairs(db: Session) -> None:
+    duplicate_relation_pairs = db.execute(
+        text(
+            """
+            select elder_user_id, guardian_user_id
+            from family_relation
+            where elder_user_id is not null and del_flag='0'
+            group by elder_user_id, guardian_user_id
+            having count(*) > 1
+            """
+        )
+    ).all()
+    for pair in duplicate_relation_pairs:
+        elder_user_id = int(pair._mapping["elder_user_id"])
+        guardian_user_id = int(pair._mapping["guardian_user_id"])
+        rows = db.execute(
+            text(
+                """
+                select id
+                from family_relation
+                where elder_user_id=:elder_user_id and guardian_user_id=:guardian_user_id
+                order by
+                  case when del_flag='0' and status in (0,1,2) then 0 else 1 end,
+                  id desc
+                """
+            ),
+            {"elder_user_id": elder_user_id, "guardian_user_id": guardian_user_id},
+        ).all()
+        canonical_id = int(rows[0]._mapping["id"])
+        for row in rows[1:]:
+            duplicate_id = int(row._mapping["id"])
+            db.execute(
+                text("update family_member set relation_id=:canonical_id, update_time=now() where relation_id=:duplicate_id"),
+                {"canonical_id": canonical_id, "duplicate_id": duplicate_id},
+            )
+            db.execute(
+                text("update family_relation set status=3, del_flag='2', update_time=now() where id=:id"),
+                {"id": duplicate_id},
+            )
+
+    duplicate_member_pairs = db.execute(
+        text(
+            """
+            select owner_user_id, data_user_id
+            from family_member
+            where del_flag=0
+            group by owner_user_id, data_user_id
+            having count(*) > 1
+            """
+        )
+    ).all()
+    for pair in duplicate_member_pairs:
+        owner_user_id = int(pair._mapping["owner_user_id"])
+        data_user_id = int(pair._mapping["data_user_id"])
+        rows = db.execute(
+            text(
+                """
+                select id
+                from family_member
+                where owner_user_id=:owner_user_id and data_user_id=:data_user_id and del_flag=0
+                order by id desc
+                """
+            ),
+            {"owner_user_id": owner_user_id, "data_user_id": data_user_id},
+        ).all()
+        for row in rows[1:]:
+            duplicate_member_id = int(row._mapping["id"])
+            db.execute(
+                text("update family_member set status='cancelled', del_flag=2, update_time=now() where id=:id"),
+                {"id": duplicate_member_id},
+            )
+            db.execute(
+                text("update family_member_device set status='replaced', del_flag=2, update_time=now() where member_id=:member_id"),
+                {"member_id": duplicate_member_id},
+            )
+    db.commit()
+
+
+def _backfill_member_devices_from_health(db: Session) -> None:
+    db.execute(
+        text(
+            """
+            insert into family_member_device(
+              member_id, owner_user_id, data_user_id, device_mac, service_id,
+              device_name, bind_by_user_id, status
+            )
+            select
+              m.id,
+              m.owner_user_id,
+              m.data_user_id,
+              latest_health.device_mac,
+              '',
+              coalesce(health_dev.device_name, concat(m.name, '的设备')),
+              m.owner_user_id,
+              'active'
+            from family_member m
+            left join family_member_device existing_device on existing_device.member_id=m.id
+              and existing_device.del_flag=0 and existing_device.status='active'
+            join health_raw latest_health on latest_health.id=(
+                select hr.id
+                from health_raw hr
+                where hr.user_id=m.data_user_id and hr.device_mac is not null and hr.device_mac<>''
+                order by hr.record_time desc, hr.id desc
+                limit 1
+            )
+            left join device health_dev on health_dev.mac=latest_health.device_mac collate utf8mb4_general_ci
+              and health_dev.del_flag=0
+            where m.del_flag=0 and m.status='active'
+              and existing_device.id is null
+            """
+        )
+    )
+    db.commit()
+
+
 def _permissions_payload(value: Any = None) -> str:
     payload = DEFAULT_PERMISSIONS.copy()
     if isinstance(value, dict):
@@ -457,17 +586,30 @@ def create_relation(
 ) -> int:
     existing = None
     if elder_user_id:
-        existing = db.execute(
+        existing_rows = db.execute(
             text(
                 """
                 select id from family_relation
                 where elder_user_id=:elder_user_id and guardian_user_id=:guardian_user_id
-                  and del_flag='0' and status in (0,1,2)
-                order by id desc limit 1
+                order by
+                  case when del_flag='0' and status in (0,1,2) then 0 else 1 end,
+                  id desc
                 """
             ),
             {"elder_user_id": elder_user_id, "guardian_user_id": guardian_user_id},
-        ).scalar()
+        ).all()
+        if existing_rows:
+            existing = int(existing_rows[0]._mapping["id"])
+            duplicate_ids = [int(row._mapping["id"]) for row in existing_rows[1:]]
+            for duplicate_id in duplicate_ids:
+                db.execute(
+                    text("update family_member set relation_id=:relation_id, update_time=now() where relation_id=:duplicate_id"),
+                    {"relation_id": existing, "duplicate_id": duplicate_id},
+                )
+                db.execute(
+                    text("update family_relation set status=3, del_flag='2', update_time=now() where id=:id"),
+                    {"id": duplicate_id},
+                )
     if existing:
         db.execute(
             text(
@@ -477,6 +619,8 @@ def create_relation(
                     relation_type=:relation_type,
                     permission_scope=:permission_scope,
                     status=:status,
+                    elder_profile_id=coalesce(:elder_profile_id, elder_profile_id),
+                    del_flag='0',
                     update_time=now()
                 where id=:id
                 """
@@ -487,6 +631,7 @@ def create_relation(
                 "relation_type": relation_type,
                 "permission_scope": _permissions_payload(permission_scope),
                 "status": status,
+                "elder_profile_id": elder_profile_id,
             },
         )
         return int(existing)
@@ -557,18 +702,48 @@ def list_members(db: Session, owner_user_id: int) -> list[dict[str, Any]]:
         text(
             """
             select m.*,
-                   d.device_mac, d.service_id, d.device_name,
-                   dev.battery, dev.last_sync_time
+                   coalesce(d.device_mac, profile_dev.mac, latest_health.device_mac) as device_mac,
+                   d.service_id,
+                   coalesce(d.device_name, dev.device_name, profile_dev.device_name, health_dev.device_name) as device_name,
+                   coalesce(dev.battery, profile_dev.battery, health_dev.battery) as battery,
+                   coalesce(dev.last_sync_time, profile_dev.last_sync_time, health_dev.last_sync_time, latest_health.record_time) as last_sync_time
             from family_member m
             left join family_member_device d on d.member_id=m.id and d.del_flag=0 and d.status='active'
             left join device dev on dev.mac=d.device_mac collate utf8mb4_general_ci and dev.del_flag=0
+            left join device profile_dev on profile_dev.id=(
+                select pd.id
+                from device pd
+                where pd.user_id=m.data_user_id and pd.del_flag=0
+                order by pd.update_time desc, pd.id desc
+                limit 1
+            )
+            left join health_raw latest_health on latest_health.id=(
+                select hr.id
+                from health_raw hr
+                where hr.user_id=m.data_user_id and hr.device_mac is not null and hr.device_mac<>''
+                order by hr.record_time desc, hr.id desc
+                limit 1
+            )
+            left join device health_dev on health_dev.mac=latest_health.device_mac collate utf8mb4_general_ci and health_dev.del_flag=0
             where m.owner_user_id=:owner_user_id and m.del_flag=0
             order by m.create_time desc
             """
         ),
         {"owner_user_id": owner_user_id},
     ).all()
-    return [_member_from_row(row) for row in rows if row]
+    members = []
+    seen_data_user_ids: set[int] = set()
+    for row in rows:
+        member = _member_from_row(row)
+        if not member:
+            continue
+        data_user_id = int(member.get("dataUserId") or 0)
+        if data_user_id and data_user_id in seen_data_user_ids:
+            continue
+        if data_user_id:
+            seen_data_user_ids.add(data_user_id)
+        members.append(member)
+    return members
 
 
 def _attention_level(member: dict[str, Any]) -> str:
@@ -764,10 +939,10 @@ def care_subscription(db: Session, user_id: int) -> dict[str, Any]:
         {"user_id": user_id},
     ).first()
     if not row:
-        return {"subscribeEnabled": False, "templateIds": [], "lastRequestStatus": {}}
+        return {"subscribeEnabled": False, "templateIds": _default_care_template_ids(), "lastRequestStatus": {}}
     data = camelize_dict(dict(row._mapping))
     data["subscribeEnabled"] = bool(data.get("subscribeEnabled"))
-    data["templateIds"] = _parse_json_list(data.get("templateIds"))
+    data["templateIds"] = _parse_json_list(data.get("templateIds")) or _default_care_template_ids()
     data["lastRequestStatus"] = _parse_json_dict(data.get("lastRequestStatus"))
     return data
 
@@ -1049,8 +1224,14 @@ def list_guardians(db: Session, data_user_id: int) -> list[dict[str, Any]]:
         {"data_user_id": data_user_id},
     ).all()
     guardians = []
+    seen_guardian_user_ids: set[int] = set()
     for row in rows:
         data = camelize_dict(dict(row._mapping))
+        guardian_user_id = int(data.get("guardianUserId") or 0)
+        if guardian_user_id and guardian_user_id in seen_guardian_user_ids:
+            continue
+        if guardian_user_id:
+            seen_guardian_user_ids.add(guardian_user_id)
         data["permissions"] = _parse_permissions(data.get("permissions"))
         relation_status = data.get("relationStatus")
         if relation_status is not None:
@@ -1103,33 +1284,144 @@ def create_member(db: Session, owner: dict[str, Any], payload: dict[str, Any]) -
         source=1,
         remark="created_from_member_api",
     )
-    result = db.execute(
+    existing_members = db.execute(
         text(
             """
-            insert into family_member(
-              owner_user_id, linked_user_id, data_user_id, name, relation, phone, avatar,
-              permissions, relation_id, elder_profile_id
-            )
-            values(
-              :owner_user_id, :linked_user_id, :data_user_id, :name, :relation, :phone, :avatar,
-              :permissions, :relation_id, :elder_profile_id
-            )
+            select id
+            from family_member
+            where owner_user_id=:owner_user_id and data_user_id=:data_user_id
+            order by case when del_flag=0 then 0 else 1 end, id desc
             """
         ),
-        {
-            "owner_user_id": owner["id"],
-            "linked_user_id": linked_user_id,
-            "data_user_id": data_user_id,
-            "name": name,
-            "relation": relation,
-            "phone": phone,
-            "avatar": avatar,
-            "permissions": _permissions_payload(payload.get("permissions")),
-            "relation_id": relation_id,
-            "elder_profile_id": elder_profile_id,
-        },
-    )
-    member_id = int(result.lastrowid)
+        {"owner_user_id": owner["id"], "data_user_id": data_user_id},
+    ).all()
+    if existing_members:
+        member_id = int(existing_members[0]._mapping["id"])
+        duplicate_member_ids = [int(row._mapping["id"]) for row in existing_members[1:]]
+        db.execute(
+            text(
+                """
+                update family_member
+                set linked_user_id=:linked_user_id,
+                    name=:name,
+                    relation=:relation,
+                    phone=:phone,
+                    avatar=:avatar,
+                    permissions=:permissions,
+                    relation_id=:relation_id,
+                    elder_profile_id=coalesce(:elder_profile_id, elder_profile_id),
+                    status='active',
+                    del_flag=0,
+                    update_time=now()
+                where id=:id
+                """
+            ),
+            {
+                "id": member_id,
+                "linked_user_id": linked_user_id,
+                "name": name,
+                "relation": relation,
+                "phone": phone,
+                "avatar": avatar,
+                "permissions": _permissions_payload(payload.get("permissions")),
+                "relation_id": relation_id,
+                "elder_profile_id": elder_profile_id,
+            },
+        )
+        for duplicate_member_id in duplicate_member_ids:
+            db.execute(
+                text("update family_member set del_flag=2, status='cancelled', update_time=now() where id=:id"),
+                {"id": duplicate_member_id},
+            )
+            db.execute(
+                text("update family_member_device set del_flag=2, status='replaced', update_time=now() where member_id=:member_id"),
+                {"member_id": duplicate_member_id},
+            )
+    else:
+        result = db.execute(
+            text(
+                """
+                insert into family_member(
+                  owner_user_id, linked_user_id, data_user_id, name, relation, phone, avatar,
+                  permissions, relation_id, elder_profile_id
+                )
+                values(
+                  :owner_user_id, :linked_user_id, :data_user_id, :name, :relation, :phone, :avatar,
+                  :permissions, :relation_id, :elder_profile_id
+                )
+                """
+            ),
+            {
+                "owner_user_id": owner["id"],
+                "linked_user_id": linked_user_id,
+                "data_user_id": data_user_id,
+                "name": name,
+                "relation": relation,
+                "phone": phone,
+                "avatar": avatar,
+                "permissions": _permissions_payload(payload.get("permissions")),
+                "relation_id": relation_id,
+                "elder_profile_id": elder_profile_id,
+            },
+        )
+        member_id = int(result.lastrowid)
+    existing_device = db.execute(
+        text(
+            """
+            select mac, device_name
+            from device
+            where user_id=:data_user_id and del_flag=0 and mac is not null and mac<>''
+            order by last_sync_time desc, update_time desc, id desc
+            limit 1
+            """
+        ),
+        {"data_user_id": data_user_id},
+    ).first()
+    if not existing_device:
+        existing_device = db.execute(
+            text(
+                """
+                select latest_health.device_mac as mac,
+                       health_dev.device_name
+                from health_raw latest_health
+                left join device health_dev on health_dev.mac=latest_health.device_mac collate utf8mb4_general_ci
+                  and health_dev.del_flag=0
+                where latest_health.user_id=:data_user_id
+                  and latest_health.device_mac is not null and latest_health.device_mac<>''
+                order by latest_health.record_time desc, latest_health.id desc
+                limit 1
+                """
+            ),
+            {"data_user_id": data_user_id},
+        ).first()
+    if existing_device:
+        existing_device_data = dict(existing_device._mapping)
+        db.execute(
+            text(
+                """
+                insert into family_member_device(
+                  member_id, owner_user_id, data_user_id, device_mac, service_id,
+                  device_name, bind_by_user_id, status
+                )
+                select
+                  :member_id, :owner_user_id, :data_user_id, :device_mac, '',
+                  :device_name, :bind_by_user_id, 'active'
+                where not exists (
+                  select 1 from family_member_device
+                  where member_id=:member_id and device_mac=:device_mac
+                    and del_flag=0 and status='active'
+                )
+                """
+            ),
+            {
+                "member_id": member_id,
+                "owner_user_id": owner["id"],
+                "data_user_id": data_user_id,
+                "device_mac": existing_device_data["mac"],
+                "device_name": existing_device_data.get("device_name") or f"{name}的设备",
+                "bind_by_user_id": owner["id"],
+            },
+        )
     db.commit()
     return get_member(db, int(owner["id"]), member_id) or {"id": member_id}
 
@@ -1139,11 +1431,29 @@ def get_member(db: Session, owner_user_id: int, member_id: int) -> dict[str, Any
         text(
             """
             select m.*,
-                   d.device_mac, d.service_id, d.device_name,
-                   dev.battery, dev.last_sync_time
+                   coalesce(d.device_mac, profile_dev.mac, latest_health.device_mac) as device_mac,
+                   d.service_id,
+                   coalesce(d.device_name, dev.device_name, profile_dev.device_name, health_dev.device_name) as device_name,
+                   coalesce(dev.battery, profile_dev.battery, health_dev.battery) as battery,
+                   coalesce(dev.last_sync_time, profile_dev.last_sync_time, health_dev.last_sync_time, latest_health.record_time) as last_sync_time
             from family_member m
             left join family_member_device d on d.member_id=m.id and d.del_flag=0 and d.status='active'
             left join device dev on dev.mac=d.device_mac collate utf8mb4_general_ci and dev.del_flag=0
+            left join device profile_dev on profile_dev.id=(
+                select pd.id
+                from device pd
+                where pd.user_id=m.data_user_id and pd.del_flag=0
+                order by pd.update_time desc, pd.id desc
+                limit 1
+            )
+            left join health_raw latest_health on latest_health.id=(
+                select hr.id
+                from health_raw hr
+                where hr.user_id=m.data_user_id and hr.device_mac is not null and hr.device_mac<>''
+                order by hr.record_time desc, hr.id desc
+                limit 1
+            )
+            left join device health_dev on health_dev.mac=latest_health.device_mac collate utf8mb4_general_ci and health_dev.del_flag=0
             where m.id=:member_id and m.owner_user_id=:owner_user_id and m.del_flag=0
             limit 1
             """
@@ -1214,15 +1524,17 @@ def bind_device(db: Session, owner: dict[str, Any], payload: dict[str, Any]) -> 
     member = require_member(db, int(owner["id"]), member_id)
     if str(member.get("status") or "active") != "active":
         raise ValueError("该共享关系已暂停或取消，不能绑定设备")
+    existing_device_mac = str(member.get("deviceMac") or member.get("mac") or "").strip()
+    if existing_device_mac:
+        raise ValueError("该家人已绑定设备，不能重复绑定")
     mac = str(payload.get("mac") or payload.get("deviceMac") or "").strip()
     if not mac:
         raise ValueError("设备 MAC 不能为空")
     service_id = str(payload.get("serviceId") or payload.get("service_id") or "").strip()
     device_name = str(payload.get("deviceName") or payload.get("device_name") or mac).strip()
     data_user_id = int(member["dataUserId"])
-    force_bind = bool(payload.get("forceBind") or payload.get("force_bind") or payload.get("confirmOverride"))
     old_device = db.execute(
-        text("select id, user_id, sn from device where mac=:mac and del_flag=0 order by id desc limit 1"),
+        text("select id, user_id, sn from device where lower(mac)=lower(:mac) and del_flag=0 order by id desc limit 1"),
         {"mac": mac},
     ).first()
     old_device_data = dict(old_device._mapping) if old_device else {}
@@ -1231,23 +1543,25 @@ def bind_device(db: Session, owner: dict[str, Any], payload: dict[str, Any]) -> 
             """
             select member_id, owner_user_id, data_user_id
             from family_member_device
-            where device_mac=:mac and del_flag=0 and status='active'
+            where lower(device_mac)=lower(:mac) and del_flag=0 and status='active'
             order by update_time desc limit 1
             """
         ),
         {"mac": mac},
     ).first()
     active_binding_data = dict(active_binding._mapping) if active_binding else {}
-    bound_user_id = old_device_data.get("user_id") or active_binding_data.get("data_user_id")
-    if bound_user_id and int(bound_user_id) != data_user_id and not force_bind:
-        raise ValueError("该设备已绑定其他健康档案，请确认后再重新绑定")
+    bound_user_id = old_device_data.get("user_id")
+    if bound_user_id and int(bound_user_id) != data_user_id:
+        raise ValueError("该设备已被其他用户绑定，请先解除原绑定")
+    if active_binding_data:
+        raise ValueError("该设备已被绑定，请先解除原绑定")
     db.execute(
         text(
             """
             insert into device(device_name, device_size, sn, mac, del_flag, create_time, update_time)
             select :device_name, 0, :sn, :mac, 0, now(), now()
             where not exists (
-              select 1 from device where mac=:mac and del_flag=0
+              select 1 from device where lower(mac)=lower(:mac) and del_flag=0
             )
             """
         ),
@@ -1258,7 +1572,7 @@ def bind_device(db: Session, owner: dict[str, Any], payload: dict[str, Any]) -> 
             """
             update family_member_device
             set del_flag=2, status='replaced', update_time=now()
-            where device_mac=:mac and del_flag=0
+            where lower(device_mac)=lower(:mac) and del_flag=0 and status<>'active'
             """
         ),
         {"mac": mac},
@@ -1287,14 +1601,14 @@ def bind_device(db: Session, owner: dict[str, Any], payload: dict[str, Any]) -> 
             set user_id=:data_user_id,
                 device_name=coalesce(nullif(:device_name,''), device_name),
                 update_time=now()
-            where mac=:mac and del_flag=0
+            where lower(mac)=lower(:mac) and del_flag=0
             """
         ),
         {"data_user_id": data_user_id, "device_name": device_name, "mac": mac},
     )
     updated_device_id = old_device_data.get("id")
     if not updated_device_id:
-        updated_device_id = db.execute(text("select id from device where mac=:mac and del_flag=0 order by id desc limit 1"), {"mac": mac}).scalar()
+        updated_device_id = db.execute(text("select id from device where lower(mac)=lower(:mac) and del_flag=0 order by id desc limit 1"), {"mac": mac}).scalar()
     db.execute(
         text(
             """
@@ -1309,7 +1623,7 @@ def bind_device(db: Session, owner: dict[str, Any], payload: dict[str, Any]) -> 
             "old_user_id": old_device_data.get("user_id"),
             "new_user_id": data_user_id,
             "operator_user_id": owner["id"],
-            "reason": "family_guardian_force_rebind" if force_bind and bound_user_id and int(bound_user_id) != data_user_id else "family_guardian_bind",
+            "reason": "family_guardian_bind",
         },
     )
     db.commit()
@@ -1335,6 +1649,7 @@ def resolve_sync_user_id(db: Session, owner_user_id: int, device_mac: str | None
 
 def device_status(member: dict[str, Any]) -> dict[str, Any]:
     last_sync = member.get("lastSyncTime")
+    mac = member.get("deviceMac") or member.get("mac")
     is_online = False
     if last_sync:
         try:
@@ -1343,7 +1658,9 @@ def device_status(member: dict[str, Any]) -> dict[str, Any]:
         except ValueError:
             is_online = False
     return {
-        "mac": member.get("deviceMac"),
+        "mac": mac,
+        "deviceMac": mac,
+        "serviceId": member.get("serviceId"),
         "deviceName": member.get("deviceName"),
         "battery": member.get("battery"),
         "lastSyncTime": last_sync,
@@ -1437,6 +1754,20 @@ def _avg(values: list[float]) -> float | None:
     return round(sum(values) / len(values), 1) if values else None
 
 
+def _normalize_elder_summary_metrics(summary: dict[str, Any]) -> dict[str, Any]:
+    if not summary:
+        return {}
+    result = dict(summary)
+    for key in ("heartRateAvg", "heartRateMin", "heartRateMax", "spo2Avg", "spo2Min", "hrvAvg", "stressAvg"):
+        value = _safe_float(result.get(key))
+        if value is not None:
+            result[key] = round(value)
+    temperature = _safe_float(result.get("temperatureAvg"))
+    if temperature is not None:
+        result["temperatureAvg"] = round(temperature, 1)
+    return result
+
+
 def weekly_ai_report(db: Session, member: dict[str, Any]) -> dict[str, Any]:
     return _period_ai_report(db, member, days=7, title="AI 看护周报", period_name="本周")
 
@@ -1473,8 +1804,8 @@ def _period_ai_report(db: Session, member: dict[str, Any], *, days: int, title: 
     metrics = {
         "syncedDays": len(records),
         "totalDays": days,
-        "heartRateAvg": _avg(heart_rates),
-        "spo2Avg": _avg(spo2_values),
+        "heartRateAvg": round(_avg(heart_rates) or 0) if heart_rates else None,
+        "spo2Avg": round(_avg(spo2_values) or 0) if spo2_values else None,
         "sleepScoreAvg": _avg(sleep_scores),
         "motionScoreAvg": _avg(motion_scores),
         "stepsAvg": round(_avg(step_values) or 0) if step_values else None,
@@ -1518,6 +1849,7 @@ def _period_ai_report(db: Session, member: dict[str, Any], *, days: int, title: 
 def filter_summary_by_permissions(summary: dict[str, Any], member: dict[str, Any]) -> dict[str, Any]:
     if not summary:
         return {}
+    summary = _normalize_elder_summary_metrics(summary)
     allowed_keys = {"id", "userId", "recordDate", "healthScore", "healthLevel"}
     if has_permission(member, "vitalSigns"):
         allowed_keys.update({
@@ -1573,7 +1905,6 @@ def member_dashboard(db: Session, member: dict[str, Any], health_index_payload) 
         "health": payload,
         "summary": summary,
         "alerts": alerts,
-        "aiSummary": daily_ai_summary(member, raw_summary, alerts) if has_permission(member, "aiSummary") else None,
     }
 
 
@@ -1584,16 +1915,31 @@ def list_elder_relations(db: Session, guardian_user_id: int) -> list[dict[str, A
             select r.*,
                    m.id as member_id,
                    m.phone,
-                   d.device_mac,
-                   d.device_name,
-                   dev.battery,
-                   dev.last_sync_time,
+                   coalesce(d.device_mac, profile_dev.mac, latest_health.device_mac) as device_mac,
+                   coalesce(d.device_name, dev.device_name, profile_dev.device_name, health_dev.device_name) as device_name,
+                   coalesce(dev.battery, profile_dev.battery, health_dev.battery) as battery,
+                   coalesce(dev.last_sync_time, profile_dev.last_sync_time, health_dev.last_sync_time, latest_health.record_time) as last_sync_time,
                    p.name as profile_name,
                    p.claim_status
             from family_relation r
             left join family_member m on m.relation_id=r.id and m.del_flag=0
             left join family_member_device d on d.member_id=m.id and d.del_flag=0 and d.status='active'
             left join device dev on dev.mac=d.device_mac collate utf8mb4_general_ci and dev.del_flag=0
+            left join device profile_dev on profile_dev.id=(
+                select pd.id
+                from device pd
+                where pd.user_id=m.data_user_id and pd.del_flag=0
+                order by pd.update_time desc, pd.id desc
+                limit 1
+            )
+            left join health_raw latest_health on latest_health.id=(
+                select hr.id
+                from health_raw hr
+                where hr.user_id=m.data_user_id and hr.device_mac is not null and hr.device_mac<>''
+                order by hr.record_time desc, hr.id desc
+                limit 1
+            )
+            left join device health_dev on health_dev.mac=latest_health.device_mac collate utf8mb4_general_ci and health_dev.del_flag=0
             left join elder_profile p on p.id=r.elder_profile_id and p.del_flag='0'
             where r.guardian_user_id=:guardian_user_id and r.del_flag='0'
             order by r.create_time desc

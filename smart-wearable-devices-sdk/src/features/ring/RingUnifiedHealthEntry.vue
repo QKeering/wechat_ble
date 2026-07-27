@@ -112,14 +112,6 @@
         </view>
         <text class="panel-meta">L3</text>
       </view>
-      <button class="ai-girlfriend-card" @tap="openGrowthGirlfriend">
-        <view class="ai-girlfriend-copy">
-          <text class="ai-girlfriend-kicker">小轻AI成长闺蜜</text>
-          <text class="ai-girlfriend-title">会听你说，也更懂你的状态</text>
-          <text class="ai-girlfriend-desc">健康 · 美丽 · 成长，结合戒指数据和语音问题给出建议</text>
-        </view>
-        <view class="ai-girlfriend-action">进入</view>
-      </button>
     </view>
 
     <view class="panel">
@@ -340,10 +332,6 @@ const handleClearData = () => {
   uni.showToast({ title: '已清空', icon: 'none' });
 };
 
-const openGrowthGirlfriend = () => {
-  uni.navigateTo({ url: '/pages/health/growth-girlfriend' });
-};
-
 const handleDisconnect = async () => {
   try {
     await ring.disconnect();
@@ -519,67 +507,6 @@ onHide(() => {
   margin-top: 8rpx;
   color: #98a2b3;
   font-size: 22rpx;
-}
-
-.ai-girlfriend-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18rpx;
-  margin: 20rpx 0 0;
-  padding: 24rpx;
-  border: 0;
-  border-radius: 8rpx;
-  background:
-    radial-gradient(circle at 88% 18%, rgba(255, 143, 203, 0.22), transparent 26%),
-    linear-gradient(135deg, #fff7fb 0%, #f3faed 100%);
-  color: #172033;
-  line-height: 1.4;
-  text-align: left;
-}
-
-.ai-girlfriend-card::after {
-  border: 0;
-}
-
-.ai-girlfriend-copy {
-  min-width: 0;
-  flex: 1;
-}
-
-.ai-girlfriend-kicker,
-.ai-girlfriend-title,
-.ai-girlfriend-desc {
-  display: block;
-}
-
-.ai-girlfriend-kicker {
-  color: #db408f;
-  font-size: 24rpx;
-  font-weight: 700;
-}
-
-.ai-girlfriend-title {
-  margin-top: 8rpx;
-  color: #172033;
-  font-size: 30rpx;
-  font-weight: 800;
-}
-
-.ai-girlfriend-desc {
-  margin-top: 8rpx;
-  color: #667085;
-  font-size: 22rpx;
-}
-
-.ai-girlfriend-action {
-  flex: 0 0 auto;
-  padding: 12rpx 20rpx;
-  border-radius: 999rpx;
-  background: #359a50;
-  color: #ffffff;
-  font-size: 22rpx;
-  font-weight: 700;
 }
 
 .panel-head,

@@ -21,11 +21,11 @@ export const baseOption = {
   xAxis: {
     type: 'category',
     data: ['00:00', '06:00', '12:00', '18:00', '21:00', '24:00'],
+    boundaryGap: false,
     axisLine: { show: false },
     axisTick: { show: false },
     axisLabel: {
-      color: '#999',
-      fontSize: 12
+      show: false
     },
     splitLine: { show: false }
   },
@@ -69,10 +69,10 @@ export const baseOption = {
     }
   ],
   grid: {
-    left: '1%',
-    right: '5%',
-    bottom: '5%',
-    top: '10%',
-    containLabel: true
+    left: 24,
+    right: 24,
+    top: 56,
+    bottom: 34,
+    containLabel: false
   }
 };

@@ -10,6 +10,11 @@ import Action from '@/components/action.vue';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { formatMetricRecordTime, getLatestTemperatureReading, getSubmitDeviceMac, requestMetricRefresh } from '@/composables/useRingMetricReadings';
 import { useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
+import {
+  getRemainingVitalMeasurementMs,
+  MIN_VITAL_MEASUREMENT_DURATION_MS,
+  MAX_VITAL_MEASUREMENT_DURATION_MS
+} from '@/utils/measurementDuration';
 const userStore = useUserStore();
 const { sendBodyTemperatureCommand, refreshHealthData } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
@@ -33,13 +38,44 @@ const agreementChecked = ref(false);
 const measureStatus = ref('idle');
 
 let measureTimeout: any = null;
+let measureCompleteTimer: any = null;
+let isMeasureCompletePending = false;
 let measureStartedAt = 0;
 const isRwDevice = () => userStore.deviceInfo?.protocol === 'rw';
+const clearMeasureCompleteTimer = () => {
+  if (!measureCompleteTimer) return;
+  clearTimeout(measureCompleteTimer);
+  measureCompleteTimer = null;
+};
+const startMeasureFallbackTimer = () => {
+  if (measureTimeout) {
+    clearTimeout(measureTimeout);
+  }
+  measureTimeout = setTimeout(() => {
+    if (measureStatus.value === 'measuring') {
+      void completeMeasureWithLatestReading();
+    }
+    measureTimeout = null;
+  }, MAX_VITAL_MEASUREMENT_DURATION_MS);
+};
 const completeMeasureWithLatestReading = async () => {
+  if (measureStatus.value !== 'measuring' || isMeasureCompletePending) return;
+  const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt);
+  if (remainingMs > 0) {
+    isMeasureCompletePending = true;
+    clearMeasureCompleteTimer();
+    measureCompleteTimer = setTimeout(() => {
+      measureCompleteTimer = null;
+      isMeasureCompletePending = false;
+      void completeMeasureWithLatestReading();
+    }, remainingMs);
+    return;
+  }
   if (measureTimeout) {
     clearTimeout(measureTimeout);
     measureTimeout = null;
   }
+  clearMeasureCompleteTimer();
   popup.value?.close();
   if (isRwDevice()) {
     await stopActiveRwMeasurement('RW VITAL');
@@ -51,6 +87,11 @@ const isIOS = computed(() => {
   const systemInfo = uni.getSystemInfoSync();
   return systemInfo.platform.toLowerCase().includes('ios');
 });
+const formatTemperatureStat = (value: unknown, fallback = '00') => {
+  const numeric = Number(String(value ?? '').replace(/[^\d.-]/g, ''));
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
+  return `${numeric.toFixed(1)}°C`;
+};
 // 开始测量
 const handleMeasure = () => {
   // 如果勾选了不再提示，直接开始测量
@@ -73,6 +114,8 @@ const startMeasure = async () => {
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
 
   measureStatus.value = 'measuring';
   measureStartedAt = Date.now();
@@ -81,19 +124,26 @@ const startMeasure = async () => {
   //   mask: true
   // });
   popup.value.open();
+  startMeasureFallbackTimer();
   // 发送测量命令
   try {
     if (isRwDevice()) {
       await runRwForegroundMeasurement('temperature', {
         startedAt: measureStartedAt,
+        timeoutMs: MAX_VITAL_MEASUREMENT_DURATION_MS,
+        minActiveMs: MIN_VITAL_MEASUREMENT_DURATION_MS,
         measureStatus: () => measureStatus.value,
         source: 'RW VITAL'
       });
       await completeMeasureWithLatestReading();
       return;
     }
-    await requestMetricRefresh(refreshHealthData, sendBodyTemperatureCommand, { expectedSteps: 'temperature' });
+    await requestMetricRefresh(refreshHealthData, sendBodyTemperatureCommand, {
+      expectedSteps: 'temperature',
+      timeoutMs: MAX_VITAL_MEASUREMENT_DURATION_MS
+    });
   } catch (error) {
+    if (measureStatus.value !== 'measuring') return;
     popup.value?.close();
     if (isRwDevice()) {
       await stopActiveRwMeasurement('RW VITAL');
@@ -104,11 +154,9 @@ const startMeasure = async () => {
     return;
   }
 
-  // 兜底, 30秒后, 自动完成测量
-  measureTimeout = setTimeout(() => {
-    void completeMeasureWithLatestReading();
-    measureTimeout = null; // 清空引用
-  }, 40000);
+  if (!measureTimeout && measureStatus.value === 'measuring') {
+    startMeasureFallbackTimer();
+  }
 };
 // 监听 userStore.receivedData 变化, 提前测量完温度,更新温度
 watch(
@@ -194,12 +242,16 @@ const measureText = computed(() => {
 onLoad(() => {});
 onShow(async () => {
   // 防止测量完成后返回到该页时，measureText重复跳转
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
   measureStatus.value = 'idle';
 });
 onUnload(() => {
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
   void stopActiveRwMeasurement('RW VITAL');
 });
 </script>
@@ -216,19 +268,19 @@ onUnload(() => {
     <view @click="jumpDetail">
       <view class="flex jc-between mt-50 p-50">
         <view class="fd-c jc-around ai-center">
-          <view class="ta-c fs-48">{{ temperatureData?.avgValue || '00' }}</view>
+          <view class="ta-c fs-48">{{ formatTemperatureStat(temperatureData?.avgValue) }}</view>
           <view class="ta-c t-979797 fs-24">平均</view>
         </view>
         <view>
           <!-- 测量数据  -->
           <!-- <view class="ta-c fs-48">{{ temperature || '00' }}</view> -->
           <!-- 接口数据 -->
-          <view class="ta-c fs-48">{{ temperatureData.baseValue || '00' }}</view>
+          <view class="ta-c fs-48">{{ formatTemperatureStat(temperatureData.baseValue) }}</view>
           <view class="ta-c t-979797 fs-24">基准温度</view>
         </view>
         <view>
           <!-- <view class="ta-c fs-48">{{ temperatureDiff }}</view> -->
-          <view class="ta-c fs-48">{{ temperatureData?.diffValue || '00' }}</view>
+          <view class="ta-c fs-48">{{ formatTemperatureStat(temperatureData?.diffValue, '0.0°C') }}</view>
           <view class="ta-c t-979797 fs-24">温度差</view>
         </view>
       </view>

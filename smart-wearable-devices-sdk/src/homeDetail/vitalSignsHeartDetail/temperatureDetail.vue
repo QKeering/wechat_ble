@@ -9,6 +9,7 @@ import type { heartRateDetail, Point } from '@/types/api/homeDetail';
 import type { HistoryPageSilentRequestConfig } from '@/composables/useRingBusinessHistoryPageSync';
 import { cloneDeep } from 'lodash-es';
 import { useUserStore } from '@/stores/user';
+import { buildDailyDetailTimeTicks, buildDetailTimeTicks } from './detailTimeAxis';
 const userStore = useUserStore();
 const echarts = require('../../static/echarts.min.js');
 const getVitalDetailSilentRequestConfig = (): HistoryPageSilentRequestConfig => ({
@@ -40,13 +41,27 @@ const heartRateList = ref([
 
 const heartRateObj = ref<heartRateDetail>({});
 const chartData = ref<Point[]>([]);
+const chartTimeTicks = computed(() => (currentName.value === 'day' ? buildDailyDetailTimeTicks() : buildDetailTimeTicks(chartData.value)));
 const normalizeTemperatureDisplay = (value: unknown) => {
   if (value === null || value === undefined || value === '') return 0;
   const numeric = typeof value === 'number' ? value : Number(String(value).replace(/[^\d.-]/g, ''));
   if (!Number.isFinite(numeric) || numeric <= 0) return 0;
-  return Number(numeric.toFixed(2));
+  return Number(numeric.toFixed(1));
 };
-const temperatureDisplay = computed(() => (temperature.value > 0 ? temperature.value : '--'));
+const formatTemperatureDisplayMetric = (value: unknown, fallback = '0') => {
+  const numeric = normalizeTemperatureDisplay(value);
+  return numeric > 0 ? numeric.toFixed(1) : fallback;
+};
+const formatTemperatureRangeDisplayMetric = (value: unknown, fallback = '0') => {
+  if (value == null || value === '') return fallback;
+  const text = String(value);
+  if (!/\d/.test(text)) return fallback;
+  return text.replace(/-?\d+(?:\.\d+)?/g, (matched) => {
+    const numeric = normalizeTemperatureDisplay(matched);
+    return numeric > 0 ? numeric.toFixed(1) : matched;
+  });
+};
+const temperatureDisplay = computed(() => (temperature.value > 0 ? temperature.value.toFixed(1) : '--'));
 watch(
   chartData,
   (newData, oldData) => {
@@ -275,15 +290,15 @@ const getTemperatureDetail = async () => {
   if (res) {
     heartRateObj.value = res;
     heartRateList.value = [
-      { label: '平均皮肤温度', value: heartRateObj.value.avgValue || '0' },
-      { label: '平均范围', value: heartRateObj.value.avgValueRange || '0' }
+      { label: '平均皮肤温度', value: formatTemperatureDisplayMetric(heartRateObj.value.avgValue) },
+      { label: '平均范围', value: formatTemperatureRangeDisplayMetric(heartRateObj.value.avgValueRange) }
     ];
     chartData.value = heartRateObj.value.chartData || [];
     const latestPoint = [...chartData.value].reverse().find((item) => normalizeTemperatureDisplay(item.value) > 0);
     temperature.value = normalizeTemperatureDisplay(heartRateObj.value.newValue ?? latestPoint?.value ?? heartRateObj.value.avgValue ?? temperature.value);
     heartRateList.value = [
-      { label: '平均皮肤温度', value: heartRateObj.value.avgValue || '0' },
-      { label: '平均范围', value: heartRateObj.value.avgValueRange || '0' }
+      { label: '平均皮肤温度', value: formatTemperatureDisplayMetric(heartRateObj.value.avgValue) },
+      { label: '平均范围', value: formatTemperatureRangeDisplayMetric(heartRateObj.value.avgValueRange) }
     ];
   }
 };
@@ -352,6 +367,7 @@ onUnload(() => {
           :showChartTitle="false"
           :showButtomCard="false"
           :showTopCard="true"
+          :time-ticks="chartTimeTicks"
           @chart-finished="(chartRef) => initChart(chartRef)"
         />
       </view>

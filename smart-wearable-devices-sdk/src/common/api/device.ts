@@ -161,13 +161,18 @@ export interface OtaPackageInfo extends DeviceInfo {
   currentVersion: string;
   deviceModel?: string;
   hasUpdate: boolean;
+  versionCode?: string;
   version?: string;
   firmwareVersion?: string;
+  fileUrl?: string;
+  fileSize?: number;
   firmwareUrl?: string;
   url?: string;
   size?: number;
   md5?: string;
   remark?: string;
+  description?: string;
+  forceUpdate?: number | string | boolean;
 }
 
 export interface OtaInfoResponse {
@@ -177,24 +182,85 @@ export interface OtaInfoResponse {
   message: string;
 }
 
+const pickOtaString = (...values: unknown[]) => {
+  for (const value of values) {
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
+};
+
+const normalizeOtaPackageInfo = (payload: unknown, params: OtaInfoParams): OtaPackageInfo | null => {
+  if (!payload || typeof payload !== 'object') return null;
+
+  const source = payload as Record<string, any>;
+  const fileUrl = pickOtaString(source.fileUrl, source.file_url, source.firmwareUrl, source.firmware_url, source.url);
+  const versionCode = pickOtaString(
+    source.versionCode,
+    source.version_code,
+    source.version,
+    source.firmwareVersion,
+    source.firmware_version
+  );
+
+  return {
+    ...source,
+    currentVersion: params.currentVersion,
+    deviceModel: pickOtaString(source.deviceModel, source.device_model, params.deviceModel),
+    versionCode,
+    version: pickOtaString(source.version, versionCode),
+    firmwareVersion: pickOtaString(source.firmwareVersion, source.firmware_version, versionCode),
+    fileUrl,
+    firmwareUrl: pickOtaString(source.firmwareUrl, source.firmware_url, fileUrl),
+    url: pickOtaString(source.url, fileUrl),
+    hasUpdate: Boolean(fileUrl)
+  };
+};
+
 export const getOtaInfo = async (
   params: OtaInfoParams,
   config: HttpRequestConfigCompat = {}
 ): Promise<OtaPackageInfo | OtaInfoResponse> => {
-  const packageInfo: OtaPackageInfo = {
+  const fallbackPackageInfo: OtaPackageInfo = {
     currentVersion: params.currentVersion,
     deviceModel: params.deviceModel,
     hasUpdate: false
   };
 
-  if (config?.custom?.returnAll) {
+  const query: Record<string, string> = {
+    currentVersion: params.currentVersion || ''
+  };
+  if (params.deviceModel) {
+    query.deviceModel = params.deviceModel;
+  }
+
+  const response = await (uni as any).$uv.http.get('/app/ota/package/check', {
+    params: query,
+    ...config
+  });
+
+  const returnAll = Boolean(config?.custom?.returnAll);
+  const responseObject = response && typeof response === 'object' ? (response as Record<string, any>) : null;
+  const looksLikeWrappedResponse =
+    responseObject &&
+    (Object.prototype.hasOwnProperty.call(responseObject, 'code') ||
+      Object.prototype.hasOwnProperty.call(responseObject, 'data') ||
+      Object.prototype.hasOwnProperty.call(responseObject, 'msg'));
+
+  const code = looksLikeWrappedResponse ? Number(responseObject?.code ?? 200) : 200;
+  const msg = pickOtaString(responseObject?.msg, responseObject?.message, 'already latest');
+  const rawData = looksLikeWrappedResponse ? responseObject?.data : response;
+  const packageInfo = normalizeOtaPackageInfo(rawData, params);
+
+  if (returnAll) {
     return {
-      code: 204,
-      data: null,
-      msg: 'No OTA update available',
-      message: 'No OTA update available'
+      code,
+      data: packageInfo,
+      msg,
+      message: msg
     };
   }
 
-  return packageInfo;
+  return packageInfo || fallbackPackageInfo;
 };

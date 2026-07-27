@@ -10,7 +10,7 @@ import type { HistoryPageSilentRequestConfig } from '@/composables/useRingBusine
 import { useUserStore } from '@/stores/user';
 import { cloneDeep } from 'lodash-es';
 import { pickMetricNumber, withMetricDetailFallback } from './metricFallback';
-import { buildDetailTimeTicks } from './detailTimeAxis';
+import { buildDailyDetailTimeTicks, buildDetailTimeTicks } from './detailTimeAxis';
 const userStore = useUserStore();
 const echarts = require('../../static/echarts.min.js');
 const getVitalDetailSilentRequestConfig = (): HistoryPageSilentRequestConfig => ({
@@ -32,7 +32,24 @@ const activeEchartOption = ref(defaultEchartOption);
 const chartInstance = ref<any>(null);
 
 const heartRate = ref(0);
-const heartRateDisplay = computed(() => (heartRate.value > 0 ? heartRate.value : '--'));
+const normalizeIntegerDisplayMetric = (value: unknown, min = 0, max = Number.POSITIVE_INFINITY) => {
+  const numeric = pickMetricNumber([value], min, max);
+  return numeric == null ? 0 : Math.round(numeric);
+};
+const formatIntegerDisplayMetric = (value: unknown, fallback = '0', min = 0, max = Number.POSITIVE_INFINITY) => {
+  const numeric = normalizeIntegerDisplayMetric(value, min, max);
+  return numeric > 0 ? String(numeric) : fallback;
+};
+const formatIntegerRangeDisplayMetric = (value: unknown, fallback = '0') => {
+  if (value == null || value === '') return fallback;
+  const text = String(value);
+  if (!/\d/.test(text)) return fallback;
+  return text.replace(/-?\d+(?:\.\d+)?/g, (matched) => {
+    const numeric = Number(matched);
+    return Number.isFinite(numeric) ? String(Math.round(numeric)) : matched;
+  });
+};
+const heartRateDisplay = computed(() => formatIntegerDisplayMetric(heartRate.value, '--', 25, 240));
 const currentDate = ref(new Date());
 
 const heartRateList = ref([
@@ -42,7 +59,7 @@ const heartRateList = ref([
 
 const heartRateObj = ref<heartRateDetail>({});
 const chartData = ref<Point[]>([]);
-const chartTimeTicks = computed(() => buildDetailTimeTicks(chartData.value));
+const chartTimeTicks = computed(() => (currentName.value === 'day' ? buildDailyDetailTimeTicks() : buildDetailTimeTicks(chartData.value)));
 watch(
   chartData,
   (newData, oldData) => {
@@ -288,13 +305,16 @@ const getRatDetail = async () => {
     );
     heartRateObj.value = detail;
     heartRateList.value = [
-      { label: '平均心率', value: heartRateObj.value.avgValue || '0' },
-      { label: '平均范围', value: heartRateObj.value.avgValueRange || '0' }
+      { label: '平均心率', value: formatIntegerDisplayMetric(heartRateObj.value.avgValue, '0', 25, 240) },
+      { label: '平均范围', value: formatIntegerRangeDisplayMetric(heartRateObj.value.avgValueRange) }
     ];
     chartData.value = heartRateObj.value.chartData || [];
     const latestPoint = [...chartData.value].reverse().find((item) => pickMetricNumber([item.value], 25, 240) !== undefined);
-    heartRate.value =
-      pickMetricNumber([heartRateObj.value.newValue, latestPoint?.value, heartRateObj.value.avgValue, heartRate.value], 25, 240) || 0;
+    heartRate.value = normalizeIntegerDisplayMetric(
+      pickMetricNumber([heartRateObj.value.newValue, latestPoint?.value, heartRateObj.value.avgValue, heartRate.value], 25, 240),
+      25,
+      240
+    );
   }
 };
 const leftClick = () => {
@@ -302,7 +322,7 @@ const leftClick = () => {
 };
 onLoad(async (options) => {
   currentName.value = currentList.value[current.value];
-  heartRate.value = pickMetricNumber([options?.heartRate], 25, 240) || 0;
+  heartRate.value = normalizeIntegerDisplayMetric(options?.heartRate, 25, 240);
 
   await getRatDetail();
 });
