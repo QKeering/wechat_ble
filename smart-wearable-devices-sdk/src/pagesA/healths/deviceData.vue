@@ -193,20 +193,20 @@ const sendMeasurementCommand = async (task: () => Promise<unknown>, expectedStep
   }
 };
 
-const quickProgressTo100 = () => {
+const quickProgressToCompletionPending = () => {
   const currentProgress = measureProgress.value;
-  const remaining = 100 - currentProgress;
+  const remaining = 99 - currentProgress;
   const steps = 10;
   const stepValue = Math.max(1, Math.floor(remaining / steps));
 
   if (progressAnimationTimer) clearInterval(progressAnimationTimer);
   progressAnimationTimer = setInterval(() => {
-    if (measureProgress.value >= 100) {
+    if (measureProgress.value >= 99) {
       if (progressAnimationTimer) clearInterval(progressAnimationTimer);
       progressAnimationTimer = null;
       return;
     }
-    measureProgress.value = Math.min(measureProgress.value + stepValue, 100);
+    measureProgress.value = Math.min(measureProgress.value + stepValue, 99);
   }, 50);
 };
 
@@ -228,8 +228,9 @@ const pushProgressInterval = (targetProgress: number, expectedStatus: typeof mea
       return;
     }
 
-    measureProgress.value += 1;
-    if (measureProgress.value >= targetProgress) {
+    const safeTargetProgress = Math.min(targetProgress, 99);
+    measureProgress.value = Math.min(measureProgress.value + 1, safeTargetProgress);
+    if (measureProgress.value >= safeTargetProgress) {
       clearInterval(progressInterval);
       progressIntervals = progressIntervals.filter((item) => item !== progressInterval);
     }
@@ -293,7 +294,7 @@ const startTemperatureMeasurement = () => {
       completeMeasurement();
     }
   });
-  pushProgressInterval(100, 'measuring_temp');
+  pushProgressInterval(99, 'measuring_temp');
   measureTimeout = setTimeout(() => {
     if (measureStatus.value === 'measuring_temp') completeMeasurement();
   }, isRwDevice() && hasRwAnyRealtimeCoreData() ? RW_OPTIONAL_TEMPERATURE_TIMEOUT_MS : DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS);
@@ -377,7 +378,7 @@ watch(
     }
 
     if (isRwDevice() && measureStatus.value === 'measuring_temp' && getLatestTemperatureData()?.temperature) {
-      quickProgressTo100();
+      quickProgressToCompletionPending();
       advanceRwMeasureSoon(() => {
         if (measureStatus.value === 'measuring_temp') completeMeasurement();
       }, 500);
@@ -404,7 +405,7 @@ watch(
 
     if (hasCompletedStatus) {
       clearMeasureTimeout();
-      quickProgressTo100();
+      quickProgressToCompletionPending();
       setTimeout(() => {
         completeMeasurement();
       }, 1000);

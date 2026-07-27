@@ -7,7 +7,7 @@ import { useRingBusinessController } from '@/composables/useRingBusinessControll
 import { useRingBusinessData } from '@/composables/useRingBusinessData';
 import { useRingStore } from '@/stores';
 import { useUserStore } from '@/stores/user';
-import { buildRwKeyCommand } from '@/sdk/ring-ble/rw';
+import { buildRwControlHealthDataCommand, RwHealthDataControlKey } from '@/sdk/ring-ble/rw';
 import { clearFrontendRingBindingState, getBoundRingIdentity, getBoundRingIdentityTail, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
@@ -22,10 +22,7 @@ const DEVICE_INFO_SNAPSHOT_WAIT_MS = 12000;
 const DEVICE_INFO_EMPTY_TEXT = '-';
 const content = '是否解除绑定当前设备？解除后需要重新绑定才能使用。';
 const FIND_RING_RED_LIGHT_DURATION_MS = 10000;
-const RW_SENSOR_RAW_KEY = 0x02fa;
-const RW_SENSOR_RAW_OUTPUT_START = 0x01;
-const RW_SENSOR_RAW_OUTPUT_STOP = 0x02;
-const RW_SENSOR_TYPE_PPG_RED = 0x04;
+const FIND_RING_COMMAND_TIMEOUT_MS = 5000;
 
 const modalPopup = ref<any>(null);
 const boundInfo = ref<Record<string, any> | null>(null);
@@ -384,15 +381,7 @@ const goConnect = () => {
 };
 
 const buildFindRingRedLightCommand = (enabled: boolean) =>
-  buildRwKeyCommand(
-    new Uint8Array([
-      (RW_SENSOR_RAW_KEY >> 8) & 0xff,
-      RW_SENSOR_RAW_KEY & 0xff,
-      0x00,
-      enabled ? RW_SENSOR_RAW_OUTPUT_START : RW_SENSOR_RAW_OUTPUT_STOP,
-      RW_SENSOR_TYPE_PPG_RED
-    ])
-  );
+  buildRwControlHealthDataCommand(RwHealthDataControlKey.BloodOxygen, enabled);
 
 const clearFindRingStopTimer = () => {
   if (findRingStopTimer) {
@@ -404,12 +393,18 @@ const clearFindRingStopTimer = () => {
 const sendFindRingRedLightCommand = async (enabled: boolean) => {
   const ready = await ensureDeviceReady();
   if (!ready) throw new Error('设备未连接，请重新连接后再查找戒指');
-  await controller.sendBytes(buildFindRingRedLightCommand(enabled), enabled ? 'find-ring/red-light/start' : 'find-ring/red-light/stop');
+  await Promise.race([
+    controller.sendBytes(buildFindRingRedLightCommand(enabled), enabled ? 'find-ring/red-light/start' : 'find-ring/red-light/stop'),
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('查找戒指指令超时')), FIND_RING_COMMAND_TIMEOUT_MS);
+    })
+  ]);
 };
 
 const stopFindRingRedLight = async (options: { silent?: boolean; reason?: string } = {}) => {
   clearFindRingStopTimer();
   if (!isFindingRing.value && !findRingBusy.value) return;
+  isFindingRing.value = false;
   findRingBusy.value = true;
   appendDeviceDiagnosticLog('find-ring-red-light-stop-start', {
     reason: options.reason || 'manual',

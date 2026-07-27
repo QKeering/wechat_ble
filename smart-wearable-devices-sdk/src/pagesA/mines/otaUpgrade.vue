@@ -3,7 +3,7 @@
     <view class="card">
       <view class="header">
         <text class="title">系统固件更新</text>
-        <text class="version">{{ hasUpgradePackage ? `目标版本: ${otaBaseInfo?.versionCode || ''}` : '当前暂无可升级固件' }}</text>
+        <text class="version">{{ hasUpgradePackage ? `目标版本: ${otaBaseInfo?.versionCode || ''}` : '当前已是最新版本' }}</text>
       </view>
 
       <view v-if="hasUpgradePackage || otaState.isUpgrading" class="progress-section">
@@ -20,7 +20,7 @@
       <button v-if="hasUpgradePackage" type="primary" :loading="otaState.isUpgrading" :disabled="otaState.isUpgrading" @tap="startOtaProcess">
         {{ otaState.isUpgrading ? '升级中...' : '开始安全升级' }}
       </button>
-      <view v-else class="no-upgrade">暂无可升级固件</view>
+      <view v-else class="no-upgrade">当前已是最新版本</view>
 
       <view class="footer-hint">
         <text class="hint-item">● 请保持手机蓝牙开启并靠近设备</text>

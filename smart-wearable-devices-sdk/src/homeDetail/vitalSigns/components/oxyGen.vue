@@ -340,11 +340,11 @@ watch(
               }
             ]
           });
+        } catch (error) {
+          uni.showToast({ title: '测量已完成，数据稍后同步', icon: 'none' });
+        } finally {
           uni.hideLoading();
           jumpDetail();
-        } catch (error) {
-          uni.hideLoading();
-          uni.showToast({ title: '数据提交失败', icon: 'none' });
         }
       }
     }
