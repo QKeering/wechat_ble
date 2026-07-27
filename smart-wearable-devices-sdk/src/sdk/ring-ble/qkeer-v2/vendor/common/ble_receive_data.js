@@ -1,4 +1,4 @@
-import ble_manager from './ble_manager.js';
+import device_state from './ble_device_state.js';
 import ble_config from './ble_config.js';
 import receive_map from '../receiver/ble_receiver_map.js';
 import common from '../utils/util_common.js';
@@ -112,7 +112,7 @@ function handleReceivedData(arrayBuffer) {
 		}
 
 		// 外部注册的监听器回调
-		const funListener = ble_manager.listenerMaps[pkt.dataInfo.cmd];
+		const funListener = device_state.listenerMaps[pkt.dataInfo.cmd];
 		if (!funListener) {
 			console.warn('接收-外部注册-未知的CMD:', pkt.dataInfo.cmd);
 			return;

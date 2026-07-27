@@ -1,4 +1,4 @@
-import ble_manager from './ble_manager.js';
+import device_state from './ble_device_state.js';
 import ble_config from './ble_config.js';
 import ble_cmd from './ble_cmd.js';
 import ble_events from './ble_events.js'
@@ -28,16 +28,16 @@ class BleOtaData {
 			this.timerID = 0;
 		};
 		try {
-			console.log("sendOtaData", arrayBuffer, ble_manager.mtuSize, ble_config.PACKAGE_HEAD_SIZE);
+			console.log("sendOtaData", arrayBuffer, device_state.mtuSize, ble_config.PACKAGE_HEAD_SIZE);
 
 			this.buffer = arrayBuffer;
-			this.dataSize = ble_manager.mtuSize - ble_config.PACKAGE_HEAD_SIZE;
+			this.dataSize = device_state.mtuSize - ble_config.PACKAGE_HEAD_SIZE;
 			this.sendCount = Math.ceil(arrayBuffer.byteLength / this.dataSize);
 			this.sendIndex = 0;
 			this.sendOffset = 0;
 			console.log("sendOtaData", this.sendCount, this.dataSize);
 
-			await ble_manager.sendData(ble_cmd.CMD_SYNC_OTA_START, {});
+			await device_state.sendData(ble_cmd.CMD_SYNC_OTA_START, {});
 			this.timerID = setTimeout(() => ble_events.otaStatus(1), 3000);
 
 		} catch (error) {
@@ -55,7 +55,7 @@ class BleOtaData {
 		try {
 			if (this.sendOffset >= this.buffer.byteLength) {
 				console.log("sendOtaDataWrite CMD_SYNC_OTA_END");
-				await ble_manager.sendData(ble_cmd.CMD_SYNC_OTA_END, {
+				await device_state.sendData(ble_cmd.CMD_SYNC_OTA_END, {
 					crc32: 0,
 				});
 			}
@@ -64,7 +64,7 @@ class BleOtaData {
 				let chunk = this.buffer.slice(this.sendOffset, end);
 				console.log(`sendOtaDataWrite 分包发送 第 ${this.sendIndex + 1} / ${this.sendCount}`, chunk);
 
-				await ble_manager.sendData(ble_cmd.CMD_SYNC_OTA_WRITE, {
+				await device_state.sendData(ble_cmd.CMD_SYNC_OTA_WRITE, {
 					data: chunk,
 				});
 

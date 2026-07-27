@@ -4,6 +4,7 @@ import ble_receive_data from './ble_receive_data.js';
 import ble_send_data from './ble_send_data.js';
 import sender_map from '../sender/ble_sender_map.js';
 import device_info from '../utils/util_device_info.js';
+import device_state from './ble_device_state.js';
 
 class BleManager {
 
@@ -28,6 +29,13 @@ class BleManager {
 
 		this.deviceFoundList = {}; // 搜索到的设备列表
 		this.listenerMaps = {};
+
+		// Sync initial values to shared state (see ble_device_state.js)
+		device_state.deviceType = this.deviceType;
+		device_state.protocolVersion = this.protocolVersion;
+		device_state.mtuSize = this.mtuSize;
+		device_state.connectedDeviceId = this.connectedDeviceId;
+		device_state.listenerMaps = this.listenerMaps;
 
 		// 监听蓝牙连接状态
 		this.onBleConnectionStateChange();
@@ -58,6 +66,7 @@ class BleManager {
 					this.isBluetoothAvailable = false;
 					this.isScanning = false;
 					this.connectedDeviceId = '';
+						device_state.connectedDeviceId = '';
 					resolve(res);
 				},
 				fail: (err) => {
@@ -114,6 +123,7 @@ class BleManager {
 				success: (res) => {
 					console.log('setBLEMTU', res);
 					this.mtuSize = res.mtu;
+					device_state.mtuSize = res.mtu;
 					resolve(res);
 				},
 				fail: (err) => {
@@ -164,11 +174,14 @@ class BleManager {
 					try {
 
 						this.deviceType = advertis.deviceType; // 设备类型，默认0x00
-						this.protocolVersion = advertis.protocolVersion; // 协议版本，默认0x01
+						device_state.deviceType = this.deviceType;
+						this.protocolVersion = advertis.protocolVersion;
+						device_state.protocolVersion = this.protocolVersion;
 						this.isCharging = advertis.isCharging; // 充电状态，0-未充电，1-充电中
 						this.batteryLevel = advertis.batteryLevel; // 电量百分比，0-100
 						this.macInfo = advertis.macInfo; // 设备MAC地址
 						this.connectedDeviceId = device.deviceId;
+						device_state.connectedDeviceId = this.connectedDeviceId;
 						this.deviceInfo = deviceInfo;
 
 						// 查找服务和特征值
@@ -204,6 +217,7 @@ class BleManager {
 				deviceId: deviceId,
 				success: (res) => {
 					this.connectedDeviceId = '';
+						device_state.connectedDeviceId = '';
 					resolve(res);
 				},
 				fail: (err) => {
@@ -378,6 +392,7 @@ class BleManager {
 			if (res.deviceId === this.connectedDeviceId) {
 				if (!res.connected) {
 					this.connectedDeviceId = '';
+						device_state.connectedDeviceId = '';
 					ble_events.bleDisconnected(res.deviceId);
 				}
 			}
@@ -400,6 +415,7 @@ class BleManager {
 	 */
 	setReceiverListener(listenerMap) {
 		this.listenerMaps = listenerMap;
+		device_state.listenerMaps = listenerMap;
 	}
 
 	// 发送数据到设备
@@ -424,4 +440,6 @@ class BleManager {
 
 }
 
-export default new BleManager();
+const bleManagerInstance = new BleManager();
+device_state.sendData = bleManagerInstance.sendData.bind(bleManagerInstance);
+export default bleManagerInstance;
