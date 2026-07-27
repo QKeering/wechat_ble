@@ -4036,6 +4036,7 @@ const handleMineRwL19Acceptance = async () => {
               </view>
               <view v-else class="action-buttons">
                 <uv-button
+                  v-if="!shouldShowReconnectButton"
                   :text="'\u626b\u4e00\u626b'"
                   shape="circle"
                   color="#FFFFFF"
@@ -4044,6 +4045,7 @@ const handleMineRwL19Acceptance = async () => {
                   @click="scanDevice"
                 ></uv-button>
                 <uv-button
+                  v-if="!shouldShowReconnectButton"
                   :text="'\u53bb\u914d\u5bf9'"
                   shape="circle"
                   color="#2E70FC"
@@ -4052,7 +4054,7 @@ const handleMineRwL19Acceptance = async () => {
                   @click="jumpDetail"
                 ></uv-button>
                 <uv-button
-                  v-if="shouldShowReconnectButton"
+                  v-if="shouldShowReconnectButton && !isLoading"
                   :text="'\u91cd\u65b0\u8fde\u63a5'"
                   shape="circle"
                   color="#2E70FC"
