@@ -1,12 +1,13 @@
 <!-- 设备信息 -->
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { onShow } from '@dcloudio/uni-app';
+import { onShow, onUnload } from '@dcloudio/uni-app';
 import { getBindInfo, unbind } from '@/common/api/device';
 import { useRingBusinessController } from '@/composables/useRingBusinessController';
 import { useRingBusinessData } from '@/composables/useRingBusinessData';
 import { useRingStore } from '@/stores';
 import { useUserStore } from '@/stores/user';
+import { buildRwKeyCommand } from '@/sdk/ring-ble/rw';
 import { clearFrontendRingBindingState, getBoundRingIdentity, getBoundRingIdentityTail, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
@@ -19,14 +20,28 @@ const ring = useRingBusinessData();
 const controller = useRingBusinessController();
 const DEVICE_INFO_SNAPSHOT_WAIT_MS = 12000;
 const DEVICE_INFO_EMPTY_TEXT = '-';
+const content = '是否解除绑定当前设备？解除后需要重新绑定才能使用。';
+const FIND_RING_RED_LIGHT_DURATION_MS = 10000;
+const RW_SENSOR_RAW_KEY = 0x02fa;
+const RW_SENSOR_RAW_OUTPUT_START = 0x01;
+const RW_SENSOR_RAW_OUTPUT_STOP = 0x02;
+const RW_SENSOR_TYPE_PPG_RED = 0x04;
 
 const modalPopup = ref<any>(null);
 const boundInfo = ref<Record<string, any> | null>(null);
 const busyText = ref('');
 const lastActionText = ref('');
 const singleReadResults = ref<Record<string, string>>({});
+const findRingBusy = ref(false);
+const isFindingRing = ref(false);
+let findRingStopTimer: ReturnType<typeof setTimeout> | null = null;
 
 const isBusy = computed(() => Boolean(busyText.value) || controller.isRefreshingBusinessData.value || controller.isRestoringDevice.value);
+const findRingStatusText = computed(() => {
+  if (findRingBusy.value) return '处理中';
+  if (isFindingRing.value) return '红灯中';
+  return '';
+});
 const connectionText = computed(() => (ring.isConnected.value ? '已连接' : '未连接'));
 const deviceName = computed(() => getFirstDeviceInfoValue(ring.currentDeviceName.value, boundInfo.value?.deviceName, boundInfo.value?.name));
 const deviceIdentity = computed(() => {
@@ -368,6 +383,112 @@ const goConnect = () => {
   uni.navigateTo({ url: '/pagesA/mines/connectDevice' });
 };
 
+const buildFindRingRedLightCommand = (enabled: boolean) =>
+  buildRwKeyCommand(
+    new Uint8Array([
+      (RW_SENSOR_RAW_KEY >> 8) & 0xff,
+      RW_SENSOR_RAW_KEY & 0xff,
+      0x00,
+      enabled ? RW_SENSOR_RAW_OUTPUT_START : RW_SENSOR_RAW_OUTPUT_STOP,
+      RW_SENSOR_TYPE_PPG_RED
+    ])
+  );
+
+const clearFindRingStopTimer = () => {
+  if (findRingStopTimer) {
+    clearTimeout(findRingStopTimer);
+    findRingStopTimer = null;
+  }
+};
+
+const sendFindRingRedLightCommand = async (enabled: boolean) => {
+  const ready = await ensureDeviceReady();
+  if (!ready) throw new Error('设备未连接，请重新连接后再查找戒指');
+  await controller.sendBytes(buildFindRingRedLightCommand(enabled), enabled ? 'find-ring/red-light/start' : 'find-ring/red-light/stop');
+};
+
+const stopFindRingRedLight = async (options: { silent?: boolean; reason?: string } = {}) => {
+  clearFindRingStopTimer();
+  if (!isFindingRing.value && !findRingBusy.value) return;
+  findRingBusy.value = true;
+  appendDeviceDiagnosticLog('find-ring-red-light-stop-start', {
+    reason: options.reason || 'manual',
+    snapshot: getDevicePageSnapshot()
+  });
+  try {
+    await sendFindRingRedLightCommand(false);
+    if (!options.silent) {
+      lastActionText.value = '戒指红灯已关闭';
+      uni.showToast({ title: '红灯已关闭', icon: 'none' });
+    }
+    appendDeviceDiagnosticLog('find-ring-red-light-stop-result', {
+      reason: options.reason || 'manual',
+      snapshot: getDevicePageSnapshot()
+    });
+  } catch (error) {
+    const message = formatBleErrorMessage(error, '关闭戒指红灯失败');
+    if (!options.silent) {
+      lastActionText.value = message;
+      uni.showToast({ title: message, icon: 'none' });
+    }
+    appendDeviceDiagnosticLog('find-ring-red-light-stop-failed', {
+      reason: options.reason || 'manual',
+      message,
+      snapshot: getDevicePageSnapshot()
+    });
+  } finally {
+    isFindingRing.value = false;
+    findRingBusy.value = false;
+  }
+};
+
+const startFindRingRedLight = async () => {
+  clearFindRingStopTimer();
+  findRingBusy.value = true;
+  lastActionText.value = '';
+  appendDeviceDiagnosticLog('find-ring-red-light-start', {
+    durationMs: FIND_RING_RED_LIGHT_DURATION_MS,
+    snapshot: getDevicePageSnapshot()
+  });
+  try {
+    await sendFindRingRedLightCommand(true);
+    isFindingRing.value = true;
+    lastActionText.value = '戒指红灯已开启，10秒后自动关闭';
+    uni.showToast({ title: '红灯已开启', icon: 'none' });
+    findRingStopTimer = setTimeout(() => {
+      void stopFindRingRedLight({ silent: true, reason: 'auto-timeout' });
+    }, FIND_RING_RED_LIGHT_DURATION_MS);
+    appendDeviceDiagnosticLog('find-ring-red-light-result', {
+      durationMs: FIND_RING_RED_LIGHT_DURATION_MS,
+      snapshot: getDevicePageSnapshot()
+    });
+  } catch (error) {
+    isFindingRing.value = false;
+    const message = formatBleErrorMessage(error, '查找戒指失败，请靠近戒指后重试');
+    lastActionText.value = message;
+    uni.showToast({ title: message, icon: 'none' });
+    appendDeviceDiagnosticLog('find-ring-red-light-failed', {
+      message,
+      snapshot: getDevicePageSnapshot()
+    });
+  } finally {
+    findRingBusy.value = false;
+  }
+};
+
+const jumpSearch = async () => {
+  if (findRingBusy.value) return;
+  if (isFindingRing.value) {
+    await stopFindRingRedLight({ reason: 'manual-toggle' });
+    return;
+  }
+  if (isBusy.value) {
+    uni.showToast({ title: '设备正在处理，请稍后再试', icon: 'none' });
+    return;
+  }
+  await startFindRingRedLight();
+};
+
 const copyDeviceId = () => {
   const value = deviceMacText.value;
   if (!value || value === DEVICE_INFO_EMPTY_TEXT) {
@@ -574,6 +695,14 @@ onShow(async () => {
     snapshot: getDevicePageSnapshot()
   });
 });
+
+onUnload(() => {
+  if (isFindingRing.value) {
+    void stopFindRingRedLight({ silent: true, reason: 'page-unload' });
+    return;
+  }
+  clearFindRingStopTimer();
+});
 </script>
 
 <template>
@@ -581,9 +710,12 @@ onShow(async () => {
     <view class="mb-50">
       <view class="mb-50 fs-36 pl-40 pr-40">设置设备</view>
       <view>
-        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30" @tap="jumpSearch">
+        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30" :class="{ 'find-ring-active': isFindingRing }" @tap="jumpSearch">
           <view class="fs-36">戒指查找</view>
-          <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+          <view class="flex ai-center">
+            <view v-if="findRingStatusText" class="find-ring-status mr-20">{{ findRingStatusText }}</view>
+            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+          </view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center" @click="openConfirmBind">
           <view class="fs-36">解除绑定</view>
@@ -666,6 +798,15 @@ onShow(async () => {
 .device-status {
   line-height: 40rpx;
   text-align: center;
+}
+
+.find-ring-active {
+  box-shadow: 0 8rpx 20rpx rgba(46, 112, 252, 0.12);
+}
+
+.find-ring-status {
+  color: #2e70fc;
+  font-size: 28rpx;
 }
 
 .copy-button {

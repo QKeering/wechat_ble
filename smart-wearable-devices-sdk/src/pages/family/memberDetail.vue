@@ -2,29 +2,40 @@
 import { computed, ref } from 'vue';
 import { onLoad, onPullDownRefresh } from '@dcloudio/uni-app';
 import {
-  getFamilyAiMonthlyReport,
-  getFamilyAiWeeklyReport,
   getFamilyDashboard,
-  getFamilyRelationAiMonthlyReport,
-  getFamilyRelationAiWeeklyReport,
   getFamilyRelationDashboard,
-  type FamilyDashboard,
-  type FamilyWeeklyReport
+  removeFamilyMember,
+  type FamilyDashboard
 } from '@/common/api/family';
 import { getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
 
 const memberId = ref(0);
 const relationId = ref(0);
 const dashboard = ref<FamilyDashboard | null>(null);
-const weeklyReport = ref<FamilyWeeklyReport | null>(null);
-const monthlyReport = ref<FamilyWeeklyReport | null>(null);
 const loading = ref(false);
+const removing = ref(false);
 
 const member = computed(() => dashboard.value?.member);
 const alerts = computed(() => dashboard.value?.alerts || []);
-const aiSummary = computed(() => dashboard.value?.aiSummary);
 const summary = computed(() => dashboard.value?.summary || {});
-const device = computed(() => dashboard.value?.device || {});
+const device = computed(() => {
+  const dashboardDevice = dashboard.value?.device || {};
+  const currentMember = (member.value || {}) as Partial<FamilyDashboard['member']>;
+  const fallbackMac = dashboardDevice.mac || dashboardDevice.deviceMac || currentMember.deviceMac || currentMember.mac;
+  return {
+    ...dashboardDevice,
+    deviceId: dashboardDevice.deviceId || currentMember.deviceId,
+    mac: fallbackMac,
+    deviceMac: fallbackMac,
+    uniMacId: dashboardDevice.uniMacId || currentMember.uniMacId,
+    protocol: dashboardDevice.protocol || currentMember.protocol,
+    advertis: dashboardDevice.advertis || currentMember.advertis,
+    serviceId: dashboardDevice.serviceId || currentMember.serviceId,
+    deviceName: dashboardDevice.deviceName || currentMember.deviceName,
+    battery: dashboardDevice.battery ?? currentMember.battery,
+    lastSyncTime: dashboardDevice.lastSyncTime || currentMember.lastSyncTime
+  };
+});
 const hasDeviceBinding = computed(() => hasBoundRingIdentity(device.value));
 const deviceIdentity = computed(() => getBoundRingIdentity(device.value));
 const deviceStatusText = computed(() => {
@@ -53,26 +64,6 @@ const metricCards = computed(() => [
   { label: '活动评分', value: Math.round(Number(summary.value.motionScore || 0)) || '--', unit: '分' }
 ]);
 
-const weeklyMetricCards = computed(() => {
-  const metrics = weeklyReport.value?.metrics;
-  return [
-    { label: '同步天数', value: metrics?.syncedDays != null ? `${metrics.syncedDays}/${metrics.totalDays || 7}` : '--', unit: '天' },
-    { label: '平均心率', value: metrics?.heartRateAvg ?? '--', unit: '次/分' },
-    { label: '平均血氧', value: metrics?.spo2Avg ?? '--', unit: '%' },
-    { label: '睡眠均分', value: metrics?.sleepScoreAvg ?? '--', unit: '分' }
-  ];
-});
-
-const monthlyMetricCards = computed(() => {
-  const metrics = monthlyReport.value?.metrics;
-  return [
-    { label: '同步天数', value: metrics?.syncedDays != null ? `${metrics.syncedDays}/${metrics.totalDays || 30}` : '--', unit: '天' },
-    { label: '平均心率', value: metrics?.heartRateAvg ?? '--', unit: '次/分' },
-    { label: '平均血氧', value: metrics?.spo2Avg ?? '--', unit: '%' },
-    { label: '平均步数', value: metrics?.stepsAvg ?? '--', unit: '步' }
-  ];
-});
-
 const fetchDashboard = async () => {
   if (!memberId.value && !relationId.value) return;
   loading.value = true;
@@ -80,37 +71,18 @@ const fetchDashboard = async () => {
     const dashboardRequest = relationId.value
       ? getFamilyRelationDashboard(relationId.value)
       : getFamilyDashboard({ memberId: memberId.value });
-    const weeklyRequest = relationId.value
-      ? getFamilyRelationAiWeeklyReport(relationId.value)
-      : getFamilyAiWeeklyReport({ memberId: memberId.value });
-    const monthlyRequest = relationId.value
-      ? getFamilyRelationAiMonthlyReport(relationId.value)
-      : getFamilyAiMonthlyReport({ memberId: memberId.value });
-    const [dashboardResult, weeklyResult, monthlyResult] = await Promise.allSettled([
-      dashboardRequest,
-      weeklyRequest,
-      monthlyRequest
-    ]);
-    if (dashboardResult.status === 'fulfilled') {
-      dashboard.value = dashboardResult.value;
-      memberId.value = Number(dashboardResult.value?.member?.id || memberId.value || 0);
-    }
-    if (weeklyResult.status === 'fulfilled') {
-      weeklyReport.value = weeklyResult.value;
-    } else {
-      weeklyReport.value = null;
-    }
-    if (monthlyResult.status === 'fulfilled') {
-      monthlyReport.value = monthlyResult.value;
-    } else {
-      monthlyReport.value = null;
-    }
+    dashboard.value = await dashboardRequest;
+    memberId.value = Number(dashboard.value?.member?.id || memberId.value || 0);
   } finally {
     loading.value = false;
   }
 };
 
 const openBind = () => {
+  if (hasDeviceBinding.value) {
+    uni.showToast({ title: '该家人已绑定设备', icon: 'none' });
+    return;
+  }
   const relationQuery = relationId.value ? `&relationId=${relationId.value}` : '';
   uni.navigateTo({ url: `/pages/family/bindDevice?memberId=${memberId.value}${relationQuery}&name=${encodeURIComponent(member.value?.name || '')}` });
 };
@@ -118,6 +90,30 @@ const openBind = () => {
 const openPermission = () => {
   const relationQuery = relationId.value ? `&relationId=${relationId.value}` : '';
   uni.navigateTo({ url: `/pages/family/sharePermission?memberId=${memberId.value}${relationQuery}` });
+};
+
+const removeMember = () => {
+  if (!memberId.value || removing.value) return;
+  const name = member.value?.name || '这位家人';
+  uni.showModal({
+    title: '移除家人',
+    content: `移除后将取消与${name}的守护关系，不能继续查看健康数据。如需恢复，需要重新添加并申请。`,
+    confirmText: '确认移除',
+    confirmColor: '#DC2626',
+    success: async (result) => {
+      if (!result.confirm) return;
+      removing.value = true;
+      try {
+        await removeFamilyMember({ memberId: memberId.value });
+        uni.showToast({ title: '已移除家人', icon: 'success' });
+        setTimeout(() => {
+          uni.redirectTo({ url: '/pages/family/family' });
+        }, 500);
+      } finally {
+        removing.value = false;
+      }
+    }
+  });
 };
 
 onLoad((query: any) => {
@@ -163,7 +159,14 @@ onPullDownRefresh(async () => {
         <view class="device-actions">
           <uv-button text="共享权限" color="#E8F0FF" :customStyle="{ width: '172rpx', height: '72rpx' }" :customTextStyle="{ color: '#2E70FC', fontSize: '28rpx' }" @click="openPermission" />
           <view class="action-gap"></view>
-          <uv-button :text="hasDeviceBinding ? '重新绑定' : '绑定设备'" color="#2E70FC" :customStyle="{ width: '172rpx', height: '72rpx' }" :customTextStyle="{ fontSize: '28rpx' }" @click="openBind" />
+          <uv-button
+            :text="hasDeviceBinding ? '已绑定设备' : '绑定设备'"
+            :disabled="hasDeviceBinding"
+            :color="hasDeviceBinding ? '#E5E7EB' : '#2E70FC'"
+            :customStyle="{ width: '172rpx', height: '72rpx' }"
+            :customTextStyle="{ color: hasDeviceBinding ? '#9CA3AF' : '#FFFFFF', fontSize: '28rpx' }"
+            @click="openBind"
+          />
         </view>
       </view>
 
@@ -183,40 +186,17 @@ onPullDownRefresh(async () => {
         </view>
       </view>
 
-      <view class="section">
-        <view class="section-title">{{ aiSummary?.title || 'AI 今日健康摘要' }}</view>
-        <view class="ai-conclusion">{{ aiSummary?.conclusion || '暂无摘要，请同步数据后再查看。' }}</view>
-        <view v-for="item in aiSummary?.suggestions || []" :key="item" class="suggestion">{{ item }}</view>
-        <view class="disclaimer">{{ aiSummary?.disclaimer }}</view>
+      <view class="remove-action">
+        <uv-button
+          :loading="removing"
+          text="移除家人"
+          color="#FFF0F0"
+          :customStyle="{ width: '100%', height: '92rpx' }"
+          :customTextStyle="{ color: '#DC2626', fontSize: '32rpx', fontWeight: 700 }"
+          @click="removeMember"
+        />
       </view>
 
-      <view class="section">
-        <view class="section-title">{{ weeklyReport?.title || 'AI 看护周报' }}</view>
-        <view class="week-period" v-if="weeklyReport">{{ weeklyReport.period.startDate }} 至 {{ weeklyReport.period.endDate }}</view>
-        <view class="ai-conclusion">{{ weeklyReport?.conclusion || '暂无足够数据生成周报，请保持每日同步。' }}</view>
-        <view class="weekly-metrics">
-          <view v-for="item in weeklyMetricCards" :key="item.label" class="weekly-metric">
-            <view class="metric-label">{{ item.label }}</view>
-            <view class="weekly-value">{{ item.value }}<text class="metric-unit">{{ item.unit }}</text></view>
-          </view>
-        </view>
-        <view v-for="item in weeklyReport?.suggestions || []" :key="item" class="suggestion">{{ item }}</view>
-        <view class="disclaimer">{{ weeklyReport?.disclaimer || 'AI 周报仅供日常看护参考，不构成医疗诊断。' }}</view>
-      </view>
-
-      <view class="section">
-        <view class="section-title">{{ monthlyReport?.title || 'AI 看护月报' }}</view>
-        <view class="week-period" v-if="monthlyReport">{{ monthlyReport.period.startDate }} 至 {{ monthlyReport.period.endDate }}</view>
-        <view class="ai-conclusion">{{ monthlyReport?.conclusion || '暂无足够数据生成月报，请保持每日同步。' }}</view>
-        <view class="weekly-metrics">
-          <view v-for="item in monthlyMetricCards" :key="item.label" class="weekly-metric">
-            <view class="metric-label">{{ item.label }}</view>
-            <view class="weekly-value">{{ item.value }}<text class="metric-unit">{{ item.unit }}</text></view>
-          </view>
-        </view>
-        <view v-for="item in monthlyReport?.suggestions || []" :key="item" class="suggestion">{{ item }}</view>
-        <view class="disclaimer">{{ monthlyReport?.disclaimer || 'AI 月报仅供日常看护参考，不构成医疗诊断。' }}</view>
-      </view>
     </template>
   </view>
 </template>
@@ -359,44 +339,7 @@ onPullDownRefresh(async () => {
   font-weight: 700;
   color: #111827;
 }
-.ai-conclusion {
-  margin-top: 18rpx;
-  color: #111827;
-  font-size: 30rpx;
-  line-height: 1.7;
-}
-.suggestion {
-  margin-top: 16rpx;
-  padding: 18rpx 22rpx;
-  border-radius: 18rpx;
-  background: #f8fafc;
-  color: #374151;
-  font-size: 28rpx;
-}
-.disclaimer {
-  margin-top: 22rpx;
-  font-size: 24rpx;
-}
-.week-period {
-  margin-top: 10rpx;
-  color: #6b7280;
-  font-size: 26rpx;
-}
-.weekly-metrics {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 18rpx;
-  margin-top: 22rpx;
-}
-.weekly-metric {
-  padding: 22rpx;
-  border-radius: 18rpx;
-  background: #f8fafc;
-}
-.weekly-value {
-  margin-top: 10rpx;
-  font-size: 34rpx;
-  font-weight: 800;
-  color: #111827;
+.remove-action {
+  margin-top: 28rpx;
 }
 </style>

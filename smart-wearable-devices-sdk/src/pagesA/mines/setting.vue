@@ -1,12 +1,11 @@
 <!-- 功能设置 -->
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onUnmounted, ref } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
 import { getBindInfo } from '@/common/api/device';
 import { getGoalInfo, updateGoalInfo } from '@/common/api/user';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingBusinessController } from '@/composables/useRingBusinessController';
-import { useRingBusinessData } from '@/composables/useRingBusinessData';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { hasBoundRingIdentity } from '@/utils/ringBinding';
 
@@ -14,12 +13,12 @@ type PickerType = 'sleep' | 'step' | 'calorie' | 'activity' | 'collect';
 
 const controller = useRingBusinessController();
 const ringBle = useRingBLE();
-const ring = useRingBusinessData();
 const boundInfo = ref<Record<string, any> | null>(null);
 const busyText = ref('');
 const lastActionText = ref('');
 const isSaving = ref(false);
 const paddingBottomVal = 160;
+let statusClearTimer: any = null;
 
 const DEFAULT_GOAL_VALUES: Record<PickerType, string> = {
   sleep: '8',
@@ -60,12 +59,17 @@ const pickerTitleMap: Record<PickerType, string> = {
 };
 
 const isBusy = computed(() => Boolean(busyText.value) || controller.isRestoringDevice.value || controller.isRefreshingBusinessData.value);
-const connectionText = computed(() => (ring.isConnected.value ? '已连接' : hasBoundRingIdentity(boundInfo.value) ? '待恢复连接' : '未绑定'));
-const monitorText = computed(() => {
-  const dbTarget = collectPeriodTarget.value || DEFAULT_GOAL_VALUES.collect;
-  return `每 ${dbTarget} 分钟`;
-});
-const statusText = computed(() => busyText.value || lastActionText.value || `${connectionText.value} · 采集周期 ${monitorText.value}`);
+const statusText = computed(() => busyText.value || lastActionText.value);
+
+const clearStatusLater = (delay = 2600) => {
+  if (statusClearTimer) {
+    clearTimeout(statusClearTimer);
+  }
+  statusClearTimer = setTimeout(() => {
+    lastActionText.value = '';
+    statusClearTimer = null;
+  }, delay);
+};
 
 const unwrapApiData = (source: any) => {
   const first = source?.data ?? source?.result ?? source;
@@ -240,12 +244,14 @@ const handleOk = async () => {
     }
     await loadGoalInfo();
     lastActionText.value = collectWarning ? `目标已保存，${collectWarning}` : '目标已保存';
+    clearStatusLater(collectWarning ? 4200 : 2600);
     uni.showToast({
       title: collectWarning ? '目标已保存' : '保存成功',
       icon: 'success'
     });
   } catch (error) {
     lastActionText.value = formatBleErrorMessage(error, '保存失败，请稍后再试');
+    clearStatusLater(4200);
     uni.showToast({ title: lastActionText.value, icon: 'none' });
   } finally {
     busyText.value = '';
@@ -269,9 +275,11 @@ const confirmBind = async () => {
     await ringBle.sendFactoryResetWithTimeCommand();
     controller.clearBusinessData();
     lastActionText.value = '恢复出厂命令已发送';
+    clearStatusLater();
     uni.showToast({ title: '已发送', icon: 'success' });
   } catch (error) {
     lastActionText.value = formatBleErrorMessage(error, '恢复出厂失败');
+    clearStatusLater(4200);
     uni.showToast({ title: lastActionText.value, icon: 'none' });
   } finally {
     busyText.value = '';
@@ -285,6 +293,12 @@ const jumpOtaUpgrade = () => {
 
 onShow(async () => {
   await Promise.all([loadBoundInfo(), loadGoalInfo()]);
+});
+
+onUnmounted(() => {
+  if (statusClearTimer) {
+    clearTimeout(statusClearTimer);
+  }
 });
 </script>
 

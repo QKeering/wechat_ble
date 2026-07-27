@@ -20,8 +20,6 @@ const items = [
   { key: 'vitalSigns', title: '生命体征', desc: '心率、血氧、皮肤温度、压力等关键指标' },
   { key: 'sleep', title: '睡眠数据', desc: '睡眠评分、时长、质量和醒来次数' },
   { key: 'motion', title: '活动数据', desc: '步数、活动时间、卡和运动评分' },
-  { key: 'alerts', title: '异常提醒', desc: '低血氧、心率异常、设备离线等提醒' },
-  { key: 'aiSummary', title: 'AI 健康摘要', desc: '每日总结、趋势解释和看护建议' },
   { key: 'deviceStatus', title: '设备状态', desc: '设备绑定、在线、同步时间和电量' }
 ];
 
@@ -84,7 +82,7 @@ onLoad((query: any) => {
     <view class="header">
       <view class="title">{{ member?.name || '家人' }}的数据共享</view>
       <view class="desc">关闭某项后，亲情账号将无法查看对应健康数据，后端接口也会同步拦截。</view>
-      <view class="auth-note">父母本人认领档案后，共享权限由父母在“长辈模式-共享管理”中调整；子女端仅可查看授权范围。</view>
+      <view class="auth-note">父母本人认领档案后，子女端仅可查看已有授权范围，不能继续调整。</view>
     </view>
 
     <view class="list">

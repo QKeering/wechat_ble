@@ -96,7 +96,7 @@ const measureStepItems = computed(() => [
   {
     key: 'skin-temperature',
     label: '皮肤温度',
-    desc: temperature.value ? `${temperature.value}°C` : '等待数据',
+    desc: temperature.value ? `${formatTemperatureMetric(temperature.value)}°C` : '等待数据',
     active: measureStatus.value === 'measuring_temp',
     done: measureStatus.value === 'completed' || Boolean(temperature.value)
   }
@@ -108,6 +108,23 @@ const isIOS = computed(() => {
 });
 const isRwDevice = () => userStore.deviceInfo?.protocol === 'rw';
 const getSubmitMac = () => getSubmitDeviceMac(userStore, isIOS.value);
+
+const normalizeIntegerMetric = (value: unknown) => {
+  if (value == null || value === '') return null;
+  const numeric = typeof value === 'number' ? value : Number(String(value).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : null;
+};
+
+const normalizeTemperatureMetric = (value: unknown) => {
+  if (value == null || value === '') return null;
+  const numeric = typeof value === 'number' ? value : Number(String(value).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? Number(numeric.toFixed(1)) : null;
+};
+
+const formatTemperatureMetric = (value: unknown) => {
+  const numeric = normalizeTemperatureMetric(value);
+  return numeric == null ? null : numeric.toFixed(1);
+};
 
 const getLatestHeartRateData = () => getLatestHeartRateReading(userStore, measureStartedAt);
 const getLatestHrvData = () => getLatestHrvReading(userStore, measureStartedAt);
@@ -409,14 +426,18 @@ const hydrateReportMetrics = () => {
   const latestSpo2Data: any = getLatestSpo2Data();
   const latestTempData: any = getLatestTemperatureData();
 
-  if (latestHrData?.heartRate) heartRate.value = latestHrData.heartRate;
-  if (latestHrvData?.heartRateVariability) heartRateVariability.value = latestHrvData.heartRateVariability;
+  const latestHeartRate = normalizeIntegerMetric(latestHrData?.heartRate);
+  const latestHrv = normalizeIntegerMetric(latestHrvData?.heartRateVariability);
+  const latestSpo2 = normalizeIntegerMetric(latestSpo2Data?.bloodOxygen);
+  const latestTemperature = normalizeTemperatureMetric(latestTempData?.temperature);
+  if (latestHeartRate != null) heartRate.value = latestHeartRate;
+  if (latestHrv != null) heartRateVariability.value = latestHrv;
   if (latestStressData?.stressIndex) stressIndex.value = latestStressData.stressIndex;
   if (latestBloodSugarData?.bloodSugar) bloodSugar.value = latestBloodSugarData.bloodSugar;
   if (latestBloodPressureData?.systolic) systolic.value = latestBloodPressureData.systolic;
   if (latestBloodPressureData?.diastolic) diastolic.value = latestBloodPressureData.diastolic;
-  if (latestSpo2Data?.bloodOxygen) spo2Value.value = latestSpo2Data.bloodOxygen;
-  if (latestTempData?.temperature) temperature.value = latestTempData.temperature;
+  if (latestSpo2 != null) spo2Value.value = latestSpo2;
+  if (latestTemperature != null) temperature.value = latestTemperature;
 };
 
 const resetMeasurementValues = () => {
@@ -485,14 +506,18 @@ watch(
     const measurementRecord: submitDataType['dataList'][number] = {
       recordTime: formatRecordTime(new Date())
     };
-    if (latestHrData?.heartRate) measurementRecord.heartRate = latestHrData.heartRate;
-    if (latestHrvData?.heartRateVariability) measurementRecord.hrv = latestHrvData.heartRateVariability;
+    const latestHeartRate = normalizeIntegerMetric(latestHrData?.heartRate);
+    const latestHrv = normalizeIntegerMetric(latestHrvData?.heartRateVariability);
+    const latestSpo2 = normalizeIntegerMetric(latestSpo2Data?.bloodOxygen);
+    const latestTemperature = normalizeTemperatureMetric(latestTempData?.temperature);
+    if (latestHeartRate != null) measurementRecord.heartRate = latestHeartRate;
+    if (latestHrv != null) measurementRecord.hrv = latestHrv;
     if (latestStressData?.stressIndex) measurementRecord.stress = latestStressData.stressIndex;
     if (latestBloodSugarData?.bloodSugar) measurementRecord.bloodSugar = latestBloodSugarData.bloodSugar;
     if (latestBloodPressureData?.systolic) measurementRecord.systolic = latestBloodPressureData.systolic;
     if (latestBloodPressureData?.diastolic) measurementRecord.diastolic = latestBloodPressureData.diastolic;
-    if (latestSpo2Data?.bloodOxygen) measurementRecord.spo2 = latestSpo2Data.bloodOxygen;
-    if (latestTempData?.temperature) measurementRecord.temperature = latestTempData.temperature;
+    if (latestSpo2 != null) measurementRecord.spo2 = latestSpo2;
+    if (latestTemperature != null) measurementRecord.temperature = latestTemperature;
 
     if (
       measurementRecord.heartRate == null &&
@@ -511,14 +536,14 @@ watch(
       return;
     }
 
-    if (latestHrData?.heartRate) heartRate.value = latestHrData.heartRate;
-    if (latestHrvData?.heartRateVariability) heartRateVariability.value = latestHrvData.heartRateVariability;
+    if (latestHeartRate != null) heartRate.value = latestHeartRate;
+    if (latestHrv != null) heartRateVariability.value = latestHrv;
     if (latestStressData?.stressIndex) stressIndex.value = latestStressData.stressIndex;
     if (latestBloodSugarData?.bloodSugar) bloodSugar.value = latestBloodSugarData.bloodSugar;
     if (latestBloodPressureData?.systolic) systolic.value = latestBloodPressureData.systolic;
     if (latestBloodPressureData?.diastolic) diastolic.value = latestBloodPressureData.diastolic;
-    if (latestSpo2Data?.bloodOxygen) spo2Value.value = latestSpo2Data.bloodOxygen;
-    if (latestTempData?.temperature) temperature.value = latestTempData.temperature;
+    if (latestSpo2 != null) spo2Value.value = latestSpo2;
+    if (latestTemperature != null) temperature.value = latestTemperature;
 
     uni.showLoading({ title: '提交数据中...', mask: false });
     try {

@@ -34,7 +34,6 @@ const picker = ref<any>(null);
 const columns = ref([['全部']]);
 const type = ref<string[]>([]);
 const selectedTypeLabel = ref('');
-const apiBase = import.meta.env.VITE_API_BASE || 'https://sh.qkeering.com';
 const t = (...codes: number[]) => String.fromCharCode(...codes);
 const copy = {
   all: t(20840, 37096),
@@ -198,6 +197,10 @@ const retryBoundReconnect = async () => {
 };
 const isConnectedBusinessDevice = (device: ScanDeviceInfo) =>
   ring.isConnected.value && ring.isReady.value && ring.isCurrentBusinessDevice(device as any);
+const handleSearchAreaClick = () => {
+  if (isScanning.value) return;
+  scanBusinessDevices({ force: true, reason: 'search-area-retry' });
+};
 // 是否为 iOS 设备。
 const isIOS = computed(() => {
   const systemInfo = uni.getSystemInfoSync();
@@ -344,10 +347,17 @@ onUnload(() => {
       </view>
     </view>
     <!-- 搜索中状态 -->
-    <view v-if="showScanArea" class="search-loading flex fd-c ai-center mb-50">
-      <uv-image :src="isScanning ? `${apiBase}/image/load.webp` : `${apiBase}/image/loads.png`" width="390rpx" height="390rpx" customStyle="opacity: 0.5;"></uv-image>
-      <view class="loading-title fs-36">{{ isScanning ? '正在搜索设备…' : '搜索已完成' }}</view>
-      <view class="loading-desc t-979797 mt-10">{{ isScanning ? '正在查找附近的可用设备（约10秒）' : '点击下方搜索结果可重新搜索' }}</view>
+    <view
+      v-if="showScanArea"
+      class="search-loading flex fd-c ai-center mb-50"
+      :class="{ 'search-loading-clickable': !isScanning }"
+      @click="handleSearchAreaClick"
+    >
+      <uv-image src="/static/images/mine/logo3.png" width="260rpx" height="260rpx" mode="aspectFit"></uv-image>
+      <view class="loading-title fs-36">{{ isScanning ? '正在搜索戒指…' : '搜索已结束，点击重新搜索' }}</view>
+      <view class="loading-desc t-979797 mt-10">
+        {{ isScanning ? '正在查找附近可用戒指，请保持戒指靠近手机。' : '未找到目标设备时，请靠近戒指后点这里重新搜索。' }}
+      </view>
     </view>
 
     <!-- 搜索结果区域 -->
@@ -357,13 +367,13 @@ onUnload(() => {
         <!-- 结果头部 -->
         <!-- <view class="results flex ai-center" @click="startScan"> -->
         <view class="results flex ai-center" @click="scanBusinessDevices({ force: true, reason: 'manual-reload' })">
-          <view class="results-title fs-36 mr-20">搜索结果</view>
+          <view class="results-title fs-36 mr-20">{{ copy.searchResult }}</view>
           <uv-image src="/static/images/mine/reload.png" width="36rpx" height="36rpx"></uv-image>
         </view>
 
         <!-- 筛选/跳转项 -->
         <view @click="openPicker" class="filter flex ai-center pt-20 pb-20 pl-40 pr-40 r-50">
-          <view class="filter-label fs-36 mr-20">{{ type.length > 0 ? (type.length > 1 ? '全部' : type[0]) : '指定型号' }}</view>
+          <view class="filter-label fs-36 mr-20">{{ type.length > 0 ? (type.length > 1 ? copy.all : type[0]) : copy.specifiedModel }}</view>
           <uv-icon name="arrow-right" color="#010101" size="10"></uv-icon>
         </view>
       </view>
@@ -376,7 +386,7 @@ onUnload(() => {
             <view class="device-model t-979797">{{ isIOS ? dev?.uniMacId : dev?.deviceId }}</view>
           </view>
           <uv-button
-            text="连接"
+            :text="copy.connect"
             shape="circle"
             color="#2E70FC"
             :customTextStyle="{ 'font-size': '32rpx' }"
@@ -391,8 +401,8 @@ onUnload(() => {
 
       <!-- 帮助提示 -->
       <view class="help-tips mt-40 fs-32 t-979797" v-if="devices.length == 0">
-        <view class="tip-item mb-30">1. 未检测到目标设备，请点击“重新搜索”以刷新设备列表。</view>
-        <view class="tip-item mb-30">2. 设备当前未开机，请将其置于充电仓中充电，待设备启动后方可完成绑定操作。</view>
+        <view class="tip-item mb-30">{{ copy.noDeviceTip }}</view>
+        <view class="tip-item mb-30">{{ copy.nearTip }}</view>
       </view>
     </view>
 
@@ -400,15 +410,15 @@ onUnload(() => {
       <view class="pt-50 pl-40 pr-40 pb-40">
         <!-- 图标与标题 -->
         <view class="popup-header flex fd-c ai-center mb-70">
-          <uv-image src="/static/images/mine/warning.png" width="132rpx" height="132rpx"></uv-image>
-          <view class="popup-title mt-30 fs-44">新设备</view>
+          <uv-image src="/static/images/mine/logo3.png" width="132rpx" height="132rpx" mode="aspectFit"></uv-image>
+          <view class="popup-title mt-30 fs-44">{{ copy.unknownDevice }}</view>
         </view>
 
         <!-- 确认文案 -->
-        <view class="popup-desc fs-36 ta-c" style="color: #222222">是否绑定新设备</view>
+        <view class="popup-desc fs-36 ta-c" style="color: #222222">{{ copy.bindNewDevice }}</view>
         <view class="popup-actions flex jc-center mt-50">
           <uv-button
-            text="取消"
+            :text="copy.cancel"
             shape="circle"
             color="#F1F3F6"
             :customTextStyle="{ 'font-size': '36rpx', color: '#2E70FC' }"
@@ -420,7 +430,7 @@ onUnload(() => {
           ></uv-button>
           <view style="width: 30rpx"></view>
           <uv-button
-            text="连接"
+            :text="copy.connect"
             shape="circle"
             color="#2E70FC"
             :customTextStyle="{ 'font-size': '36rpx' }"
@@ -470,6 +480,14 @@ onUnload(() => {
 .bound-status-icon.failed {
   background: #fff1f1;
   border-color: #ff5959;
+}
+
+.search-loading-clickable {
+  cursor: pointer;
+}
+
+.search-loading-clickable .loading-title {
+  color: #2e70fc;
 }
 
 .bound-title {

@@ -23,6 +23,7 @@
         "enablePullDownRefresh": true
       }
     },
+    // #ifdef H5
     {
       "path": "pages/health/growth-girlfriend",
       "style": {
@@ -30,6 +31,7 @@
         "navigationStyle": "custom"
       }
     },
+    // #endif
     {
       "path": "pages/family/family",
       "style": {
@@ -119,6 +121,13 @@
       "path": "pages/login/login",
       "style": {
         "navigationBarTitleText": "登录",
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/login/login-mobile",
+      "style": {
+        "navigationBarTitleText": "手机号登录",
         "navigationStyle": "custom"
       }
     },

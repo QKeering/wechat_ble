@@ -2964,7 +2964,7 @@ function isAllowedBusinessScanDevice(device: RingDeviceInfo, options: LegacyScan
   const protocol = device.protocol || resolveRingProtocol(device);
   if (protocol === 'rw' || protocol === 'qkeer-v2') return true;
 
-  return ['HR', 'IF', 'QKEERING', 'PPLUS', 'MUSLEEP_RING', 'QKV2'].some((prefix) => name.startsWith(prefix));
+  return ['HR', 'IF', 'QK', 'QKEERING', 'PPLUS', 'MUSLEEP_RING', 'QKV2'].some((prefix) => name.startsWith(prefix));
 }
 
 function getServices(deviceId: string): Promise<UniApp.GetBLEDeviceServicesSuccess['services']> {

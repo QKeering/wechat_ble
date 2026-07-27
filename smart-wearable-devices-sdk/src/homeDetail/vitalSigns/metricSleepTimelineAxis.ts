@@ -17,6 +17,7 @@ export type TimelineAxisTick = {
 
 const DEFAULT_AXIS_POINTS = 24;
 const SLEEP_AXIS_SLOT_MINUTES = 10;
+const DAILY_METRIC_TICK_LABELS = ['00:00', '06:00', '12:00', '18:00', '24:00'];
 
 const parseClockMinutes = (value: unknown): number | null => {
   const match = String(value ?? '').match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
@@ -36,6 +37,14 @@ const formatClockMinutes = (minutes: number) => {
   const minute = normalized % 60;
   return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
 };
+
+export const normalizeTimelineLabel = (value: unknown) => {
+  const text = String(value ?? '').trim();
+  if (!text || /^0+$/.test(text)) return '';
+  return text;
+};
+
+const isVisibleTimelineTickLabel = (label: unknown) => Boolean(normalizeTimelineLabel(label));
 
 const getSleepRange = (segment?: sleepSegment) => {
   const start = parseClockMinutes(segment?.startTime);
@@ -126,7 +135,7 @@ export const buildMetricSleepTimelineAxis = (
 
   const xData = dataList.map((item) => {
     const minutes = parseClockMinutes(item.time);
-    return minutes == null ? String(item.time || '00:00') : formatClockMinutes(minutes);
+    return minutes == null ? normalizeTimelineLabel(item.time) : formatClockMinutes(minutes);
   });
   return {
     xData,
@@ -136,28 +145,24 @@ export const buildMetricSleepTimelineAxis = (
   };
 };
 
-export const applyMetricSleepRangeAxisStyle = (option: any, axisData: TimelineAxisData) => {
-  if (!axisData.isSleepRangeAxis) return;
-
+export const applyMetricSleepRangeAxisStyle = (option: any, _axisData: TimelineAxisData) => {
   option.grid = {
     ...(option.grid || {}),
-    left: '4%',
-    right: '4%',
-    bottom: '16%',
-    containLabel: true
+    left: 24,
+    right: 24,
+    top: 56,
+    bottom: 34,
+    containLabel: false
   };
 
   option.xAxis = {
     ...(option.xAxis || {}),
+    boundaryGap: false,
+    axisTick: { show: false },
+    axisLine: { show: false },
     axisLabel: {
       ...(option.xAxis?.axisLabel || {}),
-      show: true,
-      interval: 0,
-      hideOverlap: false,
-      margin: 12,
-      color: '#9ca3af',
-      fontSize: 12,
-      formatter: (value: string, index: number) => (axisData.labelIndexes.has(index) ? value : '')
+      show: false
     }
   };
 };
@@ -175,9 +180,39 @@ export const getMetricTimelineTicks = (
   sleepSegmentObj?: sleepSegment,
   forceSleepRange = false
 ): TimelineAxisTick[] => {
+  if (!forceSleepRange) {
+    const lastIndex = DAILY_METRIC_TICK_LABELS.length - 1;
+    return DAILY_METRIC_TICK_LABELS.map((label, index) => ({
+      key: `daily-${label}`,
+      label,
+      left: lastIndex <= 0 ? 0 : clampPercent((index / lastIndex) * 100),
+      isFirst: index === 0,
+      isLast: index === lastIndex
+    }));
+  }
+
   const dataList = Array.isArray(chartData) ? chartData : [];
   const range = getSleepRange(sleepSegmentObj);
   const pointMinutes: number[] = [];
+
+  if (range) {
+    return [
+      {
+        key: `sleep-start-${range.start}`,
+        label: formatClockMinutes(range.start),
+        left: 0,
+        isFirst: true,
+        isLast: false
+      },
+      {
+        key: `sleep-end-${range.end}`,
+        label: formatClockMinutes(range.end),
+        left: 100,
+        isFirst: false,
+        isLast: true
+      }
+    ].filter((tick, index, list) => tick.label && !(index === list.length - 1 && tick.label === '00'));
+  }
 
   dataList.forEach((item) => {
     const minutes = parseClockMinutes(item?.time);
@@ -193,11 +228,12 @@ export const getMetricTimelineTicks = (
 
   const uniqueMinutes = Array.from(new Set(pointMinutes.filter((item) => Number.isFinite(item)))).sort((a, b) => a - b);
   if (!uniqueMinutes.length) {
+    if (dataList.length) return [];
     const axisData = buildMetricSleepTimelineAxis(chartData, sleepSegmentObj, forceSleepRange);
     const lastIndex = axisData.xData.length - 1;
     return axisData.xData
       .map((label, index) => ({ label, index }))
-      .filter(({ index }) => axisData.labelIndexes.has(index))
+      .filter(({ label, index }) => axisData.labelIndexes.has(index) && isVisibleTimelineTickLabel(label))
       .map(({ label, index }, order, list) => ({
         key: `fallback-${index}-${label}`,
         label,
@@ -221,8 +257,15 @@ export const getMetricTimelineTicks = (
 };
 
 export const compactMetricTimelineTicks = (ticks: TimelineAxisTick[], maxCount = 5): TimelineAxisTick[] => {
-  if (!Array.isArray(ticks) || ticks.length <= maxCount) return ticks || [];
-  const lastIndex = ticks.length - 1;
+  const visibleTicks = (Array.isArray(ticks) ? ticks : []).filter((tick) => isVisibleTimelineTickLabel(tick.label));
+  if (visibleTicks.length <= maxCount) {
+    return visibleTicks.map((tick, order, list) => ({
+      ...tick,
+      isFirst: order === 0,
+      isLast: order === list.length - 1
+    }));
+  }
+  const lastIndex = visibleTicks.length - 1;
   const indexes = Array.from(
     new Set([
       0,
@@ -233,7 +276,7 @@ export const compactMetricTimelineTicks = (ticks: TimelineAxisTick[], maxCount =
     ])
   ).sort((a, b) => a - b);
   return indexes.map((index, order, list) => ({
-    ...ticks[index],
+    ...visibleTicks[index],
     isFirst: order === 0,
     isLast: order === list.length - 1
   }));

@@ -45,6 +45,7 @@ const oxyGenObj = ref<heartRateDetail>({});
 const temperatureObj = ref<heartRateDetail>({});
 const hrvObj = ref<heartRateDetail>({});
 const extendedVitalObj = ref<vitalSignType>({});
+const isVitalSignsLoading = ref(true);
 
 const getMetricNumber = (value: unknown) => {
   if (value == null || value === '') return null;
@@ -65,6 +66,17 @@ const getFirstObjectMetricValue = (sources: unknown[], keys: string[]) => {
 };
 const getExtendedVitalValue = (...keys: string[]) => getFirstObjectMetricValue([extendedVitalObj.value], keys);
 const getCachedMetricValue = (...keys: string[]) => getFirstObjectMetricValue([userStore.healthData, userStore.latestMetrics], keys);
+const getVitalFallbackValue = (...values: unknown[]) => {
+  if (isVitalSignsLoading.value) return null;
+  return values.find((value) => getMetricNumber(value) !== null);
+};
+const resetVitalSignsDisplayData = () => {
+  heartRateObj.value = {};
+  oxyGenObj.value = {};
+  temperatureObj.value = {};
+  hrvObj.value = {};
+  extendedVitalObj.value = {};
+};
 const getObjectValueByKeys = (source: Record<string, any> | null | undefined, keys: string[]) => {
   for (const key of keys) {
     const value = source?.[key];
@@ -175,7 +187,11 @@ const summarizeVitalMetricResponse = (response: unknown) => {
 const heartRateDisplayObj = computed(() => {
   const data = withMetricFallback(
     heartRateObj.value,
-    getExtendedVitalValue('heartRateAvg', 'heartRate') ?? userStore.healthData?.heartRate ?? userStore.latestMetrics?.heartRate
+    getVitalFallbackValue(
+      getExtendedVitalValue('heartRateAvg', 'heartRate'),
+      userStore.healthData?.heartRate,
+      userStore.latestMetrics?.heartRate
+    )
   );
   return {
     ...data,
@@ -185,10 +201,12 @@ const heartRateDisplayObj = computed(() => {
 const oxyGenDisplayObj = computed(() => {
   const data = withMetricFallback(
     oxyGenObj.value,
-    getExtendedVitalValue('spo2Avg', 'spo2', 'bloodOxygen', 'bloodOxygenSaturation') ??
-      userStore.healthData?.bloodOxygen ??
-      userStore.healthData?.bloodOxygenSaturation ??
-      userStore.latestMetrics?.bloodOxygen,
+    getVitalFallbackValue(
+      getExtendedVitalValue('spo2Avg', 'spo2', 'bloodOxygen', 'bloodOxygenSaturation'),
+      userStore.healthData?.bloodOxygen,
+      userStore.healthData?.bloodOxygenSaturation,
+      userStore.latestMetrics?.bloodOxygen
+    ),
     {
       avgValueRange: (oxyGenObj.value as any)?.avgValueRange || '95-100'
     }
@@ -201,10 +219,12 @@ const oxyGenDisplayObj = computed(() => {
 const hrvDisplayObj = computed(() => {
   const data = withMetricFallback(
     hrvObj.value,
-    getExtendedVitalValue('hrvAvg', 'hrv', 'heartRateVariability') ??
-      userStore.healthData?.hrv ??
-      userStore.healthData?.heartRateVariability ??
-      userStore.latestMetrics?.hrv,
+    getVitalFallbackValue(
+      getExtendedVitalValue('hrvAvg', 'hrv', 'heartRateVariability'),
+      userStore.healthData?.hrv,
+      userStore.healthData?.heartRateVariability,
+      userStore.latestMetrics?.hrv
+    ),
     {
       avgValueRange: (hrvObj.value as any)?.avgValueRange || '--'
     }
@@ -216,10 +236,12 @@ const hrvDisplayObj = computed(() => {
 });
 const temperatureDisplayObj = computed(() => {
   const metric = getMetricNumber(
-    getExtendedVitalValue('temperatureAvg', 'temperature', 'skinTemperature') ??
-      userStore.healthData?.temperature ??
-      userStore.healthData?.skinTemperature ??
+    getVitalFallbackValue(
+      getExtendedVitalValue('temperatureAvg', 'temperature', 'skinTemperature'),
+      userStore.healthData?.temperature,
+      userStore.healthData?.skinTemperature,
       userStore.latestMetrics?.temperature
+    )
   );
   const avgSource = getMetricNumber((temperatureObj.value as any)?.avgValue)
     ? (temperatureObj.value as any)?.avgValue
@@ -603,6 +625,8 @@ const loadVitalSignsData = async (currentDate = new Date(), trigger = 'manual') 
   const loadId = ++vitalSignsLoadSerial;
   const date = formatLocalDate(currentDate);
   const startedAt = Date.now();
+  isVitalSignsLoading.value = true;
+  resetVitalSignsDisplayData();
   appendVitalSignsPageLog('vital-signs-load-start', {
     trigger,
     date,
@@ -619,14 +643,20 @@ const loadVitalSignsData = async (currentDate = new Date(), trigger = 'manual') 
   } else {
     temperatureObj.value = {};
   }
-  const results = await Promise.allSettled(tasks);
-  appendVitalSignsPageLog('vital-signs-load-done', {
-    trigger,
-    date,
-    loadId,
-    elapsedMs: Date.now() - startedAt,
-    failedCount: results.filter((item) => item.status === 'rejected').length
-  });
+  try {
+    const results = await Promise.allSettled(tasks);
+    appendVitalSignsPageLog('vital-signs-load-done', {
+      trigger,
+      date,
+      loadId,
+      elapsedMs: Date.now() - startedAt,
+      failedCount: results.filter((item) => item.status === 'rejected').length
+    });
+  } finally {
+    if (loadId === vitalSignsLoadSerial) {
+      isVitalSignsLoading.value = false;
+    }
+  }
 };
 const confirm = async (date: any) => {
   // 处理选择的日期，date可能是数组或单个日期对象

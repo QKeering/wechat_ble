@@ -7,7 +7,7 @@ export const RW_NOTIFY_CHAR_UUID = '0000b003-0000-1000-8000-00805f9b34fb';
 export const RW_WRITE_CHAR_UUID = '0000b002-0000-1000-8000-00805f9b34fb';
 export const RW_CCCD_UUID = '00002902-0000-1000-8000-00805f9b34fb';
 
-export const RW_SCAN_NAME_PREFIXES = ['HR', 'SY', 'BH', 'RW'];
+export const RW_SCAN_NAME_PREFIXES = ['HR', 'SY', 'BH', 'RW', 'QK'];
 export const RW_SCAN_SERVICE_MARKERS = ['180D'];
 export const RW_MANUFACTURER_MARKERS = ['F802', 'F811'];
 

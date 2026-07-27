@@ -445,8 +445,8 @@ export const activePieOption = {
       lineHeight: 20,
       color: '#979797'
     },
-    left: '13%',
-    top: '45%',
+    left: '15%',
+    top: '53%',
     textAlign: 'center',
     textVerticalAlign: 'middle'
   },

@@ -8,6 +8,8 @@ import { useRingBLE } from '@/composables/useRingBLE';
 
 const { disconnect } = useRingBLE();
 const userStore = useUserStore();
+const DEFAULT_AVATAR = '/static/images/mine/logo3.png';
+const avatarLoadFailed = ref(false);
 
 const userInfo = ref({
   id: '',
@@ -21,6 +23,7 @@ const userInfo = ref({
 const IP = ref('');
 
 onShow(() => {
+  avatarLoadFailed.value = false;
   Object.assign(userInfo.value, {
     id: userStore.userInfo.id,
     avatar: userStore.userInfo.avatar,
@@ -33,7 +36,19 @@ onShow(() => {
   IP.value = userStore.userInfo.lastIp;
 });
 
-const avatar = computed(() => getFullUrl(userInfo.value.avatar) || '/static/images/mine/avatar.png');
+const normalizeAvatarUrl = (value) => {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw || raw === '-' || ['null', 'undefined', 'none'].includes(raw.toLowerCase())) {
+    return DEFAULT_AVATAR;
+  }
+  return getFullUrl(raw) || DEFAULT_AVATAR;
+};
+const avatar = computed(() => (avatarLoadFailed.value ? DEFAULT_AVATAR : normalizeAvatarUrl(userInfo.value.avatar)));
+const handleAvatarError = () => {
+  if (avatar.value !== DEFAULT_AVATAR) {
+    avatarLoadFailed.value = true;
+  }
+};
 const profileFields = computed(() => [
   {
     label: '昵称',
@@ -99,6 +114,7 @@ const uploadFilePromise = (url) => {
 
 const onChooseAvatar = async (e) => {
   const { avatarUrl } = e.detail;
+  avatarLoadFailed.value = false;
   userInfo.value.avatar = await uploadFilePromise(avatarUrl);
   if (userInfo.value.avatar) {
     await userStore.refreshUserInfo({ avatar: userInfo.value.avatar });
@@ -196,7 +212,7 @@ const confirm = async (e) => {
     <view class="avatar-section flex jc-center ai-center mb-60">
       <button class="uv-reset-button" open-type="chooseAvatar" :disabled="avatarUploading" @chooseavatar="onChooseAvatar">
         <view style="width: 216rpx; height: 216rpx" class="relative">
-          <uv-image :src="avatar" width="216rpx" height="216rpx" radius="50rpx"></uv-image>
+          <uv-image :src="avatar" width="216rpx" height="216rpx" radius="50rpx" @error="handleAvatarError"></uv-image>
           <view class="camera-overlay absolute bottom-0 right-0">
             <uv-image src="/static/images/mine/camera.png" width="48rpx" height="48rpx"></uv-image>
           </view>

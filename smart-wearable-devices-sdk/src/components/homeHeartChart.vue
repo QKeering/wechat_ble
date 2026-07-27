@@ -115,8 +115,6 @@ defineExpose({
           v-for="tick in timeTicks"
           :key="tick.key"
           class="chart-time-tick"
-          :class="{ 'is-first': tick.isFirst, 'is-last': tick.isLast }"
-          :style="{ left: tick.left + '%' }"
         >{{ tick.label }}</text>
       </view>
 
@@ -193,28 +191,16 @@ defineExpose({
   position: relative;
   z-index: 2;
   height: 42rpx;
-  margin: 2rpx 12rpx 0;
+  margin: 2rpx 28rpx 0;
+  display: flex;
+  justify-content: space-between;
   color: #9ca3af;
   font-size: 20rpx;
   line-height: 1;
 }
 
 .chart-time-tick {
-  position: absolute;
-  top: 0;
   white-space: nowrap;
-  transform: translateX(-50%) rotate(-28deg);
-  transform-origin: top center;
-}
-
-.chart-time-tick.is-first {
-  transform: rotate(-28deg);
-  transform-origin: top left;
-}
-
-.chart-time-tick.is-last {
-  transform: translateX(-100%) rotate(-28deg);
-  transform-origin: top right;
 }
 
 .stats {

@@ -2,12 +2,8 @@
 import { computed, ref } from 'vue';
 import { onShow, onPullDownRefresh } from '@dcloudio/uni-app';
 import {
-  getFamilyCareReminders,
   getFamilyHome,
   getFamilyMembers,
-  updateFamilyCareSubscribe,
-  type FamilyCareReminder,
-  type FamilyCareReminderBox,
   type FamilyHome,
   type FamilyMember
 } from '@/common/api/family';
@@ -15,9 +11,7 @@ import { hasBoundRingIdentity } from '@/utils/ringBinding';
 
 const members = ref<FamilyMember[]>([]);
 const home = ref<FamilyHome | null>(null);
-const reminderBox = ref<FamilyCareReminderBox | null>(null);
 const loading = ref(false);
-const subscribing = ref(false);
 
 const relationText = (relation?: string) => {
   const map: Record<string, string> = {
@@ -48,8 +42,6 @@ const getDeviceStatus = (member: FamilyMember) => {
 };
 
 const hasMembers = computed(() => members.value.length > 0);
-const reminders = computed(() => reminderBox.value?.reminders || []);
-const reminderSummary = computed(() => reminderBox.value?.summaryText || '');
 const stats = computed(
   () =>
     home.value?.stats || {
@@ -60,11 +52,11 @@ const stats = computed(
       guardians: 0
     }
 );
-const summaryText = computed(() => home.value?.summaryText || '父母佩戴设备，子女远程查看状态和提醒');
+const summaryText = computed(() => home.value?.summaryText || '父母佩戴设备，家人远程查看健康状态');
 
 const getMemberCareStatus = (member: FamilyMember & { careStatus?: string; careStatusText?: string }) => {
+  if (!hasFamilyMemberDevice(member)) return '';
   if (member.careStatusText) return member.careStatusText;
-  if (!hasFamilyMemberDevice(member)) return '待绑定设备';
   if (!member.lastSyncTime) return '待同步';
   return '今日守护中';
 };
@@ -75,28 +67,42 @@ const getMemberTag = (member: FamilyMember & { careStatus?: string }) => {
   return '守护中';
 };
 
+const formatIntegerMetric = (value: unknown) => {
+  const numeric = Number(String(value ?? '').replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : null;
+};
+
 const metricText = (member: FamilyMember) => {
   const metrics = member.metrics || {};
+  const heartRate = formatIntegerMetric(metrics.heartRate);
+  const spo2 = formatIntegerMetric(metrics.spo2);
   const parts = [
-    metrics.heartRate ? `心率 ${metrics.heartRate}` : '',
-    metrics.spo2 ? `血氧 ${metrics.spo2}%` : '',
+    heartRate ? `心率 ${heartRate}` : '',
+    spo2 ? `血氧 ${spo2}%` : '',
     metrics.sleepScore ? `睡眠 ${metrics.sleepScore}分` : '',
     metrics.steps ? `步数 ${metrics.steps}` : ''
   ].filter(Boolean);
   return parts.length ? parts.join(' · ') : '暂无今日指标，请同步后查看';
 };
 
+const getMemberCardSummary = (member: FamilyMember) => String(member.cardSummary || '').trim();
+
+const shouldShowMemberCardSummary = (member: FamilyMember) => {
+  const summary = getMemberCardSummary(member);
+  if (!summary) return false;
+  if (!hasFamilyMemberDevice(member) && /(尚未绑定设备|未绑定设备|待绑定设备)/.test(summary)) return false;
+  return summary !== metricText(member);
+};
+
 const fetchMembers = async () => {
   loading.value = true;
   try {
     try {
-      const [data, remindersData] = await Promise.all([getFamilyHome(), getFamilyCareReminders()]);
+      const data = await getFamilyHome();
       home.value = data;
       members.value = data.members || [];
-      reminderBox.value = remindersData;
     } catch (error) {
       home.value = null;
-      reminderBox.value = null;
       members.value = await getFamilyMembers();
     }
   } finally {
@@ -123,49 +129,6 @@ const openCollaborate = () => {
 const openDetail = (member: FamilyMember) => {
   const relationQuery = member.relationId ? `&relationId=${member.relationId}` : '';
   uni.navigateTo({ url: `/pages/family/memberDetail?memberId=${member.id}${relationQuery}` });
-};
-
-const openReminder = (item: FamilyCareReminder) => {
-  const relationQuery = item.relationId ? `&relationId=${item.relationId}` : '';
-  uni.navigateTo({ url: item.actionUrl || `/pages/family/memberDetail?memberId=${item.memberId}${relationQuery}` });
-};
-
-const subscribeCareReminders = async () => {
-  const templateIds = String(import.meta.env.VITE_FAMILY_CARE_TEMPLATE_IDS || '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-  if (!templateIds.length) {
-    uni.showToast({ title: '请先配置订阅模板', icon: 'none' });
-    return;
-  }
-  if (typeof (uni as any).requestSubscribeMessage !== 'function') {
-    uni.showToast({ title: '当前环境不支持订阅消息', icon: 'none' });
-    return;
-  }
-  subscribing.value = true;
-  try {
-    const result = await new Promise<Record<string, any>>((resolve, reject) => {
-      (uni as any).requestSubscribeMessage({
-        tmplIds: templateIds,
-        success: resolve,
-        fail: reject
-      });
-    });
-    reminderBox.value = {
-      ...(reminderBox.value || { reminders: [], unreadCount: 0, summaryText: '', subscription: { subscribeEnabled: false, templateIds: [], lastRequestStatus: {} } }),
-      subscription: await updateFamilyCareSubscribe({
-        subscribeEnabled: Object.values(result).some((value) => value === 'accept'),
-        templateIds,
-        requestStatus: result
-      })
-    };
-    uni.showToast({ title: '提醒设置已更新', icon: 'none' });
-  } catch (error) {
-    uni.showToast({ title: '订阅未完成', icon: 'none' });
-  } finally {
-    subscribing.value = false;
-  }
 };
 
 onShow(fetchMembers);
@@ -217,30 +180,6 @@ onPullDownRefresh(async () => {
 
     <view v-if="loading" class="empty">正在加载家人信息...</view>
 
-    <view v-if="reminders.length" class="reminder-panel">
-      <view class="reminder-head">
-        <view>
-          <view class="reminder-title">照护提醒</view>
-          <view class="reminder-desc">{{ reminderSummary }}</view>
-        </view>
-        <uv-button
-          :text="reminderBox?.subscription?.subscribeEnabled ? '已开启' : '开启提醒'"
-          :loading="subscribing"
-          color="#FFF7ED"
-          :customStyle="{ width: '156rpx', height: '68rpx' }"
-          :customTextStyle="{ color: '#C2410C', fontSize: '26rpx' }"
-          @click="subscribeCareReminders"
-        />
-      </view>
-      <view v-for="item in reminders.slice(0, 3)" :key="`${item.memberId}-${item.type}-${item.title}`" class="reminder-item" :class="item.level" @click="openReminder(item)">
-        <view class="reminder-main">
-          <view class="reminder-name">{{ item.memberName }} · {{ item.title }}</view>
-          <view class="reminder-content">{{ item.content }}</view>
-        </view>
-        <uv-icon name="arrow-right" color="#9CA3AF" size="16"></uv-icon>
-      </view>
-    </view>
-
     <view v-if="!loading && !hasMembers" class="empty-card">
       <view class="empty-title">还没有添加家人</view>
       <view class="empty-desc">先为父母建立档案，再绑定对应的穿戴设备。</view>
@@ -253,10 +192,9 @@ onPullDownRefresh(async () => {
           <view class="member-info">
             <view class="member-name">{{ member.name }}</view>
             <view class="member-relation">{{ relationText(member.relation) }} · {{ getDeviceStatus(member) }}</view>
-            <view class="member-care">{{ getMemberCareStatus(member) }}</view>
-            <view class="member-summary">{{ member.cardSummary || metricText(member) }}</view>
+            <view v-if="getMemberCareStatus(member)" class="member-care">{{ getMemberCareStatus(member) }}</view>
+            <view v-if="shouldShowMemberCardSummary(member)" class="member-summary">{{ getMemberCardSummary(member) }}</view>
             <view class="member-metrics">{{ metricText(member) }}</view>
-            <view v-if="member.careSuggestion" class="member-suggestion">{{ member.careSuggestion }}</view>
           </view>
         </view>
         <view class="member-side">
@@ -321,59 +259,6 @@ onPullDownRefresh(async () => {
 }
 .summary-item.invite.active .summary-value {
   color: #2e70fc;
-}
-.reminder-panel {
-  margin: 0 0 28rpx;
-  padding: 28rpx;
-  background: #ffffff;
-  border-radius: 20rpx;
-  border: 2rpx solid #fed7aa;
-}
-.reminder-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20rpx;
-  margin-bottom: 18rpx;
-}
-.reminder-title {
-  font-size: 34rpx;
-  font-weight: 800;
-  color: #9a3412;
-}
-.reminder-desc {
-  margin-top: 8rpx;
-  font-size: 26rpx;
-  color: #7c2d12;
-  line-height: 1.5;
-}
-.reminder-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18rpx;
-  margin-top: 16rpx;
-  padding: 22rpx;
-  border-radius: 16rpx;
-  background: #fff7ed;
-}
-.reminder-item.danger {
-  background: #fff1f2;
-}
-.reminder-main {
-  min-width: 0;
-  flex: 1;
-}
-.reminder-name {
-  font-size: 30rpx;
-  font-weight: 700;
-  color: #111827;
-}
-.reminder-content {
-  margin-top: 8rpx;
-  font-size: 26rpx;
-  color: #6b7280;
-  line-height: 1.5;
 }
 .empty,
 .empty-card {
@@ -460,15 +345,6 @@ onPullDownRefresh(async () => {
 .member-metrics {
   margin-top: 8rpx;
   color: #6b7280;
-  font-size: 24rpx;
-  line-height: 1.5;
-}
-.member-suggestion {
-  margin-top: 12rpx;
-  padding: 14rpx 18rpx;
-  border-radius: 16rpx;
-  background: #f8fafc;
-  color: #374151;
   font-size: 24rpx;
   line-height: 1.5;
 }

@@ -72,19 +72,7 @@ export const baseOption = {
 // 第二个配置：pressureOption
 export const pressureOption = {
   title: {
-    subtext: '压力\n比例',
-    subtextStyle: {
-      fontSize: 14,
-      fontWeight: 'normal',
-      textAlign: 'center',
-      verticalAlign: 'middle',
-      lineHeight: 20,
-      color: '#979797'
-    },
-    left: '19%',
-    top: '43%',
-    textAlign: 'center',
-    textVerticalAlign: 'middle'
+    show: false
   },
   series: [
     {
@@ -97,7 +85,17 @@ export const pressureOption = {
         { value: 10, name: '中等', itemStyle: { color: '#00cc99', borderWidth: 1, borderColor: '#ffffff' } },
         { value: 10, name: '偏高', itemStyle: { color: '#00cc99', borderWidth: 1, borderColor: '#ffffff' } }
       ],
-      label: { show: false },
+      label: {
+        show: true,
+        position: 'center',
+        formatter: (params: any) => (params.dataIndex === 0 ? '压力\n比例' : ''),
+        color: '#979797',
+        fontSize: 14,
+        fontWeight: 'normal',
+        lineHeight: 20,
+        align: 'center',
+        verticalAlign: 'middle'
+      },
       labelLine: { show: false }
     }
   ],

@@ -15,6 +15,20 @@ class Settings(BaseSettings):
     other_api_base_url: str = ""
     wx_miniapp_appid: str = ""
     wx_miniapp_secret: str = ""
+    sms_provider: str = ""
+    sms_api_url: str = ""
+    sms_api_token: str = ""
+    sms_sign_name: str = ""
+    sms_template_code: str = ""
+    sms_timeout_seconds: int = 10
+    tencent_sms_secret_id: str = ""
+    tencent_sms_secret_key: str = ""
+    tencent_sms_sdk_app_id: str = ""
+    tencent_sms_region: str = "ap-guangzhou"
+    tencent_sms_endpoint: str = "sms.tencentcloudapi.com"
+    tencent_sms_nation_code: str = "+86"
+    tencent_sms_template_params: str = "code"
+    tencent_sms_code_expire_minutes: int = 5
 
     growth_ai_provider: str = "qwen"
     dashscope_api_key: str = ""
