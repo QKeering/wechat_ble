@@ -263,7 +263,11 @@ export const findReconnectScanCandidate = (target: RingDeviceInfo, scannedDevice
 };
 
 export const shouldReconnectByScanningFirst = (target?: RingDeviceInfo | null) => {
-  return resolveRingProtocol(target as RingDeviceInfo) === 'rw';
+  if (!target) return false;
+  // The platform deviceId is session-scoped and may change after Bluetooth,
+  // permission or app lifecycle changes. Resolve every bound device that has
+  // a stable identity from a fresh scan before attempting a connection.
+  return Boolean(getRingDeviceStableIdentity(target));
 };
 
 const getRwReconnectTargetAgeMs = (target?: RingDeviceInfo | null, now = Date.now()) => {
@@ -1314,13 +1318,11 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   const reconnect = async () => {
     if (reconnectInFlight) {
       const currentDevice = deviceInfo.value;
-      if (currentDevice.protocol === 'rw' || expectedConnectionDevice?.protocol === 'rw') {
-        writeRwStoreLog('reconnect-reuse-inflight', {
-          elapsedMs: reconnectInFlightStartedAt ? Date.now() - reconnectInFlightStartedAt : 0,
-          current: summarizeRingDeviceForStoreLog(currentDevice),
-          expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
-        });
-      }
+      writeRwStoreLog('reconnect-reuse-inflight', {
+        elapsedMs: reconnectInFlightStartedAt ? Date.now() - reconnectInFlightStartedAt : 0,
+        current: summarizeRingDeviceForStoreLog(currentDevice),
+        expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+      });
       return reconnectInFlight;
     }
 
