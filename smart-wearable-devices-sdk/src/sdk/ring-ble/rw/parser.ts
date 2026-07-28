@@ -462,6 +462,24 @@ function parseKeyFrame(frame: NonNullable<ReturnType<typeof parseRwKeyFrame>>, r
     };
   }
 
+  if (frame.key === RwKey.TimeFormat) {
+    const timeFormat = frame.data[0];
+    return {
+      type: 'rw_time_format_ack',
+      protocol: 'rw',
+      frameId: frame.checksum,
+      timestamp: Date.now(),
+      key: frame.key,
+      flag: frame.flag,
+      timeFormat,
+      use24Hour: timeFormat === 1,
+      success: frame.flag === RwKeyFlag.Update,
+      status: frame.flag === RwKeyFlag.Update ? 'success' : 'ack',
+      data: Array.from(frame.data),
+      raw: Array.from(raw)
+    };
+  }
+
   if (isRwBatteryKey(frame.key)) {
     if (frame.data.length === 0) {
       return createRwBatteryPendingParsedData(frame, raw);

@@ -28,6 +28,8 @@ import {
   buildRwSetDateTimeKeyCommand,
   buildRwSetBodyTemperatureDetectingCommand,
   buildRwSetHealthMonitoringCommand,
+  buildRwSetTimeFormatKeyCommand,
+  buildRwSetTimeZoneKeyCommand,
   buildRwSetUserProfileCommand,
   buildRwSyncTimeCommand,
   bytesToHex,
@@ -1718,8 +1720,12 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   };
 
   const sendFactoryResetWithTimeCommand = async (timestampMs = Date.now(), timezone = 8): Promise<unknown> => {
+    await sendBytes(buildRwSetTimeZoneKeyCommand(timezone), 'factory-reset-sync-time-zone-key');
+    await sleep(120);
     await sendBytes(buildRwSetDateTimeKeyCommand(timestampMs), 'factory-reset-sync-time-key');
     await sleep(250);
+    await sendBytes(buildRwSetTimeFormatKeyCommand(true), 'factory-reset-sync-time-format-key');
+    await sleep(120);
     await sendBytes(buildRwSyncTimeCommand(timestampMs, timezone), 'factory-reset-sync-time-frame');
     await sleep(250);
     return sendRwFactoryResetCommand();
@@ -1800,8 +1806,12 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   };
 
   const updateDeviceTime = async (timestampMs = Date.now(), timezone = 8) => {
+    await sendBytes(buildRwSetTimeZoneKeyCommand(timezone), 'sync-device-time-zone-key');
+    await sleep(120);
     await sendBytes(buildRwSetDateTimeKeyCommand(timestampMs), 'sync-device-time-key');
     await sleep(250);
+    await sendBytes(buildRwSetTimeFormatKeyCommand(true), 'sync-device-time-format-key');
+    await sleep(120);
     await sendBytes(buildRwSyncTimeCommand(timestampMs, timezone), 'sync-device-time-frame');
     await sleep(500);
     return readDeviceTime();

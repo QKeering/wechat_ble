@@ -24,6 +24,7 @@ export enum RwKey {
   Battery = 0x0203,
   FirmwareVersion = 0x0204,
   UserProfile = 0x0206,
+  TimeFormat = 0x020e,
   HrMonitoring = 0x0216,
   TemperatureDetecting = 0x021b,
   Spo2Monitoring = 0x0225,
@@ -172,6 +173,27 @@ export const buildRwSetDateTimeKeyCommand = (timestampMs = Date.now()) => {
     clampByte(date.getHours()),
     clampByte(date.getMinutes()),
     clampByte(date.getSeconds())
+  ]);
+  return buildRwKeyCommand(payload);
+};
+
+export const buildRwSetTimeZoneKeyCommand = (timezone = getLocalRwTimezoneHours(), daylightSaving = 0x02) => {
+  const payload = new Uint8Array([
+    RwKey.TimeZone >> 8,
+    RwKey.TimeZone & 0xff,
+    RwKeyFlag.Update,
+    normalizeRwTimezoneQuarterHours(timezone) & 0xff,
+    clampByte(daylightSaving)
+  ]);
+  return buildRwKeyCommand(payload);
+};
+
+export const buildRwSetTimeFormatKeyCommand = (use24Hour = true) => {
+  const payload = new Uint8Array([
+    RwKey.TimeFormat >> 8,
+    RwKey.TimeFormat & 0xff,
+    RwKeyFlag.Update,
+    use24Hour ? 1 : 0
   ]);
   return buildRwKeyCommand(payload);
 };
@@ -537,6 +559,17 @@ export const decodeAscii = (bytes: Uint8Array) => {
 const clampByte = (value: number) => {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(255, Math.floor(value)));
+};
+
+const getLocalRwTimezoneHours = () => {
+  const offsetMinutes = -new Date().getTimezoneOffset();
+  return offsetMinutes / 60;
+};
+
+const normalizeRwTimezoneQuarterHours = (timezone: number) => {
+  if (!Number.isFinite(timezone)) return normalizeRwTimezoneQuarterHours(getLocalRwTimezoneHours());
+  const quarterHours = Math.abs(timezone) <= 14 ? timezone * 4 : timezone;
+  return Math.max(-48, Math.min(56, Math.round(quarterHours)));
 };
 
 export const rwCrc16X26 = (payload: Uint8Array) => {
