@@ -58,6 +58,8 @@ type CompatRwHistoryDataName = RwHistoryDataName;
 const RW_RECONNECT_SCAN_TIMEOUT_MS = 12000;
 const RW_RECONNECT_CANDIDATE_TIMEOUT_MS = 12000;
 const RW_DIRECT_RECONNECT_MAX_DEVICE_AGE_MS = 30000;
+const RW_UPLOAD_DISCONNECT_RECOVERY_DELAY_MS = 250;
+const RW_UPLOAD_SUCCESS_DISCONNECT_GRACE_MS = 5000;
 
 export interface UseRingBleSdkOptions {
   getBoundDevice?: RingBleRuntime['getBoundDevice'];
@@ -532,6 +534,16 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   let connectInFlightStartedAt = 0;
   let reconnectInFlight: Promise<boolean> | null = null;
   let reconnectInFlightStartedAt = 0;
+  let rwUploadDisconnectRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let rwUploadDisconnectRecoveryToken = 0;
+  let lastUploadingStatusChangedAt = 0;
+
+  const clearRwUploadDisconnectRecovery = () => {
+    rwUploadDisconnectRecoveryToken += 1;
+    if (!rwUploadDisconnectRecoveryTimer) return;
+    clearTimeout(rwUploadDisconnectRecoveryTimer);
+    rwUploadDisconnectRecoveryTimer = null;
+  };
 
   const expirePendingConnectionAttempt = () => {
     connectionLifecycleToken += 1;
@@ -540,6 +552,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     connectInFlight = null;
     connectInFlightKey = '';
     reconnectInFlight = null;
+    clearRwUploadDisconnectRecovery();
     lastCommunicationReadyAt = 0;
   };
 
@@ -619,6 +632,9 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     },
     onDeviceReady: (payload) => {
       if (!isExpectedRingDevice(expectedConnectionDevice, payload)) return;
+      if (payload.protocol === 'rw' || expectedConnectionDevice?.protocol === 'rw') {
+        clearRwUploadDisconnectRecovery();
+      }
       deviceInfo.value = payload;
     },
     onDisconnected: (reason) => {
@@ -646,6 +662,58 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         return;
       }
       if (deviceInfo.value.protocol === 'rw' || expectedConnectionDevice?.protocol === 'rw') {
+        const isManualDisconnect = expectedConnectionDevice?.deviceId === '__cancelled_connection__';
+        const uploadStatusAgeMs = lastUploadingStatusChangedAt ? Date.now() - lastUploadingStatusChangedAt : Number.POSITIVE_INFINITY;
+        const isDuringOrJustAfterUpload =
+          uploadingStatus.value === 'uploading' ||
+          (uploadingStatus.value === 'success' && uploadStatusAgeMs <= RW_UPLOAD_SUCCESS_DISCONNECT_GRACE_MS);
+        if (!isManualDisconnect && isDuringOrJustAfterUpload) {
+          const targetDevice: RingDeviceInfo = {
+            ...expectedConnectionDevice,
+            ...deviceInfo.value,
+            protocol: 'rw',
+            notifyEnabled: false
+          };
+          const recoveryToken = (rwUploadDisconnectRecoveryToken += 1);
+          expectedConnectionDevice = targetDevice;
+          deviceInfo.value = targetDevice;
+          reconnectStatus.value = 'reconnecting';
+          reconnectResult.value = null;
+          writeRwStoreLog('upload-disconnect-recovery-start', {
+            reason,
+            uploadingStatus: uploadingStatus.value,
+            uploadStatusAgeMs,
+            target: summarizeRingDeviceForStoreLog(targetDevice),
+            elapsedMs: lastCommunicationReadyAt ? Date.now() - lastCommunicationReadyAt : null
+          });
+          if (rwUploadDisconnectRecoveryTimer) {
+            clearTimeout(rwUploadDisconnectRecoveryTimer);
+          }
+          rwUploadDisconnectRecoveryTimer = setTimeout(() => {
+            rwUploadDisconnectRecoveryTimer = null;
+            void reconnect()
+              .then((success) => {
+                if (recoveryToken !== rwUploadDisconnectRecoveryToken) return;
+                writeRwStoreLog('upload-disconnect-recovery-result', {
+                  success,
+                  target: summarizeRingDeviceForStoreLog(targetDevice),
+                  current: summarizeRingDeviceForStoreLog(deviceInfo.value)
+                });
+                if (!success) {
+                  clearDisconnectedRuntimeState();
+                }
+              })
+              .catch((error) => {
+                if (recoveryToken !== rwUploadDisconnectRecoveryToken) return;
+                writeRwStoreLog('upload-disconnect-recovery-failed', {
+                  target: summarizeRingDeviceForStoreLog(targetDevice),
+                  message: error instanceof Error ? error.message : String(error)
+                });
+                clearDisconnectedRuntimeState();
+              });
+          }, RW_UPLOAD_DISCONNECT_RECOVERY_DELAY_MS);
+          return;
+        }
         writeRwStoreLog('disconnected-runtime-reset', {
           reason,
           current: summarizeRingDeviceIdentityForStoreLog(deviceInfo.value),
@@ -674,6 +742,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     },
     onUploadingStatusChange: (status) => {
       uploadingStatus.value = status;
+      lastUploadingStatusChangedAt = Date.now();
     },
     getBoundDevice: options.getBoundDevice,
     bindDevice: options.bindDevice,
@@ -1094,6 +1163,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     expectedConnectionDevice = null;
     uploadingStatus.value = 'idle';
     lastCommunicationReadyAt = 0;
+    clearRwUploadDisconnectRecovery();
   };
 
   const setExpectedReconnectTarget = (target: RingDeviceInfo) => {

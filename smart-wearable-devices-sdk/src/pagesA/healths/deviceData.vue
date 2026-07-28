@@ -49,9 +49,11 @@ let measureTimeout: ReturnType<typeof setTimeout> | null = null;
 let rwAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
 let completionDelayTimer: ReturnType<typeof setTimeout> | null = null;
 let measureStartedAt = 0;
+let measureStepStartedAt = 0;
 
 const DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS = 35000;
 const RW_OPTIONAL_TEMPERATURE_TIMEOUT_MS = 8000;
+const RW_FULL_MEASURE_STEP_MIN_ACTIVE_MS = 6000;
 
 const measureStatusText = computed(() => {
   const statusMap = {
@@ -178,6 +180,7 @@ const sendMeasurementCommand = async (task: () => Promise<unknown>, expectedStep
     if (isRwDevice() && isRwForegroundMetric(expectedMetric)) {
       await runRwForegroundMeasurement(expectedMetric, {
         startedAt: measureStartedAt,
+        minActiveMs: RW_FULL_MEASURE_STEP_MIN_ACTIVE_MS,
         measureStatus: () => measureStatus.value,
         source: 'RW PAGE'
       });
@@ -214,10 +217,11 @@ const advanceRwMeasureSoon = (next: () => void, delay = 300) => {
   clearMeasureTimeout();
   clearAllProgressIntervals();
   clearRwAdvanceTimer();
+  const stepRemainingMs = isRwDevice() ? Math.max(0, RW_FULL_MEASURE_STEP_MIN_ACTIVE_MS - (Date.now() - measureStepStartedAt)) : 0;
   rwAdvanceTimer = setTimeout(() => {
     rwAdvanceTimer = null;
     next();
-  }, delay);
+  }, Math.max(delay, stepRemainingMs));
 };
 
 const pushProgressInterval = (targetProgress: number, expectedStatus: typeof measureStatus.value) => {
@@ -240,6 +244,7 @@ const pushProgressInterval = (targetProgress: number, expectedStatus: typeof mea
 
 const startHrMeasurement = () => {
   measureStatus.value = 'measuring_hr';
+  measureStepStartedAt = Date.now();
   measureProgress.value = 0;
   clearAllProgressIntervals();
   void sendMeasurementCommand(sendActiveMeasureCommand, 'heart_rate').then(() => {
@@ -255,6 +260,7 @@ const startHrMeasurement = () => {
 
 const startHrvMeasurement = () => {
   measureStatus.value = 'measuring_hrv';
+  measureStepStartedAt = Date.now();
   clearAllProgressIntervals();
   clearMeasureTimeout();
   void sendMeasurementCommand(sendActiveMeasureCommand, 'hrv').then(() => {
@@ -270,6 +276,7 @@ const startHrvMeasurement = () => {
 
 const startSpo2Measurement = () => {
   measureStatus.value = 'measuring_spo2';
+  measureStepStartedAt = Date.now();
   clearAllProgressIntervals();
   clearMeasureTimeout();
   void sendMeasurementCommand(sendOxyGenCommand, 'blood_oxygen').then(() => {
@@ -287,6 +294,7 @@ const startSpo2Measurement = () => {
 
 const startTemperatureMeasurement = () => {
   measureStatus.value = 'measuring_temp';
+  measureStepStartedAt = Date.now();
   clearAllProgressIntervals();
   clearMeasureTimeout();
   void sendMeasurementCommand(sendBodyTemperatureCommand, 'temperature').then(() => {
@@ -624,6 +632,7 @@ onLoad(async () => {
 onUnload(() => {
   stopMeasurementFlow();
   measureStartedAt = 0;
+  measureStepStartedAt = 0;
 });
 
 onHide(async () => {
@@ -751,7 +760,7 @@ onHide(async () => {
   position: absolute;
   inset: 48rpx;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: center;
   background: #ffffff;
   color: #2e70fc;
@@ -762,11 +771,13 @@ onHide(async () => {
 .measure-percent {
   font-size: 48rpx;
   font-weight: 800;
+  line-height: 1;
 }
 
 .measure-percent-unit {
   margin-left: 4rpx;
   font-size: 24rpx;
+  line-height: 1;
 }
 
 .progress-card,
