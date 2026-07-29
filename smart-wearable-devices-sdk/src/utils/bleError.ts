@@ -1,8 +1,10 @@
 const EMPTY_MESSAGES = new Set(['', 'undefined', 'null', '[object Object]']);
 
 const DEVICE_STATE_CHANGED_RE = /Cannot read properties of (null|undefined)|reading ['"]?[^'"]+['"]?/i;
+const BLE_UNAVAILABLE_RE =
+  /bluetooth.*(not\s*available|unavailable|disable|off)|adapter.*(not\s*available|unavailable)|openBluetoothAdapter.*not\s*available|startBluetoothDevicesDiscovery.*not\s*available|\b10001\b|蓝牙.*(未打开|不可用|未开启)/i;
 const EXPECTED_BLE_RUNTIME_RE =
-  /timeout|timed out|wait .*timeout|parsed data wait|not ready|already connect|internal error|setBLEMTU.*internal|fail:internal|property not support|fail to write descriptor|Cannot read properties of (null|undefined)|reading ['"]?[^'"]+['"]?|\u8d85\u65f6/i;
+  /timeout|timed out|wait .*timeout|parsed data wait|not ready|not available|unavailable|already connect|internal error|setBLEMTU.*internal|fail:internal|property not support|fail to write descriptor|Cannot read properties of (null|undefined)|reading ['"]?[^'"]+['"]?|\u8d85\u65f6/i;
 const BLE_TIMEOUT_RE = /timeout|timed out|wait .*timeout|\u8d85\u65f6/i;
 const BLE_INTERNAL_RE = /internal error|setBLEMTU.*internal|fail:internal/i;
 const NETWORK_ERROR_RE = /request:fail|net::|err_connection|network|\u7f51\u7edc\u8bf7\u6c42|\u7f51\u7edc\u8fde\u63a5/i;
@@ -20,6 +22,10 @@ export const formatBleErrorMessage = (error: unknown, fallback = '\u8bbe\u5907\u
     if (/^\u7f51\u7edc/.test(message)) return message;
     if (NETWORK_TIMEOUT_RE.test(message)) return '\u7f51\u7edc\u8bf7\u6c42\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5';
     return '\u7f51\u7edc\u8fde\u63a5\u5f02\u5e38\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5';
+  }
+
+  if (BLE_UNAVAILABLE_RE.test(message)) {
+    return '蓝牙未打开或不可用，请打开手机蓝牙后重试';
   }
 
   if (BLE_TIMEOUT_RE.test(message)) {

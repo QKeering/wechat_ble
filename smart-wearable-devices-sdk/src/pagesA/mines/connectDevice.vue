@@ -198,8 +198,13 @@ const retryBoundReconnect = async () => {
 const isConnectedBusinessDevice = (device: ScanDeviceInfo) =>
   ring.isConnected.value && ring.isReady.value && ring.isCurrentBusinessDevice(device as any);
 const handleSearchAreaClick = () => {
+  if (connecting.value) return;
   if (isScanning.value) return;
   scanBusinessDevices({ force: true, reason: 'search-area-retry' });
+};
+const handleResultRetryClick = () => {
+  if (connecting.value || isScanning.value) return;
+  scanBusinessDevices({ force: true, reason: 'manual-reload' });
 };
 // 是否为 iOS 设备。
 const isIOS = computed(() => {
@@ -358,6 +363,7 @@ onUnload(() => {
       <view class="loading-desc t-979797 mt-10">
         {{ isScanning ? '正在查找附近可用戒指，请保持戒指靠近手机。' : '未找到目标设备时，请靠近戒指后点这里重新搜索。' }}
       </view>
+      <view v-if="!isScanning" class="retry-search-button mt-24" @click.stop="handleSearchAreaClick">重新搜索</view>
     </view>
 
     <!-- 搜索结果区域 -->
@@ -366,7 +372,7 @@ onUnload(() => {
       <view class="results-info flex jc-between ai-center">
         <!-- 结果头部 -->
         <!-- <view class="results flex ai-center" @click="startScan"> -->
-        <view class="results flex ai-center" @click="scanBusinessDevices({ force: true, reason: 'manual-reload' })">
+        <view class="results flex ai-center" :class="{ disabled: isScanning || connecting }" @click="handleResultRetryClick">
           <view class="results-title fs-36 mr-20">{{ copy.searchResult }}</view>
           <uv-image src="/static/images/mine/reload.png" width="36rpx" height="36rpx"></uv-image>
         </view>
@@ -394,6 +400,7 @@ onUnload(() => {
               padding: '43rpx 0',
               width: '174rpx'
             }"
+            :disabled="connecting"
             @click="handleConnect(dev)"
           ></uv-button>
         </view>
@@ -426,11 +433,12 @@ onUnload(() => {
               padding: '52rpx 0',
               width: '210rpx'
             }"
+            :disabled="connecting"
             @click="cancelConnect"
           ></uv-button>
           <view style="width: 30rpx"></view>
           <uv-button
-            :text="copy.connect"
+            :text="connecting ? '连接中...' : copy.connect"
             shape="circle"
             color="#2E70FC"
             :customTextStyle="{ 'font-size': '36rpx' }"
@@ -438,6 +446,8 @@ onUnload(() => {
               padding: '52rpx 0',
               width: '210rpx'
             }"
+            :loading="connecting"
+            :disabled="connecting"
             @click="confirmConnect"
           ></uv-button>
         </view>
@@ -488,6 +498,21 @@ onUnload(() => {
 
 .search-loading-clickable .loading-title {
   color: #2e70fc;
+}
+
+.retry-search-button {
+  min-width: 200rpx;
+  padding: 18rpx 34rpx;
+  border-radius: 999rpx;
+  background: #e8f0ff;
+  color: #2e70fc;
+  font-size: 30rpx;
+  font-weight: 700;
+  text-align: center;
+}
+
+.results.disabled {
+  opacity: 0.55;
 }
 
 .bound-title {

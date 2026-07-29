@@ -57,7 +57,11 @@ type CompatRwHistoryDataName = RwHistoryDataName;
 
 const RW_RECONNECT_SCAN_TIMEOUT_MS = 12000;
 const RW_RECONNECT_CANDIDATE_TIMEOUT_MS = 12000;
+const RW_RECONNECT_BOUND_CANDIDATE_TIMEOUT_MS = 75000;
+const RW_RECONNECT_SCAN_ROUND_GAP_MS = 300;
 const RW_DIRECT_RECONNECT_MAX_DEVICE_AGE_MS = 30000;
+const RW_UPLOAD_DISCONNECT_RECOVERY_DELAY_MS = 250;
+const RW_UPLOAD_SUCCESS_DISCONNECT_GRACE_MS = 5000;
 
 export interface UseRingBleSdkOptions {
   getBoundDevice?: RingBleRuntime['getBoundDevice'];
@@ -263,7 +267,11 @@ export const findReconnectScanCandidate = (target: RingDeviceInfo, scannedDevice
 };
 
 export const shouldReconnectByScanningFirst = (target?: RingDeviceInfo | null) => {
-  return resolveRingProtocol(target as RingDeviceInfo) === 'rw';
+  if (!target) return false;
+  // The platform deviceId is session-scoped and may change after Bluetooth,
+  // permission or app lifecycle changes. Resolve every bound device that has
+  // a stable identity from a fresh scan before attempting a connection.
+  return Boolean(getRingDeviceStableIdentity(target));
 };
 
 const getRwReconnectTargetAgeMs = (target?: RingDeviceInfo | null, now = Date.now()) => {
@@ -304,6 +312,41 @@ const hasRingReconnectTargetIdentity = (target?: RingDeviceInfo | null) => {
       target.cmdCharId &&
       target.dataCharId
   );
+};
+
+const isSameBoundReconnectDevice = (boundDevice: RingDeviceInfo, currentDevice?: RingDeviceInfo | null) => {
+  if (!currentDevice?.deviceId) return false;
+  const protocol = boundDevice.protocol || resolveRingProtocol(boundDevice);
+  return isSameRingDevice({ ...boundDevice, protocol }, currentDevice);
+};
+
+const buildReconnectTargetFromBoundDevice = (
+  boundDevice: RingDeviceInfo,
+  currentDevice?: RingDeviceInfo | null
+): RingDeviceInfo => {
+  const protocol = boundDevice.protocol || resolveRingProtocol(boundDevice);
+  if (!isSameBoundReconnectDevice(boundDevice, currentDevice)) {
+    return { ...boundDevice, protocol };
+  }
+
+  return {
+    ...(currentDevice || {}),
+    ...boundDevice,
+    deviceId: currentDevice?.deviceId || boundDevice.deviceId,
+    mac: boundDevice.mac || currentDevice?.mac,
+    uniMacId: boundDevice.uniMacId || currentDevice?.uniMacId,
+    name: boundDevice.name || currentDevice?.name,
+    deviceName: boundDevice.deviceName || boundDevice.name || currentDevice?.deviceName || currentDevice?.name,
+    serviceId: currentDevice?.serviceId || boundDevice.serviceId,
+    cmdCharId: currentDevice?.cmdCharId || boundDevice.cmdCharId,
+    dataServiceId: currentDevice?.dataServiceId || boundDevice.dataServiceId,
+    dataCharId: currentDevice?.dataCharId || boundDevice.dataCharId,
+    notifyCandidates: currentDevice?.notifyCandidates || boundDevice.notifyCandidates,
+    notifyEnabled: currentDevice?.notifyEnabled ?? boundDevice.notifyEnabled,
+    advertis: boundDevice.advertis || currentDevice?.advertis,
+    lastSeenAt: currentDevice?.lastSeenAt || boundDevice.lastSeenAt,
+    protocol
+  };
 };
 
 export const isSwitchingRingDevice = (currentDevice: RingDeviceInfo, targetDevice: RingDeviceInfo) => {
@@ -528,6 +571,16 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   let connectInFlightStartedAt = 0;
   let reconnectInFlight: Promise<boolean> | null = null;
   let reconnectInFlightStartedAt = 0;
+  let rwUploadDisconnectRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let rwUploadDisconnectRecoveryToken = 0;
+  let lastUploadingStatusChangedAt = 0;
+
+  const clearRwUploadDisconnectRecovery = () => {
+    rwUploadDisconnectRecoveryToken += 1;
+    if (!rwUploadDisconnectRecoveryTimer) return;
+    clearTimeout(rwUploadDisconnectRecoveryTimer);
+    rwUploadDisconnectRecoveryTimer = null;
+  };
 
   const expirePendingConnectionAttempt = () => {
     connectionLifecycleToken += 1;
@@ -536,6 +589,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     connectInFlight = null;
     connectInFlightKey = '';
     reconnectInFlight = null;
+    clearRwUploadDisconnectRecovery();
     lastCommunicationReadyAt = 0;
   };
 
@@ -615,6 +669,9 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     },
     onDeviceReady: (payload) => {
       if (!isExpectedRingDevice(expectedConnectionDevice, payload)) return;
+      if (payload.protocol === 'rw' || expectedConnectionDevice?.protocol === 'rw') {
+        clearRwUploadDisconnectRecovery();
+      }
       deviceInfo.value = payload;
     },
     onDisconnected: (reason) => {
@@ -642,6 +699,58 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         return;
       }
       if (deviceInfo.value.protocol === 'rw' || expectedConnectionDevice?.protocol === 'rw') {
+        const isManualDisconnect = expectedConnectionDevice?.deviceId === '__cancelled_connection__';
+        const uploadStatusAgeMs = lastUploadingStatusChangedAt ? Date.now() - lastUploadingStatusChangedAt : Number.POSITIVE_INFINITY;
+        const isDuringOrJustAfterUpload =
+          uploadingStatus.value === 'uploading' ||
+          (uploadingStatus.value === 'success' && uploadStatusAgeMs <= RW_UPLOAD_SUCCESS_DISCONNECT_GRACE_MS);
+        if (!isManualDisconnect && isDuringOrJustAfterUpload) {
+          const targetDevice: RingDeviceInfo = {
+            ...expectedConnectionDevice,
+            ...deviceInfo.value,
+            protocol: 'rw',
+            notifyEnabled: false
+          };
+          const recoveryToken = (rwUploadDisconnectRecoveryToken += 1);
+          expectedConnectionDevice = targetDevice;
+          deviceInfo.value = targetDevice;
+          reconnectStatus.value = 'reconnecting';
+          reconnectResult.value = null;
+          writeRwStoreLog('upload-disconnect-recovery-start', {
+            reason,
+            uploadingStatus: uploadingStatus.value,
+            uploadStatusAgeMs,
+            target: summarizeRingDeviceForStoreLog(targetDevice),
+            elapsedMs: lastCommunicationReadyAt ? Date.now() - lastCommunicationReadyAt : null
+          });
+          if (rwUploadDisconnectRecoveryTimer) {
+            clearTimeout(rwUploadDisconnectRecoveryTimer);
+          }
+          rwUploadDisconnectRecoveryTimer = setTimeout(() => {
+            rwUploadDisconnectRecoveryTimer = null;
+            void reconnect()
+              .then((success) => {
+                if (recoveryToken !== rwUploadDisconnectRecoveryToken) return;
+                writeRwStoreLog('upload-disconnect-recovery-result', {
+                  success,
+                  target: summarizeRingDeviceForStoreLog(targetDevice),
+                  current: summarizeRingDeviceForStoreLog(deviceInfo.value)
+                });
+                if (!success) {
+                  clearDisconnectedRuntimeState();
+                }
+              })
+              .catch((error) => {
+                if (recoveryToken !== rwUploadDisconnectRecoveryToken) return;
+                writeRwStoreLog('upload-disconnect-recovery-failed', {
+                  target: summarizeRingDeviceForStoreLog(targetDevice),
+                  message: error instanceof Error ? error.message : String(error)
+                });
+                clearDisconnectedRuntimeState();
+              });
+          }, RW_UPLOAD_DISCONNECT_RECOVERY_DELAY_MS);
+          return;
+        }
         writeRwStoreLog('disconnected-runtime-reset', {
           reason,
           current: summarizeRingDeviceIdentityForStoreLog(deviceInfo.value),
@@ -670,6 +779,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     },
     onUploadingStatusChange: (status) => {
       uploadingStatus.value = status;
+      lastUploadingStatusChangedAt = Date.now();
     },
     getBoundDevice: options.getBoundDevice,
     bindDevice: options.bindDevice,
@@ -1090,6 +1200,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     expectedConnectionDevice = null;
     uploadingStatus.value = 'idle';
     lastCommunicationReadyAt = 0;
+    clearRwUploadDisconnectRecovery();
   };
 
   const setExpectedReconnectTarget = (target: RingDeviceInfo) => {
@@ -1100,17 +1211,37 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   };
 
   const getRwReconnectScanTimeoutMs = () => options.rwReconnectScanTimeoutMs ?? RW_RECONNECT_SCAN_TIMEOUT_MS;
-  const getRwReconnectCandidateTimeoutMs = () =>
-    options.rwReconnectCandidateTimeoutMs ?? RW_RECONNECT_CANDIDATE_TIMEOUT_MS;
+  const getRwReconnectCandidateTimeoutMs = (target?: RingDeviceInfo | null) => {
+    if (options.rwReconnectCandidateTimeoutMs != null) return options.rwReconnectCandidateTimeoutMs;
+    if (target && resolveRingProtocol(target) === 'rw' && getRingDeviceStableIdentity(target)) {
+      return RW_RECONNECT_BOUND_CANDIDATE_TIMEOUT_MS;
+    }
+    return RW_RECONNECT_CANDIDATE_TIMEOUT_MS;
+  };
 
-  const waitForReconnectScanCandidate = async (target: RingDeviceInfo, timeoutMs = getRwReconnectCandidateTimeoutMs()) => {
+  const getFreshReconnectScanDevices = (minLastSeenAt?: number) => {
+    if (!minLastSeenAt) return devices.value;
+    return devices.value.filter((device) => {
+      const lastSeenAt = Number(device.lastSeenAt || 0);
+      return Number.isFinite(lastSeenAt) && lastSeenAt >= minLastSeenAt - 500;
+    });
+  };
+
+  const findFreshReconnectScanCandidate = (target: RingDeviceInfo, minLastSeenAt?: number) =>
+    findReconnectScanCandidate(target, getFreshReconnectScanDevices(minLastSeenAt));
+
+  const waitForReconnectScanCandidate = async (
+    target: RingDeviceInfo,
+    timeoutMs = getRwReconnectCandidateTimeoutMs(target),
+    minLastSeenAt?: number
+  ) => {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
-      const candidate = findReconnectScanCandidate(target, devices.value);
+      const candidate = findFreshReconnectScanCandidate(target, minLastSeenAt);
       if (candidate) return candidate;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    return findReconnectScanCandidate(target, devices.value);
+    return findFreshReconnectScanCandidate(target, minLastSeenAt);
   };
 
   const reconnectByScanning = async (target: RingDeviceInfo) => {
@@ -1121,43 +1252,87 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
     try {
       const scanProtocol = target.protocol || resolveRingProtocol(target);
+      const scanTimeoutMs = getRwReconnectScanTimeoutMs();
+      const candidateTimeoutMs = getRwReconnectCandidateTimeoutMs(target);
+      const scanStartedAt = Date.now();
       writeRwStoreLog('reconnect-scan-start', {
         target: summarizeRingDeviceForStoreLog(target),
         targetIdentity: summarizeRingDeviceIdentityForStoreLog(target),
         scanProtocol,
         knownDeviceCount: devices.value.length,
-        scanTimeoutMs: getRwReconnectScanTimeoutMs(),
-        candidateTimeoutMs: getRwReconnectCandidateTimeoutMs()
+        scanTimeoutMs,
+        candidateTimeoutMs
       });
-      await startScanWithProtocol(scanProtocol, {
-        includeUnknown: true,
-        allowDuplicatesKey: true,
-        preserveDevices: true,
-        timeoutMs: getRwReconnectScanTimeoutMs()
-      });
-      writeRwStoreLog('reconnect-scan-started', {
-        target: summarizeRingDeviceForStoreLog(target),
-        scannedDeviceCount: devices.value.length
-      });
-      scanStarted = true;
-      if (!isConnectionLifecycleCurrent(lifecycleToken)) {
-        clearExpiredConnectionLifecycle();
-        return false;
-      }
+      let scanRound = 0;
+      let candidate: RingDeviceInfo | null = null;
+      while (!candidate && Date.now() - scanStartedAt < candidateTimeoutMs) {
+        scanRound += 1;
+        const remainingMs = Math.max(1000, candidateTimeoutMs - (Date.now() - scanStartedAt));
+        const roundTimeoutMs = Math.min(scanTimeoutMs, remainingMs);
+        writeRwStoreLog('reconnect-scan-round-start', {
+          round: scanRound,
+          target: summarizeRingDeviceForStoreLog(target),
+          targetIdentity: summarizeRingDeviceIdentityForStoreLog(target),
+          timeoutMs: roundTimeoutMs,
+          elapsedMs: Date.now() - scanStartedAt,
+          scannedDeviceCount: devices.value.length
+        });
+        await startScanWithProtocol(scanProtocol, {
+          includeUnknown: true,
+          allowDuplicatesKey: true,
+          preserveDevices: true,
+          timeoutMs: roundTimeoutMs
+        });
+        writeRwStoreLog('reconnect-scan-started', {
+          round: scanRound,
+          target: summarizeRingDeviceForStoreLog(target),
+          scannedDeviceCount: devices.value.length
+        });
+        scanStarted = true;
+        if (!isConnectionLifecycleCurrent(lifecycleToken)) {
+          clearExpiredConnectionLifecycle();
+          return false;
+        }
 
-      writeRwStoreLog('reconnect-candidate-wait-start', {
-        target: summarizeRingDeviceForStoreLog(target),
-        candidateTimeoutMs: getRwReconnectCandidateTimeoutMs(),
-        scannedDeviceCount: devices.value.length
-      });
-      const candidate = await waitForReconnectScanCandidate(target);
+        writeRwStoreLog('reconnect-candidate-wait-start', {
+          round: scanRound,
+          target: summarizeRingDeviceForStoreLog(target),
+          candidateTimeoutMs: roundTimeoutMs,
+          scannedDeviceCount: devices.value.length,
+          freshScannedDeviceCount: getFreshReconnectScanDevices(scanStartedAt).length
+        });
+        candidate = await waitForReconnectScanCandidate(target, roundTimeoutMs, scanStartedAt);
+        writeRwStoreLog('reconnect-scan-round-result', {
+          round: scanRound,
+          found: Boolean(candidate?.deviceId),
+          target: summarizeRingDeviceForStoreLog(target),
+          candidate: summarizeRingDeviceForStoreLog(candidate),
+          elapsedMs: Date.now() - scanStartedAt,
+          scannedDeviceCount: devices.value.length,
+          freshScannedDeviceCount: getFreshReconnectScanDevices(scanStartedAt).length,
+          scannedTail: devices.value.slice(-6).map(summarizeRingDeviceForStoreLog),
+          scannedIdentityTail: devices.value.slice(-6).map(summarizeRingDeviceIdentityForStoreLog)
+        });
+        if (!isConnectionLifecycleCurrent(lifecycleToken)) {
+          clearExpiredConnectionLifecycle();
+          return false;
+        }
+        if (!candidate && Date.now() - scanStartedAt < candidateTimeoutMs) {
+          await stopScan().catch(() => undefined);
+          scanStarted = false;
+          await new Promise((resolve) => setTimeout(resolve, RW_RECONNECT_SCAN_ROUND_GAP_MS));
+        }
+      }
       writeRwStoreLog('reconnect-scan-candidate', {
         found: Boolean(candidate?.deviceId),
         target: summarizeRingDeviceForStoreLog(target),
         targetIdentity: summarizeRingDeviceIdentityForStoreLog(target),
         candidate: summarizeRingDeviceForStoreLog(candidate),
         candidateIdentity: summarizeRingDeviceIdentityForStoreLog(candidate),
+        elapsedMs: Date.now() - scanStartedAt,
+        scanRounds: scanRound,
         scannedDeviceCount: devices.value.length,
+        freshScannedDeviceCount: getFreshReconnectScanDevices(scanStartedAt).length,
         scannedTail: devices.value.slice(-6).map(summarizeRingDeviceForStoreLog),
         scannedIdentityTail: devices.value.slice(-6).map(summarizeRingDeviceIdentityForStoreLog)
       });
@@ -1199,6 +1374,20 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         clearExpiredConnectionLifecycle();
         return false;
       }
+      if (!isSameRingDevice({ ...target, protocol }, { ...candidate, ...deviceInfo.value, protocol: deviceInfo.value.protocol || protocol })) {
+        writeRwStoreLog('reconnect-connect-result', {
+          success: false,
+          reason: 'unexpected-device',
+          target: summarizeRingDeviceForStoreLog({ ...target, protocol }),
+          candidate: summarizeRingDeviceForStoreLog(candidate),
+          deviceInfo: summarizeRingDeviceForStoreLog(deviceInfo.value)
+        });
+        await disconnect().catch(() => undefined);
+        setExpectedReconnectTarget({ ...target, protocol });
+        reconnectStatus.value = 'failed';
+        reconnectResult.value = false;
+        return false;
+      }
       reconnectStatus.value = 'success';
       reconnectResult.value = true;
       writeRwStoreLog('reconnect-connect-result', {
@@ -1237,8 +1426,14 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     } catch {
       boundDevice = null;
     }
+    const hasBoundReconnectTarget = hasRingReconnectTargetIdentity(boundDevice);
+    const currentMatchesBound = hasBoundReconnectTarget
+      ? isSameBoundReconnectDevice(boundDevice as RingDeviceInfo, currentDevice)
+      : false;
     const targetDevice = (
-      currentDevice.deviceId
+      hasBoundReconnectTarget
+        ? buildReconnectTargetFromBoundDevice(boundDevice as RingDeviceInfo, currentDevice)
+        : currentDevice.deviceId
         ? {
             ...boundDevice,
             ...currentDevice,
@@ -1252,6 +1447,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     ) as RingDeviceInfo | undefined;
     writeRwStoreLog('reconnect-start', {
       lifecycleToken,
+      boundTargetLocked: hasBoundReconnectTarget,
+      currentMatchesBound,
       current: summarizeRingDeviceForStoreLog(currentDevice),
       bound: summarizeRingDeviceForStoreLog(boundDevice),
       target: summarizeRingDeviceForStoreLog(targetDevice)
@@ -1270,21 +1467,21 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       return false;
     }
     const protocol = resolveRingProtocol(targetDevice as RingDeviceInfo);
-    setExpectedReconnectTarget({ ...targetDevice, protocol });
+    const targetWithProtocol = { ...targetDevice, protocol };
+    setExpectedReconnectTarget(targetWithProtocol);
     const targetAdapter = await switchAdapter(protocol);
     if (!isConnectionLifecycleCurrent(lifecycleToken)) {
       clearExpiredConnectionLifecycle();
       return false;
     }
-    if (shouldReconnectByScanningFirst({ ...targetDevice, protocol })) {
-      const scannedConnected = await reconnectByScanning({ ...targetDevice, protocol });
+    if (shouldReconnectByScanningFirst(targetWithProtocol)) {
+      const scannedConnected = await reconnectByScanning(targetWithProtocol);
       if (!isConnectionLifecycleCurrent(lifecycleToken)) {
         clearExpiredConnectionLifecycle();
         return false;
       }
       if (scannedConnected) return true;
-      if (shouldSkipDirectRwReconnect({ ...targetDevice, protocol })) {
-        const targetWithProtocol = { ...targetDevice, protocol };
+      if (shouldSkipDirectRwReconnect(targetWithProtocol)) {
         writeRwStoreLog('reconnect-skip-direct', {
           reason: 'rw-no-fresh-scan-candidate',
           targetAgeMs: getRwReconnectTargetAgeMs(targetWithProtocol),
@@ -1303,24 +1500,35 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       clearExpiredConnectionLifecycle();
       return false;
     }
+    if (directlyConnected && !isSameRingDevice(targetWithProtocol, deviceInfo.value)) {
+      writeRwStoreLog('reconnect-direct-result', {
+        success: false,
+        reason: 'unexpected-device',
+        target: summarizeRingDeviceForStoreLog(targetWithProtocol),
+        deviceInfo: summarizeRingDeviceForStoreLog(deviceInfo.value)
+      });
+      await disconnect().catch(() => undefined);
+      setExpectedReconnectTarget(targetWithProtocol);
+      reconnectStatus.value = 'failed';
+      reconnectResult.value = false;
+      return false;
+    }
     if (directlyConnected) lastCommunicationReadyAt = Date.now();
     writeRwStoreLog('reconnect-direct-result', {
       success: directlyConnected,
       deviceInfo: summarizeRingDeviceForStoreLog(deviceInfo.value)
     });
     if (directlyConnected || !targetDevice) return directlyConnected;
-    return reconnectByScanning({ ...targetDevice, protocol });
+    return reconnectByScanning(targetWithProtocol);
   };
   const reconnect = async () => {
     if (reconnectInFlight) {
       const currentDevice = deviceInfo.value;
-      if (currentDevice.protocol === 'rw' || expectedConnectionDevice?.protocol === 'rw') {
-        writeRwStoreLog('reconnect-reuse-inflight', {
-          elapsedMs: reconnectInFlightStartedAt ? Date.now() - reconnectInFlightStartedAt : 0,
-          current: summarizeRingDeviceForStoreLog(currentDevice),
-          expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
-        });
-      }
+      writeRwStoreLog('reconnect-reuse-inflight', {
+        elapsedMs: reconnectInFlightStartedAt ? Date.now() - reconnectInFlightStartedAt : 0,
+        current: summarizeRingDeviceForStoreLog(currentDevice),
+        expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+      });
       return reconnectInFlight;
     }
 

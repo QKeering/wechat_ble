@@ -7,7 +7,7 @@ import { useRingBusinessController } from '@/composables/useRingBusinessControll
 import { useRingBusinessData } from '@/composables/useRingBusinessData';
 import { useRingStore } from '@/stores';
 import { useUserStore } from '@/stores/user';
-import { buildRwControlHealthDataCommand, RwHealthDataControlKey } from '@/sdk/ring-ble/rw';
+import { resolveRingProtocol, type RingDeviceInfo } from '@/sdk/ring-ble';
 import { clearFrontendRingBindingState, getBoundRingIdentity, getBoundRingIdentityTail, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
@@ -20,9 +20,10 @@ const ring = useRingBusinessData();
 const controller = useRingBusinessController();
 const DEVICE_INFO_SNAPSHOT_WAIT_MS = 12000;
 const DEVICE_INFO_EMPTY_TEXT = '-';
-const content = '是否解除绑定当前设备？解除后需要重新绑定才能使用。';
+const content = '你确定要解除绑定吗？';
 const FIND_RING_RED_LIGHT_DURATION_MS = 10000;
 const FIND_RING_COMMAND_TIMEOUT_MS = 5000;
+const FIND_RING_HINT_DURATION_MS = 3000;
 
 const modalPopup = ref<any>(null);
 const boundInfo = ref<Record<string, any> | null>(null);
@@ -32,11 +33,15 @@ const singleReadResults = ref<Record<string, string>>({});
 const findRingBusy = ref(false);
 const isFindingRing = ref(false);
 let findRingStopTimer: ReturnType<typeof setTimeout> | null = null;
+let findRingHintTimer: ReturnType<typeof setTimeout> | null = null;
+let activeFindRingCommandMode: FindRingCommandMode | null = null;
+
+type FindRingCommandMode = 'rw-health-control' | 'oxygen-measure';
 
 const isBusy = computed(() => Boolean(busyText.value) || controller.isRefreshingBusinessData.value || controller.isRestoringDevice.value);
 const findRingStatusText = computed(() => {
   if (findRingBusy.value) return '处理中';
-  if (isFindingRing.value) return '红灯中';
+  if (isFindingRing.value) return '查找中';
   return '';
 });
 const connectionText = computed(() => (ring.isConnected.value ? '已连接' : '未连接'));
@@ -380,9 +385,6 @@ const goConnect = () => {
   uni.navigateTo({ url: '/pagesA/mines/connectDevice' });
 };
 
-const buildFindRingRedLightCommand = (enabled: boolean) =>
-  buildRwControlHealthDataCommand(RwHealthDataControlKey.BloodOxygen, enabled);
-
 const clearFindRingStopTimer = () => {
   if (findRingStopTimer) {
     clearTimeout(findRingStopTimer);
@@ -390,15 +392,94 @@ const clearFindRingStopTimer = () => {
   }
 };
 
+const clearFindRingHintTimer = () => {
+  if (findRingHintTimer) {
+    clearTimeout(findRingHintTimer);
+    findRingHintTimer = null;
+  }
+};
+
+const setFindRingHint = (message: string, durationMs = FIND_RING_HINT_DURATION_MS) => {
+  clearFindRingHintTimer();
+  lastActionText.value = message;
+  if (!message || durationMs <= 0) return;
+  findRingHintTimer = setTimeout(() => {
+    if (lastActionText.value === message) {
+      lastActionText.value = '';
+    }
+    findRingHintTimer = null;
+  }, durationMs);
+};
+
+const resolveCurrentFindRingDevice = (): RingDeviceInfo => {
+  const source =
+    (ring.deviceInfo.value as RingDeviceInfo | null | undefined) ||
+    (ringStore.deviceInfo as RingDeviceInfo | null | undefined) ||
+    (userStore.deviceInfo as RingDeviceInfo | null | undefined) ||
+    (boundInfo.value as RingDeviceInfo | null | undefined) ||
+    {};
+  return source as RingDeviceInfo;
+};
+
+const resolveCurrentFindRingProtocol = () => {
+  const device = resolveCurrentFindRingDevice();
+  return resolveRingProtocol(device);
+};
+
+const resolveCurrentFindRingName = () => {
+  const device = resolveCurrentFindRingDevice() as Record<string, any>;
+  return `${deviceName.value || device.deviceName || device.name || device.localName || device.displayName || ''}`.trim();
+};
+
+const resolveFindRingCommandMode = (): FindRingCommandMode => {
+  const protocol = resolveCurrentFindRingProtocol();
+  const name = resolveCurrentFindRingName().toUpperCase();
+  if (protocol === 'rw' && !name.startsWith('QK') && !name.includes('L19')) return 'rw-health-control';
+  return 'oxygen-measure';
+};
+
+const withFindRingCommandTimeout = <T,>(task: Promise<T>, timeoutMs = FIND_RING_COMMAND_TIMEOUT_MS) =>
+  Promise.race([
+    task,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error('查找戒指指令超时')), timeoutMs);
+    })
+  ]);
+
 const sendFindRingRedLightCommand = async (enabled: boolean) => {
   const ready = await ensureDeviceReady();
   if (!ready) throw new Error('设备未连接，请重新连接后再查找戒指');
-  await Promise.race([
-    controller.sendBytes(buildFindRingRedLightCommand(enabled), enabled ? 'find-ring/red-light/start' : 'find-ring/red-light/stop'),
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('查找戒指指令超时')), FIND_RING_COMMAND_TIMEOUT_MS);
-    })
-  ]);
+  const protocol = resolveCurrentFindRingProtocol();
+  const deviceName = resolveCurrentFindRingName();
+  const commandMode = enabled ? resolveFindRingCommandMode() : activeFindRingCommandMode || resolveFindRingCommandMode();
+  appendDeviceDiagnosticLog('find-ring-command-send-start', {
+    enabled,
+    protocol,
+    commandMode,
+    deviceName,
+    snapshot: getDevicePageSnapshot()
+  });
+  if (commandMode === 'oxygen-measure') {
+    if (!enabled) {
+      appendDeviceDiagnosticLog('find-ring-command-stop-skip', {
+        reason: 'oxygen-measure has no explicit stop command',
+        protocol,
+        deviceName
+      });
+      return commandMode;
+    }
+    await withFindRingCommandTimeout(controller.sendOxyGenCommand(), FIND_RING_COMMAND_TIMEOUT_MS);
+  } else {
+    await withFindRingCommandTimeout(controller.controlRwHealthData('blood_oxygen', enabled), FIND_RING_COMMAND_TIMEOUT_MS);
+  }
+  appendDeviceDiagnosticLog('find-ring-command-send-result', {
+    enabled,
+    protocol,
+    commandMode,
+    deviceName,
+    snapshot: getDevicePageSnapshot()
+  });
+  return commandMode;
 };
 
 const stopFindRingRedLight = async (options: { silent?: boolean; reason?: string } = {}) => {
@@ -413,8 +494,8 @@ const stopFindRingRedLight = async (options: { silent?: boolean; reason?: string
   try {
     await sendFindRingRedLightCommand(false);
     if (!options.silent) {
-      lastActionText.value = '戒指红灯已关闭';
-      uni.showToast({ title: '红灯已关闭', icon: 'none' });
+      setFindRingHint('戒指查找已结束');
+      uni.showToast({ title: '查找已结束', icon: 'none' });
     }
     appendDeviceDiagnosticLog('find-ring-red-light-stop-result', {
       reason: options.reason || 'manual',
@@ -434,11 +515,16 @@ const stopFindRingRedLight = async (options: { silent?: boolean; reason?: string
   } finally {
     isFindingRing.value = false;
     findRingBusy.value = false;
+    activeFindRingCommandMode = null;
+    if (options.silent) {
+      setFindRingHint('');
+    }
   }
 };
 
 const startFindRingRedLight = async () => {
   clearFindRingStopTimer();
+  clearFindRingHintTimer();
   findRingBusy.value = true;
   lastActionText.value = '';
   appendDeviceDiagnosticLog('find-ring-red-light-start', {
@@ -446,10 +532,10 @@ const startFindRingRedLight = async () => {
     snapshot: getDevicePageSnapshot()
   });
   try {
-    await sendFindRingRedLightCommand(true);
+    activeFindRingCommandMode = await sendFindRingRedLightCommand(true);
     isFindingRing.value = true;
-    lastActionText.value = '戒指红灯已开启，10秒后自动关闭';
-    uni.showToast({ title: '红灯已开启', icon: 'none' });
+    setFindRingHint('查找指令已发送，请观察戒指红灯，10秒后自动结束');
+    uni.showToast({ title: '查找指令已发送', icon: 'none' });
     findRingStopTimer = setTimeout(() => {
       void stopFindRingRedLight({ silent: true, reason: 'auto-timeout' });
     }, FIND_RING_RED_LIGHT_DURATION_MS);
@@ -459,8 +545,9 @@ const startFindRingRedLight = async () => {
     });
   } catch (error) {
     isFindingRing.value = false;
+    activeFindRingCommandMode = null;
     const message = formatBleErrorMessage(error, '查找戒指失败，请靠近戒指后重试');
-    lastActionText.value = message;
+    setFindRingHint(message, 5000);
     uni.showToast({ title: message, icon: 'none' });
     appendDeviceDiagnosticLog('find-ring-red-light-failed', {
       message,
@@ -697,6 +784,8 @@ onUnload(() => {
     return;
   }
   clearFindRingStopTimer();
+  clearFindRingHintTimer();
+  activeFindRingCommandMode = null;
 });
 </script>
 

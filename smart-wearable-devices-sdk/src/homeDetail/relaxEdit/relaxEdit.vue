@@ -7,7 +7,7 @@ const form = reactive({
   valueThird: true
 });
 const list = ref([
-  { name: '压力主管评分', value: 'valueFirst' },
+  { name: '压力主观评分', value: 'valueFirst' },
   { name: '压力比例', value: 'valueSecound' },
   { name: '压力总结', value: 'valueThird' }
 ]);

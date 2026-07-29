@@ -11,6 +11,7 @@ import {
 } from '@/homeDetail/vitalSigns/metricSleepTimelineAxis';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useUserStore } from '@/stores/user';
+import { useRingStore } from '@/stores';
 import { submitData } from '@/common/api/homeDetail';
 import type { heartRateDetail, Point, sleepSegment } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
@@ -24,6 +25,7 @@ import {
   MAX_VITAL_MEASUREMENT_DURATION_MS
 } from '@/utils/measurementDuration';
 const userStore = useUserStore();
+const ringStore = useRingStore();
 const { sendOxyGenCommand, refreshHealthData } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
 const echarts = require('../../../static/echarts.min.js');
@@ -195,6 +197,7 @@ let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
 let measureStartedAt = 0;
 const isRwDevice = () => userStore.deviceInfo?.protocol === 'rw';
+const getLatestSpo2ReadingFromStores = () => getLatestSpo2Reading(userStore, measureStartedAt) || getLatestSpo2Reading(ringStore, measureStartedAt);
 const clearMeasureCompleteTimer = () => {
   if (!measureCompleteTimer) return;
   clearTimeout(measureCompleteTimer);
@@ -283,6 +286,7 @@ const startMeasure = async () => {
       return;
     }
     await requestMetricRefresh(refreshHealthData, sendOxyGenCommand, { expectedSteps: 'blood_oxygen' });
+    await completeMeasureWithLatestReading();
   } catch (error) {
     if (measureStatus.value !== 'measuring') return;
     popup.value?.close();
@@ -305,7 +309,7 @@ watch(
   (newData) => {
     if (measureStatus.value !== 'measuring') return;
 
-    const latestReading = getLatestSpo2Reading(userStore, measureStartedAt);
+    const latestReading = getLatestSpo2ReadingFromStores();
     if (latestReading) {
       void completeMeasureWithLatestReading();
     }
@@ -317,7 +321,7 @@ watch(
   () => measureStatus.value,
   async (newStatus, oldStatus) => {
     if (newStatus === 'completed' && oldStatus !== 'completed') {
-      const latest: any = getLatestSpo2Reading(userStore, measureStartedAt);
+      const latest: any = getLatestSpo2ReadingFromStores();
       if (latest?.bloodOxygen == null) {
         measureStatus.value = 'idle';
         uni.showToast({ title: '设备未返回有效测量值', icon: 'none' });

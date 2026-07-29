@@ -5,20 +5,21 @@ import { enqueueRwDiagnosticUpload } from '@/utils/rwDiagnosticUpload';
 import {
   buildRwDeleteHealthDataCommand,
   buildRwReadDateTimeKeyCommand,
-  buildRwLegacyCompatSyncTimeCommand,
   buildRwQkeerV2HistoryListCommand,
   buildRwQkeerV2LastDataCommand,
   buildRwReadContinueKeyCommand,
   buildRwReadHealthDataCommand,
   buildRwReadKeyCommand,
   buildRwReadLocalDataCommand,
-  buildRwReadTimeCommand,
   buildRwRequestUploadCommand,
   buildRwSetDateTimeKeyCommand,
-  buildRwSyncTimeCommand,
+  buildRwSetHealthMonitoringCommand,
+  buildRwSetTimeFormatKeyCommand,
+  buildRwSetTimeZoneKeyCommand,
   RwKey,
   RwKeyFlag,
-  RwQkeerV2HistoryCommand
+  RwQkeerV2HistoryCommand,
+  type RwHealthMonitoringConfig
 } from './protocol';
 import type { RwFileListItem } from './parser';
 
@@ -45,12 +46,13 @@ const RW_HISTORY_AB_KEY_PRE_NATIVE_RESPONSE_WAIT_MS = 2200;
 const RW_HISTORY_AB_KEY_PRE_NATIVE_COMMAND_LIMIT = 1;
 const RW_HISTORY_AB_KEY_RESPONSE_WAIT_MS = 2500;
 const RW_HISTORY_AB_KEY_DELETE_WAIT_MS = 2200;
+const RW_HISTORY_AB_KEY_SDK_LOOP_MAX_READS = 32;
 const RW_HISTORY_AB_ACTIVITY_SDK_LOOP_MAX_READS = 8;
 const RW_HISTORY_AB_SLEEP_SDK_LOOP_MAX_READS = 32;
 const RW_HISTORY_AB_KEY_COMMAND_INTERVAL_MS = 180;
-const RW_HISTORY_ALLOW_DEVICE_DELETE_AFTER_READ = false;
 const RW_HISTORY_PREFLIGHT_DELAY_MS = 500;
 const RW_HISTORY_PREFLIGHT_RESPONSE_TIMEOUT_MS = 2000;
+const RW_HISTORY_DEFAULT_MONITORING_INTERVAL_MINUTES = 60;
 const RING_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
 const RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH = 4000;
@@ -241,13 +243,13 @@ const runRwHistoryPreflight = async (
 
   appendRwHistoryDiagnosticLog('history-preflight-start', {
     ...readDetails,
-    syncFrameType: 'rw-key+rw-frame+legacy-frame',
+    syncFrameType: 'rw-app-sdk-key',
     syncCommands: [
+      'history/preflight-sync-time-zone-key',
       'history/preflight-sync-time-key',
-      'history/preflight-sync-time-rw',
-      'history/preflight-sync-time-legacy',
+      'history/preflight-sync-time-format-key',
       'history/preflight-read-time-key',
-      'history/preflight-read-time'
+      'history/preflight-default-monitoring'
     ],
     delayMs: preflightDelayMs,
     responseTimeoutMs
@@ -255,15 +257,15 @@ const runRwHistoryPreflight = async (
 
   try {
     const now = Date.now();
+    await adapter.sendBytes(buildRwSetTimeZoneKeyCommand(), 'history/preflight-sync-time-zone-key');
+    if (preflightDelayMs > 0) await sleep(Math.min(preflightDelayMs, 250));
     await adapter.sendBytes(buildRwSetDateTimeKeyCommand(now), 'history/preflight-sync-time-key');
     if (preflightDelayMs > 0) await sleep(Math.min(preflightDelayMs, 250));
-    await adapter.sendBytes(buildRwSyncTimeCommand(now), 'history/preflight-sync-time-rw');
+    await adapter.sendBytes(buildRwSetTimeFormatKeyCommand(true), 'history/preflight-sync-time-format-key');
     if (preflightDelayMs > 0) await sleep(Math.min(preflightDelayMs, 250));
-    await adapter.sendBytes(buildRwLegacyCompatSyncTimeCommand(now), 'history/preflight-sync-time-legacy');
-    if (preflightDelayMs > 0) await sleep(preflightDelayMs);
+    await sendRwDefaultMonitoringConfigs(adapter, readDetails, preflightDelayMs);
+    if (preflightDelayMs > 0) await sleep(Math.min(preflightDelayMs, 250));
     await adapter.sendBytes(buildRwReadDateTimeKeyCommand(), 'history/preflight-read-time-key');
-    if (preflightDelayMs > 0) await sleep(Math.min(preflightDelayMs, 250));
-    await adapter.sendBytes(buildRwReadTimeCommand(), 'history/preflight-read-time');
 
     let preflightResponse: RingParsedData | null = null;
     if (pendingTimeResponse) {
@@ -272,7 +274,7 @@ const runRwHistoryPreflight = async (
       } catch (error) {
         appendRwHistoryDiagnosticLog('history-preflight-timeout', {
           ...readDetails,
-          syncFrameType: 'rw-key+rw-frame+legacy-frame',
+          syncFrameType: 'rw-app-sdk-key',
           delayMs: preflightDelayMs,
           responseTimeoutMs,
           error: formatRwHistoryError(error)
@@ -291,7 +293,7 @@ const runRwHistoryPreflight = async (
 
     appendRwHistoryDiagnosticLog('history-preflight-sent', {
       ...readDetails,
-      syncFrameType: 'rw-key+rw-frame+legacy-frame',
+      syncFrameType: 'rw-app-sdk-key',
       delayMs: preflightDelayMs,
       responseTimeoutMs,
       responseType: preflightResponse?.type || ''
@@ -301,6 +303,50 @@ const runRwHistoryPreflight = async (
       ...readDetails,
       error: formatRwHistoryError(error)
     });
+  }
+};
+
+const sendRwDefaultMonitoringConfigs = async (
+  adapter: LegacyRingAdapter,
+  readDetails: Record<string, unknown>,
+  preflightDelayMs: number
+) => {
+  const config: RwHealthMonitoringConfig = {
+    enabled: true,
+    startHour: 0,
+    startMinute: 0,
+    endHour: 23,
+    endMinute: 59,
+    interval: RW_HISTORY_DEFAULT_MONITORING_INTERVAL_MINUTES
+  };
+  const commands = [
+    { label: 'heart-rate', key: RwKey.HrMonitoring },
+    { label: 'blood-oxygen', key: RwKey.Spo2Monitoring },
+    { label: 'hrv', key: RwKey.HrvMonitoring },
+    { label: 'stress', key: RwKey.StressMonitoring }
+  ];
+
+  appendRwHistoryDiagnosticLog('history-preflight-default-monitoring-start', {
+    ...readDetails,
+    intervalMinutes: config.interval,
+    commands: commands.map((item) => item.label)
+  });
+
+  for (const command of commands) {
+    try {
+      await adapter.sendBytes(
+        buildRwSetHealthMonitoringCommand(command.key, config),
+        `history/preflight-default-monitoring/${command.label}`
+      );
+      if (preflightDelayMs > 0) await sleep(Math.min(preflightDelayMs, 120));
+    } catch (error) {
+      appendRwHistoryDiagnosticLog('history-preflight-default-monitoring-failed', {
+        ...readDetails,
+        key: command.key,
+        label: command.label,
+        error: formatRwHistoryError(error)
+      });
+    }
   }
 };
 
@@ -353,15 +399,14 @@ const readRwAbHealthHistoryKeys = async (
   const phase = readOptions.phase || 'final';
   const responseWaitMs = readOptions.responseWaitMs ?? RW_HISTORY_AB_KEY_RESPONSE_WAIT_MS;
   const requestedDeleteAfterRead = readOptions.deleteAfterRead ?? options.deleteAfterRead === true;
-  const deleteAfterRead = requestedDeleteAfterRead && RW_HISTORY_ALLOW_DEVICE_DELETE_AFTER_READ;
   appendRwHistoryDiagnosticLog('history-ab-key-fallback', {
     ...readDetails,
     phase,
     commands: commands.map((item) => item.label),
     responseWaitMs,
-    deleteAfterRead,
     requestedDeleteAfterRead,
-    deviceDeleteBlocked: requestedDeleteAfterRead && !deleteAfterRead,
+    packetAckMode: 'app-sdk-flag-30-after-payload',
+    deleteAfterReadIgnored: requestedDeleteAfterRead,
     commandIntervalMs: RW_HISTORY_AB_KEY_COMMAND_INTERVAL_MS
   });
 
@@ -377,11 +422,16 @@ const readRwAbHealthHistoryKeys = async (
       command,
       readDetails,
       phase,
-      responseWaitMs,
-      deleteAfterRead
+      responseWaitMs
     );
     if (sdkLoopResponses.length > 0) {
       responses.push(...sdkLoopResponses);
+      if (RW_HISTORY_AB_KEY_COMMAND_INTERVAL_MS > 0) {
+        await sleep(RW_HISTORY_AB_KEY_COMMAND_INTERVAL_MS);
+      }
+      continue;
+    }
+    if (isRwAbSdkAckLoopKey(command.key)) {
       if (RW_HISTORY_AB_KEY_COMMAND_INTERVAL_MS > 0) {
         await sleep(RW_HISTORY_AB_KEY_COMMAND_INTERVAL_MS);
       }
@@ -492,32 +542,27 @@ const readRwAbHealthHistoryWithSdkDeleteLoop = async (
   command: RwAbHealthHistoryCommand,
   readDetails: Record<string, unknown>,
   phase: 'pre-native' | 'final',
-  responseWaitMs: number,
-  deleteAfterRead: boolean
+  responseWaitMs: number
 ) => {
-  if (command.key === RwKey.Sleep) {
-    return readRwAbSleepHistoryWithSdkDeleteLoop(adapter, command, readDetails, phase, responseWaitMs, deleteAfterRead);
-  }
-  if (command.key !== RwKey.Activity) return [];
+  if (!isRwAbSdkAckLoopKey(command.key)) return [];
 
   const responses: RingParsedData[] = [];
-  let reachedEnd = false;
+  const maxReads = getRwAbSdkAckLoopMaxReads(command.key);
   appendRwHistoryDiagnosticLog('history-ab-key-sdk-loop-start', {
     ...readDetails,
     phase,
     key: command.key,
     label: command.label,
-    strategy: 'GET_GET_DEL',
+    strategy: 'GET_ACK_GET_UNTIL_EMPTY',
     readFlag: RwKeyFlag.Read,
-    deleteFlag: RwKeyFlag.Delete,
-    deleteAfterRead,
-    maxReads: RW_HISTORY_AB_ACTIVITY_SDK_LOOP_MAX_READS,
+    ackFlag: RwKeyFlag.Delete,
+    maxReads,
     responseWaitMs,
-    deleteWaitMs: RW_HISTORY_AB_KEY_DELETE_WAIT_MS
+    ackWaitMs: RW_HISTORY_AB_KEY_DELETE_WAIT_MS
   });
 
-  for (let readIndex = 0; readIndex < RW_HISTORY_AB_ACTIVITY_SDK_LOOP_MAX_READS; readIndex += 1) {
-    const commandLabel = `history/ab-key/${command.label}/sdk-read`;
+  for (let readIndex = 0; readIndex < maxReads; readIndex += 1) {
+    const commandLabel = `history/ab-key/${command.label}/read`;
     if (shouldSkipRwHistoryCommandForDiagnosticLock(readDetails, commandLabel, {
       phase,
       key: command.key,
@@ -547,133 +592,24 @@ const readRwAbHealthHistoryWithSdkDeleteLoop = async (
         response: summarizeRwHistoryInitialResponse(parsed)
       });
       if (!hasPayload) {
-        reachedEnd = true;
         break;
       }
-    } catch (error) {
-      appendRwHistoryDiagnosticLog('history-ab-key-sdk-read-timeout', {
-        ...readDetails,
-        phase,
-        key: command.key,
-        label: command.label,
-        readIndex: readIndex + 1,
-        error: formatRwHistoryError(error)
-      });
-      break;
-    }
 
-    if (RW_HISTORY_AB_KEY_COMMAND_INTERVAL_MS > 0) {
-      await sleep(RW_HISTORY_AB_KEY_COMMAND_INTERVAL_MS);
-    }
-  }
-
-  if (responses.length === 0) return responses;
-
-  if (!reachedEnd) {
-    appendRwHistoryDiagnosticLog('history-ab-key-sdk-delete-skipped', {
-      ...readDetails,
-      phase,
-      key: command.key,
-      label: command.label,
-      reason: 'read-loop-not-ended',
-      readCount: responses.length,
-      maxReads: RW_HISTORY_AB_ACTIVITY_SDK_LOOP_MAX_READS
-    });
-    return responses;
-  }
-
-  await sendRwAbHealthHistorySdkDelete(adapter, command, readDetails, phase, responses.length, 'empty', deleteAfterRead);
-
-  return responses;
-};
-
-const readRwAbSleepHistoryWithSdkDeleteLoop = async (
-  adapter: LegacyRingAdapter,
-  command: RwAbHealthHistoryCommand,
-  readDetails: Record<string, unknown>,
-  phase: 'pre-native' | 'final',
-  responseWaitMs: number,
-  deleteAfterRead: boolean
-) => {
-  const responses: RingParsedData[] = [];
-  let reachedEnd = false;
-  appendRwHistoryDiagnosticLog('history-ab-key-sdk-loop-start', {
-    ...readDetails,
-    phase,
-    key: command.key,
-    label: command.label,
-    strategy: 'GET_DEL_GET_DEL',
-    readFlag: RwKeyFlag.Read,
-    deleteFlag: RwKeyFlag.Delete,
-    deleteAfterRead,
-    maxReads: RW_HISTORY_AB_SLEEP_SDK_LOOP_MAX_READS,
-    responseWaitMs,
-    deleteWaitMs: RW_HISTORY_AB_KEY_DELETE_WAIT_MS
-  });
-
-  for (let readIndex = 0; readIndex < RW_HISTORY_AB_SLEEP_SDK_LOOP_MAX_READS; readIndex += 1) {
-    const commandLabel = `history/ab-key/${command.label}/sdk-read`;
-    if (shouldSkipRwHistoryCommandForDiagnosticLock(readDetails, commandLabel, {
-      phase,
-      key: command.key,
-      label: command.label,
-      readIndex: readIndex + 1
-    })) break;
-
-    const pendingRead = adapter.waitForParsedData(
-      (parsed) => isRwAbHealthHistoryResponseForKeyAndAttempt(parsed, command.key, RwKeyFlag.Read),
-      responseWaitMs
-    );
-    pendingRead.catch(() => undefined);
-
-    await adapter.sendBytes(buildRwReadHealthDataCommand(command.key), commandLabel);
-
-    try {
-      const parsed = await pendingRead;
-      responses.push(parsed);
-      const hasPayload = hasRwAbHealthHistoryPayload(parsed);
-      appendRwHistoryDiagnosticLog('history-ab-key-sdk-read-response', {
-        ...readDetails,
-        phase,
-        key: command.key,
-        label: command.label,
-        readIndex: readIndex + 1,
-        hasPayload,
-        response: summarizeRwHistoryInitialResponse(parsed)
-      });
-
-      const deleteResponse = await sendRwAbHealthHistorySdkDelete(
+      const ackResponse = await sendRwAbHealthHistorySdkAck(
         adapter,
         command,
         readDetails,
         phase,
         responses.length,
-        hasPayload ? 'payload' : 'empty',
-        deleteAfterRead
+        'payload'
       );
-
-      if (!hasPayload) {
-        reachedEnd = true;
-        break;
-      }
-      if (!deleteAfterRead) {
+      if (!ackResponse) {
         appendRwHistoryDiagnosticLog('history-ab-key-sdk-loop-stopped', {
           ...readDetails,
           phase,
           key: command.key,
           label: command.label,
-          reason: 'delete-after-read-disabled',
-          readCount: responses.length
-        });
-        break;
-      }
-      if (!deleteResponse) {
-        appendRwHistoryDiagnosticLog('history-ab-key-sdk-loop-stopped', {
-          ...readDetails,
-          phase,
-          key: command.key,
-          label: command.label,
-          reason: 'delete-timeout-after-payload',
+          reason: 'ack-timeout-after-payload',
           readCount: responses.length
         });
         break;
@@ -695,83 +631,89 @@ const readRwAbSleepHistoryWithSdkDeleteLoop = async (
     }
   }
 
-  if (responses.length > 0 && !reachedEnd) {
+  if (responses.length > 0 && hasRwAbHealthHistoryPayload(responses[responses.length - 1])) {
     appendRwHistoryDiagnosticLog('history-ab-key-sdk-loop-not-ended', {
       ...readDetails,
       phase,
       key: command.key,
       label: command.label,
       readCount: responses.length,
-      maxReads: RW_HISTORY_AB_SLEEP_SDK_LOOP_MAX_READS
+      maxReads
     });
   }
 
   return responses;
 };
 
-const sendRwAbHealthHistorySdkDelete = async (
+const sendRwAbHealthHistorySdkAck = async (
   adapter: LegacyRingAdapter,
   command: RwAbHealthHistoryCommand,
   readDetails: Record<string, unknown>,
   phase: 'pre-native' | 'final',
   readCount: number,
-  deleteReason: 'empty' | 'payload',
-  deleteAfterRead: boolean
+  ackReason: 'payload'
 ) => {
-  const commandLabel = `history/ab-key/${command.label}/sdk-delete`;
-  if (!deleteAfterRead || !RW_HISTORY_ALLOW_DEVICE_DELETE_AFTER_READ) {
-    appendRwHistoryDiagnosticLog('history-ab-key-sdk-delete-skipped', {
-      ...readDetails,
-      phase,
-      key: command.key,
-      label: command.label,
-      readCount,
-      deleteReason,
-      reason: RW_HISTORY_ALLOW_DEVICE_DELETE_AFTER_READ ? 'delete-after-read-disabled' : 'device-delete-disabled-for-diagnostics'
-    });
-    return null;
-  }
-
+  const commandLabel = `history/ab-key/${command.label}/ack`;
   if (shouldSkipRwHistoryCommandForDiagnosticLock(readDetails, commandLabel, {
     phase,
     key: command.key,
     label: command.label,
     readCount,
-    deleteReason
+    ackReason
   })) return null;
 
-  const pendingDelete = adapter.waitForParsedData(
+  const pendingAck = adapter.waitForParsedData(
     (parsed) => isRwAbHealthHistoryResponseForKeyAndAttempt(parsed, command.key, RwKeyFlag.Delete),
     RW_HISTORY_AB_KEY_DELETE_WAIT_MS
   );
-  pendingDelete.catch(() => undefined);
+  pendingAck.catch(() => undefined);
 
   await adapter.sendBytes(buildRwDeleteHealthDataCommand(command.key), commandLabel);
 
   try {
-    const parsed = await pendingDelete;
-    appendRwHistoryDiagnosticLog('history-ab-key-sdk-delete-response', {
+    const parsed = await pendingAck;
+    appendRwHistoryDiagnosticLog('history-ab-key-sdk-ack-response', {
       ...readDetails,
       phase,
       key: command.key,
       label: command.label,
       readCount,
-      deleteReason,
+      ackReason,
       response: summarizeRwHistoryInitialResponse(parsed)
     });
     return parsed;
   } catch (error) {
-    appendRwHistoryDiagnosticLog('history-ab-key-sdk-delete-timeout', {
+    appendRwHistoryDiagnosticLog('history-ab-key-sdk-ack-timeout', {
       ...readDetails,
       phase,
       key: command.key,
       label: command.label,
       readCount,
-      deleteReason,
+      ackReason,
       error: formatRwHistoryError(error)
     });
     return null;
   }
+};
+
+const isRwAbSdkAckLoopKey = (key: RwKey) => [
+  RwKey.ActivityCurrentDay,
+  RwKey.Activity,
+  RwKey.Sleep,
+  RwKey.RawSleep,
+  RwKey.HeartRate,
+  RwKey.BloodPressure,
+  RwKey.Temperature,
+  RwKey.BloodOxygen,
+  RwKey.Hrv,
+  RwKey.Stress,
+  RwKey.BloodSugar
+].includes(key);
+
+const getRwAbSdkAckLoopMaxReads = (key: RwKey) => {
+  if (key === RwKey.ActivityCurrentDay || key === RwKey.Activity) return RW_HISTORY_AB_ACTIVITY_SDK_LOOP_MAX_READS;
+  if (key === RwKey.Sleep || key === RwKey.RawSleep) return RW_HISTORY_AB_SLEEP_SDK_LOOP_MAX_READS;
+  return RW_HISTORY_AB_KEY_SDK_LOOP_MAX_READS;
 };
 
 const mergeRwAbHealthHistoryParsed = (...values: Array<RingParsedData | null | undefined>) => {
@@ -1520,7 +1462,7 @@ const hasRwAbHealthHistoryPayload = (parsed: RingParsedData) => {
   const data = Array.isArray((parsed as { data?: unknown }).data)
     ? ((parsed as { data?: unknown[] }).data || [])
     : [];
-  return Number(parsed.key) === RwKey.Sleep && data.length > 1;
+  return data.length > 1;
 };
 
 const hasRwHistoryParsedPayload = (parsed: RingParsedData | null | undefined) => {
