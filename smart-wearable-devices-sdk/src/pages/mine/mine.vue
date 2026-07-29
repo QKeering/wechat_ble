@@ -2459,6 +2459,27 @@ const isLoading = computed(() =>
     isReconnecting: userStore.isReconnecting === true || ringStore.isReconnecting === true
   })
 );
+const mineBluetoothStatus = computed(() => {
+  if (isConnectedStatus.value) {
+    return {
+      iconPath: '/static/images/mine/bluetooth02.png',
+      text: '已连接',
+      textColor: '#4C76F1'
+    };
+  }
+  if (isLoading.value) {
+    return {
+      iconPath: '/static/images/mine/bluetooth01.png',
+      text: '连接中',
+      textColor: '#010101'
+    };
+  }
+  return {
+    iconPath: '/static/images/mine/bluetooth03.png',
+    text: '未连接',
+    textColor: '#010101'
+  };
+});
 const isMineHistorySyncing = computed(() => historySyncBusy.value || controller.isSyncingHistory.value);
 const isMineMetricReading = computed(() => metricTestBusy.value);
 const isMineProtocolProbeRunning = computed(() => protocolProbeBusy.value);
@@ -4019,11 +4040,11 @@ const handleMineRwL19Acceptance = async () => {
           <view class="device-status flex fd-c ai-center mr-30" style="min-height: 150rpx">
             <image
               class="device-status-icon"
-              :src="isConnectedStatus ? '/static/images/mine/bluetooth02.png' : '/static/images/mine/bluetooth01.png'"
+              :src="mineBluetoothStatus.iconPath"
               mode="aspectFit"
             ></image>
-            <view class="device-text mt-10" :style="{ color: isConnectedStatus ? '#4C76F1' : '#010101' }">
-              {{ isConnectedStatus ? '\u5df2\u8fde\u63a5' : '\u672a\u8fde\u63a5' }}
+            <view class="device-text mt-10" :style="{ color: mineBluetoothStatus.textColor }">
+              {{ mineBluetoothStatus.text }}
             </view>
           </view>
           <view>

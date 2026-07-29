@@ -29,6 +29,29 @@ export interface SubmitRingHistorySyncResultResult {
 
 const HISTORY_FUTURE_TOLERANCE_SECONDS = 10 * 60;
 const RW_FALLBACK_TEMPERATURE_CELSIUS = 36.6;
+const RING_HISTORY_SUBMIT_DEDUPE_FIELDS = [
+  'recordTime',
+  'stepCount',
+  'rawStepCount',
+  'cumulativeStepCount',
+  'stepCountSource',
+  'heartRate',
+  'hrv',
+  'spo2',
+  'stress',
+  'bloodSugar',
+  'systolic',
+  'diastolic',
+  'temperature',
+  'sleepState',
+  'sleepDuration',
+  'startTime',
+  'endTime',
+  'dateRef',
+  'motionIntensity',
+  'perfusionIndex',
+  'rrIntervals'
+];
 
 const HISTORY_SOURCE_TYPES = new Set([
   'local_data',
@@ -634,6 +657,21 @@ const resolveSleepDateRef = (explicitDateRef: unknown, startTime?: string, endTi
   return startDate || endDate;
 };
 
+const getRingHistorySubmitDedupeKey = (record: RingHistorySubmitRecord) =>
+  JSON.stringify(RING_HISTORY_SUBMIT_DEDUPE_FIELDS.map((field) => [field, record[field] ?? null]));
+
+const dedupeRingHistorySubmitRecords = (records: RingHistorySubmitRecord[]) => {
+  const seen = new Set<string>();
+  const deduped: RingHistorySubmitRecord[] = [];
+  records.forEach((record) => {
+    const key = getRingHistorySubmitDedupeKey(record);
+    if (seen.has(key)) return;
+    seen.add(key);
+    deduped.push(record);
+  });
+  return deduped;
+};
+
 export const isRingHistoryPayload = (item: RingHistoryRecord) => HISTORY_SOURCE_TYPES.has(item?.type);
 
 export const isRingHistoryReadComplete = (receivedData: RingHistoryRecord[] = []) => {
@@ -664,7 +702,7 @@ export const isRingHistoryReadComplete = (receivedData: RingHistoryRecord[] = []
 };
 
 export const buildRingHistorySubmitRecords = (records: RingHistoryRecord[] = [], lastReadTimestamp = 0): RingHistorySubmitRecord[] => {
-  return records
+  const submitRecords = records
     .filter((record) => {
       const unixTime = getRingHistoryRecordSyncUnixTime(record);
       return !lastReadTimestamp || !unixTime || unixTime >= lastReadTimestamp;
@@ -777,6 +815,8 @@ export const buildRingHistorySubmitRecords = (records: RingHistoryRecord[] = [],
       return item;
     })
     .filter((record) => Object.keys(record).some((key) => key !== 'recordTime') && record.recordTime);
+
+  return dedupeRingHistorySubmitRecords(submitRecords);
 };
 
 export const submitRingHistorySyncResult = async (

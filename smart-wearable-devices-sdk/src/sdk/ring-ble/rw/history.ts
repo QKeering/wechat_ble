@@ -1462,7 +1462,7 @@ const hasRwAbHealthHistoryPayload = (parsed: RingParsedData) => {
   const data = Array.isArray((parsed as { data?: unknown }).data)
     ? ((parsed as { data?: unknown[] }).data || [])
     : [];
-  return Number(parsed.key) === RwKey.Sleep && data.length > 1;
+  return data.length > 1;
 };
 
 const hasRwHistoryParsedPayload = (parsed: RingParsedData | null | undefined) => {

@@ -97,6 +97,18 @@ const getParsedDataKey = (item: RingParsedData) => {
   return type;
 };
 
+const HISTORY_PARSED_DATA_TYPES = new Set([
+  'local_data',
+  'qkeer_v2_health_list',
+  'qkeer_v2_last_data',
+  'qkeer_v2_step_list',
+  'qkeer_v2_sleep_list',
+  'rw_upload_file',
+  'rw_file_list'
+]);
+
+const isHistoryParsedData = (item: RingParsedData) => HISTORY_PARSED_DATA_TYPES.has(item?.type);
+
 export const useRingStore = defineStore('ring', () => {
   const devices = ref<RingDeviceInfo[]>([]);
   const deviceInfo = ref<RingDeviceInfo>({});
@@ -382,6 +394,12 @@ export const useRingStore = defineStore('ring', () => {
     localData.value = [];
     lastMetricUpdateAt.value = 0;
     clearMetricSnapshot();
+  };
+
+  const clearHistoryRuntimeData = () => {
+    receivedData.value = receivedData.value.filter((item) => !isHistoryParsedData(item));
+    historyRecords.value = [];
+    localData.value = [];
   };
 
   watch(
@@ -747,6 +765,7 @@ export const useRingStore = defineStore('ring', () => {
     updateUploadingStatus: setUploadingStatus,
     updateDeviceInfo: setDeviceInfo,
     updateReceivedData: setReceivedData,
+    clearHistoryRuntimeData,
     clearRuntime
   };
 });

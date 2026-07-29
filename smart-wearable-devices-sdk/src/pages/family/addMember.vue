@@ -237,7 +237,7 @@ const acceptInvite = async () => {
 .page {
   min-height: 100vh;
   background: #f1f3f6;
-  padding: 0 30rpx 140rpx;
+  padding: 0 30rpx calc(240rpx + env(safe-area-inset-bottom));
   box-sizing: border-box;
 }
 .section,
@@ -360,7 +360,10 @@ const acceptInvite = async () => {
   position: fixed;
   left: 30rpx;
   right: 30rpx;
-  bottom: 40rpx;
+  bottom: calc(40rpx + env(safe-area-inset-bottom));
+  z-index: 20;
+  padding-top: 24rpx;
+  background: linear-gradient(180deg, rgba(241, 243, 246, 0), #f1f3f6 38%);
 }
 .invite-actions {
   display: flex;

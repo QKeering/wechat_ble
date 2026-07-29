@@ -27,6 +27,10 @@ export enum RwKey {
   TimeFormat = 0x020e,
   HrMonitoring = 0x0216,
   TemperatureDetecting = 0x021b,
+  AppFunctionV2 = 0x0263,
+  AppVideoHid = 0x0264,
+  AppLedLevel = 0x0266,
+  AppRingWearHand = 0x0268,
   Spo2Monitoring = 0x0225,
   HrvMonitoring = 0x026a,
   StressMonitoring = 0x026b,
@@ -51,7 +55,8 @@ export enum RwKey {
   AppRealTimeBloodOxygen = 0x024e,
   AppRealTimeStress = 0x024f,
   AppRealTimeHrv = 0x0269,
-  AppRealTimeBloodSugar = 0x026c
+  AppRealTimeBloodSugar = 0x026c,
+  AppLoginBind = 0x0302
 }
 
 export enum RwHealthDataControlKey {
@@ -199,6 +204,18 @@ export const buildRwSetTimeFormatKeyCommand = (use24Hour = true) => {
 };
 
 export const buildRwReadDateTimeKeyCommand = () => buildRwReadKeyCommand(RwKey.Time);
+
+export const buildRwLoginBindCommand = () => {
+  return buildRwKeyCommand(new Uint8Array([RwKey.AppLoginBind >> 8, RwKey.AppLoginBind & 0xff, RwKeyFlag.Create]));
+};
+
+export const buildRwReadFunctionV2Command = () => buildRwReadKeyCommand(RwKey.AppFunctionV2);
+
+export const buildRwReadLedLevelCommand = () => buildRwReadKeyCommand(RwKey.AppLedLevel);
+
+export const buildRwReadVideoHidCommand = () => buildRwReadKeyCommand(RwKey.AppVideoHid);
+
+export const buildRwReadRingWearHandCommand = () => buildRwReadKeyCommand(RwKey.AppRingWearHand);
 
 export const buildRwReadFileListCommand = () => buildRwFrame(RwCommand.FileSystem, RwFileSystemSubcommand.ReadFileList);
 
@@ -439,6 +456,28 @@ export const buildRwKeyCommand = (payload: Uint8Array, checksumProvider?: RwChec
   bytes[5] = checksum & 0xff;
   bytes.set(payload, 6);
   return bytes;
+};
+
+export const buildRwKeyResponseCommand = (payload: Uint8Array, checksumProvider?: RwChecksumProvider) => {
+  const bytes = new Uint8Array(6 + payload.length);
+  bytes[0] = 0xab;
+  bytes[1] = 0x11;
+  bytes[2] = (payload.length >> 8) & 0xff;
+  bytes[3] = payload.length & 0xff;
+  const checksum = (checksumProvider?.(payload) ?? rwCrc16X26(payload)) & 0xffff;
+  bytes[4] = checksum >> 8;
+  bytes[5] = checksum & 0xff;
+  bytes.set(payload, 6);
+  return bytes;
+};
+
+export const buildRwAppDataControlAckCommand = () => {
+  return buildRwKeyResponseCommand(new Uint8Array([
+    RwKey.AppDataControl >> 8,
+    RwKey.AppDataControl & 0xff,
+    RwKeyFlag.Update,
+    0x00
+  ]));
 };
 
 export const buildRwQkeerV2Packet = (

@@ -5,23 +5,127 @@ import { getBindInfo } from '@/common/api/device';
 import { getFamilyGuardians, type FamilyGuardian } from '@/common/api/family';
 import { getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
+import { useRingBusinessData } from '@/composables/useRingBusinessData';
+import { useRingStore } from '@/stores';
+import { useUserStore } from '@/stores/user';
 
 const loading = ref(false);
-const device = ref<any>(null);
+const boundDevice = ref<any>(null);
 const guardians = ref<FamilyGuardian[]>([]);
+const ring = useRingBusinessData();
+const ringStore = useRingStore();
+const userStore = useUserStore();
 
-const hasDevice = computed(() => hasBoundRingIdentity(device.value));
-const deviceName = computed(() => device.value?.deviceName || device.value?.name || '智能穿戴设备');
+const pickFirstValue = (...values: unknown[]) => {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    return value;
+  }
+  return undefined;
+};
+
+const formatSyncTime = (value: unknown) => {
+  if (value === undefined || value === null || value === '') return '';
+  const text = String(value).trim();
+  if (!text || text === '0') return '';
+  const numeric = Number(text);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    const timestamp = numeric > 1e12 ? numeric : numeric > 1e9 ? numeric * 1000 : 0;
+    if (timestamp > 0) {
+      const date = new Date(timestamp);
+      const pad = (item: number) => String(item).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+  }
+  return text.replace('T', ' ').slice(0, 16);
+};
+
+const getDeviceMac = (device?: Record<string, any> | null) =>
+  pickFirstValue(device?.mac, device?.deviceMac, device?.advertis?.macInfo, device?.uniMacId, device?.deviceId);
+
+const device = computed(() => {
+  const backend = boundDevice.value || {};
+  const currentDevice = (ring.deviceInfo.value || {}) as Record<string, any>;
+  const storeDevice = (ringStore.deviceInfo || {}) as Record<string, any>;
+  const userDevice = (userStore.deviceInfo || {}) as Record<string, any>;
+  const metrics = (ring.metrics.value || {}) as Record<string, any>;
+  const healthData = (ring.healthData.value || {}) as Record<string, any>;
+  const latestSyncAt =
+    ring.lastMetricUpdateAt.value ||
+    ringStore.lastMetricUpdateAt ||
+    userStore.lastMetricUpdateAt ||
+    healthData.lastMetricUpdateAt ||
+    metrics.lastMetricUpdateAt ||
+    0;
+
+  return {
+    ...storeDevice,
+    ...userDevice,
+    ...currentDevice,
+    ...backend,
+    deviceName:
+      pickFirstValue(
+        backend.deviceName,
+        backend.name,
+        currentDevice.displayName,
+        currentDevice.deviceName,
+        currentDevice.name,
+        storeDevice.displayName,
+        storeDevice.deviceName,
+        storeDevice.name,
+        userDevice.displayName,
+        userDevice.deviceName,
+        userDevice.name
+      ) || '',
+    name:
+      pickFirstValue(
+        backend.name,
+        backend.deviceName,
+        currentDevice.name,
+        currentDevice.displayName,
+        storeDevice.name,
+        storeDevice.displayName,
+        userDevice.name,
+        userDevice.displayName
+      ) || '',
+    mac: pickFirstValue(getDeviceMac(backend), getDeviceMac(currentDevice), getDeviceMac(storeDevice), getDeviceMac(userDevice), ring.normalMac.value, ring.iosMacId.value),
+    battery: pickFirstValue(
+      backend.battery,
+      backend.electricity,
+      backend.power,
+      metrics.battery,
+      healthData.battery,
+      healthData.batteryValue,
+      userStore.latestMetrics?.battery,
+      userStore.healthData?.battery
+    ),
+    lastSyncTime:
+      pickFirstValue(
+        backend.lastSyncTime,
+        backend.lastSyncAt,
+        backend.syncTime,
+        backend.updateTime,
+        backend.lastUploadTime,
+        formatSyncTime(latestSyncAt)
+      ) || ''
+  };
+});
 const deviceIdentity = computed(() => getBoundRingIdentity(device.value) || device.value?.sn || device.value?.mac || '');
+const hasDevice = computed(() => hasBoundRingIdentity(device.value) || Boolean(deviceIdentity.value));
+const deviceName = computed(() => device.value?.deviceName || device.value?.name || '智能穿戴设备');
+const lastSyncValue = computed(() =>
+  formatSyncTime(pickFirstValue(device.value?.lastSyncTime, device.value?.lastSyncAt, device.value?.syncTime, device.value?.updateTime))
+);
 const lastSyncText = computed(() => {
-  const value = device.value?.lastSyncTime || device.value?.updateTime;
-  if (!value) return '还没有同步记录';
-  return `最近同步：${String(value).slice(0, 16)}`;
+  if (!lastSyncValue.value) return '还没有同步记录';
+  return `最近同步：${lastSyncValue.value}`;
 });
 const batteryValue = computed(() => {
   const value = device.value?.battery ?? device.value?.electricity ?? device.value?.power;
   if (value === undefined || value === null || value === '') return null;
-  const number = Math.round(Number(value));
+  const matched = String(value).match(/-?\d+(?:\.\d+)?/);
+  const number = Math.round(Number(matched?.[0] ?? value));
   return Number.isNaN(number) ? null : number;
 });
 const batteryText = computed(() => {
@@ -33,13 +137,13 @@ const batteryText = computed(() => {
 const statusText = computed(() => {
   if (!hasDevice.value) return '等待子女帮您绑定设备';
   if (batteryValue.value != null && batteryValue.value <= 20) return '设备电量偏低';
-  if (!device.value?.lastSyncTime) return '设备已绑定，等待同步';
+  if (!lastSyncValue.value) return '设备已绑定，等待同步';
   return '设备状态正常';
 });
 const statusClass = computed(() => {
   if (!hasDevice.value) return 'warn';
   if (batteryValue.value != null && batteryValue.value <= 20) return 'danger';
-  if (!device.value?.lastSyncTime) return 'warn';
+  if (!lastSyncValue.value) return 'warn';
   return 'good';
 });
 const helperText = computed(() => {
@@ -52,7 +156,7 @@ const fetchData = async () => {
   loading.value = true;
   try {
     const [deviceRes, guardiansRes] = await Promise.allSettled([getBindInfo(), getFamilyGuardians()]);
-    device.value = deviceRes.status === 'fulfilled' ? deviceRes.value : null;
+    boundDevice.value = deviceRes.status === 'fulfilled' ? deviceRes.value : null;
     guardians.value = guardiansRes.status === 'fulfilled' ? guardiansRes.value : [];
   } finally {
     loading.value = false;

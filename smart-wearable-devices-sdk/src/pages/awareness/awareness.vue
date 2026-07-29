@@ -45,7 +45,7 @@ import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/rin
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
 import { useRingBusinessHistoryPageSync } from '@/composables/useRingBusinessHistoryPageSync';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
-import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+import { MOTION_CALORIE_DISPLAY_UNIT, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 import { formatBatteryStatusForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
 import { getAppForegroundSessionId } from '@/utils/appForegroundSession';
 import {
@@ -311,6 +311,66 @@ const getLegacyLocalDataUploadKey = (
     JSON.stringify(submitMetricCounts)
   ].join('|');
 };
+const summarizeSubmitDataResponse = (response: unknown) => {
+  if (response == null || typeof response !== 'object') {
+    return {
+      hasResponse: response !== null && response !== undefined,
+      value: response
+    };
+  }
+
+  const source = response as Record<string, any>;
+  const payload = source.data && typeof source.data === 'object' ? (source.data as Record<string, any>) : source;
+  const fieldNames = [
+    'success',
+    'count',
+    'healthCount',
+    'sleepCount',
+    'failCount',
+    'touchedDates',
+    'syncElapsedMs',
+    'healthWriteMs',
+    'sleepWriteMs',
+    'deviceUpdateMs',
+    'summaryMs',
+    'summaryDates'
+  ];
+  const result: Record<string, unknown> = {
+    hasResponse: true,
+    responseKeys: Object.keys(source).slice(0, 12)
+  };
+
+  if (payload !== source) {
+    result.payloadKeys = Object.keys(payload).slice(0, 12);
+  }
+
+  fieldNames.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) {
+      result[field] = payload[field];
+    } else if (Object.prototype.hasOwnProperty.call(source, field)) {
+      result[field] = source[field];
+    }
+  });
+
+  return result;
+};
+const clearLegacyLocalHistoryCacheAfterUpload = (context: Record<string, unknown>) => {
+  const receivedBefore = Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0;
+  const localBefore = Array.isArray(userStore.localData) ? userStore.localData.length : 0;
+  const historyBefore = Array.isArray(ringStore.historyRecords) ? ringStore.historyRecords.length : 0;
+  ringStore.clearHistoryRuntimeData();
+  lastLocalDataLength = 0;
+  appendAwarenessDiagnosticLog('legacy-local-data-cache-cleared', {
+    ...context,
+    receivedBefore,
+    localBefore,
+    historyBefore,
+    receivedAfter: Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0,
+    localAfter: Array.isArray(userStore.localData) ? userStore.localData.length : 0,
+    historyAfter: Array.isArray(ringStore.historyRecords) ? ringStore.historyRecords.length : 0,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+};
 const hasAwarenessCachedSnapshot = () => {
   const metrics = userStore.latestMetrics || {};
   const healthData = userStore.healthData || {};
@@ -477,7 +537,7 @@ const activityMotionTimeNumber = computed(() =>
   )
 );
 const activityStepValue = computed(() => (activityStepNumber.value > 0 ? `${activityStepNumber.value}` : '00'));
-const activityCalorieValue = computed(() => formatMotionCalorieKcal(activityCalorieNumber.value));
+const activityCalorieValue = computed(() => (activityCalorieNumber.value > 0 ? String(Math.round(activityCalorieNumber.value)) : '00'));
 const activityCalorieUnit = computed(() => MOTION_CALORIE_DISPLAY_UNIT);
 const activityMotionTimeValue = computed(() => (activityMotionTimeNumber.value > 0 ? `${activityMotionTimeNumber.value}` : '00'));
 const activityTargetStep = computed(() =>
@@ -926,9 +986,16 @@ watch(
               uploadSinceTimestamp,
               uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
               submitMetricCounts,
-              hasResponse: submitResponse !== null && submitResponse !== undefined,
-              responseKeys: submitResponse && typeof submitResponse === 'object' ? Object.keys(submitResponse as Record<string, any>).slice(0, 12) : [],
+              submitResponse: summarizeSubmitDataResponse(submitResponse),
               snapshot: getAwarenessConnectionSnapshot()
+            });
+            clearLegacyLocalHistoryCacheAfterUpload({
+              protocol,
+              submitCount: submitArray.length,
+              uploadSinceTimestamp,
+              uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+              submitMetricCounts,
+              deviceMac
             });
           }
 
