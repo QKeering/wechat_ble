@@ -36,6 +36,11 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Claude Code
+.claude/
+.claude.json
+CLAUDE.md
+
 # Archives / generated local packages
 *.zip
 *.7z

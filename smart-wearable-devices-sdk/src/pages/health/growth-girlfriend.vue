@@ -1,5 +1,6 @@
 <template>
   <view class="growth-page">
+    <uv-navbar placeholder leftIcon="arrow-left" title="小轻AI成长闺蜜" bgColor="transparent" autoBack :leftIconColor="'#332b34'" :titleStyle="{ color: '#332b34' }"></uv-navbar>
     <view class="header">
       <text class="title">小轻，今天也在你身边</text>
       <text class="subtitle">AI融合多维健康大数据，生成你的专属状态洞察</text>

@@ -15,7 +15,7 @@ const deviceState = {
   connectedDeviceId: '',
   listenerMaps: {},
   /** @type {null|((cmd: number, mapData: object) => Promise<void>)} */
-  sendData: null,
+  sendData: null
 };
 
 export default deviceState;

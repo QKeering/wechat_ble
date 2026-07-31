@@ -1,7 +1,7 @@
 {
   "setting": {
     "es6": true,
-    "postcss": true,
+    "postcss": false,
     "minified": true,
     "uglifyFileName": false,
     "enhance": true,
@@ -17,6 +17,7 @@
     "ignoreUploadUnusedFiles": true
   },
   "compileType": "miniprogram",
+  "libVersion": "3.16.0",
   "miniprogramRoot": "dist/build/mp-weixin/",
   "simulatorPluginLibVersion": {},
   "packOptions": {
