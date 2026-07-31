@@ -215,6 +215,14 @@ watch(
 
     if (latestReading) {
       void completeMeasureWithLatestReading();
+      return;
+    }
+
+    // 检查是否有已完成的测量（即使数据无效），由 measureStatus watch 中的 latest?.heartRate 判断跳过
+    const hasCompletedMeasure = Array.isArray(userStore.receivedData) &&
+      (userStore.receivedData as any[]).some((d) => d.type === 'active_measure' && d.heartbeatStatus !== 0x03);
+    if (hasCompletedMeasure) {
+      void completeMeasureWithLatestReading();
     }
   },
   { deep: true }
@@ -356,6 +364,7 @@ const startMeasure = async () => {
       return;
     }
     await requestMetricRefresh(refreshHealthData, sendActiveMeasureCommand, { expectedSteps: 'heart_rate' });
+    await completeMeasureWithLatestReading();
   } catch (error) {
     if (measureStatus.value !== 'measuring') return;
     popup.value?.close();

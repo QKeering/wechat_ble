@@ -155,6 +155,7 @@ import { onHide, onShow } from '@dcloudio/uni-app';
 import { getRingDeviceStableIdentity } from '@/composables/useRingBleSdk';
 import { ensureRingBusinessPageReady, getRingBusinessDeviceKey, getRingBusinessDeviceName, getRingBusinessDeviceTail, useRingBusinessController } from '@/features/ring';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { showErrorToast } from '@/utils/errorToast';
 import { normalizeHealthText } from '@/utils/healthText';
 import { formatBatteryStatusForDisplay } from '@/utils/batteryDisplay';
 import type { RingDeviceInfo } from '@/sdk/ring-ble';
@@ -271,7 +272,7 @@ const goBack = () => {
 };
 
 const showError = (error: unknown, fallback: string) => {
-  uni.showToast({ title: formatBleErrorMessage(error, fallback), icon: 'none' });
+  showErrorToast(formatBleErrorMessage(error, fallback));
 };
 
 const hideSystemLoading = () => {

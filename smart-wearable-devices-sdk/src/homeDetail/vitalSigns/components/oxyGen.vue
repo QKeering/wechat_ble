@@ -312,6 +312,14 @@ watch(
     const latestReading = getLatestSpo2ReadingFromStores();
     if (latestReading) {
       void completeMeasureWithLatestReading();
+      return;
+    }
+
+    // 检查是否有已完成的测量（即使数据无效），由 measureStatus watch 中的 latest?.bloodOxygen > 0 判断跳过
+    const hasCompletedMeasure = Array.isArray(userStore.receivedData) &&
+      (userStore.receivedData as any[]).some((d) => d.type === 'active_OxyGenMeasure' && d.bloodOxygenStatus !== 0x03);
+    if (hasCompletedMeasure) {
+      void completeMeasureWithLatestReading();
     }
   },
   { deep: true }
@@ -322,13 +330,14 @@ watch(
   async (newStatus, oldStatus) => {
     if (newStatus === 'completed' && oldStatus !== 'completed') {
       const latest: any = getLatestSpo2ReadingFromStores();
-      if (latest?.bloodOxygen == null) {
+      // 无效数据（包括 0）跳过，由 latest?.bloodOxygen > 0 判断
+      if (!(latest?.bloodOxygen > 0)) {
         measureStatus.value = 'idle';
         uni.showToast({ title: '设备未返回有效测量值', icon: 'none' });
         return;
       }
 
-      if (latest?.bloodOxygen != null) {
+      if (latest?.bloodOxygen > 0) {
         oxyGen.value = latest.bloodOxygen;
         uni.showToast({ title: '测量完成', icon: 'none' });
         // 调用提交数据的接口

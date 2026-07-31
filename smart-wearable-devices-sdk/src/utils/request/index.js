@@ -1,8 +1,13 @@
 import { useUserStore } from '@/stores/user';
+import { showErrorToast } from '@/utils/errorToast';
 export const Request = () => {
   const userStore = useUserStore();
   const successCodes = [0, 200];
-  const normalizeMessage = (message = '') => String(message).trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const normalizeMessage = (message = '') =>
+    String(message)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '');
   const isRequestOkMessage = (message = '') => normalizeMessage(message) === 'requestok';
   const normalizeNetworkErrorMessage = (message = '') => {
     const raw = String(message || '').trim();
@@ -123,7 +128,7 @@ export const Request = () => {
       if (!successCodes.includes(code) && !isRequestOkMessage(msg)) {
         // 根据 custom 配置决定是否显示 toast 消息通知用户
         if (custom.toast !== false) {
-          uni.$uv.toast(normalizeNetworkErrorMessage(msg));
+          showErrorToast(normalizeNetworkErrorMessage(msg));
         }
 
         // 根据 custom 配置决定是否抛出异常
@@ -153,10 +158,9 @@ export const Request = () => {
         return Promise.resolve(error?.data || {});
       }
       if (custom.toast !== false) {
-        uni.$uv.toast(displayMessage);
+        showErrorToast(displayMessage);
       }
       return Promise.reject({ ...error, msg: displayMessage, rawMsg: rawMessage });
     }
   );
 };
-

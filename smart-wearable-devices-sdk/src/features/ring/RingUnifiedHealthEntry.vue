@@ -158,6 +158,7 @@ import { getRingDeviceStableIdentity } from '@/composables/useRingBleSdk';
 import { getRingBusinessDeviceKey, getRingBusinessDeviceName, getRingBusinessDeviceTail } from '@/composables/useRingBusinessController';
 import { ensureRingBusinessPageReady, useRingBusinessController } from '@/features/ring';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { showErrorToast } from '@/utils/errorToast';
 import { normalizeHealthText } from '@/utils/healthText';
 import { formatBatteryStatusForDisplay } from '@/utils/batteryDisplay';
 import type { RingDeviceInfo } from '@/sdk/ring-ble';
@@ -258,7 +259,7 @@ const getRefreshStepText = (step: string) => {
 };
 
 const showError = (error: unknown, fallback: string) => {
-  uni.showToast({ title: formatBleErrorMessage(error, fallback), icon: 'none' });
+  showErrorToast(formatBleErrorMessage(error, fallback));
 };
 
 const hideSystemLoading = () => {

@@ -1,4 +1,4 @@
-import ble_manager from './ble_manager.js';
+import device_state from './ble_device_state.js';
 import common from '../utils/util_common.js';
 import ble_config from './ble_config.js';
 
@@ -27,7 +27,7 @@ function packContentData(arrayBuffer, index, count) {
 	let db = new ArrayBuffer(offset + arrayBuffer.byteLength);
 	let db_vi = new DataView(db);
 
-	db_vi.setUint8(0, ble_manager.protocolVersion); // 版本号
+	db_vi.setUint8(0, device_state.protocolVersion); // 版本号
 	db_vi.setUint32(1, count, true); // 数据长度（小端格式）
 	db_vi.setUint32(5, index, true); // 数据序列号（小端格式）
 	// 复制数据内容
@@ -71,7 +71,7 @@ function packData(arrayBuffer) {
 	// 添加设备标识
 	let db = new ArrayBuffer(1 + arrayBuffer.byteLength);
 	let db_vi = new DataView(db);
-	db_vi.setUint8(0, ble_manager.deviceType); // 设备标识
+	db_vi.setUint8(0, device_state.deviceType); // 设备标识
 	let bufView = new Uint8Array(arrayBuffer);
 	for (let i = 0; i < bufView.length; i++) {
 		db_vi.setUint8(1 + i, bufView[i]);
@@ -105,7 +105,7 @@ async function sendPacketData(cmd, arrayBuffer, index, count) {
 			console.log("sendSingleData pack_db", pack_db);
 
 			uni.writeBLECharacteristicValue({
-				deviceId: ble_manager.connectedDeviceId,
+				deviceId: device_state.connectedDeviceId,
 				serviceId: ble_config.UUID_SERVICE_TARGET,
 				characteristicId: ble_config.UUID_TARGET_CHARACTERISTIC,
 				value: pack_db,
@@ -149,11 +149,11 @@ async function sendBlockData(cmd, arrayBuffer, index, count) {
 export default async function sendData(cmd, arrayBuffer) {
 	try {
 
-		if (!ble_manager.connectedDeviceId) {
+		if (!device_state.connectedDeviceId) {
 			throw new Error('设备未连接');
 		}
 
-		let dataSize = ble_manager.mtuSize - ble_config.PACKAGE_HEAD_SIZE;
+		let dataSize = device_state.mtuSize - ble_config.PACKAGE_HEAD_SIZE;
 
 		if (arrayBuffer.byteLength <= dataSize) { // 单次整包发送数据
 			await sendSingleData(cmd, arrayBuffer);

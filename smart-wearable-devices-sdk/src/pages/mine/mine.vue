@@ -52,12 +52,12 @@ import {
   flushRwDiagnosticUploadQueue
 } from '@/utils/rwDiagnosticUpload';
 import { submitData } from '@/common/api/homeDetail';
-import { scan, getBindInfo } from '@/common/api/device';
+import { scan, getBindInfo, unbind } from '@/common/api/device';
 import CustomSteps from '@/components/customSteps.vue';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
 import { clearRwDiagnosticCommandLock, setRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
-import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
+import { formatBatteryPercentForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
 const {
   handleConnectDevice,
   deviceInfo: ringDeviceInfo,
@@ -2686,6 +2686,28 @@ const displayBatteryValue = computed(() => {
   );
   return formatBatteryPercentForDisplay(value, '--');
 });
+const getMineBatteryStatusValue = (item: Record<string, any> | null | undefined) =>
+  item?.metrics?.batteryStatus ?? item?.metrics?.chargingStatusText ?? item?.metrics?.chargingStatus ?? item?.batteryStatus ?? item?.chargingStatusText ?? item?.chargingStatus;
+const isMineBatteryCharging = computed(() => {
+  const batteryItem = latestBattery.value as Record<string, any> | null;
+  if (!batteryItem) return false;
+  const rawValue = getMineBatterySourceValue(batteryItem);
+  const statusValue = getMineBatteryStatusValue(batteryItem);
+  const healthStatus = userStore.healthData?.batteryStatus ?? userStore.latestMetrics?.batteryStatus;
+  return isBatteryChargingLike(rawValue, statusValue ?? healthStatus);
+});
+const batteryPercent = computed(() => {
+  if (isMineBatteryCharging.value) return 100;
+  const value = getFirstMetricValue(
+    getMineBatterySourceValue(latestBattery.value as Record<string, any> | null),
+    userStore.healthData?.battery,
+    userStore.latestMetrics?.battery
+  );
+  if (value == null || value === '') return 0;
+  const num = Number(String(value).replace('%', '').trim());
+  if (!Number.isFinite(num)) return 0;
+  return Math.min(Math.max(Math.round(num), 0), 100);
+});
 // Whether cached battery info can be shown.
 const shouldShowBatteryInfo = computed(() => {
   if (isConnectedStatus.value) {
@@ -3073,6 +3095,36 @@ const connectAgain = async () => {
       duration: 3000
     });
   }
+};
+// 解除绑定
+const unbindDevice = () => {
+  if (!bindInfo.value || !bindInfo.value.mac) return;
+  uni.showModal({
+    title: '提示',
+    content: '确定要解除绑定吗？',
+    success: async (res) => {
+      if (!res.confirm) return;
+      try {
+        uni.showLoading({ title: '解绑中...', mask: true });
+        await unbind({ mac: bindInfo.value.mac });
+        await disconnect();
+        userStore.updateReconnectingStatus('0');
+        userStore.updateIsManualReconnecting(false);
+        bindInfo.value = null;
+        await clearFrontendRingBindingState(userStore, ringStore);
+        uni.showToast({ title: '解绑成功', icon: 'success', duration: 1500 });
+      } catch (error: any) {
+        console.error('解绑失败:', error);
+        uni.showToast({
+          title: error?.msg || error?.message || '解绑失败，请重试',
+          icon: 'none',
+          duration: 2000
+        });
+      } finally {
+        uni.hideLoading();
+      }
+    }
+  });
 };
 
 onShow(async () => {
@@ -4034,7 +4086,7 @@ const handleMineRwL19Acceptance = async () => {
       <view class="pl-30 pr-30">
         <view class="user-section mb-50">
           <view v-if="userStore.userInfo.id" @click="$uv.route('/pagesA/mines/profile')" class="user-card user-card--logged flex ai-center">
-            <image class="user-avatar-image" :src="getFullUrl(userStore.userInfo.avatar)" mode="aspectFill"></image>
+            <image class="user-avatar-image" :src="getFullUrl(userStore.userInfo.avatar) || '/static/images/mine/avatar.png' " mode="aspectFill"></image>
             <view class="user-info flex-1 flex ai-center jc-between ml-30">
               <view class="user-nickname fs-48">{{ userStore.userInfo.nickName }}</view>
               <view class="mine-arrow"></view>
@@ -4063,39 +4115,61 @@ const handleMineRwL19Acceptance = async () => {
           <view class="device-banner relative flex">
             <view class="banner-actions flex jc-between" style="margin-bottom: 50rpx">
               <view v-if="shouldShowBatteryInfo" class="device-battery-info flex fd-c ai-center">
-                <view class="battery-level fs-56">{{ displayBatteryValue }}</view>
+                <view class="battery-icon mb-10" :class="{ charging: isMineBatteryCharging }">
+                  <view class="battery-body">
+                    <view class="battery-fill" :style="{ width: batteryPercent + '%' }"></view>
+                  </view>
+                  <view class="battery-cap"></view>
+                </view>
+                <view class="battery-level fs-40">{{ displayBatteryValue }}</view>
               </view>
               <view v-else class="action-buttons">
-                <uv-button
-                  v-if="!shouldShowReconnectButton"
-                  :text="'\u626b\u4e00\u626b'"
-                  shape="circle"
-                  color="#FFFFFF"
-                  :customTextStyle="{ color: '#010101', 'font-size': '28rpx' }"
-                  :customStyle="{ padding: '38rpx 0', width: '190rpx', 'margin-bottom': '30rpx' }"
-                  @click="scanDevice"
-                ></uv-button>
-                <uv-button
-                  v-if="!shouldShowReconnectButton"
-                  :text="'\u53bb\u914d\u5bf9'"
-                  shape="circle"
-                  color="#2E70FC"
-                  :customTextStyle="{ 'font-size': '28rpx' }"
-                  :customStyle="{ padding: '38rpx 0', width: '190rpx', 'margin-bottom': '30rpx' }"
-                  @click="jumpDetail"
-                ></uv-button>
-                <uv-button
-                  v-if="shouldShowReconnectButton && !isLoading"
-                  :text="'\u91cd\u65b0\u8fde\u63a5'"
-                  shape="circle"
-                  color="#2E70FC"
-                  loadingMode="circle"
-                  :loading="isLoading"
-                  :loadingText="isLoading ? '\u8fde\u63a5\u4e2d...' : '\u91cd\u65b0\u8fde\u63a5'"
-                  :customTextStyle="{ 'font-size': '28rpx' }"
-                  :customStyle="{ padding: '38rpx 0', width: '190rpx' }"
-                  @click="connectAgain"
-                ></uv-button>
+                <template v-if="shouldShowReconnectButton">
+                  <uv-button
+                    :text="'\u70b9\u51fb\u91cd\u8fde'"
+                    shape="circle"
+                    color="#2E70FC"
+                    loadingMode="circle"
+                    :loading="isLoading"
+                    :loadingText="isLoading ? '\u91cd\u8fde\u4e2d...' : '\u70b9\u51fb\u91cd\u8fde'"
+                    :customTextStyle="{ 'font-size': '28rpx' }"
+                    :customStyle="{
+                      padding: '38rpx 0',
+                      width: '190rpx',
+                      'margin-bottom': '30rpx'
+                    }"
+                    @click="connectAgain"
+                  ></uv-button>
+                  <uv-button
+                    text="\u89e3\u9664\u7ed1\u5b9a"
+                    shape="circle"
+                    color="#FFFFFF"
+                    :customTextStyle="{ color: '#010101', 'font-size': '28rpx' }"
+                    :customStyle="{
+                      padding: '38rpx 0',
+                      width: '190rpx'
+                    }"
+                    @click="unbindDevice"
+                  ></uv-button>
+                </template>
+                <template v-else>
+                  <uv-button
+                    :text="'\u626b\u4e00\u626b'"
+                    shape="circle"
+                    color="#FFFFFF"
+                    :customTextStyle="{ color: '#010101', 'font-size': '28rpx' }"
+                    :customStyle="{ padding: '38rpx 0', width: '190rpx', 'margin-bottom': '30rpx' }"
+                    @click="scanDevice"
+                  ></uv-button>
+                  <uv-button
+                    :text="'\u53bb\u914d\u5bf9'"
+                    shape="circle"
+                    color="#2E70FC"
+                    :customTextStyle="{ 'font-size': '28rpx' }"
+                    :customStyle="{ padding: '38rpx 0', width: '190rpx', 'margin-bottom': '30rpx' }"
+                    @click="jumpDetail"
+                  ></uv-button>
+                </template>
               </view>
             </view>
           </view>
@@ -4409,6 +4483,65 @@ const handleMineRwL19Acceptance = async () => {
   color: #ffffff;
   font-size: 28rpx;
 }
+.battery-icon {
+  display: flex;
+  align-items: center;
+  width: 56rpx;
+  height: 28rpx;
+}
+
+.battery-body {
+  position: relative;
+  flex: 1;
+  height: 100%;
+  border: 3rpx solid #4c76f1;
+  border-radius: 6rpx;
+  padding: 3rpx;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.battery-fill {
+  height: 100%;
+  background: #4c76f1;
+  border-radius: 3rpx;
+  transition: width 0.3s ease;
+}
+
+.battery-icon.charging .battery-fill {
+  animation: battery-charging 2.4s linear infinite;
+}
+
+@keyframes battery-charging {
+  0%,
+  5% {
+    width: 0%;
+  }
+  25%,
+  30% {
+    width: 25%;
+  }
+  50%,
+  55% {
+    width: 50%;
+  }
+  75%,
+  80% {
+    width: 75%;
+  }
+  100% {
+    width: 100%;
+  }
+}
+
+.battery-cap {
+  width: 5rpx;
+  height: 12rpx;
+  background: #4c76f1;
+  border-radius: 0 3rpx 3rpx 0;
+  margin-left: 2rpx;
+}
+
 .wave-progress-wrapper {
   padding: 0; /* Remove vertical padding so the wave stays inside the filled area. */
   background: rgba(255, 255, 255, 0.1);

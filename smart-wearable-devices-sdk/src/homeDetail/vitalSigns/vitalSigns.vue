@@ -712,14 +712,6 @@ onShow(async () => {
   // await getOxyGenDetail();
   // await getTemperatureDetail();
   // await getHrvData();
-  if (userStore.reconnectStatus === 'reconnecting' || userStore.isReconnecting === true) {
-    uni.showToast({
-      title: '正在重连中，请稍后再试',
-      icon: 'none',
-      duration: 2000
-    });
-    return;
-  }
   if (!isCurrentRwRing()) {
     await refreshBleMetricsAfterRestore();
   }
@@ -730,14 +722,6 @@ onPullDownRefresh(async () => {
   try {
     selectedDayIndex.value = 2;
     updateSelectedHistoryDateFromIndex(2);
-    if (userStore.reconnectStatus === 'reconnecting' || userStore.isReconnecting === true) {
-      uni.showToast({
-        title: '正在重连中，请稍后再试',
-        icon: 'none',
-        duration: 2000
-      });
-      return;
-    }
     if (!isCurrentRwRing()) {
       await refreshBleMetricsAfterRestore();
     }

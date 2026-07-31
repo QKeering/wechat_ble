@@ -3,15 +3,13 @@ import { onLaunch, onShow, onHide } from '@dcloudio/uni-app';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingBusinessController } from '@/composables/useRingBusinessController';
 import { useUserStore } from '@/stores/user';
-import { installFrontendErrorPromptGuard } from '@/utils/errorPrompt';
 import { refreshAppForegroundSessionId } from '@/utils/appForegroundSession';
 
 onLaunch(() => {
-  installFrontendErrorPromptGuard();
+  // 使用 showErrorToast() 显式控制错误提示，不再需要全局 monkey-patch
 });
 
 onShow(() => {
-  installFrontendErrorPromptGuard();
   refreshAppForegroundSessionId();
   setTimeout(() => {
     try {
