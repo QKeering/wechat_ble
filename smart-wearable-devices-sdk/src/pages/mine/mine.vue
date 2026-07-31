@@ -56,7 +56,7 @@ import CustomSteps from '@/components/customSteps.vue';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
 import { clearRwDiagnosticCommandLock, setRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
-import { formatBatteryPercentForDisplay } from '@/utils/batteryDisplay';
+import { formatBatteryPercentForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
 const {
   handleConnectDevice,
   deviceInfo: ringDeviceInfo,
@@ -2624,6 +2624,28 @@ const displayBatteryValue = computed(() => {
   );
   return formatBatteryPercentForDisplay(value, '--');
 });
+const getMineBatteryStatusValue = (item: Record<string, any> | null | undefined) =>
+  item?.metrics?.batteryStatus ?? item?.metrics?.chargingStatusText ?? item?.metrics?.chargingStatus ?? item?.batteryStatus ?? item?.chargingStatusText ?? item?.chargingStatus;
+const isMineBatteryCharging = computed(() => {
+  const batteryItem = latestBattery.value as Record<string, any> | null;
+  if (!batteryItem) return false;
+  const rawValue = getMineBatterySourceValue(batteryItem);
+  const statusValue = getMineBatteryStatusValue(batteryItem);
+  const healthStatus = userStore.healthData?.batteryStatus ?? userStore.latestMetrics?.batteryStatus;
+  return isBatteryChargingLike(rawValue, statusValue ?? healthStatus);
+});
+const batteryPercent = computed(() => {
+  if (isMineBatteryCharging.value) return 100;
+  const value = getFirstMetricValue(
+    getMineBatterySourceValue(latestBattery.value as Record<string, any> | null),
+    userStore.healthData?.battery,
+    userStore.latestMetrics?.battery
+  );
+  if (value == null || value === '') return 0;
+  const num = Number(String(value).replace('%', '').trim());
+  if (!Number.isFinite(num)) return 0;
+  return Math.min(Math.max(Math.round(num), 0), 100);
+});
 // Whether cached battery info can be shown.
 const shouldShowBatteryInfo = computed(() => {
   if (isConnectedStatus.value) {
@@ -4001,7 +4023,13 @@ const handleMineRwL19Acceptance = async () => {
           <view class="device-banner relative flex">
             <view class="banner-actions flex jc-between" style="margin-bottom: 50rpx">
               <view v-if="shouldShowBatteryInfo" class="device-battery-info flex fd-c ai-center">
-                <view class="battery-level fs-56">{{ displayBatteryValue }}</view>
+                <view class="battery-icon mb-10" :class="{ charging: isMineBatteryCharging }">
+                  <view class="battery-body">
+                    <view class="battery-fill" :style="{ width: batteryPercent + '%' }"></view>
+                  </view>
+                  <view class="battery-cap"></view>
+                </view>
+                <view class="battery-level fs-40">{{ displayBatteryValue }}</view>
               </view>
               <view v-else class="action-buttons">
                 <uv-button
@@ -4284,6 +4312,65 @@ const handleMineRwL19Acceptance = async () => {
   color: #ffffff;
   font-size: 28rpx;
 }
+.battery-icon {
+  display: flex;
+  align-items: center;
+  width: 56rpx;
+  height: 28rpx;
+}
+
+.battery-body {
+  position: relative;
+  flex: 1;
+  height: 100%;
+  border: 3rpx solid #4c76f1;
+  border-radius: 6rpx;
+  padding: 3rpx;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.battery-fill {
+  height: 100%;
+  background: #4c76f1;
+  border-radius: 3rpx;
+  transition: width 0.3s ease;
+}
+
+.battery-icon.charging .battery-fill {
+  animation: battery-charging 2.4s linear infinite;
+}
+
+@keyframes battery-charging {
+  0%,
+  5% {
+    width: 0%;
+  }
+  25%,
+  30% {
+    width: 25%;
+  }
+  50%,
+  55% {
+    width: 50%;
+  }
+  75%,
+  80% {
+    width: 75%;
+  }
+  100% {
+    width: 100%;
+  }
+}
+
+.battery-cap {
+  width: 5rpx;
+  height: 12rpx;
+  background: #4c76f1;
+  border-radius: 0 3rpx 3rpx 0;
+  margin-left: 2rpx;
+}
+
 .wave-progress-wrapper {
   padding: 0; /* Remove vertical padding so the wave stays inside the filled area. */
   background: rgba(255, 255, 255, 0.1);
