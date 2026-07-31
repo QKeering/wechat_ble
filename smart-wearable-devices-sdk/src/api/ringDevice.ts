@@ -2,7 +2,9 @@ import type { RingBindPayload, RingBoundDevice, RingHistoricalRecord, RingParsed
 
 const BOUND_RING_KEY = 'qkeer:bound-ring-device';
 const RING_HISTORY_KEY = 'qkeer:ring-history-records';
+const RING_RAW_HISTORY_KEY = 'qkeer:ring-raw-history-frames:v1';
 const MAX_LOCAL_HISTORY_RECORDS = 200;
+const MAX_LOCAL_RAW_HISTORY_FRAMES = 1000;
 
 const readStorage = <T>(key: string, fallback: T): T => {
   try {
@@ -17,6 +19,26 @@ const writeStorage = (key: string, value: unknown) => {
 };
 
 type AnyRecord = Record<string, any>;
+
+export interface RingRawHistoryFrame {
+  deviceKey: string;
+  protocol?: string;
+  sourceType?: string;
+  status?: string;
+  rawHex: string;
+  rawHash: string;
+  rawByteLength: number;
+  receivedAt: number;
+  lastSeenAt: number;
+  seenCount: number;
+  chunkIndex: number;
+  chunkCount: number;
+  recordCount: number;
+  totalNum?: number;
+  maxSeq?: number;
+  recordTimeStart?: string;
+  recordTimeEnd?: string;
+}
 
 const normalizeFieldName = (value: string) => value.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
 
@@ -151,6 +173,7 @@ export const unbindRingDevice = async (payload: RingUnbindPayload): Promise<void
 };
 
 export const uploadRingHistoryRecords = async (records: RingHistoricalRecord[], parsed: RingParsedData) => {
+  const rawStageResult = stageRingRawHistoryFrames(records, parsed);
   const history = readStorage<RingHistoricalRecord[]>(RING_HISTORY_KEY, []);
   const uploadedAt = Date.now();
   const sourceType = parsed.type;
@@ -181,7 +204,113 @@ export const uploadRingHistoryRecords = async (records: RingHistoricalRecord[], 
     .slice(0, MAX_LOCAL_HISTORY_RECORDS);
 
   writeStorage(RING_HISTORY_KEY, nextHistory);
-  return { count: records.length, storedCount: nextHistory.length };
+  return { count: records.length, storedCount: nextHistory.length, ...rawStageResult };
+};
+
+const stageRingRawHistoryFrames = (records: RingHistoricalRecord[], parsed: RingParsedData) => {
+  const rawChunks = getParsedRawChunks(parsed);
+  if (rawChunks.length === 0) {
+    return { rawStored: false, rawFrameCount: 0, rawStoredCount: 0 };
+  }
+
+  try {
+    const parsedIdentity = getParsedHistoryIdentity(parsed);
+    const firstRecord = records[0];
+    const deviceKey =
+      normalizeRingIdentity(parsedIdentity.mac || parsedIdentity.uniMacId || parsedIdentity.deviceId) ||
+      (firstRecord ? getHistoryRecordDeviceKey(firstRecord) : '') ||
+      String(parsedIdentity.mac || parsedIdentity.uniMacId || parsedIdentity.deviceId || '').trim();
+    const recordTimes = records.map(getHistoryRecordTime).filter((time) => time > 0).sort((left, right) => left - right);
+    const recordTimeStart = formatHistoryUnixTime(recordTimes[0]);
+    const recordTimeEnd = formatHistoryUnixTime(recordTimes[recordTimes.length - 1]);
+    const receivedAt = Date.now();
+    const storedFrames = readStorage<RingRawHistoryFrame[]>(RING_RAW_HISTORY_KEY, []);
+    const keyedFrames = new Map<string, RingRawHistoryFrame>();
+
+    for (const frame of storedFrames) {
+      if (frame?.rawHash) keyedFrames.set(frame.rawHash, frame);
+    }
+
+    rawChunks.forEach((raw, index) => {
+      const rawHex = bytesToHex(raw);
+      const rawHash = hashRawHistoryFrame(`${deviceKey}:${parsed.protocol || ''}:${parsed.type}:${rawHex}`);
+      const previous = keyedFrames.get(rawHash);
+      keyedFrames.set(rawHash, {
+        deviceKey,
+        protocol: parsed.protocol,
+        sourceType: parsed.type,
+        status: parsed.status,
+        rawHex,
+        rawHash,
+        rawByteLength: raw.length,
+        receivedAt: previous?.receivedAt || receivedAt,
+        lastSeenAt: receivedAt,
+        seenCount: (previous?.seenCount || 0) + 1,
+        chunkIndex: index,
+        chunkCount: rawChunks.length,
+        recordCount: records.length,
+        totalNum: Number.isFinite(Number(parsed.totalNum)) ? Number(parsed.totalNum) : undefined,
+        maxSeq: Number.isFinite(Number(parsed.maxSeq)) ? Number(parsed.maxSeq) : undefined,
+        recordTimeStart,
+        recordTimeEnd
+      });
+    });
+
+    const nextFrames = Array.from(keyedFrames.values())
+      .sort((left, right) => right.lastSeenAt - left.lastSeenAt)
+      .slice(0, MAX_LOCAL_RAW_HISTORY_FRAMES);
+    writeStorage(RING_RAW_HISTORY_KEY, nextFrames);
+
+    return {
+      rawStored: true,
+      rawFrameCount: rawChunks.length,
+      rawStoredCount: nextFrames.length
+    };
+  } catch {
+    return {
+      rawStored: false,
+      rawFrameCount: rawChunks.length,
+      rawStoredCount: 0
+    };
+  }
+};
+
+const getParsedRawChunks = (parsed: RingParsedData) => {
+  const rawChunks = (parsed as Record<string, any>)?.rawChunks;
+  if (Array.isArray(rawChunks)) {
+    return rawChunks.map(normalizeRawBytes).filter((raw) => raw.length > 0);
+  }
+
+  const raw = normalizeRawBytes(parsed.raw);
+  return raw.length > 0 ? [raw] : [];
+};
+
+const normalizeRawBytes = (value: unknown) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((byte) => Number(byte))
+    .filter((byte) => Number.isFinite(byte) && byte >= 0 && byte <= 255)
+    .map((byte) => Math.floor(byte));
+};
+
+const bytesToHex = (bytes: number[]) => bytes.map((byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase();
+
+const hashRawHistoryFrame = (value: string) => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+};
+
+const formatHistoryUnixTime = (unixTime?: number) => {
+  if (!unixTime || unixTime <= 0) return undefined;
+  const date = new Date(unixTime * 1000);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes()
+  )}:${pad(date.getSeconds())}`;
 };
 
 const getHistoryRecordTime = (record: RingHistoricalRecord) => {

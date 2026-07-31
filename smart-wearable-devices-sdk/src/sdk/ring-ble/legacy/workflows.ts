@@ -380,6 +380,96 @@ export const cleanupLegacyRing = async (adapter: LegacyRingAdapter, runtime?: Ri
   runtime?.onDeviceReady?.({} as RingDeviceInfo);
 };
 
+const LEGACY_LOCAL_DATA_TERMINAL_STATUSES = new Set(['empty', 'no_data', 'filtered', 'failed']);
+
+const getLegacyLocalDataChunkRecords = (parsed: RingParsedData) => {
+  return Array.isArray(parsed.records) ? parsed.records : [];
+};
+
+const getLegacyLocalDataChunkMaxSeq = (parsed: RingParsedData) => {
+  return getLegacyLocalDataChunkRecords(parsed).reduce((maxSeq, record) => {
+    const seq = Number((record as Record<string, any>)?.seq);
+    return Number.isFinite(seq) ? Math.max(maxSeq, seq) : maxSeq;
+  }, 0);
+};
+
+const isLegacyLocalDataChunkComplete = (parsed: RingParsedData) => {
+  if (parsed.type !== 'local_data') return false;
+  if (LEGACY_LOCAL_DATA_TERMINAL_STATUSES.has(String(parsed.status || ''))) return true;
+
+  const totalNum = Number(parsed.totalNum);
+  if (!Number.isFinite(totalNum) || totalNum <= 0) return false;
+
+  const records = getLegacyLocalDataChunkRecords(parsed);
+  const maxSeq = getLegacyLocalDataChunkMaxSeq(parsed);
+  return records.length >= totalNum || maxSeq >= totalNum || maxSeq + 1 >= totalNum;
+};
+
+const getLegacySyncErrorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : `${(error as any)?.errMsg || error || ''}`;
+
+const combineLegacyLocalDataChunks = (chunks: RingParsedData[], status?: string, error?: unknown): RingParsedData => {
+  const lastChunk = chunks[chunks.length - 1] || ({ type: 'local_data', records: [] } as RingParsedData);
+  const records = chunks.flatMap(getLegacyLocalDataChunkRecords);
+  const rawChunks = chunks
+    .map((chunk) => (Array.isArray(chunk.raw) ? chunk.raw : []))
+    .filter((raw): raw is number[] => raw.length > 0);
+  const totalNum = chunks.reduce<number | undefined>((latest, chunk) => {
+    const value = Number(chunk.totalNum);
+    return Number.isFinite(value) ? value : latest;
+  }, undefined);
+  const maxSeq = chunks.reduce((max, chunk) => Math.max(max, getLegacyLocalDataChunkMaxSeq(chunk)), 0);
+  const nextStatus = status || (records.length > 0 ? 'success' : lastChunk.status || 'empty');
+
+  return {
+    ...lastChunk,
+    type: 'local_data',
+    status: nextStatus,
+    totalNum,
+    maxSeq,
+    records,
+    rawChunks,
+    chunkCount: chunks.length,
+    complete: nextStatus !== 'partial',
+    ...(error ? { error: getLegacySyncErrorMessage(error) } : {})
+  };
+};
+
+const readLegacyLocalDataUntilComplete = async (
+  adapter: LegacyRingAdapter,
+  options: Pick<SyncLegacyHistoryOptions, 'sinceTimestamp' | 'readAll'>,
+  timeoutMs: number
+) => {
+  const chunks: RingParsedData[] = [];
+  const pendingLocalData = adapter.waitForParsedData((parsed) => {
+    if (parsed.type !== 'local_data') return false;
+    chunks.push(parsed);
+    return isLegacyLocalDataChunkComplete(parsed);
+  }, timeoutMs);
+
+  await adapter.readLocalData(options);
+
+  try {
+    await pendingLocalData;
+  } catch (error) {
+    if (chunks.length > 0) {
+      return combineLegacyLocalDataChunks(chunks, 'partial', error);
+    }
+    throw error;
+  }
+
+  return combineLegacyLocalDataChunks(chunks);
+};
+
+const isLegacyHistoryUploadSafeToDelete = (uploadResult: unknown) => {
+  if (!uploadResult || typeof uploadResult !== 'object') return false;
+  const result = uploadResult as Record<string, any>;
+  if (result.rawStored === false) return false;
+  if (result.rawStored === true) return true;
+  if (result.uploaded === true || result.submitted === true || result.success === true) return true;
+  return Number(result.count) > 0 || Number(result.storedCount) > 0;
+};
+
 export const syncLegacyHistory = async (
   adapter: LegacyRingAdapter,
   runtime?: RingBleRuntime,
@@ -450,14 +540,23 @@ export const syncLegacyHistory = async (
       }
     }
 
-    const pendingLocalData = adapter.waitForParsedData((parsed) => parsed.type === 'local_data', timeoutMs);
-    await adapter.readLocalData({
+    const currentDevice = runtime?.getDeviceInfo?.() as RingDeviceInfo | undefined;
+    const parsedLocalData = await readLegacyLocalDataUntilComplete(adapter, {
       sinceTimestamp,
       readAll: options.readAll
-    });
-
-    const parsed = await pendingLocalData;
-    const records = Array.isArray(parsed.records) ? parsed.records : [];
+    }, timeoutMs);
+    const recordsWithDevice = getLegacyLocalDataChunkRecords(parsedLocalData).map((record) =>
+      attachDeviceIdentityToRecord(record, currentDevice)
+    );
+    const parsed = attachDeviceIdentityToParsed(
+      {
+        ...parsedLocalData,
+        records: recordsWithDevice
+      },
+      currentDevice
+    );
+    runtime?.onParsedData?.(parsed);
+    const records = recordsWithDevice;
 
     if (records.length === 0) {
       runtime?.onUploadingStatusChange?.('success');
@@ -470,14 +569,14 @@ export const syncLegacyHistory = async (
       };
     }
 
-    await runtime?.uploadHistoricalRecords?.(records, parsed);
+    const uploadResult = await runtime?.uploadHistoricalRecords?.(records, parsed);
 
     let deleted = false;
-    if (deleteAfterUpload) {
+    if (deleteAfterUpload && parsed.status !== 'partial' && isLegacyHistoryUploadSafeToDelete(uploadResult)) {
       const pendingDelete = adapter.waitForParsedData((item) => item.type === 'delete_all_local_data', timeoutMs);
       await adapter.sendDeleteAllLocalDataCommand();
-      await pendingDelete;
-      deleted = true;
+      const deleteParsed = await pendingDelete;
+      deleted = deleteParsed.status !== 'failed' && deleteParsed.success !== false;
     }
 
     runtime?.onUploadingStatusChange?.('success');
@@ -485,7 +584,7 @@ export const syncLegacyHistory = async (
       status: parsed.status || 'success',
       records,
       parsed,
-      uploaded: Boolean(runtime?.uploadHistoricalRecords),
+      uploaded: Boolean(uploadResult),
       deleted
     };
   } catch (error) {

@@ -34,7 +34,7 @@ const SLEEP_MAX_POINT_GAP_SECONDS = 90 * 60;
 const SLEEP_DEFAULT_SAMPLE_SECONDS = 5 * 60;
 const SLEEP_MIN_SAMPLE_SECONDS = 60;
 const SLEEP_MAX_SAMPLE_SECONDS = 60 * 60;
-const SLEEP_SEGMENT_BACKFILL_SECONDS = 16 * 60 * 60;
+const SLEEP_SEGMENT_BACKFILL_SECONDS = 24 * 60 * 60;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const MAIN_SLEEP_WINDOW_START_HOUR = 21;
 const MAIN_SLEEP_WINDOW_END_HOUR = 11;
@@ -299,11 +299,11 @@ const normalizeRwSleepStatusToL19State = (value: unknown) => {
 const normalizeLegacySleepTypeToL19State = (value: unknown) => {
   if (value == null || value === '') return undefined;
   const numeric = getNumber(value);
-  // Legacy/QK SDK sleep status: 0 enter sleep, 1 light, 2 deep, 3 awake, 4 REM, 5 exit sleep.
+  // L19 0x36 local_data sleepType: 1 awake, 2 light, 3 deep, 4 REM.
   // Backend/UI normalized state: 1 awake, 2 REM, 3 light, 4 deep, 5 nap.
-  if (numeric === 1) return 3;
-  if (numeric === 2) return 4;
-  if (numeric === 3) return 1;
+  if (numeric === 1) return 1;
+  if (numeric === 2) return 3;
+  if (numeric === 3) return 4;
   if (numeric === 4) return 2;
   if (numeric === 5 || numeric === 0) return undefined;
   const text = String(value).trim().toLowerCase().replace(/[\s_-]/g, '');
@@ -903,13 +903,38 @@ const shouldSubmitRingHistoryRecordAfterSince = (record: RingHistorySubmitRecord
   return !unixTime || unixTime >= lastReadTimestamp;
 };
 
+const getSleepSegmentBackfillSinceTimestamp = (lastReadTimestamp = 0) => {
+  return lastReadTimestamp ? Math.max(0, lastReadTimestamp - SLEEP_SEGMENT_BACKFILL_SECONDS) : 0;
+};
+
+const isRingHistorySleepSubmitRecord = (record: RingHistorySubmitRecord) => {
+  const sourceType = String((record as Record<string, any>)?.sourceType || '').toLowerCase();
+  if (sourceType === 'l19_sleep_segment' || sourceType.startsWith('rw_sleep')) return true;
+  return Boolean(
+    record.sleepState != null ||
+      record.sleepType != null ||
+      record.sleepDuration != null ||
+      (record as Record<string, any>).sleepTime != null ||
+      record.startTime ||
+      record.endTime
+  );
+};
+
+const shouldSubmitRingHistoryRecordAfterWindow = (record: RingHistorySubmitRecord, lastReadTimestamp = 0) => {
+  if (!lastReadTimestamp) return true;
+  return shouldSubmitRingHistoryRecordAfterSince(
+    record,
+    isRingHistorySleepSubmitRecord(record) ? getSleepSegmentBackfillSinceTimestamp(lastReadTimestamp) : lastReadTimestamp
+  );
+};
+
 export const buildRingHistorySubmitRecords = (records: RingHistoryRecord[] = [], lastReadTimestamp = 0): RingHistorySubmitRecord[] => {
   const submitRecords = records
     .filter((record) => {
       const unixTime = getRingHistoryRecordSyncUnixTime(record);
       const sinceTimestamp =
         lastReadTimestamp && isSleepHistoryRecord(record)
-          ? Math.max(0, lastReadTimestamp - SLEEP_SEGMENT_BACKFILL_SECONDS)
+          ? getSleepSegmentBackfillSinceTimestamp(lastReadTimestamp)
           : lastReadTimestamp;
       return !sinceTimestamp || !unixTime || unixTime >= sinceTimestamp;
     })
@@ -1023,10 +1048,10 @@ export const buildRingHistorySubmitRecords = (records: RingHistoryRecord[] = [],
     .filter((record) => Object.keys(record).some((key) => key !== 'recordTime') && record.recordTime);
 
   const directSubmitRecords = submitRecords.filter((record) =>
-    shouldSubmitRingHistoryRecordAfterSince(record, lastReadTimestamp)
+    shouldSubmitRingHistoryRecordAfterWindow(record, lastReadTimestamp)
   );
   const sleepSegmentRecords = buildRingHistorySleepSegmentRecords(submitRecords).filter((record) =>
-    shouldSubmitRingHistoryRecordAfterSince(record, lastReadTimestamp)
+    shouldSubmitRingHistoryRecordAfterSince(record, getSleepSegmentBackfillSinceTimestamp(lastReadTimestamp))
   );
   return dedupeRingHistorySubmitRecords([...directSubmitRecords, ...sleepSegmentRecords]);
 };
@@ -1042,7 +1067,11 @@ export const submitRingHistorySyncResult = async (
   const dataList = buildRingHistorySubmitRecords(visibleRecords, options.sinceTimestamp ?? 0);
   const filteredRecords = visibleRecords.filter((record) => {
     const unixTime = getRingHistoryRecordSyncUnixTime(record);
-    if (options.sinceTimestamp && unixTime && unixTime < options.sinceTimestamp) return true;
+    const sinceTimestamp =
+      options.sinceTimestamp && isSleepHistoryRecord(record)
+        ? getSleepSegmentBackfillSinceTimestamp(options.sinceTimestamp)
+        : options.sinceTimestamp;
+    if (sinceTimestamp && unixTime && unixTime < sinceTimestamp) return true;
     return !buildRingHistorySubmitRecords([record], options.sinceTimestamp ?? 0).length;
   });
   const rawMetricCounts = countRingHistoryRecordMetrics(rawRecords as Array<Record<string, any>>);

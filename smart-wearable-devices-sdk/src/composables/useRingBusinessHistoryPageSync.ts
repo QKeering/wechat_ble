@@ -65,7 +65,7 @@ const HISTORY_PAGE_PENDING_UPLOAD_STORAGE_KEY = 'qkeer:rw-history-page-pending-u
 const HISTORY_PAGE_PENDING_UPLOAD_MAX_COUNT = 300;
 const HISTORY_PAGE_UPLOADED_RECORD_KEYS_STORAGE_KEY = 'qkeer:rw-history-page-uploaded-record-keys:v1';
 const HISTORY_PAGE_UPLOADED_RECORD_KEYS_MAX_COUNT = 2000;
-const HISTORY_PAGE_SLEEP_BACKFILL_SECONDS = 12 * 60 * 60;
+const HISTORY_PAGE_SLEEP_BACKFILL_SECONDS = 24 * 60 * 60;
 const HISTORY_PAGE_SUBMIT_FAILED_MESSAGE = '历史数据提交失败';
 const HISTORY_PAGE_FALLBACK_READ_FAILED_MESSAGE = '历史数据兜底读取失败';
 const HISTORY_PAGE_EMPTY_FALLBACK_EVENTS = {
@@ -727,8 +727,12 @@ export const useRingBusinessHistoryPageSync = () => {
     });
     const filteredRecords = visibleRecords.filter((record) => {
       const unixTime = getRingHistoryRecordSyncUnixTime(record);
-      if (sinceTimestamp && unixTime && unixTime < sinceTimestamp) return true;
-      return buildRingHistorySubmitRecords([record] as any, sinceTimestamp).length === 0;
+      const recordSubmitPreview = buildRingHistorySubmitRecords([record] as any, sinceTimestamp);
+      const isSleepRecord = recordSubmitPreview.some((item) => isHistoryPageSleepSubmitRecord(item));
+      const recordSinceTimestamp =
+        sinceTimestamp && isSleepRecord ? Math.max(0, sinceTimestamp - HISTORY_PAGE_SLEEP_BACKFILL_SECONDS) : sinceTimestamp;
+      if (recordSinceTimestamp && unixTime && unixTime < recordSinceTimestamp) return true;
+      return recordSubmitPreview.length === 0;
     });
     const currentSubmitRecords = buildRingHistorySubmitRecords(visibleRecords as any, sinceTimestamp);
     const uploadLastReadTimestamp = Number(userStore.lastReadTimestamp || 0);
