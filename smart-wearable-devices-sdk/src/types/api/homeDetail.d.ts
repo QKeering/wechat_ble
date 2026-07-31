@@ -32,6 +32,15 @@ export type SyncData = {
   diastolic?: number;
   // 睡眠状态：0无效 1清醒 2快速眼动 3浅睡 4深睡 5小睡
   sleepState?: string | number;
+  sleepType?: string | number;
+  type?: string | number;
+  sleepDuration?: number;
+  durationMinutes?: number;
+  sleepTime?: number;
+  startTime?: string;
+  endTime?: string;
+  dateRef?: string;
+  sourceType?: string;
   // 睡眠时长，单位分钟
   sleepDuration?: number;
   // 活动强度：0运动 1静止

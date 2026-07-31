@@ -51,6 +51,7 @@ import { getAppForegroundSessionId } from '@/utils/appForegroundSession';
 import {
   buildRingHistorySubmitRecords,
   countRingHistoryRecordMetrics,
+  getRingHistoryRecordSyncUnixTime,
   getRingHistoryRecordUnixTime,
   getRingSubmitDeviceMac,
   isRingHistoryPayload,
@@ -126,6 +127,7 @@ const sendTimer = ref<any>(null);
 let awarenessRefreshPromise: Promise<void> | null = null;
 let awarenessHistorySyncPromise: Promise<void> | null = null;
 let legacyLocalDataUploadPromise: Promise<unknown> | null = null;
+let legacyLocalDataStablePromise: Promise<void> | null = null;
 let awarenessProcessedRefreshPromise: Promise<void> | null = null;
 let lastAwarenessRefreshAt = 0;
 let lastAwarenessHistorySyncAt = 0;
@@ -138,8 +140,11 @@ const RW_AWARENESS_REFRESH_DEDUP_MS = 8000;
 const RW_AWARENESS_HISTORY_DEDUP_MS = 45000;
 const RW_AWARENESS_DEVICE_TIME_SYNC_DEDUP_MS = 10 * 60 * 1000;
 const LEGACY_LOCAL_DATA_UPLOAD_DEDUP_MS = 60 * 1000;
+const LEGACY_LOCAL_DATA_STABLE_WAIT_MS = 1200;
+const LEGACY_LOCAL_DATA_STABLE_POLL_MS = 250;
+const LEGACY_LOCAL_DATA_STABLE_TIMEOUT_MS = 8000;
 const AWARENESS_PROCESSED_REFRESH_DEDUP_MS = 3000;
-const LEGACY_SLEEP_UPLOAD_LOOKBACK_SECONDS = 12 * 60 * 60;
+const LEGACY_SLEEP_UPLOAD_LOOKBACK_SECONDS = 16 * 60 * 60;
 const hasAwarenessCommunicationReady = () =>
   hasAnyRingCommunicationReady(userStore.deviceInfo, ringStore.deviceInfo);
 const isAwarenessRwRing = () => userStore.deviceInfo?.protocol === 'rw' || ringStore.deviceInfo?.protocol === 'rw';
@@ -229,9 +234,21 @@ const formatUnixTimestampForLog = (timestamp?: number) => {
   const second = date.getSeconds().toString().padStart(2, '0');
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 };
+const getAwarenessLastReadTimestamp = () => {
+  const timestamp = Number(userStore.lastReadTimestamp || 0);
+  return Number.isFinite(timestamp) && timestamp > 0 ? Math.floor(timestamp) : 0;
+};
 const getAwarenessHistoryUploadSinceTimestamp = (isRwRing: boolean) => {
-  if (isRwRing) return userStore.lastReadTimestamp;
+  const lastReadTimestamp = getAwarenessLastReadTimestamp();
+  if (lastReadTimestamp > 0) return lastReadTimestamp;
+  if (isRwRing) return 0;
   return Math.max(0, getLocalDayStartUnixTimestamp(new Date()) - LEGACY_SLEEP_UPLOAD_LOOKBACK_SECONDS);
+};
+const getAwarenessHistoryReadSinceTimestamp = (isRwRing: boolean) => {
+  const uploadSinceTimestamp = getAwarenessHistoryUploadSinceTimestamp(isRwRing);
+  const lastReadTimestamp = getAwarenessLastReadTimestamp();
+  if (isRwRing || lastReadTimestamp <= 0) return uploadSinceTimestamp;
+  return Math.max(0, lastReadTimestamp - LEGACY_SLEEP_UPLOAD_LOOKBACK_SECONDS);
 };
 
 const pullDownRefresh = ref(false);
@@ -293,6 +310,130 @@ const isIOS = computed(() => {
   return systemInfo.platform.toLowerCase().includes('ios');
 });
 const local = computed(() => userStore.localData);
+const getRecordSourceTypeForLog = (record: Record<string, any>) =>
+  String(record?.sourceType || record?.source_type || record?.type || '').toLowerCase();
+const countSleepSegmentRecordsForLog = (records: Array<Record<string, any>> = []) =>
+  records.filter((record) => getRecordSourceTypeForLog(record) === 'l19_sleep_segment').length;
+const summarizeRingHistoryTimeRangeForLog = (records: Array<Record<string, any>> = [], useSyncTime = false) => {
+  const timestamps = records
+    .map((record) => (useSyncTime ? getRingHistoryRecordSyncUnixTime(record) : getRingHistoryRecordUnixTime(record)))
+    .filter((timestamp): timestamp is number => Boolean(timestamp && timestamp > 0));
+  if (timestamps.length === 0) {
+    return {
+      count: records.length,
+      timestampCount: 0
+    };
+  }
+  const minTimestamp = Math.min(...timestamps);
+  const maxTimestamp = Math.max(...timestamps);
+  return {
+    count: records.length,
+    timestampCount: timestamps.length,
+    minTimestamp,
+    minTime: formatUnixTimestampForLog(minTimestamp),
+    maxTimestamp,
+    maxTime: formatUnixTimestampForLog(maxTimestamp)
+  };
+};
+const summarizeLegacyUploadRecordsForLog = (records: Array<Record<string, any>> = []) => ({
+  startTimeRange: summarizeRingHistoryTimeRangeForLog(records, false),
+  syncTimeRange: summarizeRingHistoryTimeRangeForLog(records, true),
+  l19SleepSegmentCount: countSleepSegmentRecordsForLog(records)
+});
+const waitForAwarenessMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const getLegacyLocalDataStableSnapshot = () => {
+  const historyPayloads = Array.isArray(userStore.receivedData) ? userStore.receivedData.filter(isRingHistoryPayload) : [];
+  const records = Array.isArray(local.value) ? (local.value as Array<Record<string, any>>) : [];
+  const uploadSinceTimestamp = getAwarenessHistoryUploadSinceTimestamp(false);
+  const submitRecords = buildRingHistorySubmitRecords(records, uploadSinceTimestamp);
+  const rawRange = summarizeRingHistoryTimeRangeForLog(records, false);
+  const submitRange = summarizeRingHistoryTimeRangeForLog(submitRecords as Array<Record<string, any>>, false);
+  const completed = isRingHistoryReadComplete(historyPayloads as Array<Record<string, any>>);
+
+  return {
+    signature: [
+      historyPayloads.length,
+      records.length,
+      submitRecords.length,
+      rawRange.minTimestamp || 0,
+      rawRange.maxTimestamp || 0,
+      submitRange.minTimestamp || 0,
+      submitRange.maxTimestamp || 0,
+      completed ? 1 : 0
+    ].join('|'),
+    payloadCount: historyPayloads.length,
+    recordCount: records.length,
+    submitCount: submitRecords.length,
+    completed,
+    uploadSinceTimestamp,
+    uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+    rawRange,
+    submitRange
+  };
+};
+const waitForLegacyLocalDataStableBeforeUpload = async (trigger: string, protocol: string) => {
+  if (legacyLocalDataStablePromise) return legacyLocalDataStablePromise;
+
+  legacyLocalDataStablePromise = (async () => {
+    const startedAt = Date.now();
+    let stableStartedAt = startedAt;
+    let previous = getLegacyLocalDataStableSnapshot();
+    appendAwarenessDiagnosticLog('legacy-local-data-stable-wait-start', {
+      protocol,
+      trigger,
+      timeoutMs: LEGACY_LOCAL_DATA_STABLE_TIMEOUT_MS,
+      stableWaitMs: LEGACY_LOCAL_DATA_STABLE_WAIT_MS,
+      pollMs: LEGACY_LOCAL_DATA_STABLE_POLL_MS,
+      ...previous,
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+
+    while (Date.now() - startedAt < LEGACY_LOCAL_DATA_STABLE_TIMEOUT_MS) {
+      await waitForAwarenessMs(LEGACY_LOCAL_DATA_STABLE_POLL_MS);
+      const current = getLegacyLocalDataStableSnapshot();
+
+      if (current.signature !== previous.signature) {
+        appendAwarenessDiagnosticLog('legacy-local-data-stable-wait-progress', {
+          protocol,
+          trigger,
+          elapsedMs: Date.now() - startedAt,
+          previousSignature: previous.signature,
+          currentSignature: current.signature,
+          ...current,
+          snapshot: getAwarenessConnectionSnapshot()
+        });
+        previous = current;
+        stableStartedAt = Date.now();
+        continue;
+      }
+
+      if (Date.now() - stableStartedAt >= LEGACY_LOCAL_DATA_STABLE_WAIT_MS) {
+        appendAwarenessDiagnosticLog('legacy-local-data-stable-wait-result', {
+          protocol,
+          trigger,
+          elapsedMs: Date.now() - startedAt,
+          stableMs: Date.now() - stableStartedAt,
+          ...current,
+          snapshot: getAwarenessConnectionSnapshot()
+        });
+        return;
+      }
+    }
+
+    const timedOutSnapshot = getLegacyLocalDataStableSnapshot();
+    appendAwarenessDiagnosticLog('legacy-local-data-stable-wait-timeout', {
+      protocol,
+      trigger,
+      elapsedMs: Date.now() - startedAt,
+      ...timedOutSnapshot,
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+  })().finally(() => {
+    legacyLocalDataStablePromise = null;
+  });
+
+  return legacyLocalDataStablePromise;
+};
 const getLegacyLocalDataUploadKey = (
   deviceMac: string | undefined,
   uploadSinceTimestamp: number,
@@ -353,6 +494,23 @@ const summarizeSubmitDataResponse = (response: unknown) => {
   });
 
   return result;
+};
+const getSubmitDataResponsePayload = (response: unknown) => {
+  if (response == null || typeof response !== 'object') return null;
+  const source = response as Record<string, any>;
+  return source.data && typeof source.data === 'object' ? (source.data as Record<string, any>) : source;
+};
+const getSubmitDataResponseNumber = (response: unknown, field: string) => {
+  const payload = getSubmitDataResponsePayload(response);
+  const value = payload?.[field] ?? (response && typeof response === 'object' ? (response as Record<string, any>)[field] : undefined);
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : undefined;
+};
+const shouldKeepLegacyLocalHistoryCacheAfterUpload = (submitMetricCounts: Record<string, number>, response: unknown) => {
+  const submittedSleepCount = Number(submitMetricCounts.sleep || 0);
+  if (submittedSleepCount <= 0) return false;
+  const responseSleepCount = getSubmitDataResponseNumber(response, 'sleepCount');
+  return responseSleepCount === 0;
 };
 const clearLegacyLocalHistoryCacheAfterUpload = (context: Record<string, unknown>) => {
   const receivedBefore = Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0;
@@ -421,6 +579,14 @@ const getPositiveMetricNumber = (...values: unknown[]) => {
   }
   return 0;
 };
+const HOME_MAIN_SLEEP_MAX_MINUTES = 16 * 60;
+const getPlausibleHomeSleepDurationNumber = (...values: unknown[]) => {
+  for (const value of values) {
+    const numeric = getPositiveMetricNumber(value);
+    if (numeric > 0 && numeric <= HOME_MAIN_SLEEP_MAX_MINUTES) return numeric;
+  }
+  return 0;
+};
 const unwrapAwarenessApiData = (source: any) => {
   const first = source?.data ?? source?.result ?? source;
   return first?.goalInfo ?? first?.userGoal ?? first?.data ?? first?.result ?? first ?? {};
@@ -442,7 +608,7 @@ const getRelaxStatusByScore = (score: number) => {
   return '';
 };
 const sleepDurationMinutes = computed(() =>
-  getPositiveMetricNumber(
+  getPlausibleHomeSleepDurationNumber(
     sleepOverviewObj.value?.sleepDuration,
     userStore.healthData?.sleepTotalMinutes,
     userStore.healthData?.sleep_total_minutes,
@@ -623,6 +789,62 @@ const getDisplayMetricValue = (...values: unknown[]) => {
     if (text && text !== '--' && text !== '-' && text !== '00') return text;
   }
   return '00';
+};
+const getAwarenessChartNumber = (value: unknown) => {
+  if (value == null || value === '') return null;
+  const numeric = Number(String(value).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+};
+const buildStableAwarenessChartData = (
+  chartData: Point[] | undefined,
+  fallbackValue: number,
+  fallbackLabel = '\u5f53\u524d'
+) => {
+  const source = Array.isArray(chartData) ? chartData : [];
+  const fallbackNumber = getAwarenessChartNumber(fallbackValue);
+  if (!source.length) {
+    return fallbackNumber != null
+      ? { xData: [fallbackLabel], seriesData: [Math.round(fallbackNumber)] }
+      : { xData: [], seriesData: [] as number[] };
+  }
+
+  const xData = source.map((item: Point) => item.time?.toString() || '00:00');
+  const rawValues = source.map((item: Point) => getAwarenessChartNumber(item.value));
+  const validValues = rawValues.filter((item): item is number => item != null);
+  const average =
+    fallbackNumber ??
+    (validValues.length
+      ? validValues.reduce((total, item) => total + item, 0) / validValues.length
+      : null);
+
+  if (average == null) return { xData, seriesData: [] as number[] };
+
+  const seriesData = rawValues.map((value, index) => {
+    if (value != null) return Math.round(value);
+
+    let prev: number | null = null;
+    for (let i = index - 1; i >= 0; i -= 1) {
+      if (rawValues[i] != null) {
+        prev = rawValues[i];
+        break;
+      }
+    }
+
+    let next: number | null = null;
+    for (let i = index + 1; i < rawValues.length; i += 1) {
+      if (rawValues[i] != null) {
+        next = rawValues[i];
+        break;
+      }
+    }
+
+    if (prev != null && next != null) return Math.round((prev + next) / 2);
+    if (prev != null) return Math.round(prev);
+    if (next != null) return Math.round(next);
+    return Math.round(average);
+  });
+
+  return { xData, seriesData };
 };
 const vitalHeartRateNumber = computed(() =>
   getPositiveMetricNumber(vitalSignObj.value?.heartRate, userStore.healthData?.heartRate, userStore.latestMetrics?.heartRate)
@@ -861,7 +1083,7 @@ watch(
   async (newData) => {
     const protocol = userStore.deviceInfo?.protocol || ringStore.deviceInfo?.protocol || 'unknown';
     const isRwRing = isAwarenessRwRing();
-    const localData: any = userStore.receivedData?.filter(isRingHistoryPayload);
+    let localData: any[] = Array.isArray(userStore.receivedData) ? userStore.receivedData.filter(isRingHistoryPayload) : [];
     if (!localData || localData.length === 0) {
       userStore.updateIsSending(false);
       return;
@@ -896,11 +1118,30 @@ watch(
         userStore.updateIsSending(false);
         // uni.hideLoading();
 
+        if (!isRwRing) {
+          await waitForLegacyLocalDataStableBeforeUpload('legacy-local-data-upload', protocol);
+          localData = Array.isArray(userStore.receivedData) ? userStore.receivedData.filter(isRingHistoryPayload) : [];
+          if (!localData.length || !isRingHistoryReadComplete(localData)) {
+            userStore.updateUploadingStatus('2');
+            appendAwarenessDiagnosticLog('legacy-local-data-upload-pending', {
+              protocol,
+              reason: 'not-complete-after-stable-wait',
+              localDataCount: localData.length,
+              localDataTail: localData.slice(-3),
+              stableSnapshot: getLegacyLocalDataStableSnapshot(),
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+            return;
+          }
+        }
+
         const filteredRecords = local.value || [];
         const uploadSinceTimestamp = getAwarenessHistoryUploadSinceTimestamp(isRwRing);
         const rawMetricCounts = countRingHistoryRecordMetrics(filteredRecords as Array<Record<string, any>>);
         const submitArray = buildRingHistorySubmitRecords(filteredRecords, uploadSinceTimestamp);
         const submitMetricCounts = countRingHistoryRecordMetrics(submitArray as Array<Record<string, any>>);
+        const rawRecordSummary = summarizeLegacyUploadRecordsForLog(filteredRecords as Array<Record<string, any>>);
+        const submitRecordSummary = summarizeLegacyUploadRecordsForLog(submitArray as Array<Record<string, any>>);
         if (!isRwRing) {
           appendAwarenessDiagnosticLog('legacy-local-data-upload-ready', {
             protocol,
@@ -912,6 +1153,8 @@ watch(
             uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
             rawMetricCounts,
             submitMetricCounts,
+            rawRecordSummary,
+            submitRecordSummary,
             sample: submitArray.slice(0, 2),
             snapshot: getAwarenessConnectionSnapshot()
           });
@@ -930,6 +1173,7 @@ watch(
                 uploadSinceTimestamp,
                 uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
                 submitMetricCounts,
+                submitRecordSummary,
                 deviceMac,
                 snapshot: getAwarenessConnectionSnapshot()
               });
@@ -946,6 +1190,7 @@ watch(
                 uploadSinceTimestamp,
                 uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
                 submitMetricCounts,
+                submitRecordSummary,
                 deviceMac,
                 snapshot: getAwarenessConnectionSnapshot()
               });
@@ -961,6 +1206,7 @@ watch(
               uploadSinceTimestamp,
               uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
               submitMetricCounts,
+              submitRecordSummary,
               deviceMac,
               sample: submitArray.slice(0, 2),
               snapshot: getAwarenessConnectionSnapshot()
@@ -986,27 +1232,44 @@ watch(
               uploadSinceTimestamp,
               uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
               submitMetricCounts,
+              submitRecordSummary,
               submitResponse: summarizeSubmitDataResponse(submitResponse),
               snapshot: getAwarenessConnectionSnapshot()
             });
-            clearLegacyLocalHistoryCacheAfterUpload({
-              protocol,
-              submitCount: submitArray.length,
-              uploadSinceTimestamp,
-              uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
-              submitMetricCounts,
-              deviceMac
-            });
+            if (shouldKeepLegacyLocalHistoryCacheAfterUpload(submitMetricCounts, submitResponse)) {
+              appendAwarenessDiagnosticLog('legacy-local-data-cache-keep', {
+                protocol,
+                reason: 'sleep-not-ingested',
+                submitCount: submitArray.length,
+                uploadSinceTimestamp,
+                uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+                submitMetricCounts,
+                submitRecordSummary,
+                submitResponse: summarizeSubmitDataResponse(submitResponse),
+                deviceMac,
+                snapshot: getAwarenessConnectionSnapshot()
+              });
+            } else {
+              clearLegacyLocalHistoryCacheAfterUpload({
+                protocol,
+                submitCount: submitArray.length,
+                uploadSinceTimestamp,
+                uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+                submitMetricCounts,
+                submitRecordSummary,
+                deviceMac
+              });
+            }
           }
 
           userStore.updateUploadingStatus('2');
           const submittedTimestamps = submitArray
-            .map((record: any) => getRingHistoryRecordUnixTime(record))
+            .map((record: any) => getRingHistoryRecordSyncUnixTime(record))
             .filter(
               (timestamp): timestamp is number =>
                 Boolean(timestamp && timestamp > 0 && (!uploadSinceTimestamp || timestamp >= uploadSinceTimestamp))
             );
-          if (submittedTimestamps.length > 0 && isRwRing) {
+          if (submittedTimestamps.length > 0) {
             const maxTimestamp = Math.max(...submittedTimestamps);
             userStore.updateLastReadTimestamp(maxTimestamp);
           }
@@ -1027,6 +1290,8 @@ watch(
             uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
             rawMetricCounts,
             submitMetricCounts,
+            rawRecordSummary,
+            submitRecordSummary,
             snapshot: getAwarenessConnectionSnapshot()
           });
           if (!homeDataSyncing.value) {
@@ -1305,14 +1570,17 @@ const refreshAwarenessAfterDataProcessed = async (reason: string, date = getSele
   }
 };
 
-const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string) => {
-  if (!isAwarenessRwRing() || !hasAwarenessCommunicationReady()) return;
+const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string, options: { allowLegacy?: boolean } = {}) => {
+  const isRwRing = isAwarenessRwRing();
+  if ((!isRwRing && !options.allowLegacy) || !hasAwarenessCommunicationReady()) return;
 
   const now = Date.now();
   if (now - lastAwarenessDeviceTimeSyncAt < RW_AWARENESS_DEVICE_TIME_SYNC_DEDUP_MS) {
     appendAwarenessDiagnosticLog('device-time-sync-skip', {
       reason: 'dedup-recent',
       trigger,
+      isRwRing,
+      allowLegacy: options.allowLegacy === true,
       elapsedMs: now - lastAwarenessDeviceTimeSyncAt,
       snapshot: getAwarenessConnectionSnapshot()
     });
@@ -1322,6 +1590,8 @@ const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string) => {
   const timezone = -new Date().getTimezoneOffset() / 60;
   appendAwarenessDiagnosticLog('device-time-sync-start', {
     trigger,
+    isRwRing,
+    allowLegacy: options.allowLegacy === true,
     timestampMs: now,
     timezone,
     snapshot: getAwarenessConnectionSnapshot()
@@ -1332,6 +1602,8 @@ const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string) => {
     lastAwarenessDeviceTimeSyncAt = Date.now();
     appendAwarenessDiagnosticLog('device-time-sync-result', {
       trigger,
+      isRwRing,
+      allowLegacy: options.allowLegacy === true,
       timestampMs: now,
       timezone,
       snapshot: getAwarenessConnectionSnapshot()
@@ -1339,6 +1611,8 @@ const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string) => {
   } catch (error) {
     appendAwarenessDiagnosticLog('device-time-sync-failed', {
       trigger,
+      isRwRing,
+      allowLegacy: options.allowLegacy === true,
       timestampMs: now,
       timezone,
       error: formatBleErrorMessage(error, '\u8bbe\u5907\u65f6\u95f4\u6821\u51c6\u5931\u8d25'),
@@ -1616,25 +1890,19 @@ const initSportChart = async () => {
 const getProcessedOption = () => {
   const newOption = JSON.parse(JSON.stringify(vitalOption));
   const heartRateChart = Array.isArray(vitalSignObj.value?.heartRateChart) ? vitalSignObj.value.heartRateChart : [];
-  const fallbackHeartRateData = vitalHeartRateNumber.value > 0 ? [vitalHeartRateNumber.value] : [];
-  const fullXData = heartRateChart.length > 0 ? heartRateChart.map((item: Point) => item.time?.toString() || '00:00') : fallbackHeartRateData.map(() => '\u5f53\u524d');
+  const { xData, seriesData } = buildStableAwarenessChartData(heartRateChart, vitalHeartRateNumber.value);
 
-  const fullSeriesData = heartRateChart.length > 0 ? heartRateChart.map((item: Point) => Number(item.value)) : fallbackHeartRateData;
-  // const fullSeriesData = [62, 60, 58, 59, 61, 63, 70, 75, 80, 78, 76, 72, 78, 82, 85, 83, 80, 77, 75, 73, 70, 68, 65, 63];
-  newOption.xAxis.data = fullXData;
-  newOption.series[0].data = fullSeriesData;
+  newOption.xAxis.data = xData;
+  newOption.series[0].data = seriesData;
   return newOption;
 };
 const getRelaxOption = () => {
   const newOption = JSON.parse(JSON.stringify(relaxOption));
   const stressChart = Array.isArray(stressDetailObj.value?.stressChart) ? stressDetailObj.value.stressChart : [];
-  const fallbackStressData = relaxStressNumber.value > 0 ? [relaxStressNumber.value] : [];
-  const fullXData = stressChart.length > 0 ? stressChart.map((item: Point) => item.time?.toString() || '00:00') : fallbackStressData.map(() => '\u5f53\u524d');
+  const { xData, seriesData } = buildStableAwarenessChartData(stressChart, relaxStressNumber.value);
 
-  const fullSeriesData = stressChart.length > 0 ? stressChart.map((item: Point) => Number(item.value)) : fallbackStressData;
-  // const fullSeriesData = [62, 60, 58, 59, 61, 63, 70, 75, 80, 78, 76, 72, 78, 82, 85, 83, 80, 77, 75, 73, 70, 68, 65, 63];
-  newOption.xAxis.data = fullXData;
-  newOption.series[0].data = fullSeriesData;
+  newOption.xAxis.data = xData;
+  newOption.series[0].data = seriesData;
   return newOption;
 };
 const initVitalChart = async () => {
@@ -1697,25 +1965,32 @@ const executeCommandsSequentially = async () => {
         snapshot: getAwarenessConnectionSnapshot()
       });
       if (!isRwRing) {
+        await syncRwHomeDeviceTimeBeforeHistory('legacy-home-history-read', { allowLegacy: true });
         const historyStartedAt = Date.now();
         const historyDate = formatLocalDate(new Date());
+        const historySinceTimestamp = getAwarenessHistoryReadSinceTimestamp(false);
         appendAwarenessDiagnosticLog('legacy-home-history-read-start', {
           protocol,
           date: historyDate,
+          sinceTimestamp: historySinceTimestamp,
+          sinceText: formatUnixTimestampForLog(historySinceTimestamp),
           timeoutMs: LEGACY_HOME_HISTORY_SYNC_TIMEOUT_MS,
           snapshot: getAwarenessConnectionSnapshot()
         });
-        const historyResult = await readLocalData(false, historyDate, undefined, {
+        const historyResult = await readLocalData(false, historySinceTimestamp, undefined, {
           timeoutMs: LEGACY_HOME_HISTORY_SYNC_TIMEOUT_MS
         });
         const records = Array.isArray((historyResult as any)?.records) ? (historyResult as any).records : [];
         appendAwarenessDiagnosticLog('legacy-home-history-read-result', {
           protocol,
           date: historyDate,
+          sinceTimestamp: historySinceTimestamp,
+          sinceText: formatUnixTimestampForLog(historySinceTimestamp),
           elapsedMs: Date.now() - historyStartedAt,
           status: (historyResult as any)?.status,
           uploaded: (historyResult as any)?.uploaded,
           recordCount: records.length,
+          recordSummary: summarizeLegacyUploadRecordsForLog(records as Array<Record<string, any>>),
           receivedCount: Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0,
           localDataLength: Array.isArray(userStore.localData) ? userStore.localData.length : 0,
           sample: records.slice(0, 2),
@@ -1726,6 +2001,8 @@ const executeCommandsSequentially = async () => {
           appendAwarenessDiagnosticLog('legacy-home-history-empty-fallback-start', {
             protocol,
             date: historyDate,
+            primarySinceTimestamp: historySinceTimestamp,
+            primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
             readAll: true,
             reason: 'empty-primary-history',
             timeoutMs: LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS,
@@ -1739,10 +2016,13 @@ const executeCommandsSequentially = async () => {
             protocol,
             date: historyDate,
             readAll: true,
+            primarySinceTimestamp: historySinceTimestamp,
+            primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
             elapsedMs: Date.now() - fallbackStartedAt,
             status: (fallbackResult as any)?.status,
             uploaded: (fallbackResult as any)?.uploaded,
             recordCount: fallbackRecords.length,
+            recordSummary: summarizeLegacyUploadRecordsForLog(fallbackRecords as Array<Record<string, any>>),
             receivedCount: Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0,
             localDataLength: Array.isArray(userStore.localData) ? userStore.localData.length : 0,
             rawMetricCounts: countRingHistoryRecordMetrics(fallbackRecords as Array<Record<string, any>>),

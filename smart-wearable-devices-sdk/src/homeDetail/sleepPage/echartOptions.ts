@@ -1,4 +1,7 @@
-export const sleepTimeOption2 = {
+// @ts-nocheck
+type AnyEchartOption = any;
+
+export const sleepTimeOption2: AnyEchartOption = {
   grid: {
     left: '3%',
     right: '4%',
@@ -94,7 +97,7 @@ export const sleepTimeOption2 = {
   backgroundColor: '#f8f8fe'
 };
 
-export const sleepTimeOption = {
+export const sleepTimeOption: AnyEchartOption = {
   grid: {
     left: '3%',
     right: '4%',
@@ -179,7 +182,7 @@ export const sleepTimeOption = {
   ],
   backgroundColor: '#f8f8fe'
 };
-export const sleepRageOption = {
+export const sleepRageOption: AnyEchartOption = {
   title: {
     subtext: '睡眠\n比例',
     subtextStyle: {

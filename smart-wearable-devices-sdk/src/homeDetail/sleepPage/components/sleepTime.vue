@@ -387,52 +387,23 @@ const connectors = computed(() => {
 // ===== 时间标签 =====
 const sleepTimeTicks = computed<SleepTimelineTick[]>(() => {
   const { min, max } = timeRange.value;
-  const span = Math.max(1, max - min);
-  const minutesList: number[] = [min, max];
-  const segments = processTimeSegments();
-
-  segments.forEach((segment) => {
-    minutesList.push(segment.start, segment.start + segment.duration);
-  });
-
-  const uniqueMinutes = Array.from(new Set(minutesList.filter((item) => Number.isFinite(item))))
-    .filter((minutes) => minutes >= min && minutes <= max)
-    .sort((a, b) => a - b);
-  const rawTicks = uniqueMinutes.map((minutes, index) => ({
-    key: `${minutes}-${index}`,
-    label: formatTime(minutes),
-    left: Math.max(0, Math.min(100, ((minutes - min) / span) * 100)),
-    isFirst: false,
-    isLast: false
-  }));
-  if (rawTicks.length <= 2) {
-    return rawTicks.map((tick, index, list) => ({
-      ...tick,
-      isFirst: index === 0,
-      isLast: index === list.length - 1
-    }));
-  }
-
-  const minGapPercent = 9;
-  const lastTick = rawTicks[rawTicks.length - 1];
-  const filtered: SleepTimelineTick[] = [rawTicks[0]];
-  rawTicks.slice(1, -1).forEach((tick) => {
-    const prev = filtered[filtered.length - 1];
-    if (tick.left - prev.left < minGapPercent) return;
-    if (lastTick.left - tick.left < minGapPercent) return;
-    filtered.push(tick);
-  });
-  const prev = filtered[filtered.length - 1];
-  if (lastTick.left - prev.left < minGapPercent && filtered.length > 1) {
-    filtered.pop();
-  }
-  filtered.push(lastTick);
-
-  return filtered.map((tick, index, list) => ({
-    ...tick,
-    isFirst: index === 0,
-    isLast: index === list.length - 1
-  }));
+  const endMinutes = max > min ? max : min;
+  return [
+    {
+      key: `start-${min}`,
+      label: formatTime(min),
+      left: 0,
+      isFirst: true,
+      isLast: false
+    },
+    {
+      key: `end-${max}`,
+      label: formatTime(endMinutes),
+      left: 100,
+      isFirst: false,
+      isLast: true
+    }
+  ];
 });
 
 // ===== 点击指示器 =====

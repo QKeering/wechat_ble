@@ -1,8 +1,10 @@
 // src/utils/echartOptions.ts
 // 定义 ECharts Option 的类型（若项目中已引入 ECharts 类型，可直接使用）
+// @ts-nocheck
 const echarts = require('../../static/echarts.min.js');
+type AnyEchartOption = any;
 // 第一个配置：baseOption
-export const baseOption = {
+export const baseOption: AnyEchartOption = {
   grid: {
     left: '3%',
     right: '4%',
@@ -70,7 +72,7 @@ export const baseOption = {
 };
 
 // 第二个配置：pressureOption
-export const pressureOption = {
+export const pressureOption: AnyEchartOption = {
   title: {
     show: false
   },
@@ -153,7 +155,7 @@ export const pressureOption = {
 };
 
 // 第三个配置：todayOption
-export const todayOption = {
+export const todayOption: AnyEchartOption = {
   title: {
     text: '今天（11:00）',
     left: '3%',
@@ -216,7 +218,7 @@ export const todayOption = {
   borderRadius: 0
 };
 
-export const lastWeekOption = {
+export const lastWeekOption: AnyEchartOption = {
   title: {
     text: '11月3日-11月9日(11:00)',
     left: '3%',

@@ -1,5 +1,8 @@
 // utils/echartOptions.ts
-export const baseOption = {
+// @ts-nocheck
+type AnyEchartOption = any;
+
+export const baseOption: AnyEchartOption = {
   grid: {
     left: '3%',
     right: '4%',

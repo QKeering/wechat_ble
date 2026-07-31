@@ -333,8 +333,13 @@ onMounted(() => {
     audio = uni.createInnerAudioContext();
     return;
   }
-  recorder = getRecorderManager.call(uni);
-  recorder.onStop(async (res) => {
+  const activeRecorder = getRecorderManager.call(uni) as UniApp.RecorderManager | null;
+  if (!activeRecorder) {
+    audio = uni.createInnerAudioContext();
+    return;
+  }
+  recorder = activeRecorder;
+  activeRecorder.onStop(async (res) => {
     isListening.value = false;
     isPressingVoice.value = false;
     recorderBusy = false;
@@ -376,7 +381,7 @@ onMounted(() => {
       uni.hideLoading();
     }
   });
-  recorder.onError((error) => {
+  activeRecorder.onError((error) => {
     isListening.value = false;
     isPressingVoice.value = false;
     recorderBusy = false;

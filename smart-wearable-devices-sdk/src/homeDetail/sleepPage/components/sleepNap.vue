@@ -5,8 +5,8 @@ import type { sleepNapType } from '@/types/api/homeDetail';
 import { addSleepNap, deleteSleepNap } from '@/common/api/homeDetail';
 import { formatLocalDate } from '@/utils/utils.js';
 const popup = ref<any>(null);
-const datetimePicker = ref(null);
-const datetimePickerS = ref(null);
+const datetimePicker = ref<any>(null);
+const datetimePickerS = ref<any>(null);
 
 // 时间绑定值（格式：HH:mm）
 const startTime = ref('');
@@ -77,7 +77,12 @@ const getCurrentDate = () => {
 };
 
 // 开始时间变更时，同步限制结束时间（避免结束时间早于开始时间）
-const handleStartChange = (newTime) => {};
+const handleStartChange = (_newTime: unknown) => {};
+
+const openDatetimePicker = (type: 'start' | 'end') => {
+  const picker = type === 'start' ? datetimePicker.value : datetimePickerS.value;
+  picker?.open?.();
+};
 
 // 确认开始时间
 const handleStartConfirm = (time: selectDate) => {
@@ -168,11 +173,11 @@ onLoad(() => {});
           <text class="ml-10">00:00-23:59</text>
         </view>
         <view class="flex jc-between mt-50">
-          <view @tap="datetimePicker.open()" class="r-50 pt-40 pb-40 w-full mr-30 flex jc-center ai-center t-979797" style="background-color: #f7f7f7">
+          <view @tap="openDatetimePicker('start')" class="r-50 pt-40 pb-40 w-full mr-30 flex jc-center ai-center t-979797" style="background-color: #f7f7f7">
             {{ startTime ? startTime : '开始时间' }}
             <uv-datetime-picker ref="datetimePicker" mode="time" v-model="startTime" :maxMinute="startMaxMinute" @confirm="handleStartConfirm" @change="handleStartChange" />
           </view>
-          <view @tap="datetimePickerS.open()" class="r-50 pt-40 pb-40 w-full flex jc-center ai-center t-979797" style="background-color: #f7f7f7">
+          <view @tap="openDatetimePicker('end')" class="r-50 pt-40 pb-40 w-full flex jc-center ai-center t-979797" style="background-color: #f7f7f7">
             {{ endTime ? endTime : '结束时间' }}
             <uv-datetime-picker ref="datetimePickerS" mode="time" v-model="endTime" @confirm="handleEndConfirm" />
           </view>

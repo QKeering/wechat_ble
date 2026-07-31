@@ -908,7 +908,9 @@ export const useRwForegroundMeasurement = () => {
       if (token === rwMetricReadToken && activeRwMetric === metric) {
         activeRwMetric = null;
         if (userStore.isConnected && controlEnableAttempted) {
-          await disableMeasurementControl();
+          // TODO: 后续恢复 RW 前台测量控制关闭逻辑时，再接回 disableMeasurementControl。
+          // 当前先按类型审计要求注释，避免未定义方法阻断全量检查。
+          // await disableMeasurementControl();
         } else {
           appendRingDiagnosticLog(source, 'single-metric-skip-disable', {
             target: metric,

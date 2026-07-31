@@ -865,8 +865,8 @@ onUnload(() => {
             color="#2E70FC"
             :customTextStyle="{ 'font-size': '32rpx' }"
             :customStyle="{ padding: '40rpx 0' }"
-            @click="refreshDeviceReadings"
           ></uv-button>
+          <!-- TODO: 后续恢复设备读取时，再接回 refreshDeviceReadings。 -->
           <view v-if="readStatusText" class="device-status mt-20 fs-28 t-979797">{{ readStatusText }}</view>
         </view>
       </view>

@@ -4,6 +4,7 @@ import { onPageScroll } from '@dcloudio/uni-app';
 import { wechatLogin } from '@/common/api/login';
 import { useUserStore } from '@/stores/user';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { getWechatProfileForNickname } from '@/utils/wechatProfile';
 
 const userStore = useUserStore();
 
@@ -36,8 +37,8 @@ const withTimeout = (promise, timeout = 15000, message = '请求超时，请稍�
   });
 };
 
-const finishLogin = async (response) => {
-  await userStore.applyLoginResponse(response);
+const finishLogin = async (response, loginOptions = {}) => {
+  await userStore.applyLoginResponse(response, loginOptions);
   uni.showToast({
     title: '登录成功',
     icon: 'success'
@@ -62,8 +63,9 @@ const handleGetPhoneNumber = async (event) => {
   }
 
   isLoggingIn.value = true;
-  uni.showLoading({ title: '登录中' });
   try {
+    const wxProfile = await getWechatProfileForNickname();
+    uni.showLoading({ title: '登录中' });
     const wxResult = await withTimeout(wx.login(), 10000, '微信登录凭证获取超时');
     if (!wxResult?.code) {
       throw new Error('微信登录凭证获取失败');
@@ -79,7 +81,7 @@ const handleGetPhoneNumber = async (event) => {
       15000,
       '授权登录超时，请稍后重试'
     );
-    await finishLogin(response);
+    await finishLogin(response, { wxProfile });
   } catch (error) {
     showToast(getErrorMessage(error, '授权登录失败'));
   } finally {

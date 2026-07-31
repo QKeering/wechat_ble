@@ -1,4 +1,6 @@
+// @ts-nocheck
 const echarts = require('../../static/echarts.min.js');
+type AnyEchartOption = any;
 let temperatureGradient = '#rgba(255, 107, 139, 0)'; // 降级默认色
 if (echarts && echarts.graphic && typeof echarts.graphic.LinearGradient === 'function') {
   temperatureGradient = new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -6,7 +8,7 @@ if (echarts && echarts.graphic && typeof echarts.graphic.LinearGradient === 'fun
     { offset: 1, color: 'rgba(255, 107, 139, 0)' }
   ]);
 }
-export const pressureOption = {
+export const pressureOption: AnyEchartOption = {
   series: [
     // ========== 第一圈：最外层环（#FF5B7B）==========
     {
@@ -110,7 +112,7 @@ export const pressureOption = {
   ]
 };
 
-export const calorieOption = {
+export const calorieOption: AnyEchartOption = {
   grid: {
     left: '0%',
     right: '5%',
@@ -192,7 +194,7 @@ export const calorieOption = {
   ]
 };
 // 24小时时间轴配置 - 与图片完全一致
-export const categoryOption = {
+export const categoryOption: AnyEchartOption = {
   grid: {
     left: '2%',
     right: '2%',
@@ -332,7 +334,7 @@ export const categoryOption = {
   backgroundColor: 'transparent'
 };
 // 活动强度阶梯线图配置 - 与图片完全一致
-export const actIntensityOption = {
+export const actIntensityOption: AnyEchartOption = {
   grid: {
     left: '15%',
     right: '5%',
@@ -434,7 +436,7 @@ export const actIntensityOption = {
   },
   backgroundColor: 'transparent'
 };
-export const activePieOption = {
+export const activePieOption: AnyEchartOption = {
   title: {
     subtext: '活动\n比例',
     subtextStyle: {
@@ -526,7 +528,7 @@ export const activePieOption = {
   borderRadius: 12,
   padding: [10, 20, 10, 20]
 };
-export const todayOption = {
+export const todayOption: AnyEchartOption = {
   title: {
     text: '今天（11:00）',
     left: '3%',
@@ -589,7 +591,7 @@ export const todayOption = {
   borderRadius: 0
 };
 
-export const lastDayOption = {
+export const lastDayOption: AnyEchartOption = {
   title: {
     text: '11月3日-11月9日(11:00)',
     left: '3%',

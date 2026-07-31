@@ -181,14 +181,24 @@ type MineRwDiagnosticActionOptions = {
 };
 
 const bindInfo = ref<any>(null);
-const menuList = [
+type MineMenuItem = {
+  icon?: string;
+  iconText?: string;
+  iconClass?: string;
+  title: string;
+  path: string;
+};
+
+const menuList: MineMenuItem[] = [
   {
-    icon: '/static/images/mine/menu01.png',
+    iconText: '护',
+    iconClass: 'menu-icon-family',
     title: '\u5bb6\u4eba\u5b88\u62a4',
     path: '/pages/family/family'
   },
   {
-    icon: '/static/images/mine/menu02.png',
+    iconText: '长',
+    iconClass: 'menu-icon-elder',
     title: '\u957f\u8f88\u6a21\u5f0f',
     path: '/pages/family/elderHome'
   },
@@ -3780,7 +3790,7 @@ const handleMineMetricTest = async (metric: MineMetricTestItem, options: MineRwD
       expectedKey,
       value,
       displayText,
-      parsed: summarizeMineParsedData(parsed)
+      parsed: summarizeMineParsedData(parsed as RingParsedData | null | undefined)
     };
     appendMineDiagnosticLog('manual-metric-result', {
       ...latestMineMetricResult.value,
@@ -4176,7 +4186,10 @@ const handleMineRwL19Acceptance = async () => {
       <view class="menu-section">
         <view class="menu-item flex jc-between ai-center bg-white r-50 mb-30 pt-30 pr-40 pb-30 pl-40" v-for="(item, index) in menuList" :key="index" @tap.stop="handleMineMenuTap(item)">
           <view class="menu-item__content flex ai-center">
-            <image class="menu-icon" :src="item.icon" mode="aspectFit"></image>
+            <view v-if="item.iconText" class="menu-icon menu-icon-badge" :class="item.iconClass">
+              <text>{{ item.iconText }}</text>
+            </view>
+            <image v-else class="menu-icon menu-icon-image" :src="item.icon" mode="aspectFit"></image>
             <view class="menu-title fs-36 ml-30">{{ item.title }}</view>
           </view>
           <view class="mine-arrow"></view>
@@ -4220,10 +4233,30 @@ const handleMineRwL19Acceptance = async () => {
   width: 300rpx;
 }
 .menu-icon {
-  display: block;
   flex: 0 0 64rpx;
   height: 64rpx;
   width: 64rpx;
+}
+.menu-icon-image {
+  display: block;
+}
+.menu-icon-badge {
+  align-items: center;
+  border-radius: 22rpx;
+  box-shadow: 0 10rpx 24rpx rgba(52, 112, 255, 0.16);
+  box-sizing: border-box;
+  color: #fff;
+  display: flex;
+  font-size: 30rpx;
+  font-weight: 700;
+  justify-content: center;
+  line-height: 1;
+}
+.menu-icon-family {
+  background: linear-gradient(135deg, #35d7c7 0%, #2f7cff 100%);
+}
+.menu-icon-elder {
+  background: linear-gradient(135deg, #8b5cf6 0%, #4c76f1 100%);
 }
 .mine-arrow {
   border-right: 3rpx solid #010101;

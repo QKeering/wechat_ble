@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
-const form = reactive({
+const form = reactive<Record<string, boolean>>({
   subjectiveSleepScore: true,
   sleepInterval: true,
   sleepScore: true,
@@ -24,8 +24,8 @@ const list = ref([
   { name: '睡眠总结', value: 'activitySummary' }
 ]);
 // 拖拽后新的数据
-const newList = ref([]);
-const change = (v) => (newList.value = v);
+const newList = ref<any[]>([]);
+const change = (v: any[]) => (newList.value = v);
 const handleOk = () => {
   const cardConfig = {
     // 提取所有卡片标识，包含不显示的卡片，记录顺序

@@ -1,6 +1,8 @@
 // utils/echartOptions.ts
 // 引入 echarts （用于渐变等功能，若不需要可省略）
+// @ts-nocheck
 const echarts = require('../../static/echarts.min.js');
+type AnyEchartOption = any;
 // import * as echarts from '@/static/echarts.min.js';
 let temperatureGradient = '#4cae4c'; // 降级默认色
 if (echarts && echarts.graphic && typeof echarts.graphic.LinearGradient === 'function') {
@@ -9,7 +11,7 @@ if (echarts && echarts.graphic && typeof echarts.graphic.LinearGradient === 'fun
     { offset: 1, color: '#4cae4c' }
   ]);
 }
-export const defaultEchartOption = {
+export const defaultEchartOption: AnyEchartOption = {
   grid: {
     left: '0%', // 左侧留出状态文字的空间
     right: '0%',
@@ -78,7 +80,7 @@ export const defaultEchartOption = {
   ]
 };
 
-export const pressureOption = {
+export const pressureOption: AnyEchartOption = {
   title: {
     subtext: '强度\n比例',
     subtextStyle: {

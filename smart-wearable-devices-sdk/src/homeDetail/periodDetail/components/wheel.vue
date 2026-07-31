@@ -335,7 +335,7 @@ function initCanvas(retries = 5): Promise<void> {
   return new Promise((resolve) => {
     const L = layoutSizePx.value;
     const q = uni.createSelectorQuery().in(instance?.proxy as any);
-    q.select(`#${mainCanvasId}`)
+    (q.select(`#${mainCanvasId}`) as any)
       .fields({ node: true, size: true })
       .exec((res: any[]) => {
         const canvas = res?.[0]?.node;

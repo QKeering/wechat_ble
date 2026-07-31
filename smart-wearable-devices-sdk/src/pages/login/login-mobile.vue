@@ -4,6 +4,7 @@ import { onPageScroll } from '@dcloudio/uni-app';
 import { phoneLogin, getPhoneCode } from '@/common/api/login';
 import { useUserStore } from '@/stores/user';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { getWechatProfileForNickname } from '@/utils/wechatProfile';
 const userStore = useUserStore();
 
 const scrollTop = ref(0);
@@ -95,6 +96,7 @@ const handlePhoneLogin = async () => {
   }
   isLoggingIn.value = true;
   try {
+    const wxProfile = await getWechatProfileForNickname();
     const res1 = await wx.login();
     const res2 = await phoneLogin(
       {
@@ -108,7 +110,7 @@ const handlePhoneLogin = async () => {
         }
       }
     );
-    await userStore.applyLoginResponse(res2);
+    await userStore.applyLoginResponse(res2, { wxProfile });
     uni.showToast({
       title: '登录成功',
       icon: 'success'

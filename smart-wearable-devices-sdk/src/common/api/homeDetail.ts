@@ -27,29 +27,51 @@ export const submitData = (params: submitDataType, config = {}) => {
   return (uni as any).$uv.http.post('/app/data/sync', params, config);
 };
 
-// 提交生理期问卷
-export const addGirlHealth = (params: {
+type GirlHealthSubmitParams = {
   birthday: string;         // 出生日期 yyyy-MM-dd
   cycleDay: number;         // 平均生理周期天数
   menstruationDay: number;  // 经期持续天数
   lastMenstruationDate: string; // 最近一次月经开始日期 yyyy-MM-dd
   cycleRegularity: string;  // 周期规律：very_regular/regular/fairly_regular/irregular
   healthConditions: string; // 健康情况，多选逗号拼接
-}, config = {}) => {
-  return (uni as any).$uv.http.post('/app/girlHealth/addGirlHealth', params, config);
+  userId?: number | string;
+  id?: number;
+};
+
+type LegacyGirlHealthSubmitParams = Partial<GirlHealthSubmitParams> & {
+  birthDay?: string;
+  periodCycle?: number | string;
+  periodRuntime?: number | string;
+  lastPeriodTime?: string | string[];
+  isRuleType?: string;
+  otherUnhealth?: string;
+};
+
+const normalizeGirlHealthSubmitParams = (params: LegacyGirlHealthSubmitParams): GirlHealthSubmitParams => {
+  const lastPeriodTime = params.lastPeriodTime;
+  const legacyLastDate = Array.isArray(lastPeriodTime)
+    ? String(lastPeriodTime[0] || '')
+    : String(lastPeriodTime || '').split(',').map((item) => item.trim()).filter(Boolean)[0] || '';
+  return {
+    birthday: params.birthday || params.birthDay || '',
+    cycleDay: Number(params.cycleDay ?? params.periodCycle ?? 0),
+    menstruationDay: Number(params.menstruationDay ?? params.periodRuntime ?? 0),
+    lastMenstruationDate: params.lastMenstruationDate || legacyLastDate,
+    cycleRegularity: params.cycleRegularity || params.isRuleType || '',
+    healthConditions: params.healthConditions || params.otherUnhealth || '',
+    userId: params.userId,
+    id: params.id
+  };
 };
 
 // 提交生理期问卷
-export const updateGirlHealth = (params: {
-  birthDay: string;         // 出生日期 yyyy-MM-dd
-  cycleDay: number;         // 平均生理周期天数
-  menstruationDay: number;  // 经期持续天数
-  lastMenstruationDate: string; // 最近一次月经开始日期 yyyy-MM-dd
-  cycleRegularity: string;  // 周期规律：very_regular/regular/fairly_regular/irregular
-  healthConditions: string; // 健康情况，多选逗号拼接
-  id:number;
-}, config = {}) => {
-  return (uni as any).$uv.http.post('/app/girlHealth/updateGirlHealth', params, config);
+export const addGirlHealth = (params: LegacyGirlHealthSubmitParams, config = {}) => {
+  return (uni as any).$uv.http.post('/app/girlHealth/addGirlHealth', normalizeGirlHealthSubmitParams(params), config);
+};
+
+// 提交生理期问卷
+export const updateGirlHealth = (params: LegacyGirlHealthSubmitParams & { id: number }, config = {}) => {
+  return (uni as any).$uv.http.post('/app/girlHealth/updateGirlHealth', normalizeGirlHealthSubmitParams(params), config);
 };
 // 获取身心平衡评分
 export const getBalanceScore = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<balanceScoreType> => {

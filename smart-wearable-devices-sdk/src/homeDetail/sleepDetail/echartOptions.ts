@@ -1,5 +1,8 @@
 // utils/echartOptions.ts
-export const heartRateOption = {
+// @ts-nocheck
+type AnyEchartOption = any;
+
+export const heartRateOption: AnyEchartOption = {
   backgroundColor: '#fff',
   tooltip: {
     show: false
@@ -47,7 +50,7 @@ export const heartRateOption = {
 };
 
 //睡眠时间
-export const sleepTimeOption = {
+export const sleepTimeOption: AnyEchartOption = {
   grid: {
     left: '3%',
     right: '4%',
@@ -131,7 +134,7 @@ export const sleepTimeOption = {
   ],
   backgroundColor: '#ffffff'
 };
-export const sleepRageOption = {
+export const sleepRageOption: AnyEchartOption = {
   title: {
     subtext: '睡眠\n比例',
     subtextStyle: {

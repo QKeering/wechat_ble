@@ -2,7 +2,7 @@
 import { ref } from 'vue';
 const echarts = require('../../../static/echarts.min.js');
 import { categoryOption } from '@/homeDetail/exercise/echartOptions';
-const categoryRef = ref(null);
+const categoryRef = ref<any>(null);
 const initCategory = async () => {
   if (!categoryRef.value) return;
   try {

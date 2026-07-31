@@ -29,6 +29,15 @@ export interface SubmitRingHistorySyncResultResult {
 
 const HISTORY_FUTURE_TOLERANCE_SECONDS = 10 * 60;
 const RW_FALLBACK_TEMPERATURE_CELSIUS = 36.6;
+const SLEEP_AWAKE_STATE = 1;
+const SLEEP_MAX_POINT_GAP_SECONDS = 90 * 60;
+const SLEEP_DEFAULT_SAMPLE_SECONDS = 5 * 60;
+const SLEEP_MIN_SAMPLE_SECONDS = 60;
+const SLEEP_MAX_SAMPLE_SECONDS = 60 * 60;
+const SLEEP_SEGMENT_BACKFILL_SECONDS = 16 * 60 * 60;
+const SECONDS_PER_DAY = 24 * 60 * 60;
+const MAIN_SLEEP_WINDOW_START_HOUR = 21;
+const MAIN_SLEEP_WINDOW_END_HOUR = 11;
 const RING_HISTORY_SUBMIT_DEDUPE_FIELDS = [
   'recordTime',
   'stepCount',
@@ -44,7 +53,9 @@ const RING_HISTORY_SUBMIT_DEDUPE_FIELDS = [
   'diastolic',
   'temperature',
   'sleepState',
+  'sleepType',
   'sleepDuration',
+  'sleepTime',
   'startTime',
   'endTime',
   'dateRef',
@@ -285,6 +296,20 @@ const normalizeRwSleepStatusToL19State = (value: unknown) => {
   return L19_SLEEP_STATE_TEXT[text];
 };
 
+const normalizeLegacySleepTypeToL19State = (value: unknown) => {
+  if (value == null || value === '') return undefined;
+  const numeric = getNumber(value);
+  // Legacy/QK SDK sleep status: 0 enter sleep, 1 light, 2 deep, 3 awake, 4 REM, 5 exit sleep.
+  // Backend/UI normalized state: 1 awake, 2 REM, 3 light, 4 deep, 5 nap.
+  if (numeric === 1) return 3;
+  if (numeric === 2) return 4;
+  if (numeric === 3) return 1;
+  if (numeric === 4) return 2;
+  if (numeric === 5 || numeric === 0) return undefined;
+  const text = String(value).trim().toLowerCase().replace(/[\s_-]/g, '');
+  return L19_SLEEP_STATE_TEXT[text];
+};
+
 const getSleepStateValue = (record: RingHistoryRecord) => {
   const explicitState = normalizeL19SleepStateValue(getRecordValue(record, L19_SLEEP_STATE_ALIASES));
   if (explicitState != null) return explicitState;
@@ -293,7 +318,7 @@ const getSleepStateValue = (record: RingHistoryRecord) => {
   if (rwStatus != null) return rwStatus;
 
   const typedSleepValue = isTypedHistoryRecord(record, [/sleep/]) ? getRecordValue(record, ['value', 'val']) : undefined;
-  return normalizeL19SleepStateValue(getRecordValue(record, SLEEP_TYPE_ALIASES) ?? typedSleepValue);
+  return normalizeLegacySleepTypeToL19State(getRecordValue(record, SLEEP_TYPE_ALIASES) ?? typedSleepValue);
 };
 
 const getRecordTypeText = (record: RingHistoryRecord) =>
@@ -672,6 +697,177 @@ const dedupeRingHistorySubmitRecords = (records: RingHistorySubmitRecord[]) => {
   return deduped;
 };
 
+type SleepSegmentDraft = {
+  state: number;
+  start: number;
+  end: number;
+};
+
+const clampSleepSampleSeconds = (value: number) =>
+  Math.min(SLEEP_MAX_SAMPLE_SECONDS, Math.max(SLEEP_MIN_SAMPLE_SECONDS, Math.floor(value)));
+
+const getSleepTimelineSampleSeconds = (points: Array<{ time: number }>) => {
+  const gaps = points
+    .map((point, index) => {
+      const next = points[index + 1];
+      return next ? next.time - point.time : 0;
+    })
+    .filter((gap) => gap >= SLEEP_MIN_SAMPLE_SECONDS && gap <= SLEEP_MAX_POINT_GAP_SECONDS)
+    .sort((left, right) => left - right);
+
+  if (gaps.length === 0) return SLEEP_DEFAULT_SAMPLE_SECONDS;
+  return clampSleepSampleSeconds(gaps[Math.floor(gaps.length / 2)]);
+};
+
+const mergeAdjacentSleepSegments = (segments: SleepSegmentDraft[]) => {
+  const merged: SleepSegmentDraft[] = [];
+  segments
+    .filter((segment) => segment.end > segment.start)
+    .sort((left, right) => left.start - right.start)
+    .forEach((segment) => {
+      const last = merged[merged.length - 1];
+      if (last && last.state === segment.state && segment.start - last.end <= SLEEP_MIN_SAMPLE_SECONDS) {
+        last.end = Math.max(last.end, segment.end);
+        return;
+      }
+      merged.push({ ...segment });
+    });
+  return merged;
+};
+
+const getLocalDayStartUnixTime = (unixTime: number) => {
+  const date = new Date(unixTime * 1000);
+  date.setHours(0, 0, 0, 0);
+  return Math.floor(date.getTime() / 1000);
+};
+
+const getMainSleepWindowCandidates = (unixTime: number) => {
+  const dayStart = getLocalDayStartUnixTime(unixTime);
+  const windowStartOffset = MAIN_SLEEP_WINDOW_START_HOUR * 60 * 60;
+  const windowEndOffset = MAIN_SLEEP_WINDOW_END_HOUR * 60 * 60;
+  return [
+    {
+      start: dayStart - SECONDS_PER_DAY + windowStartOffset,
+      end: dayStart + windowEndOffset
+    },
+    {
+      start: dayStart + windowStartOffset,
+      end: dayStart + SECONDS_PER_DAY + windowEndOffset
+    }
+  ];
+};
+
+const clipSleepSegmentToMainSleepWindow = (segment: SleepSegmentDraft) => {
+  const seen = new Set<string>();
+  return getMainSleepWindowCandidates(segment.start)
+    .map((window) => {
+      const start = Math.max(segment.start, window.start);
+      const end = Math.min(segment.end, window.end);
+      return end > start ? { ...segment, start, end } : null;
+    })
+    .filter((item): item is SleepSegmentDraft => {
+      if (!item) return false;
+      const key = `${item.state}_${item.start}_${item.end}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
+
+export const buildRingHistorySleepSegmentRecords = (
+  records: RingHistorySubmitRecord[] = []
+): RingHistorySubmitRecord[] => {
+  const points = records
+    .map((record) => {
+      const time = parseRecordTime(record.recordTime);
+      const state = getSleepStateValue(record);
+      if (!time || state == null) return null;
+      return { time, state, record };
+    })
+    .filter((point): point is { time: number; state: number; record: RingHistorySubmitRecord } => Boolean(point))
+    .sort((left, right) => left.time - right.time);
+
+  if (points.length === 0) return [];
+
+  const sampleSeconds = getSleepTimelineSampleSeconds(points);
+  const rawSegments: SleepSegmentDraft[] = points
+    .map((point, index) => {
+      const durationMinutes = getSleepDurationMinutes(point.record);
+      const explicitEnd = parseRecordTime(point.record.endTime) || (durationMinutes ? point.time + durationMinutes * 60 : undefined);
+      const next = points[index + 1];
+      const nextGap = next ? next.time - point.time : 0;
+      const end =
+        explicitEnd && explicitEnd > point.time
+          ? explicitEnd
+          : next && nextGap > 0 && nextGap <= SLEEP_MAX_POINT_GAP_SECONDS
+            ? next.time
+            : point.time + sampleSeconds;
+      return {
+        state: point.state,
+        start: point.time,
+        end
+      };
+    })
+    .filter((segment) => segment.end > segment.start);
+
+  const sleepWindowSegments = rawSegments.flatMap((segment) => clipSleepSegmentToMainSleepWindow(segment));
+  if (sleepWindowSegments.length === 0) return [];
+
+  const groups: SleepSegmentDraft[][] = [];
+  sleepWindowSegments.forEach((segment) => {
+    const currentGroup = groups[groups.length - 1];
+    const previous = currentGroup?.[currentGroup.length - 1];
+    if (!currentGroup || !previous || segment.start - previous.end > SLEEP_MAX_POINT_GAP_SECONDS) {
+      groups.push([segment]);
+      return;
+    }
+    currentGroup.push(segment);
+  });
+
+  const normalizedSegments = groups.flatMap((group) => {
+    const firstSleepIndex = group.findIndex((segment) => segment.state !== SLEEP_AWAKE_STATE);
+    if (firstSleepIndex < 0) return [];
+
+    let lastSleepIndex = -1;
+    for (let index = group.length - 1; index >= 0; index -= 1) {
+      if (group[index].state !== SLEEP_AWAKE_STATE) {
+        lastSleepIndex = index;
+        break;
+      }
+    }
+
+    return mergeAdjacentSleepSegments(group.slice(firstSleepIndex, lastSleepIndex + 1));
+  });
+
+  return normalizedSegments
+    .map((segment) => {
+      const sleepTime = Math.max(1, Math.round((segment.end - segment.start) / 60));
+      const startTime = formatUnixTime(segment.start);
+      const endTime = formatUnixTime(segment.end);
+      const dateRef = resolveSleepDateRef(undefined, startTime, endTime);
+      const record: RingHistorySubmitRecord = {
+        recordTime: startTime,
+        sleepState: segment.state,
+        sleepType: segment.state,
+        type: segment.state,
+        sleepDuration: sleepTime,
+        durationMinutes: sleepTime,
+        sleepTime,
+        startTime,
+        endTime,
+        dateRef,
+        sourceType: 'l19_sleep_segment'
+      };
+
+      Object.keys(record).forEach((key) => {
+        if (record[key] == null || record[key] === '') delete record[key];
+      });
+
+      return record;
+    })
+    .filter((record) => Boolean(record.startTime && record.endTime && record.dateRef));
+};
+
 export const isRingHistoryPayload = (item: RingHistoryRecord) => HISTORY_SOURCE_TYPES.has(item?.type);
 
 export const isRingHistoryReadComplete = (receivedData: RingHistoryRecord[] = []) => {
@@ -701,11 +897,21 @@ export const isRingHistoryReadComplete = (receivedData: RingHistoryRecord[] = []
   });
 };
 
+const shouldSubmitRingHistoryRecordAfterSince = (record: RingHistorySubmitRecord, lastReadTimestamp = 0) => {
+  if (!lastReadTimestamp) return true;
+  const unixTime = getRingHistoryRecordSyncUnixTime(record);
+  return !unixTime || unixTime >= lastReadTimestamp;
+};
+
 export const buildRingHistorySubmitRecords = (records: RingHistoryRecord[] = [], lastReadTimestamp = 0): RingHistorySubmitRecord[] => {
   const submitRecords = records
     .filter((record) => {
       const unixTime = getRingHistoryRecordSyncUnixTime(record);
-      return !lastReadTimestamp || !unixTime || unixTime >= lastReadTimestamp;
+      const sinceTimestamp =
+        lastReadTimestamp && isSleepHistoryRecord(record)
+          ? Math.max(0, lastReadTimestamp - SLEEP_SEGMENT_BACKFILL_SECONDS)
+          : lastReadTimestamp;
+      return !sinceTimestamp || !unixTime || unixTime >= sinceTimestamp;
     })
     .map((record) => {
       const rrIntervals = getRecordValue(record, ['rrIntervals', 'rrintervals', 'ppg']);
@@ -816,7 +1022,13 @@ export const buildRingHistorySubmitRecords = (records: RingHistoryRecord[] = [],
     })
     .filter((record) => Object.keys(record).some((key) => key !== 'recordTime') && record.recordTime);
 
-  return dedupeRingHistorySubmitRecords(submitRecords);
+  const directSubmitRecords = submitRecords.filter((record) =>
+    shouldSubmitRingHistoryRecordAfterSince(record, lastReadTimestamp)
+  );
+  const sleepSegmentRecords = buildRingHistorySleepSegmentRecords(submitRecords).filter((record) =>
+    shouldSubmitRingHistoryRecordAfterSince(record, lastReadTimestamp)
+  );
+  return dedupeRingHistorySubmitRecords([...directSubmitRecords, ...sleepSegmentRecords]);
 };
 
 export const submitRingHistorySyncResult = async (

@@ -150,6 +150,102 @@ if (stepSubmitRecords.length !== 1 || stepSubmitRecords[0].stepCount !== 128) {
   throw new Error(`RW step submit records should ignore zero placeholders and keep positive steps: ${JSON.stringify(stepSubmitRecords)}`);
 }
 
+const legacySleepTypeSubmitRecords = buildRingHistorySubmitRecords([
+  { unixTime: 1767229300, sleepType: 1 },
+  { unixTime: 1767229600, sleepType: 2 },
+  { unixTime: 1767229900, sleepType: 3 },
+  { unixTime: 1767230200, sleepType: 4 }
+]);
+
+if (
+  legacySleepTypeSubmitRecords.length !== 4 ||
+  legacySleepTypeSubmitRecords[0].sleepState !== 3 ||
+  legacySleepTypeSubmitRecords[1].sleepState !== 4 ||
+  legacySleepTypeSubmitRecords[2].sleepState !== 1 ||
+  legacySleepTypeSubmitRecords[3].sleepState !== 2
+) {
+  throw new Error(
+    `Legacy L19 raw sleepType should follow SDK mapping 1=light,2=deep,3=awake,4=REM before backend submit: ${JSON.stringify(legacySleepTypeSubmitRecords)}`
+  );
+}
+
+const l19MainSleepWindowSubmitRecords = buildRingHistorySubmitRecords([
+  { recordTime: '2026-07-30 20:30:00', sleepType: 1 },
+  { recordTime: '2026-07-30 21:10:00', sleepType: 1 },
+  { recordTime: '2026-07-31 05:30:00', sleepType: 3 },
+  { recordTime: '2026-07-31 10:50:00', sleepType: 2 },
+  { recordTime: '2026-07-31 11:10:00', sleepType: 2 },
+  { recordTime: '2026-07-31 12:00:00', sleepType: 1 }
+]);
+const l19MainSleepWindowSegments = l19MainSleepWindowSubmitRecords.filter(
+  (record) => record.sourceType === 'l19_sleep_segment'
+);
+const l19MainSleepWindowSegmentTimes = l19MainSleepWindowSegments.map((record) => ({
+  startTime: record.startTime,
+  endTime: record.endTime
+}));
+
+if (
+  l19MainSleepWindowSegments.length === 0 ||
+  l19MainSleepWindowSegments.some(
+    (record) => String(record.startTime) < '2026-07-30 21:00:00' || String(record.endTime) > '2026-07-31 11:00:00'
+  ) ||
+  !l19MainSleepWindowSegments.some((record) => record.startTime === '2026-07-30 21:00:00')
+) {
+  throw new Error(
+    `L19 synthesized sleep segments should be clipped to the 21:00-11:00 main sleep window: ${JSON.stringify(
+      l19MainSleepWindowSegmentTimes
+    )}`
+  );
+}
+
+const l19NoDuplicateSinceTimestamp = Math.floor(Date.parse('2026/07/31 12:00:00') / 1000);
+const l19NoDuplicateAfterSinceSubmitRecords = buildRingHistorySubmitRecords(
+  [
+    { recordTime: '2026-07-30 21:10:00', sleepType: 1 },
+    { recordTime: '2026-07-31 05:30:00', sleepType: 3 },
+    { recordTime: '2026-07-31 10:50:00', sleepType: 2 },
+    { recordTime: '2026-07-31 12:05:00', heartRate: 75 }
+  ],
+  l19NoDuplicateSinceTimestamp
+);
+
+if (
+  l19NoDuplicateAfterSinceSubmitRecords.length !== 1 ||
+  l19NoDuplicateAfterSinceSubmitRecords[0].heartRate !== 75 ||
+  l19NoDuplicateAfterSinceSubmitRecords.some((record) => record.sourceType === 'l19_sleep_segment')
+) {
+  throw new Error(
+    `Backfilled L19 sleep records that already ended before lastReadTimestamp should not be submitted again: ${JSON.stringify(
+      l19NoDuplicateAfterSinceSubmitRecords
+    )}`
+  );
+}
+
+const l19CrossSinceTimestamp = Math.floor(Date.parse('2026/07/31 01:00:00') / 1000);
+const l19CrossSinceSubmitRecords = buildRingHistorySubmitRecords(
+  [
+    { recordTime: '2026-07-30 23:30:00', sleepType: 1 },
+    { recordTime: '2026-07-31 00:30:00', sleepType: 2 },
+    { recordTime: '2026-07-31 01:30:00', sleepType: 3 }
+  ],
+  l19CrossSinceTimestamp
+);
+const l19CrossSinceSegments = l19CrossSinceSubmitRecords.filter((record) => record.sourceType === 'l19_sleep_segment');
+
+if (
+  l19CrossSinceSegments.length === 0 ||
+  !l19CrossSinceSegments.some(
+    (record) => String(record.startTime) < '2026-07-31 01:00:00' && String(record.endTime) >= '2026-07-31 01:00:00'
+  )
+) {
+  throw new Error(
+    `L19 sleep segments crossing lastReadTimestamp should still be submitted once for cross-night completion: ${JSON.stringify(
+      l19CrossSinceSubmitRecords
+    )}`
+  );
+}
+
 const unsafeSummaryStepSubmitRecords = buildRingHistorySubmitRecords([
   { unixTime: 1767229265, dataType: 'step', rawDataType: 'ab_activity_current_day_summary', stepCount: 9262 },
   { unixTime: 1767229266, dataType: 'summary', rawDataType: 'last_data', stepCount: 9262, heartRate: 72 },

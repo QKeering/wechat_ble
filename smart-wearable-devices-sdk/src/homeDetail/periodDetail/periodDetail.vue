@@ -102,6 +102,22 @@ import { updateGirlHealth } from '@/common/api/homeDetail';
 interface GirlHealthAllExt extends UserGirlHealthAllResponse {
   periodTips?: string;
 }
+type GirlHealthModel = {
+  id?: number;
+  userId?: number | string;
+  birthday?: string;
+  birthDay?: string;
+  cycleDay?: number | string;
+  periodCycle?: number | string;
+  menstruationDay?: number | string;
+  periodRuntime?: number | string;
+  lastMenstruationDate?: string;
+  lastPeriodTime?: string | string[];
+  cycleRegularity?: string;
+  isRuleType?: string;
+  healthConditions?: string;
+  otherUnhealth?: string;
+};
 import PeriodCycleWheel from './components/wheel.vue';
 import EditPeriodModal from './components/EditPeriodModal.vue';
 
@@ -218,7 +234,7 @@ const showIntroCard = ref(true);
 const tempStatsRaw = ref<HealthTempStatItem[]>([]);
 const tempStatsLoaded = ref(false);
 const girlHealthAll = ref<GirlHealthAllExt | null>(null);
-const modelGirlHealth=ref()
+const modelGirlHealth = ref<GirlHealthModel>({});
 const girlHealthEndDate= ref('')
 /** lastPeriodTime 解析后的经期日期集合 (yyyy-MM-dd) */
 const periodDates = ref<Set<string>>(new Set());
@@ -500,17 +516,37 @@ function syncWheelFromGirlHealthAll() {
   cycleDay.value = dayIndex;
 }
 
+function normalizePeriodDateList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  return String(value || '')
+    .split(',')
+    .map((s: string) => s.trim())
+    .filter(Boolean);
+}
+
+function toPositiveNumber(value: unknown, fallback: number) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
+}
+
 async function loadGirlHealthInfo() {
   try {
     const res: any = await getGirlHealth({});
-	modelGirlHealth.value = res 
-    const raw: string = res?.lastPeriodTime || '';
-    const dates = raw
-      .split(',')
-      .map((s: string) => s.trim())
-      .filter(Boolean);
+	modelGirlHealth.value = {
+      ...(res || {}),
+      birthDay: res?.birthDay || res?.birthday || '',
+      periodCycle: res?.periodCycle ?? res?.cycleDay,
+      periodRuntime: res?.periodRuntime ?? res?.menstruationDay,
+      lastPeriodTime: res?.lastPeriodTime || res?.lastMenstruationDate,
+      isRuleType: res?.isRuleType || res?.cycleRegularity || '',
+      otherUnhealth: res?.otherUnhealth || res?.healthConditions || ''
+    };
+    const dates = normalizePeriodDateList(res?.lastPeriodTime || res?.lastMenstruationDate);
     periodDates.value = new Set(dates);
   } catch {
+    modelGirlHealth.value = {};
     periodDates.value = new Set();
   }
 }
@@ -530,12 +566,11 @@ async function loadGirlHealthAll() {
   try {
     const res = await getUserGirlHealthAll({ date: formatDateYmd(selectedDate.value) });
     girlHealthAll.value = res || null;
-	if(res!=null){
-		girlHealthEndDate.value =girlHealthAll.value.predictedCycle.luteal.end
-	}
+	girlHealthEndDate.value = res?.predictedCycle?.luteal?.end || '';
     syncWheelFromGirlHealthAll();
   } catch {
     girlHealthAll.value = null;
+    girlHealthEndDate.value = '';
   }
 }
 
@@ -580,13 +615,13 @@ function onEdit() {
   
   const data = modelGirlHealth.value;
   if (data) {
-	  let dates=modelGirlHealth.value.lastPeriodTime.split(',').sort()
+	  const dates = normalizePeriodDateList(data.lastPeriodTime || data.lastMenstruationDate).sort();
 	  
 	  editFormData.value = {
-	    startDate: dates[0],
-	    cycleDays: modelGirlHealth.value.periodCycle,
-	    periodDays: modelGirlHealth.value.periodRuntime,
-		id:modelGirlHealth.value?.id
+	    startDate: dates[0] || data.lastMenstruationDate || formatDateYmd(new Date()),
+	    cycleDays: toPositiveNumber(data.cycleDay ?? data.periodCycle, 28),
+	    periodDays: toPositiveNumber(data.menstruationDay ?? data.periodRuntime, 5),
+		id:data.id || 0
 	  };
     // editFormData.value = {
     //   startDate: data.predictedCycle.menstrual.start,
@@ -626,15 +661,20 @@ function getDateArray(startDateStr:string, days:number) {
     }
     return result;
 }
-function onSaveEdit(data: { startDate: string; cycleDays: number; periodDays: number ; id:number}) {
+async function onSaveEdit(data: { startDate: string; cycleDays: number; periodDays: number ; id:number}) {
   // 保存用户修改的经期信息
   
   // 更新表单数据
   editFormData.value = { ...data };
+  const model = modelGirlHealth.value;
+  if (!model) {
+    uni.showToast({ title: '未获取到生理周期资料，请刷新后重试', icon: 'none' });
+    return;
+  }
   try {
     uni.showLoading({ title: '提交中...', mask: true });
 	const dates=getDateArray(data.startDate,data.periodDays)
-     updateGirlHealth({
+     await updateGirlHealth({
 		    birthDay:modelGirlHealth.value.birthDay, //出生日期
 		    periodCycle:editFormData.value.cycleDays, //经期周期
 		    periodRuntime:editFormData.value.periodDays,//持续天数

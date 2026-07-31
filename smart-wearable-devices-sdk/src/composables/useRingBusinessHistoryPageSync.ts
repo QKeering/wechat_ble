@@ -63,6 +63,9 @@ const HISTORY_PAGE_UPLOAD_ENDPOINT = '/app/data/sync';
 const HISTORY_PAGE_UPLOAD_TIMEOUT_MS = 90000;
 const HISTORY_PAGE_PENDING_UPLOAD_STORAGE_KEY = 'qkeer:rw-history-page-pending-upload:v1';
 const HISTORY_PAGE_PENDING_UPLOAD_MAX_COUNT = 300;
+const HISTORY_PAGE_UPLOADED_RECORD_KEYS_STORAGE_KEY = 'qkeer:rw-history-page-uploaded-record-keys:v1';
+const HISTORY_PAGE_UPLOADED_RECORD_KEYS_MAX_COUNT = 2000;
+const HISTORY_PAGE_SLEEP_BACKFILL_SECONDS = 12 * 60 * 60;
 const HISTORY_PAGE_SUBMIT_FAILED_MESSAGE = '历史数据提交失败';
 const HISTORY_PAGE_FALLBACK_READ_FAILED_MESSAGE = '历史数据兜底读取失败';
 const HISTORY_PAGE_EMPTY_FALLBACK_EVENTS = {
@@ -365,6 +368,12 @@ interface HistoryPagePendingUpload {
   attemptCount: number;
 }
 
+interface HistoryPageUploadedRecordKeys {
+  deviceMac: string;
+  keys: string[];
+  updatedAt: number;
+}
+
 const readHistoryPagePendingUpload = (): HistoryPagePendingUpload | null => {
   try {
     const stored = uni.getStorageSync(HISTORY_PAGE_PENDING_UPLOAD_STORAGE_KEY);
@@ -443,6 +452,73 @@ const clearHistoryPagePendingUpload = (deviceMac: string) => {
   } catch {
     // Ignore local storage cleanup failures.
   }
+};
+
+const readHistoryPageUploadedRecordKeys = (deviceMac: string) => {
+  try {
+    const stored = uni.getStorageSync(HISTORY_PAGE_UPLOADED_RECORD_KEYS_STORAGE_KEY);
+    if (!stored || typeof stored !== 'object') return new Set<string>();
+    const record = stored as Partial<HistoryPageUploadedRecordKeys>;
+    if (!record.deviceMac || String(record.deviceMac) !== deviceMac) return new Set<string>();
+    if (!Array.isArray(record.keys)) return new Set<string>();
+    return new Set(record.keys.filter(Boolean).map((item) => String(item)));
+  } catch {
+    return new Set<string>();
+  }
+};
+
+const writeHistoryPageUploadedRecordKeys = (deviceMac: string, keys: string[]) => {
+  const previous = readHistoryPageUploadedRecordKeys(deviceMac);
+  keys.filter(Boolean).forEach((key) => previous.add(String(key)));
+  const payload: HistoryPageUploadedRecordKeys = {
+    deviceMac,
+    keys: Array.from(previous).slice(-HISTORY_PAGE_UPLOADED_RECORD_KEYS_MAX_COUNT),
+    updatedAt: Date.now()
+  };
+  try {
+    uni.setStorageSync(HISTORY_PAGE_UPLOADED_RECORD_KEYS_STORAGE_KEY, payload);
+    return payload.keys.length;
+  } catch {
+    return previous.size;
+  }
+};
+
+const filterAlreadyUploadedHistoryPageRecords = (
+  records: RingHistorySubmitRecord[],
+  uploadedKeys: Set<string>
+) => {
+  const submitRecords: RingHistorySubmitRecord[] = [];
+  const alreadyUploadedRecords: RingHistorySubmitRecord[] = [];
+  records.forEach((record) => {
+    if (!record?.recordTime) return;
+    if (uploadedKeys.has(getHistoryPageSubmitRecordKey(record))) {
+      alreadyUploadedRecords.push(record);
+      return;
+    }
+    submitRecords.push(record);
+  });
+  return { submitRecords, alreadyUploadedRecords };
+};
+
+const isHistoryPageSleepSubmitRecord = (record: RingHistorySubmitRecord) => {
+  const sourceType = String((record as Record<string, any>)?.sourceType || '').toLowerCase();
+  if (sourceType === 'l19_sleep_segment' || sourceType.startsWith('rw_sleep')) return true;
+  return Boolean(
+    record.sleepState != null ||
+      record.sleepType != null ||
+      record.sleepDuration != null ||
+      (record as Record<string, any>).sleepTime != null ||
+      record.startTime ||
+      record.endTime
+  );
+};
+
+const isHistoryPageRecordAfterLastReadWindow = (record: RingHistorySubmitRecord, lastReadTimestamp: number) => {
+  if (!lastReadTimestamp) return true;
+  const unixTime = getRingHistoryRecordSyncUnixTime(record);
+  if (!unixTime) return true;
+  if (!isHistoryPageSleepSubmitRecord(record)) return unixTime > lastReadTimestamp;
+  return unixTime > Math.max(0, lastReadTimestamp - HISTORY_PAGE_SLEEP_BACKFILL_SECONDS);
 };
 
 const summarizeHistoryPageSubmitResponse = (response: unknown) => {
@@ -655,11 +731,26 @@ export const useRingBusinessHistoryPageSync = () => {
       return buildRingHistorySubmitRecords([record] as any, sinceTimestamp).length === 0;
     });
     const currentSubmitRecords = buildRingHistorySubmitRecords(visibleRecords as any, sinceTimestamp);
+    const uploadLastReadTimestamp = Number(userStore.lastReadTimestamp || 0);
+    const lastReadFilteredRecords = uploadLastReadTimestamp > 0
+      ? currentSubmitRecords.filter((record) => {
+          return !isHistoryPageRecordAfterLastReadWindow(record, uploadLastReadTimestamp);
+        })
+      : [];
+    const currentCandidateRecords = uploadLastReadTimestamp > 0
+      ? currentSubmitRecords.filter((record) => {
+          return isHistoryPageRecordAfterLastReadWindow(record, uploadLastReadTimestamp);
+        })
+      : currentSubmitRecords;
+    const uploadedRecordKeys = readHistoryPageUploadedRecordKeys(deviceMac);
+    const currentUploadSplit = filterAlreadyUploadedHistoryPageRecords(currentCandidateRecords, uploadedRecordKeys);
     const pendingUpload = readHistoryPagePendingUpload();
-    const pendingRecords: RingHistorySubmitRecord[] = pendingUpload && pendingUpload.deviceMac === deviceMac ? pendingUpload.dataList : [];
+    const pendingRecords: RingHistorySubmitRecord[] = pendingUpload && pendingUpload.deviceMac === deviceMac
+      ? pendingUpload.dataList.filter((record) => !uploadedRecordKeys.has(getHistoryPageSubmitRecordKey(record)))
+      : [];
     const pendingDroppedForOtherDevice = Boolean(pendingUpload && pendingUpload.deviceMac !== deviceMac);
     if (pendingDroppedForOtherDevice) clearHistoryPagePendingUpload(pendingUpload?.deviceMac || '');
-    const submitPreviewRecords = mergeHistoryPageSubmitRecords(pendingRecords, currentSubmitRecords);
+    const submitPreviewRecords = mergeHistoryPageSubmitRecords(pendingRecords, currentUploadSplit.submitRecords);
 
     if (submitPreviewRecords.length === 0) {
       appendRingDiagnosticLog('RW PAGE', 'history-page-upload-skip', {
@@ -668,6 +759,12 @@ export const useRingBusinessHistoryPageSync = () => {
         deviceMac,
         rawRecordCount: records.length,
         currentSubmitRecordCount: currentSubmitRecords.length,
+        currentCandidateRecordCount: currentCandidateRecords.length,
+        lastReadFilteredRecordCount: lastReadFilteredRecords.length,
+        uploadLastReadTimestamp,
+        newSubmitRecordCount: currentUploadSplit.submitRecords.length,
+        alreadyUploadedCount: currentUploadSplit.alreadyUploadedRecords.length,
+        uploadedRecordKeyCount: uploadedRecordKeys.size,
         filteredOutCount: filteredRecords.length,
         futureFilteredOutCount: futureFilteredRecords.length,
         pendingUploadCount: pendingRecords.length,
@@ -688,6 +785,12 @@ export const useRingBusinessHistoryPageSync = () => {
       deviceMac,
       rawRecordCount: records.length,
       currentSubmitRecordCount: currentSubmitRecords.length,
+      currentCandidateRecordCount: currentCandidateRecords.length,
+      lastReadFilteredRecordCount: lastReadFilteredRecords.length,
+      uploadLastReadTimestamp,
+      newSubmitRecordCount: currentUploadSplit.submitRecords.length,
+      alreadyUploadedCount: currentUploadSplit.alreadyUploadedRecords.length,
+      uploadedRecordKeyCount: uploadedRecordKeys.size,
       pendingUploadCount: pendingRecords.length,
       pendingAttemptCount: pendingUpload?.attemptCount || 0,
       pendingDroppedForOtherDevice,
@@ -724,6 +827,10 @@ export const useRingBusinessHistoryPageSync = () => {
       return null;
     }
     clearHistoryPagePendingUpload(deviceMac);
+    const uploadedRecordKeyCount = writeHistoryPageUploadedRecordKeys(
+      deviceMac,
+      submitPreviewRecords.map((record) => getHistoryPageSubmitRecordKey(record))
+    );
     const maxTimestamp = submitPreviewRecords.reduce((latest, record) => {
       return Math.max(latest, getRingHistoryRecordSyncUnixTime(record) || 0);
     }, 0);
@@ -744,9 +851,14 @@ export const useRingBusinessHistoryPageSync = () => {
       recordCount: submitPreviewRecords.length,
       rawRecordCount: records.length,
       currentSubmitRecordCount: currentSubmitRecords.length,
+      currentCandidateRecordCount: currentCandidateRecords.length,
+      lastReadFilteredRecordCount: lastReadFilteredRecords.length,
+      newSubmitRecordCount: currentUploadSplit.submitRecords.length,
+      alreadyUploadedCount: currentUploadSplit.alreadyUploadedRecords.length,
       pendingUploadCount: pendingRecords.length,
       pendingAttemptCount: pendingUpload?.attemptCount || 0,
       submitRecordCount: submitPreviewRecords.length,
+      uploadedRecordKeyCount,
       filteredOutCount: filteredRecords.length,
       futureTimestampFilterEnabled: true,
       futureFilteredOutCount: futureFilteredRecords.length,
@@ -767,6 +879,7 @@ export const useRingBusinessHistoryPageSync = () => {
       submitted: true,
       count: submitPreviewRecords.length,
       maxTimestamp,
+      uploadedRecordKeyCount,
       submitResponse,
       records: submitPreviewRecords
     };

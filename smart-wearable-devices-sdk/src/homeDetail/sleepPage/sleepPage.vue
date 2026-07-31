@@ -290,33 +290,101 @@ const shouldPreferOverviewSleepDuration = (detailMinutes = 0) => {
   return detailMinutes > MAX_MAIN_SLEEP_MINUTES || detailMinutes > overviewMinutes + MAIN_SLEEP_OVERVIEW_TOLERANCE_MINUTES;
 };
 
+const isPlausibleMainSleepMinutes = (minutes = 0) => minutes > 0 && minutes <= MAX_MAIN_SLEEP_MINUTES;
+
+const isMainSleepSectionStage = (item: any) => {
+  const stage = normalizeSleepStageText(item?.time ?? item?.name ?? item?.type);
+  return Boolean(stage) && stage !== SLEEP_STAGE_NAMES['1'] && stage !== SLEEP_STAGE_NAMES['5'];
+};
+
+const getSleepSectionMainSleepMinutes = (section?: Point[]) => {
+  if (!Array.isArray(section)) return 0;
+  return Math.round(
+    section.reduce((total, item: any) => {
+      if (!isMainSleepSectionStage(item)) return total;
+      return total + toPositiveNumber(item?.value);
+    }, 0)
+  );
+};
+
+const hasSleepSectionData = (section?: Point[]) =>
+  Array.isArray(section) && section.some((item: any) => toPositiveNumber(item?.value) > 0);
+
+const getSleepDetailPointDurationMinutes = (point: any) => {
+  const explicitDuration = toPositiveNumber(
+    point?.durationMinutes ?? point?.duration ?? point?.sleepDuration ?? point?.minutes ?? point?.minute
+  );
+  if (explicitDuration > 0 && explicitDuration <= 180) return explicitDuration;
+
+  const valueDuration = toPositiveNumber(point?.value);
+  if (!valueDuration || valueDuration > 180) return 0;
+  const rawValue = String(point?.value ?? '').trim();
+  if (!hasExplicitSleepType(point) && ['1', '2', '3', '4', '5'].includes(rawValue)) return 0;
+  return valueDuration;
+};
+
+const getUniqueSleepDetailDurationMinutes = (detail?: sleepDetail) => {
+  const chartData = Array.isArray(detail?.chartData) ? detail.chartData : [];
+  const seen = new Set<string>();
+  let total = 0;
+  chartData.forEach((point: any) => {
+    const duration = getSleepDetailPointDurationMinutes(point);
+    if (!duration) return;
+    const time = String(point?.time ?? point?.startTime ?? point?.start_time ?? point?.recordTime ?? '').trim();
+    const stage = getSleepStageRawValue(point);
+    const key = `${time}|${stage}|${duration}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    total += duration;
+  });
+  return Math.round(total);
+};
+
+const getDisplaySleepDurationMinutes = (detail?: sleepDetail, segment?: sleepSegment) => {
+  const detailMinutes = toPositiveNumber(detail?.sleepDuration);
+  const overviewMinutes = getOverviewSleepDurationMinutes();
+  const uniqueDetailMinutes = getUniqueSleepDetailDurationMinutes(detail);
+  const sectionMinutes = getSleepSectionMainSleepMinutes(segment?.chartDataSection);
+
+  if (isPlausibleMainSleepMinutes(detailMinutes) && !shouldPreferOverviewSleepDuration(detailMinutes)) {
+    const fullerCandidate = [uniqueDetailMinutes, sectionMinutes, overviewMinutes].find(
+      (minutes) => isPlausibleMainSleepMinutes(minutes) && minutes > detailMinutes + MAIN_SLEEP_OVERVIEW_TOLERANCE_MINUTES
+    );
+    if (!fullerCandidate) return detailMinutes;
+  }
+  if (detailMinutes > MAX_MAIN_SLEEP_MINUTES && isPlausibleMainSleepMinutes(uniqueDetailMinutes)) return uniqueDetailMinutes;
+  if (detailMinutes > MAX_MAIN_SLEEP_MINUTES && isPlausibleMainSleepMinutes(sectionMinutes)) return sectionMinutes;
+  if (isPlausibleMainSleepMinutes(sectionMinutes)) return sectionMinutes;
+  if (isPlausibleMainSleepMinutes(overviewMinutes)) return overviewMinutes;
+  if (isPlausibleMainSleepMinutes(uniqueDetailMinutes)) return uniqueDetailMinutes;
+  return detailMinutes || sectionMinutes || overviewMinutes || uniqueDetailMinutes || 0;
+};
+
 const mainSleepAnalysis = computed(() => getMainSleepAnalysis(sleepDetailObj.value, sleepSegmentObj.value));
 
 const displaySleepDetailObj = computed(() => {
   const detail = sleepDetailObj.value || {};
   const analysis = mainSleepAnalysis.value;
-  const detailMinutes = toPositiveNumber(detail.sleepDuration);
-  if (!shouldPreferOverviewSleepDuration(detailMinutes)) {
-    return {
-      ...detail,
-      chartData: Array.isArray(detail.chartData) ? analysis.chartData : detail.chartData
-    };
-  }
+  const displayMinutes = getDisplaySleepDurationMinutes(detail as sleepDetail, sleepSegmentObj.value);
   return {
     ...detail,
-    sleepDuration: getOverviewSleepDurationMinutes(),
-    chartData: Array.isArray(detail.chartData) ? analysis.chartData : detail.chartData
+    sleepDuration: displayMinutes || detail.sleepDuration,
+    chartData: Array.isArray(detail.chartData) && analysis.chartData.length ? analysis.chartData : detail.chartData
   };
 });
 
 const displaySleepSegmentObj = computed(() => {
   const segment = sleepSegmentObj.value || {};
   const analysis = mainSleepAnalysis.value;
+  const segmentSection = Array.isArray(segment.chartDataSection) ? segment.chartDataSection : [];
+  const analysisSection = Array.isArray(analysis.chartDataSection) ? analysis.chartDataSection : [];
+  const hasBackendSection = hasSleepSectionData(segmentSection);
+  const fallbackSection = hasSleepSectionData(analysisSection) ? analysisSection : segment.chartDataSection;
   return {
     ...segment,
-    endTime: analysis.endTime || segment.endTime,
-    chartData: analysis.chartDataSection.length ? analysis.chartDataSection : segment.chartData,
-    chartDataSection: analysis.chartDataSection.length ? analysis.chartDataSection : segment.chartDataSection
+    endTime: hasBackendSection ? segment.endTime : analysis.endTime || segment.endTime,
+    chartData: hasBackendSection ? segment.chartData : fallbackSection || segment.chartData,
+    chartDataSection: hasBackendSection ? segment.chartDataSection : fallbackSection
   };
 });
 

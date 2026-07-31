@@ -127,9 +127,18 @@ const submitQuestionnaire = async () => {
 
   // Step6: 健康情况（多选，逗号拼接）
   const healthConditionsStr = Array.from(selectedConditions.value).join(',');
-  const userData=uni.getStorageSync("userInfo")
+  const userData = uni.getStorageSync("userInfo") || {};
   
   const params = {
+    birthday,
+    cycleDay,
+    menstruationDay,
+    lastMenstruationDate,
+    cycleRegularity,
+    healthConditions: healthConditionsStr,
+    userId: userData?.id
+  };
+  const legacyParamsForReference = {
     birthDay:birthday, //出生日期
     periodCycle:cycleDay, //经期周期
     periodRuntime:menstruationDay,//持续天数
@@ -210,6 +219,27 @@ const onMonthChange = (e: any) => {
 };
 const onDayChange = (e: any) => {
   selectedDay.value = dayList.value[e.detail.value];
+};
+
+type PickerViewChangeEvent = {
+  detail: {
+    value: number[];
+  };
+};
+
+const onBirthDatePickerChange = (e: PickerViewChangeEvent) => {
+  const [year = 0, month = 0, day = 0] = e.detail.value || [];
+  onYearChange({ detail: { value: year } });
+  onMonthChange({ detail: { value: month } });
+  onDayChange({ detail: { value: day } });
+};
+
+const onCycleDayPickerChange = (e: PickerViewChangeEvent) => {
+  onOnlyDayChange({ detail: { value: e.detail.value?.[0] ?? 0 } });
+};
+
+const onMenstruationDayPickerChange = (e: PickerViewChangeEvent) => {
+  onOnlyLongDayChange({ detail: { value: e.detail.value?.[0] ?? 0 } });
 };
 
 // ────────── 导航 ──────────
@@ -296,7 +326,7 @@ onLoad(async () => {
             class="picker-view"
             :value="[yearIndex, monthIndex, dayIndex]"
             indicator-style="height: 88rpx;"
-            @change="(e) => { onYearChange({detail:{value:[e.detail.value[0]]}}); onMonthChange({detail:{value:[e.detail.value[1]]}}); onDayChange({detail:{value:[e.detail.value[2]]}}); }"
+            @change="onBirthDatePickerChange"
           >
             <!-- 年 -->
             <picker-view-column>
@@ -332,7 +362,7 @@ onLoad(async () => {
                class="picker-view"
                :value="[onlyDayIndex]"
                indicator-style="height: 88rpx;"
-               @change="(e) => { onOnlyDayChange({detail:{value:[e.detail.value[0]]}}); }"
+               @change="onCycleDayPickerChange"
              >
                <!-- 天 -->
                <picker-view-column>
@@ -353,7 +383,7 @@ onLoad(async () => {
                class="picker-view"
                :value="[onlyLongDayIndex]"
                indicator-style="height: 88rpx;"
-               @change="(e) => { onOnlyLongDayChange({detail:{value:[e.detail.value[0]]}}); }"
+               @change="onMenstruationDayPickerChange"
              >
                <!-- 天 -->
                <picker-view-column>

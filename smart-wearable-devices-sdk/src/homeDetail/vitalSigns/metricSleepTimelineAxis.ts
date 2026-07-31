@@ -217,14 +217,8 @@ export const getMetricTimelineTicks = (
   dataList.forEach((item) => {
     const minutes = parseClockMinutes(item?.time);
     if (minutes == null) return;
-    const normalized = range ? normalizeToRange(minutes, range) : minutes;
-    if (range && forceSleepRange && (normalized < range.start || normalized > range.end)) return;
-    pointMinutes.push(normalized);
+    pointMinutes.push(minutes);
   });
-
-  if (forceSleepRange && range) {
-    pointMinutes.push(range.start, range.end);
-  }
 
   const uniqueMinutes = Array.from(new Set(pointMinutes.filter((item) => Number.isFinite(item)))).sort((a, b) => a - b);
   if (!uniqueMinutes.length) {
@@ -243,8 +237,8 @@ export const getMetricTimelineTicks = (
       }));
   }
 
-  const min = range && forceSleepRange ? range.start : uniqueMinutes[0];
-  const max = range && forceSleepRange ? range.end : uniqueMinutes[uniqueMinutes.length - 1];
+  const min = uniqueMinutes[0];
+  const max = uniqueMinutes[uniqueMinutes.length - 1];
   const span = Math.max(1, max - min);
 
   return uniqueMinutes.map((minutes, index, list) => ({
