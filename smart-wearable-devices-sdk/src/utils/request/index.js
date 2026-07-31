@@ -42,11 +42,13 @@ export const Request = () => {
     (config) => {
       // 初始化请求拦截器时会执行此方法，此时 data 为 undefined，赋予默认值
       config.data = config.data || {};
+      config.header = config.header || {};
+      config.__authTokenAtRequest = config?.custom?.auth && userStore.token ? userStore.token : '';
 
       // 根据 custom 参数配置决定是否需要 token，并添加对应请求头
-      if (config?.custom?.auth && userStore.token) {
-        config.header.Authorization = userStore.token;
-        config.header.token = userStore.token;
+      if (config?.custom?.auth && config.__authTokenAtRequest) {
+        config.header.Authorization = config.__authTokenAtRequest;
+        config.header.token = config.__authTokenAtRequest;
       }
 
       return config;
@@ -68,33 +70,58 @@ export const Request = () => {
       const app = getApp();
       const appGlobalData = app.globalData || (app.globalData = {});
       const url = response.config?.url || '';
+      const tokenAtRequest = response.config?.__authTokenAtRequest || '';
+      const currentToken = userStore.token || '';
 
       // 判断是否登录失效
       const isLoginExpired = code === 401 || code === 403;
+      const isStaleAuthResponse = isLoginExpired && currentToken && tokenAtRequest !== currentToken;
+      if (isStaleAuthResponse) {
+        return Promise.reject({
+          code,
+          msg: normalizeNetworkErrorMessage(msg),
+          rawMsg: msg,
+          result,
+          url,
+          staleAuth: true
+        });
+      }
+
       if (isLoginExpired) {
         userStore.logout();
       }
 
       // 处理未登录或登录失效的情况
       if (isLoginExpired && !appGlobalData.isLogin) {
-        appGlobalData.showLoginModal = true;
-        if (!userStore.isShowLoginPopup) {
+        if (!appGlobalData.showLoginModal && !userStore.isShowLoginPopup) {
+          appGlobalData.showLoginModal = true;
+          userStore.setShowLoginPopup?.(true);
           await uni.showModal({
             title: '提示',
             content: '未登录或登录失效，请重新登录!',
             confirmColor: '#2e70fc',
             success: async (modalResult) => {
-              appGlobalData.showLoginModal = false;
               if (modalResult.confirm) {
                 uni.navigateTo({
                   url: '/pages/login/login'
                 });
               }
+            },
+            complete: () => {
+              appGlobalData.showLoginModal = false;
+              userStore.setShowLoginPopup?.(false);
             }
           });
         }
 
-        return new Promise(() => {}); // 阻断后续处理
+        return Promise.reject({
+          code,
+          msg: normalizeNetworkErrorMessage(msg),
+          rawMsg: msg,
+          result,
+          url,
+          loginExpired: true
+        });
       }
 
       // 判断响应是否成功

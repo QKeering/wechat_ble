@@ -1,24 +1,69 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { onLoad } from '@dcloudio/uni-app';
+import { computed, ref } from 'vue';
+import { onLoad, onUnload } from '@dcloudio/uni-app';
 import { bindFamilyDevice, bindFamilyRelationDevice, type FamilyDeviceBindPayload } from '@/common/api/family';
 import { getBoundRingDevice } from '@/api';
-import { getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
+import { getBoundRingIdentity } from '@/utils/ringBinding';
+import { getRingBusinessDeviceName, useRingBusinessController } from '@/composables/useRingBusinessController';
+import { getRingDeviceStableIdentity } from '@/composables/useRingBleSdk';
 
 const memberId = ref(0);
 const relationId = ref(0);
 const memberName = ref('');
 const mac = ref('');
-const serviceId = ref('');
 const deviceName = ref('');
 const localDevice = ref<any>(null);
+const boundLocalDevice = ref<Record<string, any> | null>(null);
 const submitting = ref(false);
+const ring = useRingBusinessController();
+const scanDevices = computed(() => (ring.businessDevices.value as Record<string, any>[]).filter((device) => !isBoundLocalDevice(device)));
+const scanning = computed(() => ring.isScanning.value);
+const scanDeviceName = (device: Record<string, any>) => getRingBusinessDeviceName(device as any) || '戒指设备';
+const scanDeviceIdentity = (device: Record<string, any>) =>
+  getRingDeviceStableIdentity(device as any) || device.uniMacId || device.deviceId || '-';
+
+const normalizeIdentity = (value?: unknown) =>
+  String(value || '')
+    .replace(/[^a-fA-F0-9]/g, '')
+    .toUpperCase();
+
+const getIdentityCandidates = (device?: Record<string, any> | null) => {
+  if (!device) return [];
+  return [
+    getBoundRingIdentity(device),
+    getRingDeviceStableIdentity(device as any),
+    device?.mac,
+    device?.deviceMac,
+    device?.advertis?.macInfo,
+    device?.uniMacId,
+    device?.deviceId
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+};
+
+const hasSameDeviceIdentity = (left?: Record<string, any> | null, right?: Record<string, any> | null) => {
+  const leftRaw = getIdentityCandidates(left);
+  const rightRaw = getIdentityCandidates(right);
+  if (!leftRaw.length || !rightRaw.length) return false;
+  if (leftRaw.some((leftId) => rightRaw.includes(leftId))) return true;
+
+  const leftIds = leftRaw.map(normalizeIdentity).filter((value) => value.length >= 6);
+  const rightIds = rightRaw.map(normalizeIdentity).filter((value) => value.length >= 6);
+  return leftIds.some((leftId) =>
+    rightIds.some((rightId) => leftId === rightId || leftId.endsWith(rightId.slice(-6)) || rightId.endsWith(leftId.slice(-6)))
+  );
+};
+
+const isBoundLocalDevice = (device: Record<string, any>) => {
+  const currentBoundDevice = (ring.ringStore?.boundDevice || null) as Record<string, any> | null;
+  return hasSameDeviceIdentity(device, boundLocalDevice.value) || hasSameDeviceIdentity(device, currentBoundDevice);
+};
 
 const buildPayload = (forceBind = false): FamilyDeviceBindPayload => ({
   memberId: memberId.value || undefined,
   mac: mac.value.trim(),
   deviceId: localDevice.value?.deviceId,
-  serviceId: serviceId.value.trim(),
   uniMacId: localDevice.value?.uniMacId,
   protocol: localDevice.value?.protocol,
   advertis: localDevice.value?.advertis,
@@ -63,16 +108,34 @@ const confirmForceBind = (message: string) => {
   });
 };
 
-const useLocalDevice = async () => {
-  const device = await getBoundRingDevice();
-  if (!device || !hasBoundRingIdentity(device)) {
-    uni.showToast({ title: '当前没有本地已连接设备', icon: 'none' });
+const loadBoundLocalDevice = async () => {
+  boundLocalDevice.value = await getBoundRingDevice();
+};
+
+const searchDevices = async () => {
+  await loadBoundLocalDevice();
+  if (scanning.value) {
+    await ring.stopScan();
     return;
   }
+  try {
+    await ring.scanForBusinessDevices();
+  } catch (error: any) {
+    uni.showToast({ title: String(error?.message || '搜索设备失败，请检查蓝牙'), icon: 'none' });
+  }
+};
+
+const selectScanDevice = async (device: Record<string, any>) => {
   localDevice.value = device;
-  mac.value = getBoundRingIdentity(device) || '';
-  serviceId.value = device.serviceId || '';
-  deviceName.value = device.deviceName || device.name || '父母设备';
+  mac.value =
+    getRingDeviceStableIdentity(device as any) ||
+    device.mac ||
+    device.advertis?.macInfo ||
+    device.uniMacId ||
+    device.deviceId ||
+    '';
+  deviceName.value = getRingBusinessDeviceName(device as any) || `${memberName.value || '家人'}的设备`;
+  await ring.stopScan();
 };
 
 const scanCode = async () => {
@@ -115,7 +178,12 @@ onLoad((query: any) => {
   memberId.value = Number(query?.memberId || 0);
   relationId.value = Number(query?.relationId || 0);
   memberName.value = decodeURIComponent(query?.name || '');
+  void loadBoundLocalDevice();
   deviceName.value = memberName.value ? `${memberName.value}的设备` : '';
+});
+
+onUnload(() => {
+  void ring.stopScan();
 });
 </script>
 
@@ -125,7 +193,7 @@ onLoad((query: any) => {
 
     <view class="intro">
       <view class="intro-title">给{{ memberName || '家人' }}绑定设备</view>
-      <view class="intro-desc">绑定后，设备同步的数据会归属到这位家人的健康档案，子女端可查看状态和提醒。</view>
+      <view class="intro-desc">绑定后，设备同步的数据会归属到这位家人的健康档案，家人端可查看健康状态。</view>
     </view>
 
     <view class="form-card">
@@ -133,16 +201,35 @@ onLoad((query: any) => {
       <input v-model="mac" class="input" placeholder="请输入设备 MAC，或扫码获取" />
 
       <view class="row-actions">
-        <uv-button text="使用本机已连设备" color="#E8F0FF" :customTextStyle="{ color: '#2E70FC', fontSize: '28rpx' }" :customStyle="{ flex: 1, height: '80rpx' }" @click="useLocalDevice" />
-        <view class="gap"></view>
-        <uv-button text="扫码" color="#E8F0FF" :customTextStyle="{ color: '#2E70FC', fontSize: '28rpx' }" :customStyle="{ width: '160rpx', height: '80rpx' }" @click="scanCode" />
+        <uv-button text="扫码" color="#E8F0FF" :customTextStyle="{ color: '#2E70FC', fontSize: '28rpx' }" :customStyle="{ width: '100%', height: '80rpx' }" @click="scanCode" />
+      </view>
+
+      <uv-button
+        :text="scanning ? '停止搜索' : '搜索附近设备'"
+        color="#E8F0FF"
+        :customStyle="{ width: '100%', height: '80rpx', marginTop: '18rpx' }"
+        :customTextStyle="{ color: '#2E70FC', fontSize: '28rpx' }"
+        @click="searchDevices"
+      />
+
+      <view v-if="scanDevices.length" class="scan-list">
+        <view
+          v-for="device in scanDevices"
+          :key="device.deviceId || device.uniMacId || device.mac"
+          class="scan-device"
+          :class="{ selected: localDevice?.deviceId === device.deviceId }"
+          @click="selectScanDevice(device)"
+        >
+          <view class="scan-main">
+            <view class="scan-name">{{ scanDeviceName(device) }}</view>
+            <view class="scan-id">{{ scanDeviceIdentity(device) }}</view>
+          </view>
+          <view class="scan-rssi">{{ device.RSSI ?? device.rssi ?? '' }}</view>
+        </view>
       </view>
 
       <view class="label">设备名称</view>
       <input v-model="deviceName" class="input" placeholder="例如：爸爸的戒指" />
-
-      <view class="label">Service ID（选填）</view>
-      <input v-model="serviceId" class="input" placeholder="蓝牙服务 ID，可自动带入" />
     </view>
 
     <view class="notice">
@@ -160,7 +247,7 @@ onLoad((query: any) => {
 .page {
   min-height: 100vh;
   background: #f1f3f6;
-  padding: 0 30rpx 140rpx;
+  padding: 0 30rpx calc(240rpx + env(safe-area-inset-bottom));
   box-sizing: border-box;
 }
 .intro,
@@ -204,8 +291,43 @@ onLoad((query: any) => {
   display: flex;
   margin-top: 18rpx;
 }
-.gap {
-  width: 18rpx;
+.scan-list {
+  margin-top: 18rpx;
+  border-radius: 18rpx;
+  overflow: hidden;
+  background: #f8fafc;
+}
+.scan-device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22rpx 24rpx;
+  border-bottom: 1rpx solid #e5eaf2;
+}
+.scan-device:last-child {
+  border-bottom: 0;
+}
+.scan-device.selected {
+  background: #e8f0ff;
+}
+.scan-main {
+  min-width: 0;
+  flex: 1;
+}
+.scan-name {
+  color: #111827;
+  font-size: 30rpx;
+  font-weight: 700;
+}
+.scan-id,
+.scan-rssi {
+  margin-top: 6rpx;
+  color: #8b93a1;
+  font-size: 24rpx;
+}
+.scan-rssi {
+  flex-shrink: 0;
+  margin: 0 0 0 18rpx;
 }
 .notice-title {
   font-size: 32rpx;
@@ -216,6 +338,9 @@ onLoad((query: any) => {
   position: fixed;
   left: 30rpx;
   right: 30rpx;
-  bottom: 40rpx;
+  bottom: calc(40rpx + env(safe-area-inset-bottom));
+  z-index: 20;
+  padding-top: 24rpx;
+  background: linear-gradient(180deg, rgba(241, 243, 246, 0), #f1f3f6 38%);
 }
 </style>

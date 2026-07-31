@@ -7,7 +7,7 @@
       :hover-stay-time="100"
       @tap.stop="openPanel"
     >
-      <uv-icon class="detail-info__icon" name="info-circle" size="16px"></uv-icon>
+      <uv-icon class="detail-info__icon" name="question-circle" size="16px"></uv-icon>
     </view>
 
 

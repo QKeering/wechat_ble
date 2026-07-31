@@ -1549,7 +1549,7 @@ function isBusinessRingDevice(device: RingDeviceInfo) {
   const protocol = device.protocol;
   if (protocol === 'rw' || protocol === 'qkeer-v2') return true;
 
-  const legacyPrefixes = ['HR', 'IF', 'QKEERING', 'PPLUS', 'MUSLEEP_RING', 'QKV2'];
+  const legacyPrefixes = ['HR', 'IF', 'QK', 'QKEERING', 'PPLUS', 'MUSLEEP_RING', 'QKV2'];
   return legacyPrefixes.some((prefix) => name.startsWith(prefix));
 }
 

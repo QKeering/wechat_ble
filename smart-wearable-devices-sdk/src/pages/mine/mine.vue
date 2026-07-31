@@ -20,6 +20,7 @@ import {
   RwKey,
   RwQkeerV2HistoryCommand,
   buildRwControlHealthDataCommand,
+  buildRwDeleteHealthDataCommand,
   buildRwFrame,
   buildRwKeyCommand,
   buildRwKeyCommandWithoutChecksum,
@@ -129,6 +130,7 @@ type MineProtocolProbeMode =
   | 'sleepActivityCurrentDay'
   | 'sleepContinueHistory'
   | 'rawSleepHistory'
+  | 'sleepDelete'
   | 'stepSleep';
 interface MineHistorySyncItem {
   key: MineHistorySyncKey;
@@ -1425,7 +1427,8 @@ const mineSingleProtocolProbeKeyByMode: Partial<Record<MineProtocolProbeMode, st
   sleepNativeList: 'history/qkeer-v2-sleep-list',
   sleepEnhanceRead: 'history/qkeer-v2-enhance-sleep-read',
   sleepContinueHistory: 'history-key/sleep/read-continue',
-  rawSleepHistory: 'history-key/raw-sleep/read'
+  rawSleepHistory: 'history-key/raw-sleep/read',
+  sleepDelete: 'history-key/sleep/delete'
 };
 const mineProtocolProbeSingleOnlyKeys = new Set([
   'monitoring/temperature-detecting/plain-write',
@@ -1840,6 +1843,15 @@ const createMineProtocolProbeCommands = (mode: MineProtocolProbeMode = 'full'): 
       expected: 'SDK step1 only, rw_health_data:sleep/rw_health_data_ack:sleep key=0x0505 flag=0x10',
       build: () => buildRwReadHealthDataCommand(RwKey.Sleep),
       predicate: isMineHealthDataKeyFlagParsed('sleep', RwKey.Sleep, RwKeyFlag.Read),
+      required: true,
+      timeoutMs: 8000
+    },
+    {
+      key: 'history-key/sleep/delete',
+      label: '\u6e05\u7a7a\u7761\u7720\u5386\u53f2(0x0505)',
+      expected: 'rw_health_data_ack:sleep key=0x0505 flag=0x30 via PDF delete command 050530',
+      build: () => buildRwDeleteHealthDataCommand(RwKey.Sleep),
+      predicate: isMineHealthDataKeyFlagParsed('sleep', RwKey.Sleep, RwKeyFlag.Delete),
       required: true,
       timeoutMs: 8000
     },
@@ -2447,6 +2459,27 @@ const isLoading = computed(() =>
     isReconnecting: userStore.isReconnecting === true || ringStore.isReconnecting === true
   })
 );
+const mineBluetoothStatus = computed(() => {
+  if (isConnectedStatus.value) {
+    return {
+      iconPath: '/static/images/mine/bluetooth02.png',
+      text: '已连接',
+      textColor: '#4C76F1'
+    };
+  }
+  if (isLoading.value) {
+    return {
+      iconPath: '/static/images/mine/bluetooth01.png',
+      text: '连接中',
+      textColor: '#010101'
+    };
+  }
+  return {
+    iconPath: '/static/images/mine/bluetooth03.png',
+    text: '未连接',
+    textColor: '#010101'
+  };
+});
 const isMineHistorySyncing = computed(() => historySyncBusy.value || controller.isSyncingHistory.value);
 const isMineMetricReading = computed(() => metricTestBusy.value);
 const isMineProtocolProbeRunning = computed(() => protocolProbeBusy.value);
@@ -2487,6 +2520,7 @@ const isMineSleepEnhanceReadProtocolProbeRunning = computed(() => isMineProtocol
 const isMineSleepActivityCurrentDayProtocolProbeRunning = computed(() => isMineProtocolProbeRunning.value && activeProtocolProbeMode.value === 'sleepActivityCurrentDay');
 const isMineSleepContinueHistoryProtocolProbeRunning = computed(() => isMineProtocolProbeRunning.value && activeProtocolProbeMode.value === 'sleepContinueHistory');
 const isMineRawSleepHistoryProtocolProbeRunning = computed(() => isMineProtocolProbeRunning.value && activeProtocolProbeMode.value === 'rawSleepHistory');
+const isMineSleepDeleteProtocolProbeRunning = computed(() => isMineProtocolProbeRunning.value && activeProtocolProbeMode.value === 'sleepDelete');
 const isMineStepSleepProtocolProbeRunning = computed(() => isMineProtocolProbeRunning.value && activeProtocolProbeMode.value === 'stepSleep');
 const protocolProbeButtonText = computed(() => (isMineCoreProtocolProbeRunning.value ? '\u6838\u5fc3\u81ea\u68c0\u4e2d...' : '\u6838\u5fc3\u81ea\u68c0'));
 const fullProtocolProbeButtonText = computed(() => (isMineFullProtocolProbeRunning.value ? '\u5b8c\u6574\u81ea\u68c0\u4e2d...' : '\u5b8c\u6574\u81ea\u68c0'));
@@ -2515,6 +2549,7 @@ const sleepEnhanceReadProtocolProbeButtonText = computed(() => (isMineSleepEnhan
 const sleepActivityCurrentDayProtocolProbeButtonText = computed(() => (isMineSleepActivityCurrentDayProtocolProbeRunning.value ? '\u7761\u7720\u5019\u9009051a\u4e2d...' : '\u7761\u7720\u5019\u9009051a'));
 const sleepContinueHistoryProtocolProbeButtonText = computed(() => (isMineSleepContinueHistoryProtocolProbeRunning.value ? '\u7761\u7720\u7eed\u8bfb0505\u4e2d...' : '\u7761\u7720\u7eed\u8bfb0505'));
 const rawSleepHistoryProtocolProbeButtonText = computed(() => (isMineRawSleepHistoryProtocolProbeRunning.value ? '\u539f\u59cb\u7761\u772002FE\u4e2d...' : '\u539f\u59cb\u7761\u772002FE'));
+const sleepDeleteProtocolProbeButtonText = computed(() => (isMineSleepDeleteProtocolProbeRunning.value ? '\u6e05\u7a7a\u7761\u77200505\u4e2d...' : '\u6e05\u7a7a\u7761\u77200505'));
 const stepSleepProtocolProbeButtonText = computed(() => (isMineStepSleepProtocolProbeRunning.value ? '\u6b65\u6570/\u7761\u7720\u5355\u6d4b\u4e2d...' : '\u6b65\u6570/\u7761\u7720\u5355\u6d4b'));
 const rwAcceptanceButtonText = computed(() => (mineRwAcceptanceBusy.value ? activeMineRwAcceptanceStep.value || 'RW/L19\u9a8c\u6536\u4e2d...' : 'RW/L19\u9a8c\u6536'));
 const getMineProtocolProbeModeLabel = (mode: MineProtocolProbeMode) => {
@@ -2544,8 +2579,25 @@ const getMineProtocolProbeModeLabel = (mode: MineProtocolProbeMode) => {
   if (mode === 'sleepActivityCurrentDay') return '\u7761\u7720\u5019\u9009051a';
   if (mode === 'sleepContinueHistory') return '\u7761\u7720\u7eed\u8bfb0505';
   if (mode === 'rawSleepHistory') return '\u539f\u59cb\u7761\u772002FE';
+  if (mode === 'sleepDelete') return '\u6e05\u7a7a\u7761\u77200505';
   if (mode === 'stepSleep') return '\u6b65\u6570/\u7761\u7720\u5355\u6d4b';
   return '\u5b8c\u6574\u81ea\u68c0';
+};
+const confirmMineSleepDeleteProbe = () =>
+  new Promise<boolean>((resolve) => {
+    uni.showModal({
+      title: '\u786e\u8ba4\u6e05\u7a7a\u7761\u7720',
+      content: '\u5c06\u5411RW\u8bbe\u5907\u53d1\u9001\u4f9b\u5e94\u5546PDF\u7761\u7720\u5220\u9664\u547d\u4ee4050530\uff0c\u4ec5\u7528\u4e8eSDK\u534f\u8bae\u9a8c\u8bc1\u3002',
+      confirmText: '\u786e\u8ba4\u6e05\u7a7a',
+      confirmColor: '#e34d59',
+      success: (res) => resolve(Boolean(res.confirm)),
+      fail: () => resolve(false)
+    });
+  });
+const handleMineSleepDeleteProbe = async () => {
+  const confirmed = await confirmMineSleepDeleteProbe();
+  if (!confirmed) return { ok: false, skipped: true, message: '\u5df2\u53d6\u6d88\u6e05\u7a7a\u7761\u7720\u547d\u4ee4' };
+  return handleMineProtocolProbe('sleepDelete');
 };
 const getMineHistorySyncLabel = (key: MineHistorySyncKey | '') => {
   if (key === 'all') return '\u5168\u90e8\u5386\u53f2';
@@ -3693,7 +3745,7 @@ const handleMineProtocolProbe = async (mode: MineProtocolProbeMode = 'core', opt
     return { ok: false, mode, message, rawMessage: mineErrorToString(error) };
   } finally {
     const lockCleared = clearRwDiagnosticCommandLock(diagnosticLockOwner);
-    const keepSleepProbeIsolated = MINE_SLEEP_PROTOCOL_PROBE_ISOLATION_LOCK && (mode === 'sleepHistory' || mode === 'sleepSdkHistory' || mode === 'sleepNativeDetail' || mode === 'sleepNativeList' || mode === 'sleepEnhanceRead' || mode === 'sleepActivityCurrentDay' || mode === 'sleepContinueHistory' || mode === 'rawSleepHistory');
+    const keepSleepProbeIsolated = MINE_SLEEP_PROTOCOL_PROBE_ISOLATION_LOCK && (mode === 'sleepHistory' || mode === 'sleepSdkHistory' || mode === 'sleepNativeDetail' || mode === 'sleepNativeList' || mode === 'sleepEnhanceRead' || mode === 'sleepActivityCurrentDay' || mode === 'sleepContinueHistory' || mode === 'rawSleepHistory' || mode === 'sleepDelete');
     if (keepSleepProbeIsolated) {
       setMineSleepProbeIsolationLock('sleep-probe-finished');
     } else {
@@ -4010,11 +4062,11 @@ const handleMineRwL19Acceptance = async () => {
           <view class="device-status flex fd-c ai-center mr-30" style="min-height: 150rpx">
             <image
               class="device-status-icon"
-              :src="isConnectedStatus ? '/static/images/mine/bluetooth02.png' : '/static/images/mine/bluetooth01.png'"
+              :src="mineBluetoothStatus.iconPath"
               mode="aspectFit"
             ></image>
-            <view class="device-text mt-10" :style="{ color: isConnectedStatus ? '#4C76F1' : '#010101' }">
-              {{ isConnectedStatus ? '\u5df2\u8fde\u63a5' : '\u672a\u8fde\u63a5' }}
+            <view class="device-text mt-10" :style="{ color: mineBluetoothStatus.textColor }">
+              {{ mineBluetoothStatus.text }}
             </view>
           </view>
           <view>
@@ -4033,6 +4085,7 @@ const handleMineRwL19Acceptance = async () => {
               </view>
               <view v-else class="action-buttons">
                 <uv-button
+                  v-if="!shouldShowReconnectButton"
                   :text="'\u626b\u4e00\u626b'"
                   shape="circle"
                   color="#FFFFFF"
@@ -4041,6 +4094,7 @@ const handleMineRwL19Acceptance = async () => {
                   @click="scanDevice"
                 ></uv-button>
                 <uv-button
+                  v-if="!shouldShowReconnectButton"
                   :text="'\u53bb\u914d\u5bf9'"
                   shape="circle"
                   color="#2E70FC"
@@ -4049,7 +4103,7 @@ const handleMineRwL19Acceptance = async () => {
                   @click="jumpDetail"
                 ></uv-button>
                 <uv-button
-                  v-if="shouldShowReconnectButton"
+                  v-if="shouldShowReconnectButton && !isLoading"
                   :text="'\u91cd\u65b0\u8fde\u63a5'"
                   shape="circle"
                   color="#2E70FC"
@@ -4093,14 +4147,6 @@ const handleMineRwL19Acceptance = async () => {
             <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureRealtimeControlDisableProtocolProbeRunning" :loading="isMineTemperatureRealtimeControlDisableProtocolProbeRunning" @tap="handleMineProtocolProbe('temperatureRealtimeControlDisable')">{{ temperatureRealtimeControlDisableProtocolProbeButtonText }}</button>
             <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineTemperatureHistoryProtocolProbeRunning" :loading="isMineTemperatureHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('temperatureHistory')">{{ temperatureHistoryProtocolProbeButtonText }}</button>
           </template>
-          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepHistoryProtocolProbeRunning" :loading="isMineSleepHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepHistory')">{{ sleepHistoryProtocolProbeButtonText }}</button>
-          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepNativeDetailProtocolProbeRunning" :loading="isMineSleepNativeDetailProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepNativeDetail')">{{ sleepNativeDetailProtocolProbeButtonText }}</button>
-          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepNativeListProtocolProbeRunning" :loading="isMineSleepNativeListProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepNativeList')">{{ sleepNativeListProtocolProbeButtonText }}</button>
-          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepEnhanceReadProtocolProbeRunning" :loading="isMineSleepEnhanceReadProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepEnhanceRead')">{{ sleepEnhanceReadProtocolProbeButtonText }}</button>
-          <button v-if="false && MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepSdkHistoryProtocolProbeRunning" :loading="isMineSleepSdkHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepSdkHistory')">{{ sleepSdkHistoryProtocolProbeButtonText }}</button>
-          <button v-if="false && MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepActivityCurrentDayProtocolProbeRunning" :loading="isMineSleepActivityCurrentDayProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepActivityCurrentDay')">{{ sleepActivityCurrentDayProtocolProbeButtonText }}</button>
-          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineSleepContinueHistoryProtocolProbeRunning" :loading="isMineSleepContinueHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepContinueHistory')">{{ sleepContinueHistoryProtocolProbeButtonText }}</button>
-          <button v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE" class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineRawSleepHistoryProtocolProbeRunning" :loading="isMineRawSleepHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('rawSleepHistory')">{{ rawSleepHistoryProtocolProbeButtonText }}</button>
           <template v-if="MINE_SHOW_STEP_PROTOCOL_PROBES">
             <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineStepCurrentDayProtocolProbeRunning" :loading="isMineStepCurrentDayProtocolProbeRunning" @tap="handleMineProtocolProbe('stepCurrentDay')">{{ stepCurrentDayProtocolProbeButtonText }}</button>
             <button class="rw-diagnostic-button" :disabled="isMineRwAnyActionBusy && !isMineStepCurrentDayC6ProtocolProbeRunning" :loading="isMineStepCurrentDayC6ProtocolProbeRunning" @tap="handleMineProtocolProbe('stepCurrentDayC6')">{{ stepCurrentDayC6ProtocolProbeButtonText }}</button>
@@ -4138,6 +4184,21 @@ const handleMineRwL19Acceptance = async () => {
             {{ getMineHistoryButtonText(item) }}
           </button>
         </view>
+        <template v-if="MINE_SHOW_SLEEP_PROTOCOL_PROBE">
+          <view class="rw-diagnostic-section-label rw-sleep-protocol-label">{{ '\u7761\u7720\u534f\u8bae\u6d4b\u8bd5\uff08\u4f9b\u5e94\u5546PDF\uff09' }}</view>
+          <view class="rw-sleep-protocol-note">{{ '\u4e3b\u9a8c\u8bc1\u547d\u4ee4\uff1a050510\uff1bSleepItem = 4\u5b57\u8282\u65f6\u95f4\u6233 + 1\u5b57\u8282\u72b6\u6001 + 2\u5b57\u8282\u4fdd\u7559\u3002' }}</view>
+          <view class="rw-sleep-protocol-actions">
+            <button class="rw-diagnostic-button rw-sleep-protocol-button primary" :disabled="isMineRwAnyActionBusy && !isMineSleepHistoryProtocolProbeRunning" :loading="isMineSleepHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepHistory')">{{ sleepHistoryProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button rw-sleep-protocol-button" :disabled="isMineRwAnyActionBusy && !isMineSleepSdkHistoryProtocolProbeRunning" :loading="isMineSleepSdkHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepSdkHistory')">{{ sleepSdkHistoryProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button rw-sleep-protocol-button" :disabled="isMineRwAnyActionBusy && !isMineSleepContinueHistoryProtocolProbeRunning" :loading="isMineSleepContinueHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepContinueHistory')">{{ sleepContinueHistoryProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button rw-sleep-protocol-button" :disabled="isMineRwAnyActionBusy && !isMineSleepNativeDetailProtocolProbeRunning" :loading="isMineSleepNativeDetailProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepNativeDetail')">{{ sleepNativeDetailProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button rw-sleep-protocol-button" :disabled="isMineRwAnyActionBusy && !isMineSleepNativeListProtocolProbeRunning" :loading="isMineSleepNativeListProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepNativeList')">{{ sleepNativeListProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button rw-sleep-protocol-button" :disabled="isMineRwAnyActionBusy && !isMineSleepEnhanceReadProtocolProbeRunning" :loading="isMineSleepEnhanceReadProtocolProbeRunning" @tap="handleMineProtocolProbe('sleepEnhanceRead')">{{ sleepEnhanceReadProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button rw-sleep-protocol-button" :disabled="isMineRwAnyActionBusy && !isMineRawSleepHistoryProtocolProbeRunning" :loading="isMineRawSleepHistoryProtocolProbeRunning" @tap="handleMineProtocolProbe('rawSleepHistory')">{{ rawSleepHistoryProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button rw-sleep-protocol-button" :disabled="isMineRwAnyActionBusy && !isMineStepSleepProtocolProbeRunning" :loading="isMineStepSleepProtocolProbeRunning" @tap="handleMineProtocolProbe('stepSleep')">{{ stepSleepProtocolProbeButtonText }}</button>
+            <button class="rw-diagnostic-button rw-sleep-protocol-button danger-text" :disabled="isMineRwAnyActionBusy && !isMineSleepDeleteProtocolProbeRunning" :loading="isMineSleepDeleteProtocolProbeRunning" @tap="handleMineSleepDeleteProbe">{{ sleepDeleteProtocolProbeButtonText }}</button>
+          </view>
+        </template>
       </view>
 
       <view class="menu-section">
@@ -4247,6 +4308,37 @@ const handleMineRwL19Acceptance = async () => {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12rpx;
   margin-top: 16rpx;
+}
+.rw-sleep-protocol-label {
+  color: #111827;
+  font-weight: 600;
+  margin-top: 28rpx;
+}
+.rw-sleep-protocol-note {
+  background: #f6f8ff;
+  border: 1rpx solid #dfe7ff;
+  border-radius: 14rpx;
+  color: #647089;
+  font-size: 22rpx;
+  line-height: 1.45;
+  margin-top: 12rpx;
+  padding: 14rpx 16rpx;
+}
+.rw-sleep-protocol-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12rpx;
+  margin-top: 16rpx;
+}
+.rw-sleep-protocol-button {
+  font-size: 22rpx;
+  min-height: 76rpx;
+}
+.rw-sleep-protocol-button.primary {
+  background: #edf4ff;
+  border-color: #bcd4ff;
+  color: #2e70fc;
+  font-weight: 600;
 }
 .rw-diagnostic-button {
   align-items: center;

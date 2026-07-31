@@ -150,7 +150,7 @@ onLoad(() => {});
         </view>
       </view>
       <view v-else class="flex jc-center">
-        <view class="nap-empty"></view>
+        <image class="nap-empty-icon" src="/static/images/homeDetail/sleepNapEmpty.png" mode="aspectFit" />
       </view>
     </view>
     <view class="flex jc-center mt-50" @tap="openPopup">
@@ -220,23 +220,10 @@ onLoad(() => {});
   color: #ffffff;
 }
 
-.nap-empty {
+.nap-empty-icon {
   width: 116rpx;
   height: 116rpx;
-  border: 2rpx dashed #c7c5f8;
-  border-radius: 50%;
-  background: #f7f6ff;
-  position: relative;
-}
-
-.nap-empty::after {
-  content: '';
-  position: absolute;
-  left: 32rpx;
-  top: 54rpx;
-  width: 52rpx;
-  height: 2rpx;
-  background: #c7c5f8;
+  display: block;
 }
 
 .popupCard {

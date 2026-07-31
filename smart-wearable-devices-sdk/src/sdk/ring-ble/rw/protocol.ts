@@ -7,7 +7,7 @@ export const RW_NOTIFY_CHAR_UUID = '0000b003-0000-1000-8000-00805f9b34fb';
 export const RW_WRITE_CHAR_UUID = '0000b002-0000-1000-8000-00805f9b34fb';
 export const RW_CCCD_UUID = '00002902-0000-1000-8000-00805f9b34fb';
 
-export const RW_SCAN_NAME_PREFIXES = ['HR', 'SY', 'BH', 'RW'];
+export const RW_SCAN_NAME_PREFIXES = ['HR', 'SY', 'BH', 'RW', 'QK'];
 export const RW_SCAN_SERVICE_MARKERS = ['180D'];
 export const RW_MANUFACTURER_MARKERS = ['F802', 'F811'];
 
@@ -24,8 +24,13 @@ export enum RwKey {
   Battery = 0x0203,
   FirmwareVersion = 0x0204,
   UserProfile = 0x0206,
+  TimeFormat = 0x020e,
   HrMonitoring = 0x0216,
   TemperatureDetecting = 0x021b,
+  AppFunctionV2 = 0x0263,
+  AppVideoHid = 0x0264,
+  AppLedLevel = 0x0266,
+  AppRingWearHand = 0x0268,
   Spo2Monitoring = 0x0225,
   HrvMonitoring = 0x026a,
   StressMonitoring = 0x026b,
@@ -50,7 +55,8 @@ export enum RwKey {
   AppRealTimeBloodOxygen = 0x024e,
   AppRealTimeStress = 0x024f,
   AppRealTimeHrv = 0x0269,
-  AppRealTimeBloodSugar = 0x026c
+  AppRealTimeBloodSugar = 0x026c,
+  AppLoginBind = 0x0302
 }
 
 export enum RwHealthDataControlKey {
@@ -176,7 +182,40 @@ export const buildRwSetDateTimeKeyCommand = (timestampMs = Date.now()) => {
   return buildRwKeyCommand(payload);
 };
 
+export const buildRwSetTimeZoneKeyCommand = (timezone = getLocalRwTimezoneHours(), daylightSaving = 0x02) => {
+  const payload = new Uint8Array([
+    RwKey.TimeZone >> 8,
+    RwKey.TimeZone & 0xff,
+    RwKeyFlag.Update,
+    normalizeRwTimezoneQuarterHours(timezone) & 0xff,
+    clampByte(daylightSaving)
+  ]);
+  return buildRwKeyCommand(payload);
+};
+
+export const buildRwSetTimeFormatKeyCommand = (use24Hour = true) => {
+  const payload = new Uint8Array([
+    RwKey.TimeFormat >> 8,
+    RwKey.TimeFormat & 0xff,
+    RwKeyFlag.Update,
+    use24Hour ? 1 : 0
+  ]);
+  return buildRwKeyCommand(payload);
+};
+
 export const buildRwReadDateTimeKeyCommand = () => buildRwReadKeyCommand(RwKey.Time);
+
+export const buildRwLoginBindCommand = () => {
+  return buildRwKeyCommand(new Uint8Array([RwKey.AppLoginBind >> 8, RwKey.AppLoginBind & 0xff, RwKeyFlag.Create]));
+};
+
+export const buildRwReadFunctionV2Command = () => buildRwReadKeyCommand(RwKey.AppFunctionV2);
+
+export const buildRwReadLedLevelCommand = () => buildRwReadKeyCommand(RwKey.AppLedLevel);
+
+export const buildRwReadVideoHidCommand = () => buildRwReadKeyCommand(RwKey.AppVideoHid);
+
+export const buildRwReadRingWearHandCommand = () => buildRwReadKeyCommand(RwKey.AppRingWearHand);
 
 export const buildRwReadFileListCommand = () => buildRwFrame(RwCommand.FileSystem, RwFileSystemSubcommand.ReadFileList);
 
@@ -419,6 +458,28 @@ export const buildRwKeyCommand = (payload: Uint8Array, checksumProvider?: RwChec
   return bytes;
 };
 
+export const buildRwKeyResponseCommand = (payload: Uint8Array, checksumProvider?: RwChecksumProvider) => {
+  const bytes = new Uint8Array(6 + payload.length);
+  bytes[0] = 0xab;
+  bytes[1] = 0x11;
+  bytes[2] = (payload.length >> 8) & 0xff;
+  bytes[3] = payload.length & 0xff;
+  const checksum = (checksumProvider?.(payload) ?? rwCrc16X26(payload)) & 0xffff;
+  bytes[4] = checksum >> 8;
+  bytes[5] = checksum & 0xff;
+  bytes.set(payload, 6);
+  return bytes;
+};
+
+export const buildRwAppDataControlAckCommand = () => {
+  return buildRwKeyResponseCommand(new Uint8Array([
+    RwKey.AppDataControl >> 8,
+    RwKey.AppDataControl & 0xff,
+    RwKeyFlag.Update,
+    0x00
+  ]));
+};
+
 export const buildRwQkeerV2Packet = (
   cmd: number,
   payload: Uint8Array = new Uint8Array(),
@@ -537,6 +598,17 @@ export const decodeAscii = (bytes: Uint8Array) => {
 const clampByte = (value: number) => {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(255, Math.floor(value)));
+};
+
+const getLocalRwTimezoneHours = () => {
+  const offsetMinutes = -new Date().getTimezoneOffset();
+  return offsetMinutes / 60;
+};
+
+const normalizeRwTimezoneQuarterHours = (timezone: number) => {
+  if (!Number.isFinite(timezone)) return normalizeRwTimezoneQuarterHours(getLocalRwTimezoneHours());
+  const quarterHours = Math.abs(timezone) <= 14 ? timezone * 4 : timezone;
+  return Math.max(-48, Math.min(56, Math.round(quarterHours)));
 };
 
 export const rwCrc16X26 = (payload: Uint8Array) => {

@@ -3,10 +3,10 @@
     <view class="card">
       <view class="header">
         <text class="title">系统固件更新</text>
-        <text class="version">目标版本: {{ otaBaseInfo?.versionCode || '' }}</text>
+        <text class="version">{{ hasUpgradePackage ? `目标版本: ${otaBaseInfo?.versionCode || ''}` : '当前已是最新版本' }}</text>
       </view>
 
-      <view class="progress-section">
+      <view v-if="hasUpgradePackage || otaState.isUpgrading" class="progress-section">
         <progress :percent="otaState.progress" stroke-width="12" activeColor="#007AFF" border-radius="6" />
         <text class="percent">{{ otaState.progress }}%</text>
       </view>
@@ -17,9 +17,10 @@
         </text>
       </view>
 
-      <button type="primary" :loading="otaState.isUpgrading" :disabled="otaState.isUpgrading" @tap="startOtaProcess">
+      <button v-if="hasUpgradePackage" type="primary" :loading="otaState.isUpgrading" :disabled="otaState.isUpgrading" @tap="startOtaProcess">
         {{ otaState.isUpgrading ? '升级中...' : '开始安全升级' }}
       </button>
+      <view v-else class="no-upgrade">当前已是最新版本</view>
 
       <view class="footer-hint">
         <text class="hint-item">● 请保持手机蓝牙开启并靠近设备</text>
@@ -62,11 +63,126 @@ const otaState = ref({
 });
 const otaBaseInfo = ref({});
 const bindInfo = ref({});
+const hasUpgradePackage = computed(() => Boolean(firmwareUrl.value && otaBaseInfo.value?.fileUrl));
+
+const pickText = (...values) => {
+  for (const value of values) {
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
+};
+
+const pickObjectText = (source, keys) => {
+  if (!source || typeof source !== 'object') return '';
+  for (const key of keys) {
+    const text = pickText(source[key]);
+    if (text) return text;
+  }
+  return '';
+};
+
+const findReceivedMetricText = (...types) => {
+  const normalizedTypes = types.map((type) => String(type).toLowerCase());
+  for (const item of userStore.receivedData || []) {
+    const sourceType = String(item?.type || item?.sourceType || '').toLowerCase();
+    if (!normalizedTypes.includes(sourceType)) continue;
+    const text = pickText(
+      item?.value,
+      item?.metrics?.value,
+      item?.metrics?.firmwareVersion,
+      item?.metrics?.hardwareVersion,
+      item?.metrics?.softwareVersion,
+      item?.metrics?.uiVersion
+    );
+    if (text) return text;
+  }
+  return '';
+};
 
 const versionInfo = computed(() => {
-  const versionData = userStore.receivedData.find((item) => item.type === 'softwareVersion');
-  return versionData?.value || '';
+  return pickText(
+    findReceivedMetricText('firmware_version', 'firmwareVersion', 'hardwareVersion', 'hardware_version', 'softwareVersion', 'software_version'),
+    pickObjectText(userStore.latestMetrics, [
+      'firmwareVersion',
+      'hardwareVersion',
+      'softwareVersion',
+      'uiVersion',
+      'versionCode',
+      'version'
+    ]),
+    pickObjectText(userStore.healthData, [
+      'firmwareVersion',
+      'firmware_version',
+      'hardwareVersion',
+      'hardware_version',
+      'softwareVersion',
+      'software_version',
+      'uiVersion',
+      'ui_version',
+      'versionCode',
+      'version'
+    ]),
+    pickObjectText(userStore.deviceInfo, [
+      'firmwareVersion',
+      'firmware_version',
+      'hardwareVersion',
+      'hardware_version',
+      'softwareVersion',
+      'software_version',
+      'uiVersion',
+      'ui_version',
+      'versionCode',
+      'version'
+    ]),
+    pickObjectText(bindInfo.value, [
+      'firmwareVersion',
+      'firmware_version',
+      'hardwareVersion',
+      'hardware_version',
+      'softwareVersion',
+      'software_version',
+      'uiVersion',
+      'ui_version',
+      'versionCode',
+      'version'
+    ])
+  );
 });
+
+const deviceModel = computed(() => {
+  return pickObjectText(userStore.deviceInfo, [
+    'deviceModel',
+    'modelKey',
+    'model',
+    'productId',
+    'productCode',
+    'modelName'
+  ]) || pickObjectText(bindInfo.value, [
+    'deviceModel',
+    'modelKey',
+    'model',
+    'productId',
+    'productCode',
+    'modelName'
+  ]);
+});
+
+const buildFirmwareDownloadUrl = (url) => {
+  const rawUrl = pickText(url);
+  if (!rawUrl) return '';
+  if (/^https?:\/\//i.test(rawUrl)) return encodeURI(rawUrl);
+
+  const apiBase = String(import.meta.env.VITE_API_BASE || '').replace(/\/+$/, '');
+  let path = rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`;
+  const isProdGateway = /^https:\/\/sh\.qkeering\.com$/i.test(apiBase);
+  if (isProdGateway && path.startsWith('/admin/files/')) {
+    path = `/api${path}`;
+  }
+
+  return encodeURI(`${apiBase}${path}`);
+};
 
 // --- 工具方法 ---
 
@@ -345,7 +461,7 @@ const startOtaProcess = async () => {
   if (otaState.value.isUpgrading) return;
   if (otaState.value.success) {
     uni.showToast({
-      title: '已是最新版本',
+      title: hasUpgradePackage.value ? '升级已完成' : '已是最新版本',
       icon: 'none'
     });
     return;
@@ -476,9 +592,26 @@ onLoad(async () => {
     return;
   }
   try {
-    console.log('当前版本信息:', versionInfo.value);
+    bindInfo.value = (await getBindInfo()) || {};
+    const currentVersion = versionInfo.value;
+    const currentDeviceModel = deviceModel.value;
+    console.log('当前版本信息:', currentVersion, '设备型号:', currentDeviceModel || '-');
+
+    if (!currentVersion) {
+      firmwareUrl.value = '';
+      otaBaseInfo.value = {};
+      Object.assign(otaState.value, {
+        isUpgrading: false,
+        progress: 0,
+        statusText: '未获取到当前固件版本',
+        error: false,
+        success: true
+      });
+      return;
+    }
+
     const res = await getOtaInfo(
-      { currentVersion: versionInfo.value, deviceModel: '' },
+      { currentVersion, deviceModel: currentDeviceModel },
       {
         custom: {
           returnAll: true
@@ -489,10 +622,15 @@ onLoad(async () => {
       const msg = res?.msg || '暂无更新';
       console.log('OTA状态:', msg);
 
-      otaState.value = {
+      firmwareUrl.value = '';
+      otaBaseInfo.value = {};
+      Object.assign(otaState.value, {
+        isUpgrading: false,
+        progress: 0,
         statusText: msg,
+        error: false,
         success: true
-      };
+      });
       return;
     }
 
@@ -500,9 +638,17 @@ onLoad(async () => {
     otaBaseInfo.value = otaData;
 
     if (otaData.fileUrl) {
-      const apiBase = import.meta.env.VITE_API_BASE;
-      firmwareUrl.value = encodeURI(apiBase + otaData.fileUrl);
+      firmwareUrl.value = buildFirmwareDownloadUrl(otaData.fileUrl);
       cleanup();
+    } else {
+      firmwareUrl.value = '';
+      Object.assign(otaState.value, {
+        isUpgrading: false,
+        progress: 0,
+        statusText: '暂无可升级固件',
+        error: false,
+        success: true
+      });
     }
   } catch (err) {
     const errMsg = typeof err === 'string' ? err : err?.msg || '获取OTA信息失败';
@@ -595,6 +741,17 @@ button {
   background: #007aff;
   font-weight: bold;
   color: white;
+}
+
+.no-upgrade {
+  margin-top: 40rpx;
+  height: 88rpx;
+  border-radius: 44rpx;
+  background: #f2f4f8;
+  color: #8e8e93;
+  font-size: 28rpx;
+  line-height: 88rpx;
+  text-align: center;
 }
 
 .footer-hint {

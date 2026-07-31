@@ -329,7 +329,12 @@ const submitQuestion = async () => {
 onMounted(() => {
   greetingText.value = greetingOptions[Math.floor(Math.random() * greetingOptions.length)];
   void loadServerContext();
-  recorder = uni.getRecorderManager();
+  const getRecorderManager = (uni as any).getRecorderManager;
+  if (typeof getRecorderManager !== 'function') {
+    audio = uni.createInnerAudioContext();
+    return;
+  }
+  recorder = getRecorderManager.call(uni);
   recorder.onStop(async (res) => {
     isListening.value = false;
     isPressingVoice.value = false;
@@ -341,7 +346,7 @@ onMounted(() => {
     }
     if (!res.tempFilePath) {
       uni.hideLoading();
-      aiAnswer.value = '没有拿到录音文件，请确认已允许小程序使用麦克风权限。';
+      aiAnswer.value = '没有拿到录音文件，请确认浏览器已允许使用麦克风。';
       return;
     }
     try {

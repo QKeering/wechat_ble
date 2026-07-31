@@ -25,6 +25,20 @@ if (formatBleErrorMessage(new Error("Cannot read properties of null (reading 'de
   throw new Error('BLE stale device-state errors should keep the shared localized reconnect hint.');
 }
 
+const bluetoothUnavailableHint = '蓝牙未打开或不可用，请打开手机蓝牙后重试';
+
+if (formatBleErrorMessage({ errMsg: 'openBluetoothAdapter:fail:not available', errCode: 10001 }) !== bluetoothUnavailableHint) {
+  throw new Error('Bluetooth unavailable errors should be shown in Chinese.');
+}
+
+if (formatBleErrorMessage(new Error('startBluetoothDevicesDiscovery:fail bluetooth is not available')) !== bluetoothUnavailableHint) {
+  throw new Error('Bluetooth disabled discovery errors should be shown in Chinese.');
+}
+
+if (!isExpectedBleRuntimeError({ errMsg: 'openBluetoothAdapter:fail:not available', errCode: 10001 })) {
+  throw new Error('Bluetooth unavailable errors should be treated as expected BLE runtime errors.');
+}
+
 const networkTimeoutHint = '\u7f51\u7edc\u8bf7\u6c42\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5';
 
 if (

@@ -397,7 +397,7 @@ function isAllowedBusinessScanDevice(device: RingDeviceInfo, options: LegacyScan
   if (protocol === 'rw' || protocol === 'qkeer-v2') return true;
 
   const name = `${device.name || device.localName || device.displayName || ''}`.toUpperCase();
-  return ['HR', 'IF', 'QKEERING', 'PPLUS', 'MUSLEEP_RING', 'QKV2'].some((prefix) => name.startsWith(prefix));
+  return ['HR', 'IF', 'QK', 'QKEERING', 'PPLUS', 'MUSLEEP_RING', 'QKV2'].some((prefix) => name.startsWith(prefix));
 }
 
 const toArray = (data: Record<string, any> | Record<string, any>[]) => {

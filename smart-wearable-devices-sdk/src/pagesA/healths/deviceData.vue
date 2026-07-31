@@ -49,9 +49,11 @@ let measureTimeout: ReturnType<typeof setTimeout> | null = null;
 let rwAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
 let completionDelayTimer: ReturnType<typeof setTimeout> | null = null;
 let measureStartedAt = 0;
+let measureStepStartedAt = 0;
 
 const DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS = 35000;
 const RW_OPTIONAL_TEMPERATURE_TIMEOUT_MS = 8000;
+const RW_FULL_MEASURE_STEP_MIN_ACTIVE_MS = 6000;
 
 const measureStatusText = computed(() => {
   const statusMap = {
@@ -96,7 +98,7 @@ const measureStepItems = computed(() => [
   {
     key: 'skin-temperature',
     label: '皮肤温度',
-    desc: temperature.value ? `${temperature.value}°C` : '等待数据',
+    desc: temperature.value ? `${formatTemperatureMetric(temperature.value)}°C` : '等待数据',
     active: measureStatus.value === 'measuring_temp',
     done: measureStatus.value === 'completed' || Boolean(temperature.value)
   }
@@ -108,6 +110,23 @@ const isIOS = computed(() => {
 });
 const isRwDevice = () => userStore.deviceInfo?.protocol === 'rw';
 const getSubmitMac = () => getSubmitDeviceMac(userStore, isIOS.value);
+
+const normalizeIntegerMetric = (value: unknown) => {
+  if (value == null || value === '') return null;
+  const numeric = typeof value === 'number' ? value : Number(String(value).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : null;
+};
+
+const normalizeTemperatureMetric = (value: unknown) => {
+  if (value == null || value === '') return null;
+  const numeric = typeof value === 'number' ? value : Number(String(value).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? Number(numeric.toFixed(1)) : null;
+};
+
+const formatTemperatureMetric = (value: unknown) => {
+  const numeric = normalizeTemperatureMetric(value);
+  return numeric == null ? null : numeric.toFixed(1);
+};
 
 const getLatestHeartRateData = () => getLatestHeartRateReading(userStore, measureStartedAt);
 const getLatestHrvData = () => getLatestHrvReading(userStore, measureStartedAt);
@@ -161,6 +180,7 @@ const sendMeasurementCommand = async (task: () => Promise<unknown>, expectedStep
     if (isRwDevice() && isRwForegroundMetric(expectedMetric)) {
       await runRwForegroundMeasurement(expectedMetric, {
         startedAt: measureStartedAt,
+        minActiveMs: RW_FULL_MEASURE_STEP_MIN_ACTIVE_MS,
         measureStatus: () => measureStatus.value,
         source: 'RW PAGE'
       });
@@ -176,20 +196,20 @@ const sendMeasurementCommand = async (task: () => Promise<unknown>, expectedStep
   }
 };
 
-const quickProgressTo100 = () => {
+const quickProgressToCompletionPending = () => {
   const currentProgress = measureProgress.value;
-  const remaining = 100 - currentProgress;
+  const remaining = 99 - currentProgress;
   const steps = 10;
   const stepValue = Math.max(1, Math.floor(remaining / steps));
 
   if (progressAnimationTimer) clearInterval(progressAnimationTimer);
   progressAnimationTimer = setInterval(() => {
-    if (measureProgress.value >= 100) {
+    if (measureProgress.value >= 99) {
       if (progressAnimationTimer) clearInterval(progressAnimationTimer);
       progressAnimationTimer = null;
       return;
     }
-    measureProgress.value = Math.min(measureProgress.value + stepValue, 100);
+    measureProgress.value = Math.min(measureProgress.value + stepValue, 99);
   }, 50);
 };
 
@@ -197,10 +217,11 @@ const advanceRwMeasureSoon = (next: () => void, delay = 300) => {
   clearMeasureTimeout();
   clearAllProgressIntervals();
   clearRwAdvanceTimer();
+  const stepRemainingMs = isRwDevice() ? Math.max(0, RW_FULL_MEASURE_STEP_MIN_ACTIVE_MS - (Date.now() - measureStepStartedAt)) : 0;
   rwAdvanceTimer = setTimeout(() => {
     rwAdvanceTimer = null;
     next();
-  }, delay);
+  }, Math.max(delay, stepRemainingMs));
 };
 
 const pushProgressInterval = (targetProgress: number, expectedStatus: typeof measureStatus.value) => {
@@ -211,8 +232,9 @@ const pushProgressInterval = (targetProgress: number, expectedStatus: typeof mea
       return;
     }
 
-    measureProgress.value += 1;
-    if (measureProgress.value >= targetProgress) {
+    const safeTargetProgress = Math.min(targetProgress, 99);
+    measureProgress.value = Math.min(measureProgress.value + 1, safeTargetProgress);
+    if (measureProgress.value >= safeTargetProgress) {
       clearInterval(progressInterval);
       progressIntervals = progressIntervals.filter((item) => item !== progressInterval);
     }
@@ -222,6 +244,7 @@ const pushProgressInterval = (targetProgress: number, expectedStatus: typeof mea
 
 const startHrMeasurement = () => {
   measureStatus.value = 'measuring_hr';
+  measureStepStartedAt = Date.now();
   measureProgress.value = 0;
   clearAllProgressIntervals();
   void sendMeasurementCommand(sendActiveMeasureCommand, 'heart_rate').then(() => {
@@ -237,6 +260,7 @@ const startHrMeasurement = () => {
 
 const startHrvMeasurement = () => {
   measureStatus.value = 'measuring_hrv';
+  measureStepStartedAt = Date.now();
   clearAllProgressIntervals();
   clearMeasureTimeout();
   void sendMeasurementCommand(sendActiveMeasureCommand, 'hrv').then(() => {
@@ -252,6 +276,7 @@ const startHrvMeasurement = () => {
 
 const startSpo2Measurement = () => {
   measureStatus.value = 'measuring_spo2';
+  measureStepStartedAt = Date.now();
   clearAllProgressIntervals();
   clearMeasureTimeout();
   void sendMeasurementCommand(sendOxyGenCommand, 'blood_oxygen').then(() => {
@@ -269,6 +294,7 @@ const startSpo2Measurement = () => {
 
 const startTemperatureMeasurement = () => {
   measureStatus.value = 'measuring_temp';
+  measureStepStartedAt = Date.now();
   clearAllProgressIntervals();
   clearMeasureTimeout();
   void sendMeasurementCommand(sendBodyTemperatureCommand, 'temperature').then(() => {
@@ -276,7 +302,7 @@ const startTemperatureMeasurement = () => {
       completeMeasurement();
     }
   });
-  pushProgressInterval(100, 'measuring_temp');
+  pushProgressInterval(99, 'measuring_temp');
   measureTimeout = setTimeout(() => {
     if (measureStatus.value === 'measuring_temp') completeMeasurement();
   }, isRwDevice() && hasRwAnyRealtimeCoreData() ? RW_OPTIONAL_TEMPERATURE_TIMEOUT_MS : DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS);
@@ -360,7 +386,7 @@ watch(
     }
 
     if (isRwDevice() && measureStatus.value === 'measuring_temp' && getLatestTemperatureData()?.temperature) {
-      quickProgressTo100();
+      quickProgressToCompletionPending();
       advanceRwMeasureSoon(() => {
         if (measureStatus.value === 'measuring_temp') completeMeasurement();
       }, 500);
@@ -387,7 +413,7 @@ watch(
 
     if (hasCompletedStatus) {
       clearMeasureTimeout();
-      quickProgressTo100();
+      quickProgressToCompletionPending();
       setTimeout(() => {
         completeMeasurement();
       }, 1000);
@@ -409,14 +435,18 @@ const hydrateReportMetrics = () => {
   const latestSpo2Data: any = getLatestSpo2Data();
   const latestTempData: any = getLatestTemperatureData();
 
-  if (latestHrData?.heartRate) heartRate.value = latestHrData.heartRate;
-  if (latestHrvData?.heartRateVariability) heartRateVariability.value = latestHrvData.heartRateVariability;
+  const latestHeartRate = normalizeIntegerMetric(latestHrData?.heartRate);
+  const latestHrv = normalizeIntegerMetric(latestHrvData?.heartRateVariability);
+  const latestSpo2 = normalizeIntegerMetric(latestSpo2Data?.bloodOxygen);
+  const latestTemperature = normalizeTemperatureMetric(latestTempData?.temperature);
+  if (latestHeartRate != null) heartRate.value = latestHeartRate;
+  if (latestHrv != null) heartRateVariability.value = latestHrv;
   if (latestStressData?.stressIndex) stressIndex.value = latestStressData.stressIndex;
   if (latestBloodSugarData?.bloodSugar) bloodSugar.value = latestBloodSugarData.bloodSugar;
   if (latestBloodPressureData?.systolic) systolic.value = latestBloodPressureData.systolic;
   if (latestBloodPressureData?.diastolic) diastolic.value = latestBloodPressureData.diastolic;
-  if (latestSpo2Data?.bloodOxygen) spo2Value.value = latestSpo2Data.bloodOxygen;
-  if (latestTempData?.temperature) temperature.value = latestTempData.temperature;
+  if (latestSpo2 != null) spo2Value.value = latestSpo2;
+  if (latestTemperature != null) temperature.value = latestTemperature;
 };
 
 const resetMeasurementValues = () => {
@@ -485,14 +515,18 @@ watch(
     const measurementRecord: submitDataType['dataList'][number] = {
       recordTime: formatRecordTime(new Date())
     };
-    if (latestHrData?.heartRate) measurementRecord.heartRate = latestHrData.heartRate;
-    if (latestHrvData?.heartRateVariability) measurementRecord.hrv = latestHrvData.heartRateVariability;
+    const latestHeartRate = normalizeIntegerMetric(latestHrData?.heartRate);
+    const latestHrv = normalizeIntegerMetric(latestHrvData?.heartRateVariability);
+    const latestSpo2 = normalizeIntegerMetric(latestSpo2Data?.bloodOxygen);
+    const latestTemperature = normalizeTemperatureMetric(latestTempData?.temperature);
+    if (latestHeartRate != null) measurementRecord.heartRate = latestHeartRate;
+    if (latestHrv != null) measurementRecord.hrv = latestHrv;
     if (latestStressData?.stressIndex) measurementRecord.stress = latestStressData.stressIndex;
     if (latestBloodSugarData?.bloodSugar) measurementRecord.bloodSugar = latestBloodSugarData.bloodSugar;
     if (latestBloodPressureData?.systolic) measurementRecord.systolic = latestBloodPressureData.systolic;
     if (latestBloodPressureData?.diastolic) measurementRecord.diastolic = latestBloodPressureData.diastolic;
-    if (latestSpo2Data?.bloodOxygen) measurementRecord.spo2 = latestSpo2Data.bloodOxygen;
-    if (latestTempData?.temperature) measurementRecord.temperature = latestTempData.temperature;
+    if (latestSpo2 != null) measurementRecord.spo2 = latestSpo2;
+    if (latestTemperature != null) measurementRecord.temperature = latestTemperature;
 
     if (
       measurementRecord.heartRate == null &&
@@ -511,14 +545,14 @@ watch(
       return;
     }
 
-    if (latestHrData?.heartRate) heartRate.value = latestHrData.heartRate;
-    if (latestHrvData?.heartRateVariability) heartRateVariability.value = latestHrvData.heartRateVariability;
+    if (latestHeartRate != null) heartRate.value = latestHeartRate;
+    if (latestHrv != null) heartRateVariability.value = latestHrv;
     if (latestStressData?.stressIndex) stressIndex.value = latestStressData.stressIndex;
     if (latestBloodSugarData?.bloodSugar) bloodSugar.value = latestBloodSugarData.bloodSugar;
     if (latestBloodPressureData?.systolic) systolic.value = latestBloodPressureData.systolic;
     if (latestBloodPressureData?.diastolic) diastolic.value = latestBloodPressureData.diastolic;
-    if (latestSpo2Data?.bloodOxygen) spo2Value.value = latestSpo2Data.bloodOxygen;
-    if (latestTempData?.temperature) temperature.value = latestTempData.temperature;
+    if (latestSpo2 != null) spo2Value.value = latestSpo2;
+    if (latestTemperature != null) temperature.value = latestTemperature;
 
     uni.showLoading({ title: '提交数据中...', mask: false });
     try {
@@ -598,6 +632,7 @@ onLoad(async () => {
 onUnload(() => {
   stopMeasurementFlow();
   measureStartedAt = 0;
+  measureStepStartedAt = 0;
 });
 
 onHide(async () => {
@@ -725,7 +760,7 @@ onHide(async () => {
   position: absolute;
   inset: 48rpx;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: center;
   background: #ffffff;
   color: #2e70fc;
@@ -736,11 +771,13 @@ onHide(async () => {
 .measure-percent {
   font-size: 48rpx;
   font-weight: 800;
+  line-height: 1;
 }
 
 .measure-percent-unit {
   margin-left: 4rpx;
   font-size: 24rpx;
+  line-height: 1;
 }
 
 .progress-card,

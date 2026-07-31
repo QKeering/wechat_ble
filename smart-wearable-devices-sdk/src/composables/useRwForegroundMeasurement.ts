@@ -32,6 +32,7 @@ const RW_FOREGROUND_METRIC_RESULT_TIMEOUT_MS_BY_METRIC: Partial<Record<RwForegro
   temperature: 65000,
   hrv: 65000
 };
+const RW_APP_COMPAT_PRIME_METRICS = new Set<RwForegroundMetric>(['heart_rate', 'blood_oxygen']);
 
 const RING_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
@@ -811,6 +812,7 @@ export const useRwForegroundMeasurement = () => {
 
     let elapsed = 0;
     let controlEnableAttempted = false;
+    let controlCurrentlyEnabled = false;
     try {
       const waitForMetricOrDelay = async (delayMs: number) => {
         const result = await Promise.race([
@@ -828,9 +830,45 @@ export const useRwForegroundMeasurement = () => {
         if (result) await waitForMinActiveDuration();
         return result;
       };
+      const enableMeasurementControl = async () => {
+        controlEnableAttempted = true;
+        await controlRwHealthData(metric, true);
+        controlCurrentlyEnabled = true;
+      };
+      const disableMeasurementControl = async () => {
+        await controlRwHealthData(metric, false).catch(() => undefined);
+        controlCurrentlyEnabled = false;
+      };
+      const runRwAppCompatiblePrime = async () => {
+        if (!RW_APP_COMPAT_PRIME_METRICS.has(metric)) return null;
+        appendRingDiagnosticLog(source, 'single-metric-app-prime-start', {
+          ...getRwForegroundMeasurementSnapshot(metric, startedAt, options.measureStatus)
+        });
+        await enableMeasurementControl();
+        const firstWindowResult = await waitForMetricOrDelay(8000);
+        if (firstWindowResult) return firstWindowResult;
+        await disableMeasurementControl();
+        const disabledWindowResult = await waitForMetricOrDelay(1000);
+        if (disabledWindowResult) return disabledWindowResult;
+        appendRingDiagnosticLog(source, 'single-metric-app-prime-read-history', {
+          ...getRwForegroundMeasurementSnapshot(metric, startedAt, options.measureStatus)
+        });
+        await readRwHealthData(metric).catch(() => undefined);
+        const historyReadResult = await waitForMetricOrDelay(2500);
+        if (historyReadResult) return historyReadResult;
+        await enableMeasurementControl();
+        appendRingDiagnosticLog(source, 'single-metric-app-prime-enabled-again', {
+          ...getRwForegroundMeasurementSnapshot(metric, startedAt, options.measureStatus)
+        });
+        return await waitForMetricOrDelay(250);
+      };
 
-      controlEnableAttempted = true;
-      await controlRwHealthData(metric, true);
+      const appPrimeResult = await runRwAppCompatiblePrime();
+      if (appPrimeResult) return await finishWithMinActiveDuration(appPrimeResult);
+
+      if (!controlCurrentlyEnabled) {
+        await enableMeasurementControl();
+      }
       const earlyResult = await waitForMetricOrDelay(200);
       if (earlyResult) return await finishWithMinActiveDuration(earlyResult);
       controlAckPreview = findLatestRealtimeControlAck(metric, startedAt);
@@ -870,7 +908,7 @@ export const useRwForegroundMeasurement = () => {
       if (token === rwMetricReadToken && activeRwMetric === metric) {
         activeRwMetric = null;
         if (userStore.isConnected && controlEnableAttempted) {
-          await controlRwHealthData(metric, false).catch(() => undefined);
+          await disableMeasurementControl();
         } else {
           appendRingDiagnosticLog(source, 'single-metric-skip-disable', {
             target: metric,

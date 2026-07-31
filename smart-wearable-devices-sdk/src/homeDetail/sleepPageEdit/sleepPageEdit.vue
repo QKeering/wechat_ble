@@ -21,7 +21,7 @@ const list = ref([
   { name: '心率变异性', value: 'heartRateVariability' },
   { name: '皮肤温度', value: 'skinTemperature' },
   { name: '小睡', value: 'napRecord' },
-  { name: '活动总结', value: 'activitySummary' }
+  { name: '睡眠总结', value: 'activitySummary' }
 ]);
 // 拖拽后新的数据
 const newList = ref([]);

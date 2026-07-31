@@ -133,6 +133,9 @@ const realDeviceCurrentDayStepContinue = parseRwRingData(
     'ab11005383c5051a102e2439b00000000000000000000000002e2447c00000016b0001facf002d32a02e2455d00000000000000000000000002e2463e00000000000000000000000002e2471f0000000000000000000000000'
   )
 );
+const realDeviceCurrentDayStepSequence = parseRwRingData(
+  hexToBytes('ab1100234f23051a1001502e8a000007da000af62e00fa44c001502e800000025500034165004a5560')
+);
 const realDeviceRelativeCurrentDayStep = parseRwRingData(
   hexToBytes(
     'ab1100a36042051a10033329c200000035000049fd000699600332b3800000000000000000000000000332c1900000000000000000000000000332cfa00000000000000000000000000332ddb00000000000000000000000000332ebc00000000000000000000000000332f9d0000000000000000000000000033307e0000000000000000000000000033315f00000000000000000000000000333240000000035000049fd00069960'
@@ -464,6 +467,24 @@ if (
       realDeviceCurrentDayStep,
       realDeviceCurrentDayStepContinue
     })}`
+  );
+}
+
+if (
+  realDeviceCurrentDayStepSequence?.type !== 'rw_health_data' ||
+  realDeviceCurrentDayStepSequence.name !== 'step' ||
+  realDeviceCurrentDayStepSequence.key !== RwKey.ActivityCurrentDay ||
+  realDeviceCurrentDayStepSequence.value !== 2010 ||
+  realDeviceCurrentDayStepSequence.records?.length !== 2 ||
+  realDeviceCurrentDayStepSequence.records?.[0]?.rawDataType !== 'ab_activity_current_day_jl2_sequence' ||
+  realDeviceCurrentDayStepSequence.records?.[0]?.timestampSource !== 'current_day_key_sequence_hour' ||
+  realDeviceCurrentDayStepSequence.records?.[0]?.stepCount !== 2010 ||
+  realDeviceCurrentDayStepSequence.records?.[1]?.stepCount !== 597
+) {
+  throw new Error(
+    `RW parser should treat 0x051A sequence payloads as data blocks so the SDK can ACK/delete and continue: ${JSON.stringify(
+      realDeviceCurrentDayStepSequence
+    )}`
   );
 }
 

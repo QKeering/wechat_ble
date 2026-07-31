@@ -23,11 +23,11 @@ export const heartRateOption = {
   xAxis: {
     type: 'category',
     data: ['00:00', '06:00', '12:00', '18:00', '21:00', '24:00'],
+    boundaryGap: false,
     axisLine: { show: false },
     axisTick: { show: false },
     axisLabel: {
-      color: '#999',
-      fontSize: 12
+      show: false
     },
     splitLine: { show: false }
   },
@@ -71,11 +71,11 @@ export const heartRateOption = {
     }
   ],
   grid: {
-    left: '1%',
-    right: '5%',
-    bottom: '5%',
-    top: '10%',
-    containLabel: true
+    left: 24,
+    right: 24,
+    top: 56,
+    bottom: 34,
+    containLabel: false
   }
 };
 // 体温图表配置（默认）
@@ -102,11 +102,11 @@ export const temperatureOption = {
   xAxis: {
     type: 'category',
     data: ['00:00', '02:00', '04:00', '06:00', '08:00', '10:00', '12:00', '14:00', '16:00', '18:00', '20:00', '22:00', '24:00'],
+    boundaryGap: false,
     axisLine: { show: false },
     axisTick: { show: false },
     axisLabel: {
-      color: '#999',
-      fontSize: 12
+      show: false
     },
     splitLine: { show: false }
   },
@@ -152,11 +152,11 @@ export const temperatureOption = {
     }
   ],
   grid: {
-    left: '1%',
-    right: '5%',
-    bottom: '5%',
-    top: '10%',
-    containLabel: true
+    left: 24,
+    right: 24,
+    top: 56,
+    bottom: 34,
+    containLabel: false
   }
 };
 

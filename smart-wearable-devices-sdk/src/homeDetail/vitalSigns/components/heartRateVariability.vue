@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, nextTick } from 'vue';
 import { onLoad, onPageScroll, onShow, onUnload } from '@dcloudio/uni-app';
 import { baseOption } from '@/homeDetail/vitalSigns/echartOptions';
 import {
   applyMetricSleepRangeAxisStyle,
   buildMetricSleepTimelineAxis,
   compactMetricTimelineTicks,
-  getMetricTimelineTicks
+  getMetricTimelineTicks,
+  normalizeTimelineLabel
 } from '@/homeDetail/vitalSigns/metricSleepTimelineAxis';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useUserStore } from '@/stores/user';
@@ -61,17 +62,35 @@ const isIOS = computed(() => {
   const systemInfo = uni.getSystemInfoSync();
   return systemInfo.platform.toLowerCase().includes('ios');
 });
+const waitMeasurePopupClosed = () => new Promise<void>((resolve) => setTimeout(resolve, 80));
+const showMeasureWaitingPopup = async () => {
+  measurePopup.value?.close?.();
+  await nextTick();
+  await waitMeasurePopupClosed();
+  popup1.value?.open?.();
+};
 const metricAxisTicks = computed(() => {
   const chartData = Array.isArray(props.hrvData?.chartData) ? props.hrvData.chartData : [];
   return getMetricTimelineTicks(chartData, props.sleepSegmentObj, !props.isHeartTate);
 });
-const visibleMetricAxisTicks = computed(() => (props.isHeartTate ? compactMetricTimelineTicks(metricAxisTicks.value) : metricAxisTicks.value));
+const visibleMetricAxisTicks = computed(() => compactMetricTimelineTicks(metricAxisTicks.value, props.isHeartTate ? 5 : 6));
 const metricChartKey = computed(() => {
   const chartData = Array.isArray(props.hrvData?.chartData) ? props.hrvData.chartData : [];
   const lastPoint = chartData[chartData.length - 1] as any;
   const tickKey = visibleMetricAxisTicks.value.map((item) => item.label).join('|');
   return `${props.isHeartTate ? 'hrv' : 'sleep-hrv'}-${chartData.length}-${lastPoint?.time || ''}-${lastPoint?.value || ''}-${tickKey}`;
 });
+const formatIntegerStat = (value: unknown, fallback = '00') => {
+  const numeric = Number(String(value ?? '').replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? String(Math.round(numeric)) : fallback;
+};
+const formatIntegerRangeStat = (value: unknown, fallback = '00') => {
+  const parts = String(value ?? '')
+    .split('-')
+    .map((item) => formatIntegerStat(item, ''));
+  const validParts = parts.filter(Boolean);
+  return validParts.length === 2 ? `${validParts[0]}-${validParts[1]}` : formatIntegerStat(value, fallback);
+};
 const getProcessedOption = () => {
   const newOption = cloneDeep(baseOption);
   const chartData = Array.isArray(props.hrvData?.chartData) ? props.hrvData.chartData : [];
@@ -79,7 +98,7 @@ const getProcessedOption = () => {
   let fullSeriesData: (number | null)[] = [];
   if (chartData.length > 0) {
     // 有数据时使用实际数据
-    fullXData = chartData.map((item: Point) => item.time?.toString() || '00:00');
+    fullXData = chartData.map((item: Point) => normalizeTimelineLabel(item.time));
     // fullSeriesData = props.hrvData?.chartData?.map((item: Point) => Number(item.value)) || [];
     fullSeriesData =
       chartData.map((item: Point) => {
@@ -174,6 +193,17 @@ const clearMeasureCompleteTimer = () => {
   clearTimeout(measureCompleteTimer);
   measureCompleteTimer = null;
 };
+const startMeasureFallbackTimer = () => {
+  if (measureTimeout) {
+    clearTimeout(measureTimeout);
+  }
+  measureTimeout = setTimeout(() => {
+    if (measureStatus.value === 'measuring') {
+      void completeMeasureWithLatestReading();
+    }
+    measureTimeout = null;
+  }, MAX_VITAL_MEASUREMENT_DURATION_MS);
+};
 const completeMeasureWithLatestReading = async () => {
   if (measureStatus.value !== 'measuring' || isMeasureCompletePending) return;
   const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt);
@@ -209,7 +239,11 @@ const handleMeasure = () => {
   }
 };
 const startMeasure = async () => {
-  measurePopup.value.close();
+  if (measureStatus.value === 'measuring') {
+    await showMeasureWaitingPopup();
+    return;
+  }
+  measurePopup.value?.close?.();
   if (!getSubmitDeviceMac(userStore, isIOS.value)) {
     uni.showToast({ title: '请先连接设备', icon: 'none' });
     (uni as any).$uv.route('/pagesA/mines/connectDevice');
@@ -229,7 +263,8 @@ const startMeasure = async () => {
   //   title: '测量中...',
   //   mask: true
   // });
-  popup1.value?.open();
+  await showMeasureWaitingPopup();
+  startMeasureFallbackTimer();
   // 发送测量命令
   try {
     if (isRwDevice()) {
@@ -245,6 +280,7 @@ const startMeasure = async () => {
     }
     await requestMetricRefresh(refreshHealthData, sendActiveMeasureCommand, { expectedSteps: 'hrv' });
   } catch (error) {
+    if (measureStatus.value !== 'measuring') return;
     popup1.value?.close();
     if (isRwDevice()) {
       await stopActiveRwMeasurement('RW VITAL');
@@ -255,10 +291,9 @@ const startMeasure = async () => {
     return;
   }
 
-  measureTimeout = setTimeout(() => {
-    void completeMeasureWithLatestReading();
-    measureTimeout = null; // 清空引用
-  }, MAX_VITAL_MEASUREMENT_DURATION_MS);
+  if (!measureTimeout && measureStatus.value === 'measuring') {
+    startMeasureFallbackTimer();
+  }
 };
 
 // 监听 userStore.receivedData 变化
@@ -303,11 +338,11 @@ watch(
               }
             ]
           });
+        } catch (error) {
+          uni.showToast({ title: '测量已完成，数据稍后同步', icon: 'none' });
+        } finally {
           uni.hideLoading();
           jumpDetail();
-        } catch (error) {
-          uni.hideLoading();
-          uni.showToast({ title: '数据提交失败', icon: 'none' });
         }
       }
     }
@@ -356,11 +391,11 @@ onUnload(() => {
     <view @click="jumpDetail">
       <view class="stats" v-if="!isHeartTate">
         <view class="stat-item">
-          <view class="stat-value">{{ hrvData.avgValue || '00' }}</view>
+          <view class="stat-value">{{ formatIntegerStat(hrvData.avgValue) }}</view>
           <view class="stat-label">心率变异性</view>
         </view>
         <view class="stat-item">
-          <view class="stat-value">{{ hrvData.avgValueRange || '00' }}</view>
+          <view class="stat-value">{{ formatIntegerRangeStat(hrvData.avgValueRange) }}</view>
           <view class="stat-label">关键指数</view>
         </view>
       </view>
@@ -368,22 +403,20 @@ onUnload(() => {
         <view class="flex ai-center jc-center">
 <uv-image src="/static/images/homeDetail/heartLove.png" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
           <view class="ml-15">
-            <text class="fs-48">{{ hrvData?.newValue || '00' }}</text>
+            <text class="fs-48">{{ formatIntegerStat(hrvData?.newValue) }}</text>
             <text class="t-979797 fs-24">%</text>
           </view>
         </view>
       </view>
       <view class="metric-chart-wrap">
         <view class="metric-echart-box flex ai-center jc-center">
-          <l-echart :key="metricChartKey" ref="chartRef" @finished="initChart" style="width: 100%; height: 424rpx; margin: 0"></l-echart>
+          <l-echart :key="metricChartKey" ref="chartRef" @finished="initChart" style="width: 100%; height: 320rpx; margin: 0"></l-echart>
         </view>
         <view v-if="visibleMetricAxisTicks.length" class="metric-time-axis">
           <text
             v-for="tick in visibleMetricAxisTicks"
             :key="tick.key"
             class="metric-time-tick"
-            :class="{ 'is-first': tick.isFirst, 'is-last': tick.isLast }"
-            :style="{ left: tick.left + '%' }"
           >{{ tick.label }}</text>
         </view>
       </view>
@@ -391,11 +424,11 @@ onUnload(() => {
       <!-- 统计信息 -->
       <view class="stats" v-if="isHeartTate">
         <view class="stat-item">
-          <view class="stat-value">{{ hrvData?.avgValue || '00' }}</view>
+          <view class="stat-value">{{ formatIntegerStat(hrvData?.avgValue) }}</view>
           <view class="stat-label">心率变异性</view>
         </view>
         <view class="stat-item">
-          <view class="stat-value">{{ hrvData?.avgValueRange || '00' }}</view>
+          <view class="stat-value">{{ formatIntegerRangeStat(hrvData?.avgValueRange) }}</view>
           <view class="stat-label">关键指数</view>
         </view>
       </view>
@@ -480,36 +513,28 @@ onUnload(() => {
 
 .metric-chart-wrap {
   width: 100%;
+  position: relative;
+  height: 360rpx;
 }
 
 .metric-echart-box {
   width: 100%;
+  height: 320rpx;
 }
 
 .metric-time-axis {
-  position: relative;
-  height: 44rpx;
-  margin: 4rpx 10rpx 0;
+  position: absolute;
+  left: 28rpx;
+  right: 28rpx;
+  bottom: 8rpx;
+  display: flex;
+  justify-content: space-between;
   color: #9ca3af;
-  font-size: 18rpx;
+  font-size: 20rpx;
   line-height: 1;
 }
 
 .metric-time-tick {
-  position: absolute;
-  top: 0;
   white-space: nowrap;
-  transform: translateX(-50%) rotate(-35deg);
-  transform-origin: top center;
-}
-
-.metric-time-tick.is-first {
-  transform: rotate(-35deg);
-  transform-origin: top left;
-}
-
-.metric-time-tick.is-last {
-  transform: translateX(-100%) rotate(-35deg);
-  transform-origin: top right;
 }
 </style>

@@ -462,6 +462,24 @@ function parseKeyFrame(frame: NonNullable<ReturnType<typeof parseRwKeyFrame>>, r
     };
   }
 
+  if (frame.key === RwKey.TimeFormat) {
+    const timeFormat = frame.data[0];
+    return {
+      type: 'rw_time_format_ack',
+      protocol: 'rw',
+      frameId: frame.checksum,
+      timestamp: Date.now(),
+      key: frame.key,
+      flag: frame.flag,
+      timeFormat,
+      use24Hour: timeFormat === 1,
+      success: frame.flag === RwKeyFlag.Update,
+      status: frame.flag === RwKeyFlag.Update ? 'success' : 'ack',
+      data: Array.from(frame.data),
+      raw: Array.from(raw)
+    };
+  }
+
   if (isRwBatteryKey(frame.key)) {
     if (frame.data.length === 0) {
       return createRwBatteryPendingParsedData(frame, raw);
@@ -1341,7 +1359,10 @@ function parseCompactHistoryMetricValue(key: number, value: number | undefined, 
 
 function parseCurrentDayStepValue(data: Uint8Array) {
   const records = parseRwCurrentDayActivityRecords(data);
-  const totalStep = records.reduce((total, record) => total + (parseRwStepCountValue(record.stepCount) ?? 0), 0);
+  const sequenceRecords = records.filter((record) => record.rawDataType === 'ab_activity_current_day_jl2_sequence');
+  const totalStep = sequenceRecords.length > 0
+    ? Math.max(...sequenceRecords.map((record) => parseRwStepCountValue(record.stepCount) ?? 0))
+    : records.reduce((total, record) => total + (parseRwStepCountValue(record.stepCount) ?? 0), 0);
   return totalStep > 0 ? totalStep : undefined;
 }
 
@@ -1501,8 +1522,11 @@ function parseRwJl2ActivityRecords(data: Uint8Array, currentDay: boolean): Array
 
     const calorieRaw = readUint32BE(record, 8);
     const distanceRaw = readUint32BE(record, 12);
+    const hasDeviceTimestamp = deviceUnixTime != null;
     records.push(createRwStepHistoryRecord({
-      rawDataType: currentDay ? 'ab_activity_current_day_jl2_hour' : 'ab_activity_history_jl2',
+      rawDataType: currentDay
+        ? (hasDeviceTimestamp ? 'ab_activity_current_day_jl2_hour' : 'ab_activity_current_day_jl2_sequence')
+        : 'ab_activity_history_jl2',
       unixTime: currentDay ? getRwCurrentDayHourTimestamp(hour) : deviceUnixTime,
       hour,
       stepCount,
@@ -1512,14 +1536,25 @@ function parseRwJl2ActivityRecords(data: Uint8Array, currentDay: boolean): Array
       distanceRaw,
       rawJlTimeSeconds: rawTime,
       deviceUnixTime,
-      timestampSource: currentDay ? 'current_day_key_hour' : 'jl_device_time',
+      timestampSource: currentDay
+        ? (hasDeviceTimestamp ? 'current_day_key_hour' : 'current_day_key_sequence_hour')
+        : 'jl_device_time',
       sequenceIndex: index,
       rawData: Array.from(record)
     }));
   }
 
-  if (validTimestampCount === 0) return [];
+  if (validTimestampCount === 0 && !isRwCurrentDayJl2SequencePayload(data, currentDay, records)) return [];
   return records;
+}
+
+function isRwCurrentDayJl2SequencePayload(data: Uint8Array, currentDay: boolean, records: Array<Record<string, any>>) {
+  if (!currentDay || records.length === 0) return false;
+  // BH/SY 当前日 0x051A 偶发返回 16 字节块，但块头不是 JL 秒时间。
+  // 文档仍要求按“有数据块”处理并读完后删块；这里只对 0x00/0x01 开头的当前日块放行，
+  // 避免把已有的 relative-hour 当前日格式误判成 JL2 小时记录。
+  const firstByte = data[0] ?? 0xff;
+  return firstByte <= 0x01;
 }
 
 function parseRwActivityRecordsBySize(

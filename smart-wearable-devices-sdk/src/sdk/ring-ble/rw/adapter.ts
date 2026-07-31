@@ -13,28 +13,40 @@ import {
   RwFileSystemSubcommand,
   RwHealthDataControlKey,
   RwTimeSubcommand,
+  buildRwAppDataControlAckCommand,
   buildRwFormatFileSystemCommand as buildRwFormatFileSystemFrame,
   buildRwFrame,
   buildRwControlHealthDataCommand,
   buildRwBatteryCommandVariants,
   buildRwFirmwareVersionCommandVariants,
+  buildRwLoginBindCommand,
   buildRwReadFileListCommand,
   buildRwReadDateTimeKeyCommand,
+  buildRwDeleteHealthDataCommand,
+  buildRwReadFunctionV2Command,
   buildRwReadHealthDataCommand,
+  buildRwReadContinueKeyCommand,
+  buildRwReadContinueKeyCommandWithoutChecksum,
   buildRwReadKeyCommand,
   buildRwReadKeyCommandWithoutChecksum,
+  buildRwReadLedLevelCommand,
+  buildRwReadRingWearHandCommand,
+  buildRwReadVideoHidCommand,
   buildRwReadHealthMonitoringCommand,
   buildRwReadTimeCommand,
   buildRwSetDateTimeKeyCommand,
   buildRwSetBodyTemperatureDetectingCommand,
   buildRwSetHealthMonitoringCommand,
+  buildRwSetTimeFormatKeyCommand,
+  buildRwSetTimeZoneKeyCommand,
   buildRwSetUserProfileCommand,
   buildRwSyncTimeCommand,
   bytesToHex,
   readUint32LE,
   type RwHealthMonitoringConfig,
   type RwUserProfile,
-  RwKey
+  RwKey,
+  RwKeyFlag
 } from './protocol';
 import { parseRwRingData } from './parser';
 import { getRwHistoryDataType } from './history';
@@ -62,6 +74,11 @@ type RwLocalDataReadIntent = {
   dataType?: string;
   dataTypes?: string[];
   expiresAt: number;
+};
+
+type RwAppHistoryReadCommand = {
+  label: string;
+  key: RwKey;
 };
 
 type L19MetricAliasType = 'active_measure' | 'active_OxyGenMeasure' | 'active_Temperature';
@@ -123,6 +140,11 @@ const RW_ALTERNATE_NOTIFY_MAX_BACKGROUND_CANDIDATES = 2;
 const RW_CREATE_CONNECTION_TIMEOUT_MS = 20000;
 const RW_CREATE_CONNECTION_RETRY_DELAYS_MS = [0, 900, 1800];
 const RW_CREATE_CONNECTION_ADAPTER_RESET_DELAY_MS = 1200;
+const RW_APP_READY_PREFLIGHT_TTL_MS = 2 * 60 * 1000;
+const RW_APP_READY_MONITORING_INTERVAL_MINUTES = 60;
+const RW_APP_HISTORY_SYNC_RESPONSE_WAIT_MS = 2200;
+const RW_APP_HISTORY_SYNC_DELETE_WAIT_MS = 1800;
+const RW_APP_HISTORY_SYNC_LOOP_MAX_READS = 32;
 const RW_BLE_DEBUG_STORAGE_KEY = 'qkeer:ring-ble-debug';
 const RW_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 const RW_DIAGNOSTIC_LOG_MAX_COUNT = 500;
@@ -348,6 +370,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   let pendingCollectPeriodReadAlias: RwPendingAlias | null = null;
   let pendingCollectPeriodSetAlias: RwPendingAlias | null = null;
   let writeQueue: Promise<unknown> = Promise.resolve();
+  let rwAppReadyPreflightRunning: Promise<void> | null = null;
+  let lastRwAppReadyPreflightAt = 0;
 
   const getRuntimeDevice = () => {
     const runtimeDevice = (runtime?.getDeviceInfo?.() || {}) as RingDeviceInfo;
@@ -369,6 +393,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     pendingActiveMeasureAlias = null;
     pendingCollectPeriodReadAlias = null;
     pendingCollectPeriodSetAlias = null;
+    rwAppReadyPreflightRunning = null;
+    lastRwAppReadyPreflightAt = 0;
   };
 
   const pruneRecentParsedData = (now = Date.now()) => {
@@ -978,6 +1004,13 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       cacheServiceId(deviceId, currentDevice.serviceId || '');
       cacheServiceId(currentDevice.mac || currentDevice.advertis?.macInfo || currentDevice.uniMacId || '', currentDevice.serviceId || '');
       runtime?.onDeviceReady?.(currentDevice);
+      void runRwAppReadyPreflight('connect-ready', { force: true }).catch((error) => {
+        rwBleLog('rw-app-preflight-fail', {
+          reason: 'connect-ready',
+          deviceId,
+          error: formatError(error)
+        });
+      });
       void enableAlternateNotifyChannels(deviceId, notifyCandidates, enabledNotify);
       void readStandardBatteryLevel('connect-ready');
       void readStandardDeviceInformationVersions('connect-ready');
@@ -1478,6 +1511,298 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     }
   };
 
+  const sendBestEffortSequential = async (commands: RwCommandWrite[], delayMs = 120, source = 'rw-app') => {
+    for (const command of commands) {
+      const { bytes, label } = normalizeCommandWrite(command);
+      try {
+        await sendBytes(bytes, label);
+      } catch (error) {
+        rwBleLog(`${source}-command-fail`, {
+          label,
+          error: formatError(error)
+        });
+      }
+      if (delayMs > 0) await sleep(delayMs);
+    }
+  };
+
+  const buildRwAppReadyPreflightCommands = (timestampMs = Date.now(), timezone = 8): RwCommandWrite[] => [
+    { label: 'rw-app/login-bind', bytes: buildRwLoginBindCommand() },
+    { label: 'rw-app/read-firmware', bytes: buildRwReadKeyCommand(RwKey.FirmwareVersion) },
+    { label: 'rw-app/sync-time-zone', bytes: buildRwSetTimeZoneKeyCommand(timezone) },
+    { label: 'rw-app/sync-time', bytes: buildRwSetDateTimeKeyCommand(timestampMs) },
+    { label: 'rw-app/sync-time-format', bytes: buildRwSetTimeFormatKeyCommand(true) },
+    { label: 'rw-app/read-function-v2', bytes: buildRwReadFunctionV2Command() },
+    { label: 'rw-app/read-led-level', bytes: buildRwReadLedLevelCommand() },
+    { label: 'rw-app/read-video-hid', bytes: buildRwReadVideoHidCommand() },
+    { label: 'rw-app/read-wear-hand', bytes: buildRwReadRingWearHandCommand() },
+    ...RW_APP_READY_MONITORING_KEYS.map((key) => ({
+      label: `rw-app/default-monitoring-${key.toString(16)}`,
+      bytes: buildRwSetHealthMonitoringCommand(key, {
+        enabled: true,
+        startHour: 0,
+        startMinute: 0,
+        endHour: 23,
+        endMinute: 59,
+        interval: RW_APP_READY_MONITORING_INTERVAL_MINUTES
+      })
+    }))
+  ];
+
+  const runRwAppReadyPreflight = async (
+    reason = 'manual',
+    options: { force?: boolean; timezone?: number } = {}
+  ) => {
+    const device = getRuntimeDevice();
+    if (!device.deviceId || !device.serviceId || !device.cmdCharId) {
+      rwBleLog('rw-app-preflight-skip', {
+        reason,
+        skipReason: 'device-not-ready',
+        deviceId: device.deviceId,
+        serviceId: device.serviceId,
+        cmdCharId: device.cmdCharId
+      });
+      return;
+    }
+
+    const now = Date.now();
+    if (!options.force && lastRwAppReadyPreflightAt > 0 && now - lastRwAppReadyPreflightAt < RW_APP_READY_PREFLIGHT_TTL_MS) {
+      rwBleLog('rw-app-preflight-skip', {
+        reason,
+        skipReason: 'recently-ran',
+        elapsedMs: now - lastRwAppReadyPreflightAt
+      });
+      return;
+    }
+    if (rwAppReadyPreflightRunning) {
+      rwBleLog('rw-app-preflight-join', { reason });
+      return rwAppReadyPreflightRunning;
+    }
+
+    lastRwAppReadyPreflightAt = now;
+    const timestampMs = Date.now();
+    const timezone = options.timezone ?? 8;
+    const commands = buildRwAppReadyPreflightCommands(timestampMs, timezone);
+    const task = (async () => {
+      rwBleLog('rw-app-preflight-start', {
+        reason,
+        commandCount: commands.length,
+        timestampMs,
+        timezone,
+        deviceId: device.deviceId
+      });
+      await sendBestEffortSequential(commands, 140, 'rw-app-preflight');
+      rwBleLog('rw-app-preflight-done', {
+        reason,
+        elapsedMs: Date.now() - timestampMs,
+        commandCount: commands.length
+      });
+    })();
+    rwAppReadyPreflightRunning = task.finally(() => {
+      rwAppReadyPreflightRunning = null;
+    });
+    return rwAppReadyPreflightRunning;
+  };
+
+  const buildRwAppHistoryReadCommands = (intent: RwLocalDataReadIntent): RwAppHistoryReadCommand[] => {
+    const requestedDataTypes = intent.dataTypes || (intent.dataType ? [normalizeRwHistoryDataType(intent.dataType)] : []);
+    const requested = new Set(requestedDataTypes.filter(Boolean));
+    const shouldRead = (type: string) => requested.size === 0 || requested.has(type);
+    const commands: RwAppHistoryReadCommand[] = [];
+
+    if (shouldRead('step')) {
+      commands.push(
+        { label: 'history/rw-app-current-day-step', key: RwKey.ActivityCurrentDay },
+        { label: 'history/rw-app-step-history', key: RwKey.Activity }
+      );
+    }
+    if (shouldRead('sleep')) {
+      commands.push({ label: 'history/rw-app-sleep', key: RwKey.Sleep });
+    }
+    if (shouldRead('heart_rate')) {
+      commands.push({ label: 'history/rw-app-heart-rate', key: RwKey.HeartRate });
+    }
+    if (shouldRead('blood_pressure')) {
+      commands.push({ label: 'history/rw-app-blood-pressure', key: RwKey.BloodPressure });
+    }
+    if (shouldRead('blood_oxygen')) {
+      commands.push({ label: 'history/rw-app-blood-oxygen', key: RwKey.BloodOxygen });
+    }
+    if (shouldRead('hrv')) {
+      commands.push({ label: 'history/rw-app-hrv', key: RwKey.Hrv });
+    }
+    if (shouldRead('stress')) {
+      commands.push({ label: 'history/rw-app-stress', key: RwKey.Stress });
+    }
+    return commands;
+  };
+
+  const isRwAppHistoryResponseFor = (parsed: RingParsedData, key: RwKey, flag: RwKeyFlag) => (
+    parsed.protocol === 'rw' &&
+    ['rw_health_data', 'rw_health_data_ack'].includes(parsed.type) &&
+    Number(parsed.key) === key &&
+    (Number(parsed.flag) & 0xff) === flag
+  );
+
+  const hasRwAppHistoryPayload = (parsed: RingParsedData) => {
+    if (Array.isArray(parsed.records) && parsed.records.length > 0) return true;
+    if (parsed.value != null && parsed.value !== '') return true;
+    const data = Array.isArray((parsed as { data?: unknown }).data)
+      ? ((parsed as { data?: unknown[] }).data || [])
+      : [];
+    return data.length > 1;
+  };
+
+  const sendRwAppHistoryReadDeleteLoop = async (command: RwAppHistoryReadCommand, source: string) => {
+    let readCount = 0;
+    for (; readCount < RW_APP_HISTORY_SYNC_LOOP_MAX_READS; readCount += 1) {
+      const pendingRead = waitForParsedData(
+        (parsed) => isRwAppHistoryResponseFor(parsed, command.key, RwKeyFlag.Read),
+        RW_APP_HISTORY_SYNC_RESPONSE_WAIT_MS
+      );
+      pendingRead.catch(() => undefined);
+
+      await sendBytes(buildRwReadHealthDataCommand(command.key), `${command.label}/read`);
+
+      let parsed: RingParsedData;
+      try {
+        parsed = await pendingRead;
+      } catch (error) {
+        rwBleLog('history-rw-app-loop-read-timeout', {
+          source,
+          label: command.label,
+          key: command.key,
+          readIndex: readCount + 1,
+          error: formatError(error)
+        });
+        break;
+      }
+
+      const hasPayload = hasRwAppHistoryPayload(parsed);
+      rwBleLog('history-rw-app-loop-read-response', {
+        source,
+        label: command.label,
+        key: command.key,
+        readIndex: readCount + 1,
+        hasPayload,
+        recordCount: Array.isArray(parsed.records) ? parsed.records.length : 0,
+        value: parsed.value,
+        dataLength: Array.isArray((parsed as { data?: unknown }).data) ? ((parsed as { data?: unknown[] }).data || []).length : 0
+      });
+
+      if (!hasPayload) break;
+
+      const pendingDelete = waitForParsedData(
+        (deleteParsed) => isRwAppHistoryResponseFor(deleteParsed, command.key, RwKeyFlag.Delete),
+        RW_APP_HISTORY_SYNC_DELETE_WAIT_MS
+      );
+      pendingDelete.catch(() => undefined);
+
+      await sendBytes(buildRwDeleteHealthDataCommand(command.key), `${command.label}/delete-current-block`);
+
+      try {
+        const deleteParsed = await pendingDelete;
+        rwBleLog('history-rw-app-loop-delete-response', {
+          source,
+          label: command.label,
+          key: command.key,
+          readIndex: readCount + 1,
+          status: deleteParsed.status,
+          statusCode: deleteParsed.statusCode
+        });
+      } catch (error) {
+        rwBleLog('history-rw-app-loop-delete-timeout', {
+          source,
+          label: command.label,
+          key: command.key,
+          readIndex: readCount + 1,
+          error: formatError(error)
+        });
+        break;
+      }
+
+      await sleep(140);
+    }
+
+    if (readCount >= RW_APP_HISTORY_SYNC_LOOP_MAX_READS) {
+      rwBleLog('history-rw-app-loop-max-read-stop', {
+        source,
+        label: command.label,
+        key: command.key,
+        maxReads: RW_APP_HISTORY_SYNC_LOOP_MAX_READS
+      });
+    }
+  };
+
+  const sendRwAppHistorySyncProbe = async (intent: RwLocalDataReadIntent, source: string) => {
+    const commands = buildRwAppHistoryReadCommands(intent);
+    rwBleLog('history-rw-app-sync-start', {
+      source,
+      readAll: intent.readAll,
+      sinceTimestamp: intent.sinceTimestamp,
+      dataType: intent.dataType,
+      dataTypes: intent.dataTypes,
+      commandCount: commands.length
+    });
+    await runRwAppReadyPreflight('history-sync').catch((error) => {
+      rwBleLog('history-rw-app-preflight-fail', {
+        source,
+        error: formatError(error)
+      });
+    });
+    for (const command of commands) {
+      await sendRwAppHistoryReadDeleteLoop(command, source);
+      await sleep(140);
+    }
+    rwBleLog('history-rw-app-sync-sent', {
+      source,
+      commandCount: commands.length
+    });
+  };
+
+  const isRwDeviceAppDataControlRequestFrame = (rawBytes: Uint8Array) => (
+    rawBytes.length >= 12 &&
+    rawBytes[0] === 0xab &&
+    rawBytes[1] === 0x01 &&
+    rawBytes[6] === (RwKey.AppDataControl >> 8) &&
+    rawBytes[7] === (RwKey.AppDataControl & 0xff) &&
+    rawBytes[8] === 0x00 &&
+    rawBytes[10] === 0x05
+  );
+
+  const acknowledgeRwDeviceAppDataControlRequest = (rawBytes: Uint8Array, meta: {
+    deviceId?: string;
+    serviceId?: string;
+    characteristicId?: string;
+    rawHex?: string;
+  }) => {
+    if (!isRwDeviceAppDataControlRequestFrame(rawBytes)) return;
+    const controlKey = rawBytes[9];
+    const controlAction = rawBytes[11];
+    rwBleLog('rw-app-control-device-request', {
+      rawHex: meta.rawHex,
+      deviceId: meta.deviceId,
+      serviceId: meta.serviceId,
+      characteristicId: meta.characteristicId,
+      controlKey,
+      controlAction
+    });
+    void sendBytes(buildRwAppDataControlAckCommand(), `rw-app-control-device-ack-${controlKey.toString(16)}`)
+      .then(() => {
+        rwBleLog('rw-app-control-device-ack-ok', {
+          controlKey,
+          controlAction
+        });
+      })
+      .catch((error) => {
+        rwBleLog('rw-app-control-device-ack-fail', {
+          controlKey,
+          controlAction,
+          error: formatError(error)
+        });
+      });
+  };
+
   const readAllMonitoringConfigs = () => {
     return sendSequential(RW_MONITORING_KEYS.map((key) => buildRwReadHealthMonitoringCommand(key)));
   };
@@ -1516,11 +1841,12 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
 
   const deleteRwHealthData = (name: RwHealthDataName) => {
     const normalizedName = normalizeRwHealthDataName(name);
-    rwBleLog('history-delete-blocked', {
+    const readableKey = resolveRwReadableHealthDataKey(normalizedName);
+    rwBleLog('history-delete-current-block', {
       name: normalizedName,
-      reason: 'device-delete-disabled-for-diagnostics'
+      key: readableKey
     });
-    return Promise.reject(new Error('RW device history delete is disabled during diagnostics.'));
+    return sendBytes(buildRwDeleteHealthDataCommand(readableKey), `${normalizedName}/health-delete-current-block`);
   };
 
   const controlRwHealthData = (name: RwHealthDataName, enabled = true) => {
@@ -1718,8 +2044,12 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   };
 
   const sendFactoryResetWithTimeCommand = async (timestampMs = Date.now(), timezone = 8): Promise<unknown> => {
+    await sendBytes(buildRwSetTimeZoneKeyCommand(timezone), 'factory-reset-sync-time-zone-key');
+    await sleep(120);
     await sendBytes(buildRwSetDateTimeKeyCommand(timestampMs), 'factory-reset-sync-time-key');
     await sleep(250);
+    await sendBytes(buildRwSetTimeFormatKeyCommand(true), 'factory-reset-sync-time-format-key');
+    await sleep(120);
     await sendBytes(buildRwSyncTimeCommand(timestampMs, timezone), 'factory-reset-sync-time-frame');
     await sleep(250);
     return sendRwFactoryResetCommand();
@@ -1800,8 +2130,12 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   };
 
   const updateDeviceTime = async (timestampMs = Date.now(), timezone = 8) => {
+    await sendBytes(buildRwSetTimeZoneKeyCommand(timezone), 'sync-device-time-zone-key');
+    await sleep(120);
     await sendBytes(buildRwSetDateTimeKeyCommand(timestampMs), 'sync-device-time-key');
     await sleep(250);
+    await sendBytes(buildRwSetTimeFormatKeyCommand(true), 'sync-device-time-format-key');
+    await sleep(120);
     await sendBytes(buildRwSyncTimeCommand(timestampMs, timezone), 'sync-device-time-frame');
     await sleep(500);
     return readDeviceTime();
@@ -1812,7 +2146,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     return updateDeviceTime(timestampMs, timezone);
   };
 
-  const sendReadLocalDataCommand = (sinceTimestamp = 0, readAll = true) => {
+  const sendReadLocalDataCommand = async (sinceTimestamp = 0, readAll = true) => {
     const intent = resolveRwLocalDataReadIntent({ sinceTimestamp, readAll });
     lastLocalDataReadIntent = intent;
     rwBleLog('history-read-file-list-request', {
@@ -1822,10 +2156,16 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       dataType: intent.dataType,
       dataTypes: intent.dataTypes
     });
+    await sendRwAppHistorySyncProbe(intent, 'sendReadLocalDataCommand').catch((error) => {
+      rwBleLog('history-rw-app-sync-fail', {
+        source: 'sendReadLocalDataCommand',
+        error: formatError(error)
+      });
+    });
     return sendBytes(buildRwReadFileListCommand(), 'history/read-file-list');
   };
 
-  const readLocalData = (options: LegacyReadLocalDataOptions = {}) => {
+  const readLocalData = async (options: LegacyReadLocalDataOptions = {}) => {
     const intent = resolveRwLocalDataReadIntent(options);
     lastLocalDataReadIntent = intent;
     rwBleLog('history-read-file-list-request', {
@@ -1834,6 +2174,12 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       sinceTimestamp: intent.sinceTimestamp,
       dataType: intent.dataType,
       dataTypes: intent.dataTypes
+    });
+    await sendRwAppHistorySyncProbe(intent, 'readLocalData').catch((error) => {
+      rwBleLog('history-rw-app-sync-fail', {
+        source: 'readLocalData',
+        error: formatError(error)
+      });
     });
     return sendBytes(buildRwReadFileListCommand(), 'history/read-file-list');
   };
@@ -2276,6 +2622,12 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         parsedAt: receivedAt
       }));
       const parsedVariants = [parsedWithDevice, ...takeL19CompatAliases(parsedWithDevice)];
+      acknowledgeRwDeviceAppDataControlRequest(rawBytes, {
+        rawHex,
+        deviceId: res.deviceId,
+        serviceId: res.serviceId,
+        characteristicId: res.characteristicId
+      });
       parsedVariants.forEach((item) => runtime?.onParsedData?.(item));
       rwBleLog('rx-parsed', {
         rawHex,
@@ -2615,6 +2967,12 @@ const RW_MONITORING_WRITE_KEYS = [
   RwKey.BloodPressureMonitoring,
   RwKey.TemperatureDetecting
 ];
+const RW_APP_READY_MONITORING_KEYS = [
+  RwKey.HrMonitoring,
+  RwKey.Spo2Monitoring,
+  RwKey.HrvMonitoring,
+  RwKey.StressMonitoring
+];
 
 const secondsToRwIntervalMinutes = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds <= 0) return 30;
@@ -2785,13 +3143,17 @@ const buildRwRealtimeHealthDataReadCommands = (name: RwHealthDataName): RwComman
   if (realtimeKey && realtimeKey !== readableKey) {
     commands.push(
       { label: `${normalizedName}/app-sdk-ab-crc-realtime-read`, bytes: buildRwReadKeyCommand(realtimeKey) },
-      { label: `${normalizedName}/ab-no-crc-realtime-read`, bytes: buildRwReadKeyCommandWithoutChecksum(realtimeKey) }
+      { label: `${normalizedName}/app-sdk-ab-crc-realtime-read-continue`, bytes: buildRwReadContinueKeyCommand(realtimeKey) },
+      { label: `${normalizedName}/ab-no-crc-realtime-read`, bytes: buildRwReadKeyCommandWithoutChecksum(realtimeKey) },
+      { label: `${normalizedName}/ab-no-crc-realtime-read-continue`, bytes: buildRwReadContinueKeyCommandWithoutChecksum(realtimeKey) }
     );
   }
   if (readableKey) {
     commands.push(
       { label: `${normalizedName}/app-sdk-ab-crc-health-read`, bytes: buildRwReadHealthDataCommand(readableKey) },
-      { label: `${normalizedName}/ab-no-crc-health-read`, bytes: buildRwReadKeyCommandWithoutChecksum(readableKey) }
+      { label: `${normalizedName}/app-sdk-ab-crc-health-read-continue`, bytes: buildRwReadContinueKeyCommand(readableKey) },
+      { label: `${normalizedName}/ab-no-crc-health-read`, bytes: buildRwReadKeyCommandWithoutChecksum(readableKey) },
+      { label: `${normalizedName}/ab-no-crc-health-read-continue`, bytes: buildRwReadContinueKeyCommandWithoutChecksum(readableKey) }
     );
   }
   return commands;
@@ -2964,7 +3326,7 @@ function isAllowedBusinessScanDevice(device: RingDeviceInfo, options: LegacyScan
   const protocol = device.protocol || resolveRingProtocol(device);
   if (protocol === 'rw' || protocol === 'qkeer-v2') return true;
 
-  return ['HR', 'IF', 'QKEERING', 'PPLUS', 'MUSLEEP_RING', 'QKV2'].some((prefix) => name.startsWith(prefix));
+  return ['HR', 'IF', 'QK', 'QKEERING', 'PPLUS', 'MUSLEEP_RING', 'QKV2'].some((prefix) => name.startsWith(prefix));
 }
 
 function getServices(deviceId: string): Promise<UniApp.GetBLEDeviceServicesSuccess['services']> {

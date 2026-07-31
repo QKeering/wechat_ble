@@ -2,7 +2,7 @@ import type { RingDeviceInfo, RingProtocolDetector, RingProtocolKind } from './t
 
 export const LEGACY_RING_DETECTOR: RingProtocolDetector = {
   protocol: 'legacy',
-  namePrefixes: ['HR', 'IF', 'QKeeRing', 'PPlus']
+  namePrefixes: ['HR', 'IF', 'QK', 'QKeeRing', 'PPlus']
 };
 
 export const QKEER_V2_RING_DETECTOR: RingProtocolDetector = {

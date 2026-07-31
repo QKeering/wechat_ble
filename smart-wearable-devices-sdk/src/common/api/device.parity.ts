@@ -20,6 +20,13 @@ const getRemoteCurrentDeviceCalls = () => remoteCurrentDeviceCalls;
   $uv: {
     http: {
       get: async (url: string) => {
+        if (url === '/app/ota/package/check') {
+          return {
+            code: 200,
+            data: null,
+            msg: 'already latest'
+          };
+        }
         if (url !== '/app/device/current') {
           throw new Error(`Unexpected device API URL: ${url}`);
         }

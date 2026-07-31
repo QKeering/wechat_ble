@@ -180,8 +180,10 @@ const leftClick = () => {
             </view>
           </view>
         </view>
-        <view @click="agreementChecked = !agreementChecked" class="mt-40 flex ai-center jc-center footer" style="bottom: 100rpx">
-          <uv-icon :name="agreementChecked ? 'checkmark-circle-fill' : 'checkmark-circle'" :color="agreementChecked ? '#2E70FC' : ''" size="18"></uv-icon>
+        <view @click="agreementChecked = !agreementChecked" class="agreement-row flex ai-center jc-center footer" style="bottom: 100rpx">
+          <view :class="['agreement-checkbox', { checked: agreementChecked }]">
+            <text v-if="agreementChecked" class="agreement-checkmark">✓</text>
+          </view>
           <view class="fs-24" style="color: #222222">
             我已阅读并同意
             <text class="t-2e70fc" @click.stop="$uv.route('/pages/login/agreement?type=user')">《用户协议》</text>
@@ -197,5 +199,36 @@ const leftClick = () => {
 <style lang="scss" scoped>
 .form-row {
   border: 2rpx solid #2e70fc;
+}
+
+.agreement-row {
+  position: fixed;
+  left: 30rpx;
+  right: 30rpx;
+}
+
+.agreement-checkbox {
+  width: 28rpx;
+  height: 28rpx;
+  margin-right: 8rpx;
+  border: 2rpx solid #a7abb3;
+  border-radius: 50%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+}
+
+.agreement-checkbox.checked {
+  border-color: #20c66a;
+  background: #20c66a;
+}
+
+.agreement-checkmark {
+  color: #ffffff;
+  font-size: 20rpx;
+  line-height: 1;
+  font-weight: 700;
 }
 </style>

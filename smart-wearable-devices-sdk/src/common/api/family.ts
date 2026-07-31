@@ -74,11 +74,13 @@ export interface FamilyDashboard {
   device: {
     deviceId?: string;
     mac?: string;
+    deviceMac?: string;
     uniMacId?: string;
     protocol?: string;
     advertis?: {
       macInfo?: string;
     };
+    serviceId?: string;
     deviceName?: string;
     battery?: number | string;
     lastSyncTime?: string;

@@ -58,7 +58,11 @@ const statusClass = computed(() => {
   return 'good';
 });
 
-const metrics = computed(() => [
+const metrics = computed(() => {
+  const sleepScore = Number(sleep.value?.sleepScore);
+  const hasSleepScore = Number.isFinite(sleepScore) && sleepScore > 0;
+
+  return [
   {
     label: '心率',
     value: Math.round(Number(vital.value?.heartRate || vital.value?.heartRateAvg || 0)) || '--',
@@ -75,9 +79,9 @@ const metrics = computed(() => [
   },
   {
     label: '睡眠',
-    value: Math.round(Number(sleep.value?.sleepScore || 0)) || '--',
+    value: hasSleepScore ? Math.round(sleepScore) : '--',
     unit: '分',
-    status: Number(sleep.value?.sleepScore || 0) < 60 ? '偏低' : '正常',
+    status: hasSleepScore ? (sleepScore < 60 ? '偏低' : '正常') : '暂无',
     tip: '睡眠分数用于参考昨晚休息情况。'
   },
   {
@@ -94,7 +98,8 @@ const metrics = computed(() => [
     status: hasDeviceBinding.value ? '可同步' : '未绑定',
     tip: batteryText.value
   }
-]);
+  ];
+});
 
 const fetchData = async () => {
   loading.value = true;

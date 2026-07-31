@@ -18,6 +18,8 @@
   buildRwLegacyCompatSyncTimeCommand,
   buildRwRequestUploadCommand,
   buildRwSetDateTimeKeyCommand,
+  buildRwSetTimeFormatKeyCommand,
+  buildRwSetTimeZoneKeyCommand,
   buildRwSyncTimeCommand,
   RwHealthDataControlKey,
   RwKey,
@@ -68,6 +70,16 @@ if (
   rwReadDateTimeKey[8] !== 0x10
 ) {
   throw new Error(`Unexpected RW JL read date-time key command: ${bytesToHex(rwReadDateTimeKey)}`);
+}
+
+const rwTimeZoneKey = buildRwSetTimeZoneKeyCommand(8);
+if (bytesToHex(rwTimeZoneKey) !== 'ab01000579e00202002002') {
+  throw new Error(`Unexpected RW JL timezone key command: ${bytesToHex(rwTimeZoneKey)}`);
+}
+
+const rwTimeFormatKey = buildRwSetTimeFormatKeyCommand(true);
+if (bytesToHex(rwTimeFormatKey) !== 'ab010004bba1020e0001') {
+  throw new Error(`Unexpected RW JL 24-hour time-format key command: ${bytesToHex(rwTimeFormatKey)}`);
 }
 
 const legacyCompatSyncTime = buildRwLegacyCompatSyncTimeCommand(1696687197195, 8);

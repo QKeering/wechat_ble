@@ -674,15 +674,15 @@ const handleChartTouchMove = (e: any) => {
   color: #9ca3af;
   z-index: 2;
   white-space: nowrap;
-  transform: translateX(-50%) rotate(-35deg);
+  transform: translateX(-50%);
   transform-origin: top center;
 }
 .time-tick.is-first {
-  transform: rotate(-35deg);
+  transform: none;
   transform-origin: top left;
 }
 .time-tick.is-last {
-  transform: translateX(-100%) rotate(-35deg);
+  transform: translateX(-100%);
   transform-origin: top right;
 }
 
