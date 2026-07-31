@@ -52,7 +52,7 @@ import {
   flushRwDiagnosticUploadQueue
 } from '@/utils/rwDiagnosticUpload';
 import { submitData } from '@/common/api/homeDetail';
-import { scan, getBindInfo } from '@/common/api/device';
+import { scan, getBindInfo, unbind } from '@/common/api/device';
 import CustomSteps from '@/components/customSteps.vue';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
@@ -3086,6 +3086,36 @@ const connectAgain = async () => {
     });
   }
 };
+// 解除绑定
+const unbindDevice = () => {
+  if (!bindInfo.value || !bindInfo.value.mac) return;
+  uni.showModal({
+    title: '提示',
+    content: '确定要解除绑定吗？',
+    success: async (res) => {
+      if (!res.confirm) return;
+      try {
+        uni.showLoading({ title: '解绑中...', mask: true });
+        await unbind({ mac: bindInfo.value.mac });
+        await disconnect();
+        userStore.updateReconnectingStatus('0');
+        userStore.updateIsManualReconnecting(false);
+        bindInfo.value = null;
+        await clearFrontendRingBindingState(userStore, ringStore);
+        uni.showToast({ title: '解绑成功', icon: 'success', duration: 1500 });
+      } catch (error: any) {
+        console.error('解绑失败:', error);
+        uni.showToast({
+          title: error?.msg || error?.message || '解绑失败，请重试',
+          icon: 'none',
+          duration: 2000
+        });
+      } finally {
+        uni.hideLoading();
+      }
+    }
+  });
+};
 
 onShow(async () => {
   try {
@@ -4046,7 +4076,7 @@ const handleMineRwL19Acceptance = async () => {
       <view class="pl-30 pr-30">
         <view class="user-section mb-50">
           <view v-if="userStore.userInfo.id" @click="$uv.route('/pagesA/mines/profile')" class="user-card user-card--logged flex ai-center">
-            <image class="user-avatar-image" :src="getFullUrl(userStore.userInfo.avatar)" mode="aspectFill"></image>
+            <image class="user-avatar-image" :src="getFullUrl(userStore.userInfo.avatar) || '/static/images/mine/avatar.png' " mode="aspectFill"></image>
             <view class="user-info flex-1 flex ai-center jc-between ml-30">
               <view class="user-nickname fs-48">{{ userStore.userInfo.nickName }}</view>
               <view class="mine-arrow"></view>
@@ -4084,36 +4114,52 @@ const handleMineRwL19Acceptance = async () => {
                 <view class="battery-level fs-40">{{ displayBatteryValue }}</view>
               </view>
               <view v-else class="action-buttons">
-                <uv-button
-                  v-if="!shouldShowReconnectButton"
-                  :text="'\u626b\u4e00\u626b'"
-                  shape="circle"
-                  color="#FFFFFF"
-                  :customTextStyle="{ color: '#010101', 'font-size': '28rpx' }"
-                  :customStyle="{ padding: '38rpx 0', width: '190rpx', 'margin-bottom': '30rpx' }"
-                  @click="scanDevice"
-                ></uv-button>
-                <uv-button
-                  v-if="!shouldShowReconnectButton"
-                  :text="'\u53bb\u914d\u5bf9'"
-                  shape="circle"
-                  color="#2E70FC"
-                  :customTextStyle="{ 'font-size': '28rpx' }"
-                  :customStyle="{ padding: '38rpx 0', width: '190rpx', 'margin-bottom': '30rpx' }"
-                  @click="jumpDetail"
-                ></uv-button>
-                <uv-button
-                  v-if="shouldShowReconnectButton && !isLoading"
-                  :text="'\u91cd\u65b0\u8fde\u63a5'"
-                  shape="circle"
-                  color="#2E70FC"
-                  loadingMode="circle"
-                  :loading="isLoading"
-                  :loadingText="isLoading ? '\u8fde\u63a5\u4e2d...' : '\u91cd\u65b0\u8fde\u63a5'"
-                  :customTextStyle="{ 'font-size': '28rpx' }"
-                  :customStyle="{ padding: '38rpx 0', width: '190rpx' }"
-                  @click="connectAgain"
-                ></uv-button>
+                <template v-if="shouldShowReconnectButton">
+                  <uv-button
+                    :text="'\u70b9\u51fb\u91cd\u8fde'"
+                    shape="circle"
+                    color="#2E70FC"
+                    loadingMode="circle"
+                    :loading="isLoading"
+                    :loadingText="isLoading ? '\u91cd\u8fde\u4e2d...' : '\u70b9\u51fb\u91cd\u8fde'"
+                    :customTextStyle="{ 'font-size': '28rpx' }"
+                    :customStyle="{
+                      padding: '38rpx 0',
+                      width: '190rpx',
+                      'margin-bottom': '30rpx'
+                    }"
+                    @click="connectAgain"
+                  ></uv-button>
+                  <uv-button
+                    text="\u89e3\u9664\u7ed1\u5b9a"
+                    shape="circle"
+                    color="#FFFFFF"
+                    :customTextStyle="{ color: '#010101', 'font-size': '28rpx' }"
+                    :customStyle="{
+                      padding: '38rpx 0',
+                      width: '190rpx'
+                    }"
+                    @click="unbindDevice"
+                  ></uv-button>
+                </template>
+                <template v-else>
+                  <uv-button
+                    :text="'\u626b\u4e00\u626b'"
+                    shape="circle"
+                    color="#FFFFFF"
+                    :customTextStyle="{ color: '#010101', 'font-size': '28rpx' }"
+                    :customStyle="{ padding: '38rpx 0', width: '190rpx', 'margin-bottom': '30rpx' }"
+                    @click="scanDevice"
+                  ></uv-button>
+                  <uv-button
+                    :text="'\u53bb\u914d\u5bf9'"
+                    shape="circle"
+                    color="#2E70FC"
+                    :customTextStyle="{ 'font-size': '28rpx' }"
+                    :customStyle="{ padding: '38rpx 0', width: '190rpx', 'margin-bottom': '30rpx' }"
+                    @click="jumpDetail"
+                  ></uv-button>
+                </template>
               </view>
             </view>
           </view>

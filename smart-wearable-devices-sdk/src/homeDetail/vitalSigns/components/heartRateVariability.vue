@@ -279,6 +279,7 @@ const startMeasure = async () => {
       return;
     }
     await requestMetricRefresh(refreshHealthData, sendActiveMeasureCommand, { expectedSteps: 'hrv' });
+    await completeMeasureWithLatestReading();
   } catch (error) {
     if (measureStatus.value !== 'measuring') return;
     popup1.value?.close();
@@ -305,6 +306,14 @@ watch(
     const latestReading = getLatestHrvReading(userStore, measureStartedAt);
 
     if (latestReading) {
+      void completeMeasureWithLatestReading();
+      return;
+    }
+
+    // 检查是否有已完成的测量（即使数据无效），由 measureStatus watch 中的 latest?.heartRateVariability 判断跳过
+    const hasCompletedMeasure = Array.isArray(userStore.receivedData) &&
+      (userStore.receivedData as any[]).some((d) => d.type === 'active_measure' && d.heartbeatStatus !== 0x03);
+    if (hasCompletedMeasure) {
       void completeMeasureWithLatestReading();
     }
   },
