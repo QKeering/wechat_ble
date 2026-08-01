@@ -1623,6 +1623,16 @@ const getProcessedOption = () => {
   // const fullSeriesData = [62, 60, 58, 59, 61, 63, 70, 75, 80, 78, 76, 72, 78, 82, 85, 83, 80, 77, 75, 73, 70, 68, 65, 63];
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = fullSeriesData;
+  // 根据实际数据动态计算 y 轴范围，避免折线超出显示区域被裁切
+  if (fullSeriesData.length) {
+    const dataMin = Math.min(...fullSeriesData);
+    const dataMax = Math.max(...fullSeriesData);
+    const paddedMin = Math.max(0, Math.floor((dataMin - 10) / 10) * 10);
+    const paddedMax = Math.max(100, Math.ceil((dataMax + 10) / 10) * 10);
+    newOption.yAxis.min = paddedMin;
+    newOption.yAxis.max = paddedMax;
+    newOption.yAxis.splitNumber = Math.max(4, Math.round((paddedMax - paddedMin) / 20));
+  }
   return newOption;
 };
 const getRelaxOption = () => {
