@@ -57,6 +57,15 @@ const STAGE_ALIASES: Record<string, string> = {
 
 type SleepTimelineSegment = { start: number; duration: number; type: string };
 type SleepTimelineTick = { key: string; label: string; left: number; isFirst: boolean; isLast: boolean };
+const SUMMARY_ONLY_STAGE_ORDER = ['深睡', '浅睡', '快速眼动', '清醒', '小睡'];
+
+const isLikelySummaryOnlyTimeline = (points: Array<{ time: number; type: string }>) => {
+  if (points.length < 2 || points.length > SUMMARY_ONLY_STAGE_ORDER.length) return false;
+  const seenStages = new Set(points.map((point) => point.type));
+  if (seenStages.size !== points.length) return false;
+  const expectedOrder = SUMMARY_ONLY_STAGE_ORDER.filter((stage) => seenStages.has(stage));
+  return expectedOrder.length === points.length && points.every((point, index) => point.type === expectedOrder[index]);
+};
 
 const normalizeStageType = (...values: unknown[]) => {
   for (const value of values) {
@@ -69,38 +78,81 @@ const normalizeStageType = (...values: unknown[]) => {
 };
 
 const hasExplicitSleepType = (item: any) =>
+  item?.stageCode !== undefined ||
+  item?.stage_code !== undefined ||
+  item?.sleepStageCode !== undefined ||
+  item?.sleep_stage_code !== undefined ||
+  item?.sleepStage !== undefined ||
+  item?.sleep_stage !== undefined ||
+  item?.sleepStageName !== undefined ||
+  item?.sleep_stage_name !== undefined ||
   item?.sleepType !== undefined ||
   item?.sleep_type !== undefined ||
   item?.sleepTypeName !== undefined ||
   item?.sleep_type_name !== undefined;
 
-const getPointStageType = (item: any) => {
+const STAGE_FIELD_KEYS = [
+  'stageCode',
+  'stage_code',
+  'sleepStageCode',
+  'sleep_stage_code',
+  'sleepState',
+  'sleep_state',
+  'sleepStatus',
+  'sleep_status',
+  'sleepStage',
+  'sleep_stage',
+  'sleepStageName',
+  'sleep_stage_name',
+  'stageName',
+  'status',
+  'state',
+  'stage',
+  'type',
+  'name'
+];
+
+const isStageCodeValue = (value: unknown) => /^[1-5]$/.test(String(value ?? '').trim());
+
+const shouldUseValueAsStageCode = (chartData: any[]) => {
+  if (!Array.isArray(chartData) || chartData.length === 0) return false;
+  const hasNamedStageField = chartData.some((item: any) =>
+    hasExplicitSleepType(item) ||
+    STAGE_FIELD_KEYS.some((key) => item?.[key] !== undefined && item?.[key] !== null && String(item?.[key]).trim() !== '')
+  );
+  if (hasNamedStageField) return true;
+  const values = chartData
+    .map((item: any) => item?.value)
+    .filter((value: unknown) => value !== undefined && value !== null && String(value).trim() !== '');
+  return values.length > 0 && values.every(isStageCodeValue);
+};
+
+const getPointStageType = (item: any, allowValueStageFallback = false) => {
   const explicitStage = normalizeStageType(
-    item?.sleepType,
-    item?.sleep_type,
+    item?.stageCode,
+    item?.stage_code,
+    item?.sleepStageCode,
+    item?.sleep_stage_code,
+    item?.sleepStage,
+    item?.sleep_stage,
+    item?.sleepStageName,
+    item?.sleep_stage_name,
     item?.sleepTypeName,
-    item?.sleep_type_name
+    item?.sleep_type_name,
+    item?.sleepType,
+    item?.sleep_type
   );
   if (explicitStage) return explicitStage;
+
+  const fieldValues = STAGE_FIELD_KEYS.map((key) => item?.[key]);
+  const fieldStage = normalizeStageType(...fieldValues);
+  if (fieldStage) return fieldStage;
+
   // sleep-detail 明细会返回 sleepType 文案，同时 value 可能固定为 5。
   // sleepType 存在但不是阶段文案时，不能再把 value=5 误判为“小睡”。
   if (hasExplicitSleepType(item)) return '';
 
-  return normalizeStageType(
-    item?.sleepState,
-    item?.sleep_state,
-    item?.sleepStatus,
-    item?.sleep_status,
-    item?.sleepStage,
-    item?.sleep_stage,
-    item?.stageName,
-    item?.status,
-    item?.state,
-    item?.stage,
-    item?.type,
-    item?.name,
-    item?.value
-  );
+  return allowValueStageFallback ? normalizeStageType(item?.value) : '';
 };
 
 // ===== 时间工具 =====
@@ -116,6 +168,79 @@ const parseTimeToMinutes = (timeStr: string): number => {
 };
 
 const hasClockTime = (timeStr: unknown) => /(\d{1,2}):(\d{2})(?::(\d{2}))?/.test(String(timeStr ?? ''));
+
+const TIME_FIELD_KEYS = [
+  'time',
+  'startTime',
+  'start_time',
+  'recordTime',
+  'record_time',
+  'collectTime',
+  'collect_time',
+  'createTime',
+  'create_time',
+  'dateTime',
+  'datetime',
+  'timestamp'
+];
+
+const formatTimestampLikeClock = (value: unknown) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '';
+  const timestamp = value > 100000000000 ? value : value > 1000000000 ? value * 1000 : 0;
+  if (!timestamp) return '';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+};
+
+const getPointTimeText = (item: any) => {
+  if (!item || typeof item !== 'object') return '';
+  for (const key of TIME_FIELD_KEYS) {
+    const value = item?.[key];
+    if (value === undefined || value === null || value === '') continue;
+    const timestampText = formatTimestampLikeClock(value);
+    if (timestampText) return timestampText;
+    const text = String(value);
+    if (hasClockTime(text)) return text;
+  }
+  return '';
+};
+
+const getSleepTimelineSourceData = () => {
+  const segmentAny = props.sleepSegmentObj as any;
+  const detailAny = props.sleepDetailObj as any;
+  const candidates = [
+    segmentAny?.chartData,
+    segmentAny?.timeline,
+    segmentAny?.timelineData,
+    segmentAny?.sleepTimeline,
+    segmentAny?.sleepStageTimeline,
+    segmentAny?.sleepStageList,
+    segmentAny?.stageList,
+    segmentAny?.records,
+    detailAny?.chartData,
+    detailAny?.timeline,
+    detailAny?.timelineData,
+    detailAny?.sleepTimeline,
+    detailAny?.sleepStageTimeline,
+    detailAny?.sleepStageList,
+    detailAny?.stageList,
+    detailAny?.records
+  ];
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate) || candidate.length === 0) continue;
+    const allowValueStageFallback = shouldUseValueAsStageCode(candidate);
+    const hasTimelinePoint = candidate.some((item: any) => {
+      const rawTime = getPointTimeText(item);
+      if (!hasClockTime(rawTime)) return false;
+      return Boolean(getPointStageType(item, allowValueStageFallback));
+    });
+    if (hasTimelinePoint) return candidate;
+  }
+
+  return [] as any[];
+};
 
 const formatTime = (minutes: number): string => {
   const normalized = ((Math.round(minutes) % 1440) + 1440) % 1440;
@@ -174,8 +299,8 @@ const mergeTimelineSegments = (segments: SleepTimelineSegment[]) => {
 const getFallbackStartMinutes = () => {
   const segmentStart = parseTimeToMinutes(props.sleepSegmentObj?.startTime || '');
   if (hasClockTime(props.sleepSegmentObj?.startTime)) return segmentStart;
-  const firstPoint = props.sleepDetailObj?.chartData?.[0] as any;
-  return parseTimeToMinutes(firstPoint?.time || firstPoint?.startTime || firstPoint?.start_time || '');
+  const firstPoint = getSleepTimelineSourceData()[0] as any;
+  return parseTimeToMinutes(getPointTimeText(firstPoint));
 };
 
 const getFallbackSegmentsFromSummary = (): SleepTimelineSegment[] => {
@@ -202,10 +327,11 @@ const getTypicalPointGap = (points: Array<{ time: number; type: string }>) => {
 };
 
 const processTimeSegments = (): SleepTimelineSegment[] => {
-  const chartData = props.sleepDetailObj?.chartData;
+  const chartData = getSleepTimelineSourceData();
   if (!Array.isArray(chartData) || chartData.length === 0) {
     return getFallbackSegmentsFromSummary();
   }
+  const allowValueStageFallback = shouldUseValueAsStageCode(chartData);
 
   const startMins = parseTimeToMinutes(props.sleepSegmentObj?.startTime || '');
   const endMins = parseTimeToMinutes(props.sleepSegmentObj?.endTime || '');
@@ -213,7 +339,7 @@ const processTimeSegments = (): SleepTimelineSegment[] => {
   const hasEndTime = hasClockTime(props.sleepSegmentObj?.endTime);
   const rawPointTimes = chartData
     .map((item: any) => {
-      const rawTime = item?.time || item?.startTime || item?.start_time || '';
+      const rawTime = getPointTimeText(item);
       return hasClockTime(rawTime) ? parseTimeToMinutes(rawTime) : null;
     })
     .filter((time): time is number => time != null)
@@ -227,10 +353,10 @@ const processTimeSegments = (): SleepTimelineSegment[] => {
 
   const detailPoints = chartData
     .map((item: any) => {
-      const rawTimeText = item?.time || item?.startTime || item?.start_time || '';
+      const rawTimeText = getPointTimeText(item);
       if (!hasClockTime(rawTimeText)) return null;
       const rawTime = parseTimeToMinutes(rawTimeText);
-      const type = getPointStageType(item);
+      const type = getPointStageType(item, allowValueStageFallback);
       if (!Number.isFinite(rawTime) || !type) return null;
       return {
         time: normalizeTime(rawTime),
@@ -241,6 +367,10 @@ const processTimeSegments = (): SleepTimelineSegment[] => {
     .sort((a: any, b: any) => a.time - b.time) as Array<{ time: number; type: string }>;
 
   if (!detailPoints.length) {
+    return getFallbackSegmentsFromSummary();
+  }
+
+  if (isLikelySummaryOnlyTimeline(detailPoints)) {
     return getFallbackSegmentsFromSummary();
   }
 
@@ -273,7 +403,7 @@ const processTimeSegments = (): SleepTimelineSegment[] => {
   });
 
   const merged = mergeTimelineSegments(segments);
-  return merged.length ? merged : getFallbackSegmentsFromSummary();
+  return merged;
 };
 
 // ===== 时间范围 =====
@@ -294,10 +424,10 @@ const timeRange = computed(() => {
     }
   }
 
-  const chartData = props.sleepDetailObj?.chartData;
+  const chartData = getSleepTimelineSourceData();
   if (chartData && chartData.length > 0) {
-    const firstRaw = chartData[0]?.time || '';
-    const lastRaw = chartData[chartData.length - 1]?.time || '';
+    const firstRaw = getPointTimeText(chartData[0]);
+    const lastRaw = getPointTimeText(chartData[chartData.length - 1]);
     if (hasClockTime(firstRaw) && hasClockTime(lastRaw)) {
       const first = parseTimeToMinutes(firstRaw);
       const last = parseTimeToMinutes(lastRaw);

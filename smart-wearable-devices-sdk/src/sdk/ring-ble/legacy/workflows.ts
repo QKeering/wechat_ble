@@ -28,6 +28,7 @@ export interface SyncLegacyHistoryOptions {
   dataTypes?: string[];
   timeoutMs?: number;
   deleteAfterUpload?: boolean;
+  silentUploadStatus?: boolean;
 }
 
 export interface SyncLegacyHistoryResult {
@@ -478,8 +479,13 @@ export const syncLegacyHistory = async (
   const sinceTimestamp = options.sinceTimestamp;
   const timeoutMs = options.timeoutMs ?? 20000;
   const deleteAfterUpload = options.deleteAfterUpload ?? false;
-
-  runtime?.onUploadingStatusChange?.('uploading');
+  const shouldNotifyUploadStatus = options.silentUploadStatus !== true;
+  let uploadStatusStarted = false;
+  const notifyUploadStatus = (status: 'uploading' | 'success' | 'failed') => {
+    if (!shouldNotifyUploadStatus) return;
+    if (status === 'uploading') uploadStatusStarted = true;
+    runtime?.onUploadingStatusChange?.(status);
+  };
 
   try {
     if (adapter.protocol === 'rw') {
@@ -503,25 +509,31 @@ export const syncLegacyHistory = async (
 
         runtime?.onParsedData?.(parsedWithDevice);
 
+        let uploadResult: unknown;
         if (recordsWithDevice.length > 0) {
-          await runtime?.uploadHistoricalRecords?.(recordsWithDevice, parsedWithDevice);
+          notifyUploadStatus('uploading');
+          uploadResult = await runtime?.uploadHistoricalRecords?.(recordsWithDevice, parsedWithDevice);
+          notifyUploadStatus('success');
         }
 
         let deleted = false;
-        if (recordsWithDevice.length > 0 && deleteAfterUpload) {
+        if (
+          recordsWithDevice.length > 0 &&
+          deleteAfterUpload &&
+          parsedWithDevice.status !== 'partial' &&
+          isLegacyHistoryUploadSafeToDelete(uploadResult)
+        ) {
           const pendingDelete = adapter.waitForParsedData((item) => item.type === 'delete_all_local_data', timeoutMs);
           await adapter.sendDeleteAllLocalDataCommand();
           const deleteParsed = await pendingDelete;
           deleted = deleteParsed.status !== 'failed' && deleteParsed.success !== false;
         }
 
-        runtime?.onUploadingStatusChange?.('success');
-
         return {
           status: parsedWithDevice.status || (recordsWithDevice.length > 0 ? 'success' : 'empty'),
           records: recordsWithDevice,
           parsed: parsedWithDevice,
-          uploaded: Boolean(recordsWithDevice.length > 0 && runtime?.uploadHistoricalRecords),
+          uploaded: Boolean(uploadResult),
           deleted
         };
       } catch (error) {
@@ -559,7 +571,6 @@ export const syncLegacyHistory = async (
     const records = recordsWithDevice;
 
     if (records.length === 0) {
-      runtime?.onUploadingStatusChange?.('success');
       return {
         status: parsed.status || 'empty',
         records,
@@ -569,6 +580,7 @@ export const syncLegacyHistory = async (
       };
     }
 
+    notifyUploadStatus('uploading');
     const uploadResult = await runtime?.uploadHistoricalRecords?.(records, parsed);
 
     let deleted = false;
@@ -579,7 +591,7 @@ export const syncLegacyHistory = async (
       deleted = deleteParsed.status !== 'failed' && deleteParsed.success !== false;
     }
 
-    runtime?.onUploadingStatusChange?.('success');
+    notifyUploadStatus('success');
     return {
       status: parsed.status || 'success',
       records,
@@ -588,7 +600,7 @@ export const syncLegacyHistory = async (
       deleted
     };
   } catch (error) {
-    runtime?.onUploadingStatusChange?.('failed');
+    if (uploadStatusStarted) notifyUploadStatus('failed');
     throw error;
   }
 };

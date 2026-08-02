@@ -1,7 +1,7 @@
-import { bindRingDevice, clearBoundRingDevice, getBoundRingDevice, normalizeRingBoundDevice, unbindRingDevice } from '@/api';
+import { bindRingDevice, clearBoundRingDevice, getBoundRingDevice, normalizeRingBoundDevice, unbindRingDevice } from '@/api/ringDevice';
 import type { RingBindPayload } from '@/sdk/ring-ble';
 import type { DeviceInfo, DeviceModel } from '@/types/api/device';
-import { hasBoundRingIdentity } from '@/utils/ringBinding';
+import { getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
 
 export interface HttpRequestConfigCompat {
   [key: string]: any;
@@ -12,8 +12,10 @@ interface GetBindInfoParams {
 }
 
 const BIND_INFO_REMOTE_CACHE_MS = 5000;
-let remoteBindInfoCache: { value: DeviceInfo | null; expiresAt: number; localFingerprint: string } | null = null;
-let remoteBindInfoPending: Promise<DeviceInfo | null> | null = null;
+type RemoteBindInfoResult = { ok: true; value: DeviceInfo | null } | { ok: false; value: null };
+
+let remoteBindInfoCache: { value: RemoteBindInfoResult; expiresAt: number; localFingerprint: string } | null = null;
+let remoteBindInfoPending: Promise<RemoteBindInfoResult> | null = null;
 
 const clearRemoteBindInfoCache = () => {
   remoteBindInfoCache = null;
@@ -50,11 +52,83 @@ const normalizeBindInfoResponse = (payload: unknown): DeviceInfo | null => {
   return null;
 };
 
+const normalizeBindIdentity = (value: unknown) => String(value || '').replace(/[^0-9a-fA-F]/g, '').toLowerCase();
+
+const isSameBindIdentity = (left: DeviceInfo | null | undefined, right: DeviceInfo | null | undefined) => {
+  const leftIdentity = getBoundRingIdentity(left as any);
+  const rightIdentity = getBoundRingIdentity(right as any);
+  if (!leftIdentity || !rightIdentity) return false;
+  if (leftIdentity === rightIdentity) return true;
+  const leftNorm = normalizeBindIdentity(leftIdentity);
+  const rightNorm = normalizeBindIdentity(rightIdentity);
+  return Boolean(leftNorm && rightNorm && (leftNorm === rightNorm || leftNorm.endsWith(rightNorm.slice(-6)) || rightNorm.endsWith(leftNorm.slice(-6))));
+};
+
+const mergeBoundRingDevice = (
+  remote: DeviceInfo | null | undefined,
+  local?: DeviceInfo | null,
+  payload?: RingBindPayload | null
+): DeviceInfo | null => {
+  const normalizedRemote = normalizeRingBoundDevice(remote as any) as DeviceInfo | null;
+  if (!hasBoundRingIdentity(normalizedRemote)) return null;
+
+  const normalizedLocal = normalizeRingBoundDevice(local as any) as DeviceInfo | null;
+  const normalizedPayload = normalizeRingBoundDevice(payload as any) as DeviceInfo | null;
+  const compatibleLocal = normalizedLocal && isSameBindIdentity(normalizedRemote, normalizedLocal) ? normalizedLocal : null;
+  const compatiblePayload = normalizedPayload && isSameBindIdentity(normalizedRemote, normalizedPayload) ? normalizedPayload : null;
+
+  return normalizeRingBoundDevice({
+    ...(compatibleLocal || {}),
+    ...(compatiblePayload || {}),
+    ...(normalizedRemote || {}),
+    serviceId: normalizedRemote?.serviceId || compatiblePayload?.serviceId || compatibleLocal?.serviceId,
+    cmdCharId: normalizedRemote?.cmdCharId || compatiblePayload?.cmdCharId || compatibleLocal?.cmdCharId,
+    dataCharId: normalizedRemote?.dataCharId || compatiblePayload?.dataCharId || compatibleLocal?.dataCharId,
+    dataServiceId: normalizedRemote?.dataServiceId || compatiblePayload?.dataServiceId || compatibleLocal?.dataServiceId,
+    protocol: normalizedRemote?.protocol || compatiblePayload?.protocol || compatibleLocal?.protocol,
+    advertis: normalizedRemote?.advertis || compatiblePayload?.advertis || compatibleLocal?.advertis,
+    source: 'remote',
+    syncedAt: Date.now()
+  } as any) as DeviceInfo | null;
+};
+
+const assertBackendSuccess = (payload: unknown) => {
+  const source = payload && typeof payload === 'object' ? (payload as Record<string, any>) : null;
+  if (!source || !Object.prototype.hasOwnProperty.call(source, 'code')) return;
+  const code = Number(source.code);
+  if (!Number.isFinite(code) || code === 200 || code === 0) return;
+  const reason = source.data?.reasonCode || source.msg || source.message || 'DEVICE_BIND_FAILED';
+  throw new Error(String(reason));
+};
+
+const postAppApi = async (url: string, data: Record<string, any>, config: HttpRequestConfigCompat = {}) => {
+  const http = (uni as any)?.$uv?.http;
+  const requestConfig = {
+    ...config,
+    custom: {
+      toast: false,
+      ...(config.custom || {})
+    }
+  };
+  if (typeof http?.post === 'function') {
+    return http.post(url, data, requestConfig);
+  }
+  if (typeof http?.request === 'function') {
+    return http.request({
+      ...requestConfig,
+      url,
+      method: 'POST',
+      data
+    });
+  }
+  throw new Error('HTTP client not initialized');
+};
+
 const getRemoteBindInfo = async (
   config: HttpRequestConfigCompat,
   useCache: boolean,
   localFingerprint: string
-): Promise<DeviceInfo | null> => {
+): Promise<RemoteBindInfoResult> => {
   const now = Date.now();
   if (
     useCache &&
@@ -68,25 +142,27 @@ const getRemoteBindInfo = async (
     return remoteBindInfoPending;
   }
 
-  let request: Promise<DeviceInfo | null> | null = null;
+  let request: Promise<RemoteBindInfoResult> | null = null;
   request = (async () => {
     try {
       const remote = await (uni as any).$uv.http.get('/app/device/current', {
         custom: { toast: false, catch: true },
         ...config
       });
+      assertBackendSuccess(remote);
       const value = normalizeBindInfoResponse(remote);
+      const result: RemoteBindInfoResult = { ok: true, value };
       if (useCache) {
         remoteBindInfoCache = {
-          value,
+          value: result,
           expiresAt: Date.now() + BIND_INFO_REMOTE_CACHE_MS,
           localFingerprint
         };
       }
-      return value;
+      return result;
     } catch (error) {
-      // Fall back to local binding cache when the deployed backend is older.
-      return null;
+      // Remote request failure only falls back for display. Remote success with empty binding clears local mirror.
+      return { ok: false, value: null };
     } finally {
       if (remoteBindInfoPending === request) {
         remoteBindInfoPending = null;
@@ -101,12 +177,22 @@ const getRemoteBindInfo = async (
 };
 
 export const bind = async (params: RingBindPayload, _config: HttpRequestConfigCompat = {}) => {
-  const device = await bindRingDevice(params);
+  const localBeforeRemote = await getBoundRingDevice();
+  const response = await postAppApi('/app/device/bind', params as any, _config);
+  assertBackendSuccess(response);
+  const remote = normalizeBindInfoResponse(response);
+  const authoritative = mergeBoundRingDevice(remote, localBeforeRemote as DeviceInfo | null, params);
+  if (!hasBoundRingIdentity(authoritative)) {
+    throw new Error('Backend binding response missing valid device info');
+  }
+  const device = await bindRingDevice(authoritative as any);
   clearRemoteBindInfoCache();
-  return device;
+  return device as DeviceInfo;
 };
 
 export const unbind = async (params: { mac: string }, _config: HttpRequestConfigCompat = {}) => {
+  const response = await postAppApi('/app/device/unbind', params as any, _config);
+  assertBackendSuccess(response);
   const result = await unbindRingDevice(params);
   clearRemoteBindInfoCache();
   return result;
@@ -122,8 +208,16 @@ export const getBindInfo = async (
     !params.refresh && !hasConfigOverrides(_config),
     getBindInfoFingerprint(localBeforeRemote as DeviceInfo | null)
   );
-  if (remote) {
-    return remote;
+  if (remote.ok) {
+    if (remote.value) {
+      const device = mergeBoundRingDevice(remote.value, localBeforeRemote as DeviceInfo | null);
+      if (device) {
+        await bindRingDevice(device as any);
+        return device;
+      }
+    }
+    await clearBoundRingDevice();
+    return null;
   }
 
   const local = await getBoundRingDevice();
@@ -149,7 +243,7 @@ export const deviceModelList = async (_params = {}, _config: HttpRequestConfigCo
 };
 
 export const getInfo = async (_params = {}, _config: HttpRequestConfigCompat = {}): Promise<DeviceInfo | null> => {
-  return getBoundRingDevice();
+  return getBindInfo({}, _config);
 };
 
 export interface OtaInfoParams {

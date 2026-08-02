@@ -35,7 +35,7 @@
 
     <view class="cycle-legend">
       <view
-        v-for="p in phaseKeys"
+        v-for="p in legendPhaseKeys"
         :key="p"
         class="legend-item"
         :class="{ active: currentPhase === p }"
@@ -58,12 +58,13 @@ const BASE_WRAPPER = 320;
 type PhaseKey = 'menstrual' | 'follicular' | 'ovulation' | 'luteal';
 
 const phaseKeys: PhaseKey[] = ['menstrual', 'follicular', 'ovulation', 'luteal'];
+const legendPhaseKeys: PhaseKey[] = ['menstrual', 'ovulation', 'follicular', 'luteal'];
 
 const phaseLabels: Record<PhaseKey, string> = {
   menstrual: '月经期',
-  follicular: '卵泡期',
+  follicular: '易孕期',
   ovulation: '排卵期',
-  luteal: '黄体期'
+  luteal: '安全期'
 };
 
 const defaultPhaseLength: Record<PhaseKey, number> = {

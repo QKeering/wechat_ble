@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // @ts-nocheck
 import { computed, ref } from 'vue';
-import { onLoad, onPageScroll, onShow, onPullDownRefresh } from '@dcloudio/uni-app';
+import { onLoad, onPageScroll, onShow, onPullDownRefresh, onUnload } from '@dcloudio/uni-app';
 import sleepTime from '@/homeDetail/sleepPage/components/sleepTime.vue';
 import sleepRage from '@/homeDetail/sleepPage/components/sleepRage.vue';
 import sleepScore from '@/homeDetail/sleepPage/components/sleepScore.vue';
@@ -120,46 +120,89 @@ const normalizeSleepStageText = (value: unknown) => {
 };
 
 const hasExplicitSleepType = (point: any) =>
+  point?.stageCode !== undefined ||
+  point?.stage_code !== undefined ||
+  point?.sleepStageCode !== undefined ||
+  point?.sleep_stage_code !== undefined ||
+  point?.sleepStage !== undefined ||
+  point?.sleep_stage !== undefined ||
+  point?.sleepStageName !== undefined ||
+  point?.sleep_stage_name !== undefined ||
   point?.sleepType !== undefined ||
   point?.sleep_type !== undefined ||
   point?.sleepTypeName !== undefined ||
   point?.sleep_type_name !== undefined;
 
+const SLEEP_STAGE_FIELD_KEYS = [
+  'stageCode',
+  'stage_code',
+  'sleepStageCode',
+  'sleep_stage_code',
+  'sleepState',
+  'sleep_state',
+  'sleepStatus',
+  'sleep_status',
+  'sleepStage',
+  'sleep_stage',
+  'sleepStageName',
+  'sleep_stage_name',
+  'stageName',
+  'status',
+  'state',
+  'stage',
+  'type',
+  'name'
+];
+
 const getExplicitSleepStageValue = (point: any) => {
   const candidates = [
-    point?.sleepType,
-    point?.sleep_type,
+    point?.stageCode,
+    point?.stage_code,
+    point?.sleepStageCode,
+    point?.sleep_stage_code,
+    point?.sleepStage,
+    point?.sleep_stage,
+    point?.sleepStageName,
+    point?.sleep_stage_name,
     point?.sleepTypeName,
-    point?.sleep_type_name
+    point?.sleep_type_name,
+    point?.sleepType,
+    point?.sleep_type
   ];
-  return candidates.find((item) => item !== undefined && item !== null && String(item).trim() !== '');
+  return candidates.find((item) => Boolean(normalizeSleepStageText(item)));
 };
 
-const getSleepStageRawValue = (point: any) => {
+const isSleepValueStageCode = (value: unknown) => /^[1-5]$/.test(String(value ?? '').trim());
+
+const shouldUseSleepValueAsStageCode = (chartData: any[]) => {
+  if (!Array.isArray(chartData) || chartData.length === 0) return false;
+  const hasNamedStageField = chartData.some((item: any) =>
+    hasExplicitSleepType(item) ||
+    SLEEP_STAGE_FIELD_KEYS.some((key) => item?.[key] !== undefined && item?.[key] !== null && String(item?.[key]).trim() !== '')
+  );
+  if (hasNamedStageField) return true;
+  const values = chartData
+    .map((item: any) => item?.value)
+    .filter((value: unknown) => value !== undefined && value !== null && String(value).trim() !== '');
+  return values.length > 0 && values.every(isSleepValueStageCode);
+};
+
+const getSleepStageRawValue = (point: any, allowValueStageFallback = false) => {
   const explicitValue = getExplicitSleepStageValue(point);
   if (explicitValue !== undefined) return String(explicitValue ?? '').trim();
 
-  const candidates = [
-    point?.sleepState,
-    point?.sleep_state,
-    point?.sleepStatus,
-    point?.sleep_status,
-    point?.sleepStage,
-    point?.sleep_stage,
-    point?.stageName,
-    point?.status,
-    point?.state,
-    point?.stage,
-    point?.type,
-    point?.name,
-    point?.value
-  ];
+  const candidates = SLEEP_STAGE_FIELD_KEYS.map((key) => point?.[key]);
+  const normalizedValue = candidates.find((item) => Boolean(normalizeSleepStageText(item)));
+  if (normalizedValue !== undefined) return String(normalizedValue ?? '').trim();
+  if (allowValueStageFallback && isSleepValueStageCode(point?.value)) return String(point?.value ?? '').trim();
+  if (hasExplicitSleepType(point)) return '';
+  if (allowValueStageFallback) candidates.push(point?.value);
   const value = candidates.find((item) => item !== undefined && item !== null && String(item).trim() !== '');
   return String(value ?? '').trim();
 };
 
 const isSleepStagePoint = (point: any) => {
-  const value = getSleepStageRawValue(point);
+  const value = getSleepStageRawValue(point, true);
   return value === '2' || value === '3' || value === '4' || ['深睡', '浅睡', '快速眼动'].includes(value);
 };
 
@@ -188,15 +231,16 @@ Object.assign(SLEEP_STAGE_NAMES, {
   nap: '小睡'
 });
 
-const getSleepStageName = (point: any) => {
-  const value = getSleepStageRawValue(point);
+const getSleepStageName = (point: any, allowValueStageFallback = false) => {
+  const value = getSleepStageRawValue(point, allowValueStageFallback);
   return normalizeSleepStageText(value);
 };
-const isNapStagePoint = (point: any) => {
+const isNapStagePoint = (point: any, allowValueStageFallback = false) => {
   if (hasExplicitSleepType(point)) {
-    return normalizeSleepStageText(getExplicitSleepStageValue(point)) === '小睡';
+    const explicitStage = normalizeSleepStageText(getExplicitSleepStageValue(point));
+    if (explicitStage) return explicitStage === '小睡';
   }
-  const value = getSleepStageRawValue(point);
+  const value = getSleepStageRawValue(point, allowValueStageFallback);
   return value === '5' || value === '小睡';
 };
 
@@ -205,6 +249,7 @@ const getMainSleepAnalysis = (detail?: sleepDetail, segment?: sleepSegment) => {
   if (!chartData.length) {
     return { endTime: '', chartData: [], chartDataSection: [] as Point[] };
   }
+  const allowValueStageFallback = shouldUseSleepValueAsStageCode(chartData);
 
   const segmentStart = parseClockMinutes(segment?.startTime);
   let segmentEnd = parseClockMinutes(segment?.endTime);
@@ -232,7 +277,7 @@ const getMainSleepAnalysis = (detail?: sleepDetail, segment?: sleepSegment) => {
   for (let index = 0; index < points.length; index += 1) {
     const current = points[index];
     const previous = points[index - 1];
-    if (isNapStagePoint(current.item)) {
+    if (isNapStagePoint(current.item, allowValueStageFallback)) {
       mainEnd = previous ? previous.minute + Math.min(typicalGap, 30) : current.minute;
       cutoffIndex = index;
       break;
@@ -245,8 +290,8 @@ const getMainSleepAnalysis = (detail?: sleepDetail, segment?: sleepSegment) => {
   }
   if (segmentEnd != null) mainEnd = Math.min(mainEnd, segmentEnd);
 
-  const mainPoints = points.slice(0, cutoffIndex).filter((entry: any) => !isNapStagePoint(entry.item));
-  const mainStagePoints = mainPoints.filter((entry: any) => Boolean(getSleepStageName(entry.item)));
+  const mainPoints = points.slice(0, cutoffIndex).filter((entry: any) => !isNapStagePoint(entry.item, allowValueStageFallback));
+  const mainStagePoints = mainPoints.filter((entry: any) => Boolean(getSleepStageName(entry.item, allowValueStageFallback)));
   if (!mainStagePoints.length) {
     const sourceSection = Array.isArray(segment?.chartDataSection) ? segment.chartDataSection : [];
     const chartDataSection = ['清醒', '快速眼动', '浅睡', '深睡'].map((time) => {
@@ -265,7 +310,7 @@ const getMainSleepAnalysis = (detail?: sleepDetail, segment?: sleepSegment) => {
   }
   const stageMinutes: Record<string, number> = { 清醒: 0, 快速眼动: 0, 浅睡: 0, 深睡: 0 };
   mainStagePoints.forEach((entry: any, index: number) => {
-    const stageName = getSleepStageName(entry.item);
+    const stageName = getSleepStageName(entry.item, allowValueStageFallback);
     if (!stageName) return;
     const nextMinute = mainStagePoints[index + 1]?.minute ?? mainEnd;
     const duration = Math.max(0, Math.min(nextMinute, mainEnd) - entry.minute);
@@ -310,7 +355,7 @@ const getSleepSectionMainSleepMinutes = (section?: Point[]) => {
 const hasSleepSectionData = (section?: Point[]) =>
   Array.isArray(section) && section.some((item: any) => toPositiveNumber(item?.value) > 0);
 
-const getSleepDetailPointDurationMinutes = (point: any) => {
+const getSleepDetailPointDurationMinutes = (point: any, allowValueStageFallback = false) => {
   const explicitDuration = toPositiveNumber(
     point?.durationMinutes ?? point?.duration ?? point?.sleepDuration ?? point?.minutes ?? point?.minute
   );
@@ -319,19 +364,20 @@ const getSleepDetailPointDurationMinutes = (point: any) => {
   const valueDuration = toPositiveNumber(point?.value);
   if (!valueDuration || valueDuration > 180) return 0;
   const rawValue = String(point?.value ?? '').trim();
-  if (!hasExplicitSleepType(point) && ['1', '2', '3', '4', '5'].includes(rawValue)) return 0;
+  if (allowValueStageFallback && !hasExplicitSleepType(point) && ['1', '2', '3', '4', '5'].includes(rawValue)) return 0;
   return valueDuration;
 };
 
 const getUniqueSleepDetailDurationMinutes = (detail?: sleepDetail) => {
   const chartData = Array.isArray(detail?.chartData) ? detail.chartData : [];
+  const allowValueStageFallback = shouldUseSleepValueAsStageCode(chartData);
   const seen = new Set<string>();
   let total = 0;
   chartData.forEach((point: any) => {
-    const duration = getSleepDetailPointDurationMinutes(point);
+    const duration = getSleepDetailPointDurationMinutes(point, allowValueStageFallback);
     if (!duration) return;
     const time = String(point?.time ?? point?.startTime ?? point?.start_time ?? point?.recordTime ?? '').trim();
-    const stage = getSleepStageRawValue(point);
+    const stage = getSleepStageRawValue(point, allowValueStageFallback);
     const key = `${time}|${stage}|${duration}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -424,32 +470,52 @@ const formatTemperatureRangeDisplayMetric = (value: unknown, fallback = '00') =>
   });
 };
 
-const displayHeartRateObj = computed(() => ({
-  ...(heartRateObj.value || {}),
-  newValue: formatIntegerDisplayMetric((heartRateObj.value as any)?.newValue),
-  avgValue: formatIntegerDisplayMetric((heartRateObj.value as any)?.avgValue),
-  minValue: formatIntegerDisplayMetric((heartRateObj.value as any)?.minValue),
-  avgValueRange: formatIntegerRangeDisplayMetric((heartRateObj.value as any)?.avgValueRange),
-  maxValue: formatIntegerDisplayMetric((heartRateObj.value as any)?.maxValue)
-} as heartRateDetail));
+const HEART_RATE_VALUE_KEYS = ['heartRate', 'heart_rate', 'heartRateValue', 'heart_rate_value', 'bpm'];
+const HRV_VALUE_KEYS = ['hrv', 'hrvValue', 'hrv_value', 'heartRateVariability', 'heart_rate_variability'];
+const BLOOD_OXYGEN_VALUE_KEYS = ['bloodOxygen', 'blood_oxygen', 'bloodOxygenValue', 'blood_oxygen_value', 'oxygen', 'spo2', 'SpO2'];
 
-const displayOxyGenObj = computed(() => ({
-  ...(oxyGenObj.value || {}),
-  newValue: formatIntegerDisplayMetric((oxyGenObj.value as any)?.newValue),
-  avgValue: formatIntegerDisplayMetric((oxyGenObj.value as any)?.avgValue),
-  minValue: formatIntegerDisplayMetric((oxyGenObj.value as any)?.minValue),
-  maxValue: formatIntegerDisplayMetric((oxyGenObj.value as any)?.maxValue),
-  avgValueRange: formatIntegerRangeDisplayMetric((oxyGenObj.value as any)?.avgValueRange)
-} as heartRateDetail));
+const getSleepMetricFallbackSources = () => [
+  (sleepDetailObj.value as any)?.chartData,
+  (sleepDetailObj.value as any)?.records,
+  (sleepSegmentObj.value as any)?.chartData,
+  (sleepSegmentObj.value as any)?.records
+];
 
-const displayHrvObj = computed(() => ({
-  ...(hrvObj.value || {}),
-  newValue: formatIntegerDisplayMetric((hrvObj.value as any)?.newValue),
-  avgValue: formatIntegerDisplayMetric((hrvObj.value as any)?.avgValue),
-  minValue: formatIntegerDisplayMetric((hrvObj.value as any)?.minValue),
-  maxValue: formatIntegerDisplayMetric((hrvObj.value as any)?.maxValue),
-  avgValueRange: formatIntegerRangeDisplayMetric((hrvObj.value as any)?.avgValueRange)
-} as heartRateDetail));
+const displayHeartRateObj = computed(() => {
+  const metric = normalizeSleepMetricDetail(heartRateObj.value || {}, HEART_RATE_VALUE_KEYS, getSleepMetricFallbackSources());
+  return {
+    ...metric,
+    newValue: formatIntegerDisplayMetric((metric as any)?.newValue),
+    avgValue: formatIntegerDisplayMetric((metric as any)?.avgValue),
+    minValue: formatIntegerDisplayMetric((metric as any)?.minValue),
+    avgValueRange: formatIntegerRangeDisplayMetric((metric as any)?.avgValueRange),
+    maxValue: formatIntegerDisplayMetric((metric as any)?.maxValue)
+  } as heartRateDetail;
+});
+
+const displayOxyGenObj = computed(() => {
+  const metric = normalizeSleepMetricDetail(oxyGenObj.value || {}, BLOOD_OXYGEN_VALUE_KEYS, getSleepMetricFallbackSources());
+  return {
+    ...metric,
+    newValue: formatIntegerDisplayMetric((metric as any)?.newValue),
+    avgValue: formatIntegerDisplayMetric((metric as any)?.avgValue),
+    minValue: formatIntegerDisplayMetric((metric as any)?.minValue),
+    maxValue: formatIntegerDisplayMetric((metric as any)?.maxValue),
+    avgValueRange: formatIntegerRangeDisplayMetric((metric as any)?.avgValueRange)
+  } as heartRateDetail;
+});
+
+const displayHrvObj = computed(() => {
+  const metric = normalizeSleepMetricDetail(hrvObj.value || {}, HRV_VALUE_KEYS, getSleepMetricFallbackSources());
+  return {
+    ...metric,
+    newValue: formatIntegerDisplayMetric((metric as any)?.newValue),
+    avgValue: formatIntegerDisplayMetric((metric as any)?.avgValue),
+    minValue: formatIntegerDisplayMetric((metric as any)?.minValue),
+    maxValue: formatIntegerDisplayMetric((metric as any)?.maxValue),
+    avgValueRange: formatIntegerRangeDisplayMetric((metric as any)?.avgValueRange)
+  } as heartRateDetail;
+});
 
 const displayTemperatureObj = computed(() => ({
   ...(temperatureObj.value || {}),
@@ -563,11 +629,43 @@ const normalizeSleepMetricPoint = (item: any, index: number, valueKeys: string[]
   };
 };
 
-const normalizeSleepMetricDetail = (response: unknown, valueKeys: string[]) => {
+const normalizeMetricChartData = (items: unknown[], valueKeys: string[]) => items
+  .map((item, index) => normalizeSleepMetricPoint(item, index, valueKeys))
+  .filter((point: any) => getDisplayMetricNumber(point?.value) != null);
+
+const getMetricChartDataWithFallback = (response: unknown, valueKeys: string[], fallbackSources: unknown[] = []) => {
+  const chartData = normalizeMetricChartData(getSleepMetricChartArray(response), valueKeys);
+  if (chartData.length > 0) return chartData;
+  for (const source of fallbackSources) {
+    if (!Array.isArray(source) || source.length === 0) continue;
+    const fallbackChartData = normalizeMetricChartData(source, valueKeys);
+    if (fallbackChartData.length > 0) return fallbackChartData;
+  }
+  return chartData;
+};
+
+const pickMetricValue = (value: unknown, fallback?: number) => {
+  const numeric = getDisplayMetricNumber(value);
+  if (numeric != null) return value;
+  return fallback;
+};
+
+const normalizeSleepMetricDetail = (response: unknown, valueKeys: string[], fallbackSources: unknown[] = []) => {
   const payload = getSleepPayloadObject(response) || {};
-  const chartData = getSleepMetricChartArray(response).map((item, index) => normalizeSleepMetricPoint(item, index, valueKeys));
+  const chartData = getMetricChartDataWithFallback(response, valueKeys, fallbackSources);
+  const values = chartData
+    .map((item: any) => getDisplayMetricNumber(item?.value))
+    .filter((value): value is number => value != null);
+  const avgValue = values.length ? values.reduce((total, value) => total + value, 0) / values.length : undefined;
+  const maxValue = values.length ? Math.max(...values) : undefined;
+  const minValue = values.length ? Math.min(...values) : undefined;
+  const newValue = values.length ? values[values.length - 1] : undefined;
   return {
     ...(payload as Record<string, any>),
+    newValue: pickMetricValue((payload as Record<string, any>)?.newValue, newValue),
+    avgValue: pickMetricValue((payload as Record<string, any>)?.avgValue, avgValue),
+    minValue: pickMetricValue((payload as Record<string, any>)?.minValue, minValue),
+    maxValue: pickMetricValue((payload as Record<string, any>)?.maxValue, maxValue),
     chartData
   } as heartRateDetail;
 };
@@ -615,6 +713,7 @@ const querySleepPage = <T>(endpoint: string, currentDate: Date, query: () => Pro
   });
 
 let sleepPageLoadId = 0;
+let sleepPageDeferredLoadTimer: any = null;
 const isCurrentSleepPageLoad = (loadId?: number) => loadId == null || loadId === sleepPageLoadId;
 
 const runSleepLoadTask = async (endpoint: string, currentDate: Date, task: () => Promise<unknown>) => {
@@ -690,11 +789,11 @@ const loadSleepPageData = async (currentDate = new Date(), options: { waitSecond
   });
 
   const criticalTasks = [
-    { endpoint: 'sleep-detail', run: () => getSleepDetailInfo(currentDate, loadId) },
     { endpoint: 'sleep-segment', run: () => getSleepSegmentInfo(currentDate, loadId) },
     { endpoint: 'sleep-overview', run: () => getSleepOverviewData(currentDate, loadId) }
   ];
   const secondaryTasks = [
+    { endpoint: 'sleep-detail', run: () => getSleepDetailInfo(currentDate, loadId) },
     { endpoint: 'sleep-heart-rate', run: () => getRatDetail(currentDate, loadId) },
     { endpoint: 'sleep-hrv', run: () => getHrvDetailData(currentDate, loadId) },
     { endpoint: 'sleep-blood-oxygen', run: () => getOxyGenDetail(currentDate, loadId) },
@@ -728,6 +827,33 @@ const loadSleepPageData = async (currentDate = new Date(), options: { waitSecond
   } else {
     void secondaryRun;
   }
+};
+
+const loadSleepPageDataWithDiagnostics = async (currentDate: Date, options: { waitSecondary?: boolean; trigger?: string } = {}) => {
+  try {
+    await loadSleepPageData(currentDate, options);
+  } catch (error) {
+    appendSleepPageDiagnosticLog('sleep-page-load-failed', {
+      date: formatLocalDate(currentDate),
+      trigger: options.trigger || 'unknown',
+      error: String((error as any)?.message || (error as any)?.errMsg || error || '')
+    });
+  }
+};
+
+const scheduleSleepPageDataLoad = (currentDate: Date, trigger: string) => {
+  if (sleepPageDeferredLoadTimer) {
+    clearTimeout(sleepPageDeferredLoadTimer);
+  }
+  const scheduledDate = new Date(currentDate.getTime());
+  appendSleepPageDiagnosticLog('sleep-page-load-scheduled', {
+    date: formatLocalDate(scheduledDate),
+    trigger
+  });
+  sleepPageDeferredLoadTimer = setTimeout(() => {
+    sleepPageDeferredLoadTimer = null;
+    void loadSleepPageDataWithDiagnostics(scheduledDate, { trigger });
+  }, 60);
 };
 
 // 点击日期处理函数
@@ -810,7 +936,7 @@ const getRatDetail = async (currentDate = new Date(), loadId?: number) => {
   const res = await querySleepPage('sleep-heart-rate', currentDate, (requestConfig) => getSleepHeartRateDetail({
     date: isoDate
   }, requestConfig));
-  const normalized = normalizeSleepMetricDetail(res, ['heartRate', 'heart_rate', 'heartRateValue', 'heart_rate_value', 'bpm']);
+  const normalized = normalizeSleepMetricDetail(res, HEART_RATE_VALUE_KEYS, getSleepMetricFallbackSources());
   appendSleepPageDiagnosticLog('sleep-page-query-result', {
     endpoint: 'sleep-heart-rate',
     date: isoDate,
@@ -828,7 +954,7 @@ const getHrvDetailData = async (currentDate = new Date(), loadId?: number) => {
   const res = await querySleepPage('sleep-hrv', currentDate, (requestConfig) => getSleepHrvDetail({
     date: isoDate
   }, requestConfig));
-  const normalized = normalizeSleepMetricDetail(res, ['hrv', 'hrvValue', 'hrv_value', 'heartRateVariability', 'heart_rate_variability']);
+  const normalized = normalizeSleepMetricDetail(res, HRV_VALUE_KEYS, getSleepMetricFallbackSources());
   appendSleepPageDiagnosticLog('sleep-page-query-result', {
     endpoint: 'sleep-hrv',
     date: isoDate,
@@ -846,7 +972,7 @@ const getOxyGenDetail = async (currentDate = new Date(), loadId?: number) => {
   const res = await querySleepPage('sleep-blood-oxygen', currentDate, (requestConfig) => getSleepBloodOxygenDetail({
     date: isoDate
   }, requestConfig));
-  const normalized = normalizeSleepMetricDetail(res, ['bloodOxygen', 'blood_oxygen', 'bloodOxygenValue', 'blood_oxygen_value', 'oxygen', 'spo2', 'SpO2']);
+  const normalized = normalizeSleepMetricDetail(res, BLOOD_OXYGEN_VALUE_KEYS, getSleepMetricFallbackSources());
   appendSleepPageDiagnosticLog('sleep-page-query-result', {
     endpoint: 'sleep-blood-oxygen',
     date: isoDate,
@@ -956,30 +1082,44 @@ const jumpEdit = () => {
 const leftClick = (): void => {
   uni.navigateBack();
 };
-onLoad(async (options) => {
+onLoad((options) => {
   // 统一转换为数字并设置默认值，普通入口无参数时默认加载今天。
   const rawDayIndex = options?.selectedDayIndex;
   const parsedDayIndex = rawDayIndex !== undefined && rawDayIndex !== '' ? Number(rawDayIndex) : 2;
   const dayIndex = Number.isFinite(parsedDayIndex) ? parsedDayIndex : 2;
-  selectedDayIndex.value = dayIndex;
+  selectedDayIndex.value = dateList.value[dayIndex] ? dayIndex : 2;
 
-  if (dayIndex !== 3) {
-    await handleDateClick(selectedDayIndex.value);
+  if (selectedDayIndex.value !== 3) {
+    scheduleSleepPageDataLoad(dateList.value[selectedDayIndex.value].date, 'page-load');
   } else {
     // 核心修改：仅当 selectedDate 存在时才调用 confirm
     if (options?.selectedDate) {
       // 进一步确保格式化后的日期有效（可选，增强健壮性）
       const formattedDate = uni.$uv.timeFormat(options.selectedDate, 'yyyy-mm-dd');
       if (formattedDate && formattedDate !== 'NaN-NaN-NaN') {
-        await confirm({ fulldate: formattedDate });
+        const selectedDate = new Date(formattedDate);
+        selectedDateInfo.value = {
+          year: selectedDate.getFullYear().toString(),
+          monthDay: `${(selectedDate.getMonth() + 1).toString().padStart(2, '0')}-${selectedDate.getDate().toString().padStart(2, '0')}`
+        };
+        hasSelectedDate.value = true;
+        selectedDayIndex.value = 3;
+        scheduleSleepPageDataLoad(selectedDate, 'page-load-custom-date');
         return;
       }
     }
     selectedDayIndex.value = 2;
-    await handleDateClick(2);
+    scheduleSleepPageDataLoad(dateList.value[2].date, 'page-load-fallback');
   }
 });
 onShow(async () => {});
+onUnload(() => {
+  if (sleepPageDeferredLoadTimer) {
+    clearTimeout(sleepPageDeferredLoadTimer);
+    sleepPageDeferredLoadTimer = null;
+  }
+  sleepPageLoadId += 1;
+});
 // 下拉刷新事件处理器
 onPullDownRefresh(async () => {
   try {

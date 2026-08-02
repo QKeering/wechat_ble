@@ -588,9 +588,11 @@ assertIncludes('src/pages/mine/mine.vue', [
 assertIncludes('src/composables/useRingBLE.ts', [
   'interface CompatReadLocalDataOptions',
   'readOptions: CompatReadLocalDataOptions = {}',
+  'silentUploadStatus?: boolean',
   'const timeoutMs = Number(readOptions.timeoutMs)',
-  'timeoutMs: historyOptions.timeoutMs'
-], 'useRingBLE must allow RW business pages to pass a bounded history timeout and expose it in queue diagnostics');
+  'timeoutMs: historyOptions.timeoutMs',
+  'silentUploadStatus: readOptions.silentUploadStatus === true'
+], 'useRingBLE must allow RW business pages to pass a bounded history timeout/silent status and expose it in queue diagnostics');
 
 assertIncludes('src/composables/useRingBusinessHistoryPageSync.ts', [
   'timeoutMs?: number',
@@ -604,8 +606,7 @@ assertIncludes('src/composables/useRingBusinessHistoryPageSync.ts', [
   'hasStepOrSleepHistoryDataType(dataTypes)',
   'getHistoryPageStartDate(options.date, dataTypes, readAll)',
   'historyStartDate',
-  'ringBle.readLocalData(readAll, historyStartDate, dataTypes, { timeoutMs })',
-  'ringBle.readLocalData(true, historyStartDate, fallbackDataTypes, { timeoutMs: fallbackTimeoutMs })',
+  'silentUploadStatus: true',
   'fallbackFocus: fallbackDataTypes[0]',
   'elapsedMs: Date.now() - startedAt',
   "'latestHrvValue'",

@@ -5,6 +5,7 @@ const BLE_UNAVAILABLE_RE =
   /bluetooth.*(not\s*available|unavailable|disable|off)|adapter.*(not\s*available|unavailable)|openBluetoothAdapter.*not\s*available|startBluetoothDevicesDiscovery.*not\s*available|\b10001\b|蓝牙.*(未打开|不可用|未开启)/i;
 const EXPECTED_BLE_RUNTIME_RE =
   /timeout|timed out|wait .*timeout|parsed data wait|not ready|not available|unavailable|already connect|internal error|setBLEMTU.*internal|fail:internal|property not support|fail to write descriptor|Cannot read properties of (null|undefined)|reading ['"]?[^'"]+['"]?|超时/i;
+const BLE_ALREADY_CONNECTED_RE = /already connect|already connected/i;
 const BLE_TIMEOUT_RE = /timeout|timed out|wait .*timeout|超时/i;
 const BLE_INTERNAL_RE = /internal error|setBLEMTU.*internal|fail:internal/i;
 const NETWORK_ERROR_RE = /request:fail|net::|err_connection|network|网络请求|网络连接/i;
@@ -22,6 +23,10 @@ export const formatBleErrorMessage = (error: unknown, fallback = '设备暂时�
     if (/^网络/.test(message)) return message;
     if (NETWORK_TIMEOUT_RE.test(message)) return '网络请求超时，请稍后重试';
     return '网络连接异常，请稍后重试';
+  }
+
+  if (BLE_ALREADY_CONNECTED_RE.test(message)) {
+    return '设备已连接，请勿重复连接';
   }
 
   if (BLE_UNAVAILABLE_RE.test(message)) {

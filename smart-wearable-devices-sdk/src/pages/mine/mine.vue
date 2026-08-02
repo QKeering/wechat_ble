@@ -52,7 +52,7 @@ import {
   flushRwDiagnosticUploadQueue
 } from '@/utils/rwDiagnosticUpload';
 import { submitData } from '@/common/api/homeDetail';
-import { scan, getBindInfo, unbind } from '@/common/api/device';
+import { scan, getBindInfo } from '@/common/api/device';
 import CustomSteps from '@/components/customSteps.vue';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
@@ -80,6 +80,7 @@ const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
 const RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH = 4000;
 const RING_PROTOCOL_PROBE_REPORT_CHUNK_SIZE = 10;
 const RW_DIAGNOSTIC_BUILD_TAG = 'rw-visible-build-tag-20260720-2048';
+const MINE_SHOW_DIAGNOSTIC_PANEL = false;
 const MINE_SHOW_TEMPERATURE_PROTOCOL_PROBES = false;
 const MINE_SHOW_STEP_PROTOCOL_PROBES = true;
 const MINE_SHOW_SLEEP_PROTOCOL_PROBE = true;
@@ -227,10 +228,33 @@ const mineMenuNavigating = ref(false);
 const handleMineMenuTap = (item: { path?: string }) => {
   if (!item?.path || mineMenuNavigating.value) return;
   mineMenuNavigating.value = true;
-  (uni as any).$uv.route(item.path);
+  const path = item.path;
+  const startedAt = Date.now();
+  appendMineDiagnosticLog('mine-menu-navigate-start', { path });
   setTimeout(() => {
-    mineMenuNavigating.value = false;
-  }, 800);
+    uni.navigateTo({
+      url: path,
+      success: () => {
+        appendMineDiagnosticLog('mine-menu-navigate-success', {
+          path,
+          elapsedMs: Date.now() - startedAt
+        });
+      },
+      fail: (error) => {
+        appendMineDiagnosticLog('mine-menu-navigate-fail', {
+          path,
+          elapsedMs: Date.now() - startedAt,
+          error: String((error as any)?.errMsg || error || '')
+        });
+        uni.showToast({ title: '页面加载失败，请稍后重试', icon: 'none' });
+      },
+      complete: () => {
+        setTimeout(() => {
+          mineMenuNavigating.value = false;
+        }, 800);
+      }
+    });
+  }, 0);
 };
 const scrollTop = ref(0);
 // Delay hiding upload progress so success state remains visible briefly.
@@ -3096,37 +3120,6 @@ const connectAgain = async () => {
     });
   }
 };
-// 解除绑定
-const unbindDevice = () => {
-  if (!bindInfo.value || !bindInfo.value.mac) return;
-  uni.showModal({
-    title: '提示',
-    content: '确定要解除绑定吗？',
-    success: async (res) => {
-      if (!res.confirm) return;
-      try {
-        uni.showLoading({ title: '解绑中...', mask: true });
-        await unbind({ mac: bindInfo.value.mac });
-        await disconnect();
-        userStore.updateReconnectingStatus('0');
-        userStore.updateIsManualReconnecting(false);
-        bindInfo.value = null;
-        await clearFrontendRingBindingState(userStore, ringStore);
-        uni.showToast({ title: '解绑成功', icon: 'success', duration: 1500 });
-      } catch (error: any) {
-        console.error('解绑失败:', error);
-        uni.showToast({
-          title: error?.msg || error?.message || '解绑失败，请重试',
-          icon: 'none',
-          duration: 2000
-        });
-      } finally {
-        uni.hideLoading();
-      }
-    }
-  });
-};
-
 onShow(async () => {
   try {
     if (!userStore.token) {
@@ -4140,17 +4133,6 @@ const handleMineRwL19Acceptance = async () => {
                     }"
                     @click="connectAgain"
                   ></uv-button>
-                  <uv-button
-                    text="\u89e3\u9664\u7ed1\u5b9a"
-                    shape="circle"
-                    color="#FFFFFF"
-                    :customTextStyle="{ color: '#010101', 'font-size': '28rpx' }"
-                    :customStyle="{
-                      padding: '38rpx 0',
-                      width: '190rpx'
-                    }"
-                    @click="unbindDevice"
-                  ></uv-button>
                 </template>
                 <template v-else>
                   <uv-button
@@ -4176,7 +4158,7 @@ const handleMineRwL19Acceptance = async () => {
         </view>
       </view>
 
-      <view class="rw-diagnostic-panel bg-white r-50 mb-30 pt-30 pr-40 pb-30 pl-40">
+      <view v-if="MINE_SHOW_DIAGNOSTIC_PANEL" class="rw-diagnostic-panel bg-white r-50 mb-30 pt-30 pr-40 pb-30 pl-40">
         <view class="rw-diagnostic-header flex jc-between ai-center">
           <view>
             <view class="rw-diagnostic-title">RW{{ '\u8bca\u65ad' }}</view>

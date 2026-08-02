@@ -44,6 +44,14 @@ PROTECTED_ADMIN_PREFIXES = (
     "/admin",
     "/common/",
 )
+API_PREFIX = "/api"
+API_ADMIN_COMPAT_PREFIXES = (
+    "/api/admin",
+    "/api/common/",
+    "/api/system/",
+    "/api/monitor/",
+    "/api/tool/",
+)
 
 
 def create_app() -> FastAPI:
@@ -68,8 +76,13 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def ruoyi_admin_path_compat(request: Request, call_next):
-        if request.url.path.startswith(("/system/", "/monitor/", "/tool/")):
-            request.scope["path"] = "/admin" + request.url.path
+        if request.url.path.startswith(API_ADMIN_COMPAT_PREFIXES):
+            compat_path = request.url.path[len(API_PREFIX):] or "/"
+            request.scope["path"] = compat_path
+            request.scope["raw_path"] = compat_path.encode()
+        path = request.scope["path"]
+        if path.startswith(("/system/", "/monitor/", "/tool/")):
+            request.scope["path"] = "/admin" + path
             request.scope["raw_path"] = request.scope["path"].encode()
         path = request.scope["path"]
         if (

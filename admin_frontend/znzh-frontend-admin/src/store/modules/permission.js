@@ -34,8 +34,8 @@ const permission = {
       return new Promise(resolve => {
         // 向后端请求路由数据
         getRouters().then(res => {
-          const sdata = JSON.parse(JSON.stringify(res.data))
-          const rdata = JSON.parse(JSON.stringify(res.data))
+          const sdata = ensureHealthDataRoute(JSON.parse(JSON.stringify(res.data)))
+          const rdata = ensureHealthDataRoute(JSON.parse(JSON.stringify(res.data)))
           const sidebarRoutes = filterAsyncRouter(sdata)
           const rewriteRoutes = filterAsyncRouter(rdata, false, true)
           const asyncRoutes = filterDynamicRoutes(dynamicRoutes)
@@ -53,6 +53,76 @@ const permission = {
 }
 
 // 遍历后台传来的路由字符串，转换为组件对象
+function ensureHealthDataRoute(routes) {
+  if (!Array.isArray(routes)) {
+    return routes
+  }
+  const healthRoute = {
+    name: 'HealthData',
+    path: 'healthData',
+    component: 'user/healthData/index',
+    meta: { title: '健康数据', icon: 'clipboard', noCache: false }
+  }
+
+  let existingHealthRoute = null
+  const normalizeHealthDataRoute = (items) => {
+    for (const route of items) {
+      if (route && (route.component === 'user/healthData/index' || route.path === 'healthData')) {
+        route.hidden = false
+        route.path = route.path || healthRoute.path
+        route.component = route.component || healthRoute.component
+        route.name = route.name || healthRoute.name
+        route.meta = { ...healthRoute.meta, ...(route.meta || {}), title: '健康数据' }
+        existingHealthRoute = route
+        return route
+      }
+      const matched = Array.isArray(route.children) && normalizeHealthDataRoute(route.children)
+      if (matched) {
+        return matched
+      }
+    }
+    return null
+  }
+
+  const findUserParent = (items) => {
+    for (const route of items) {
+      const children = Array.isArray(route.children) ? route.children : []
+      const isUserParent = children.some(child =>
+        child.component === 'user/user/index' ||
+        child.component === 'user/log/index' ||
+        child.path === 'user' ||
+        child.path === 'log'
+      )
+      if (isUserParent) {
+        return route
+      }
+      const matched = findUserParent(children)
+      if (matched) {
+        return matched
+      }
+    }
+    return null
+  }
+
+  normalizeHealthDataRoute(routes)
+  const parent = findUserParent(routes)
+  if (parent && existingHealthRoute) {
+    parent.hidden = false
+    parent.alwaysShow = true
+    parent.children = Array.isArray(parent.children) ? parent.children : []
+    const alreadyInParent = parent.children.some(child => child === existingHealthRoute || child.component === 'user/healthData/index' || child.path === 'healthData')
+    if (!alreadyInParent) {
+      parent.children.push(existingHealthRoute)
+    }
+  } else if (parent) {
+    parent.hidden = false
+    parent.alwaysShow = true
+    parent.children = Array.isArray(parent.children) ? parent.children : []
+    parent.children.push(healthRoute)
+  }
+  return routes
+}
+
 function filterAsyncRouter(asyncRouterMap, lastRouter = false, type = false) {
   return asyncRouterMap.filter(route => {
     if (type && route.children) {

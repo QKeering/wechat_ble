@@ -19,6 +19,7 @@ const lastActionText = ref('');
 const isSaving = ref(false);
 const paddingBottomVal = 160;
 let statusClearTimer: any = null;
+let initialLoadTimer: any = null;
 
 const DEFAULT_GOAL_VALUES: Record<PickerType, string> = {
   sleep: '8',
@@ -28,10 +29,10 @@ const DEFAULT_GOAL_VALUES: Record<PickerType, string> = {
   collect: '60'
 };
 
-const sleepTarget = ref('');
-const stepTarget = ref('');
-const calorieTarget = ref('');
-const activityDurationTarget = ref('');
+const sleepTarget = ref(DEFAULT_GOAL_VALUES.sleep);
+const stepTarget = ref(DEFAULT_GOAL_VALUES.step);
+const calorieTarget = ref(DEFAULT_GOAL_VALUES.calorie);
+const activityDurationTarget = ref(DEFAULT_GOAL_VALUES.activity);
 const collectPeriodTarget = ref(DEFAULT_GOAL_VALUES.collect);
 
 const pickerRef = ref<any>(null);
@@ -291,13 +292,27 @@ const jumpOtaUpgrade = () => {
   uni.navigateTo({ url: '/pagesA/mines/otaUpgrade' });
 };
 
-onShow(async () => {
-  await Promise.all([loadBoundInfo(), loadGoalInfo()]);
+const scheduleInitialLoad = () => {
+  if (initialLoadTimer) {
+    clearTimeout(initialLoadTimer);
+  }
+  initialLoadTimer = setTimeout(() => {
+    initialLoadTimer = null;
+    void Promise.all([loadBoundInfo(), loadGoalInfo()]);
+  }, 60);
+};
+
+onShow(() => {
+  scheduleInitialLoad();
 });
 
 onUnmounted(() => {
   if (statusClearTimer) {
     clearTimeout(statusClearTimer);
+  }
+  if (initialLoadTimer) {
+    clearTimeout(initialLoadTimer);
+    initialLoadTimer = null;
   }
 });
 </script>

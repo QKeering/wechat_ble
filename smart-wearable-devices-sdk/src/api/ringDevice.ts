@@ -135,18 +135,20 @@ export const clearBoundRingDevice = async (): Promise<void> => {
 
 export const bindRingDevice = async (payload: RingBindPayload): Promise<RingBoundDevice> => {
   const stableMac = getBindPayloadStableMac(payload);
+  const normalizedPayload = normalizeRingBoundDevice(payload as any) || (payload as any);
   const boundDevice: RingBoundDevice = {
-    mac: stableMac,
-    deviceId: payload.deviceId || stableMac,
-    deviceName: payload.deviceName,
-    name: payload.deviceName,
-    serviceId: payload.serviceId,
-    cmdCharId: payload.cmdCharId,
-    dataCharId: payload.dataCharId,
-    dataServiceId: payload.dataServiceId,
-    uniMacId: payload.uniMacId,
-    protocol: payload.protocol,
-    advertis: payload.advertis
+    ...normalizedPayload,
+    mac: stableMac || normalizedPayload.mac || '',
+    deviceId: normalizedPayload.deviceId || stableMac || '',
+    deviceName: normalizedPayload.deviceName || normalizedPayload.name,
+    name: normalizedPayload.name || normalizedPayload.deviceName,
+    serviceId: normalizedPayload.serviceId,
+    cmdCharId: normalizedPayload.cmdCharId,
+    dataCharId: normalizedPayload.dataCharId,
+    dataServiceId: normalizedPayload.dataServiceId,
+    uniMacId: normalizedPayload.uniMacId || stableMac || '',
+    protocol: normalizedPayload.protocol,
+    advertis: normalizedPayload.advertis
   };
 
   writeStorage(BOUND_RING_KEY, boundDevice);
@@ -207,23 +209,64 @@ export const uploadRingHistoryRecords = async (records: RingHistoricalRecord[], 
   return { count: records.length, storedCount: nextHistory.length, ...rawStageResult };
 };
 
+export const buildRingRawHistoryFrames = (
+  records: Array<RingHistoricalRecord | AnyRecord>,
+  parsed: (RingParsedData & AnyRecord) | AnyRecord | null | undefined,
+  forcedDeviceKey = ''
+): RingRawHistoryFrame[] => {
+  if (!parsed || typeof parsed !== 'object') return [];
+  const rawChunks = getParsedRawChunks(parsed as RingParsedData);
+  if (rawChunks.length === 0) return [];
+
+  const parsedIdentity = getParsedHistoryIdentity(parsed as RingParsedData);
+  const firstRecord = records[0] as RingHistoricalRecord | undefined;
+  const deviceKey =
+    normalizeRingIdentity(forcedDeviceKey) ||
+    normalizeRingIdentity(parsedIdentity.mac || parsedIdentity.uniMacId || parsedIdentity.deviceId) ||
+    (firstRecord ? getHistoryRecordDeviceKey(firstRecord) : '') ||
+    String(forcedDeviceKey || parsedIdentity.mac || parsedIdentity.uniMacId || parsedIdentity.deviceId || '').trim();
+  const recordTimes = (records as RingHistoricalRecord[])
+    .map(getHistoryRecordTime)
+    .filter((time) => time > 0)
+    .sort((left, right) => left - right);
+  const recordTimeStart = formatHistoryUnixTime(recordTimes[0]);
+  const recordTimeEnd = formatHistoryUnixTime(recordTimes[recordTimes.length - 1]);
+  const receivedAt = Date.now();
+
+  return rawChunks.map((raw, index) => {
+    const rawHex = bytesToHex(raw);
+    const protocol = String(parsed.protocol || '');
+    const sourceType = String(parsed.type || '');
+    const rawHash = hashRawHistoryFrame(`${deviceKey}:${protocol}:${sourceType}:${rawHex}`);
+    return {
+      deviceKey,
+      protocol: parsed.protocol,
+      sourceType: parsed.type,
+      status: parsed.status,
+      rawHex,
+      rawHash,
+      rawByteLength: raw.length,
+      receivedAt,
+      lastSeenAt: receivedAt,
+      seenCount: 1,
+      chunkIndex: index,
+      chunkCount: rawChunks.length,
+      recordCount: records.length,
+      totalNum: Number.isFinite(Number(parsed.totalNum)) ? Number(parsed.totalNum) : undefined,
+      maxSeq: Number.isFinite(Number(parsed.maxSeq)) ? Number(parsed.maxSeq) : undefined,
+      recordTimeStart,
+      recordTimeEnd
+    };
+  });
+};
+
 const stageRingRawHistoryFrames = (records: RingHistoricalRecord[], parsed: RingParsedData) => {
-  const rawChunks = getParsedRawChunks(parsed);
-  if (rawChunks.length === 0) {
+  const rawFrames = buildRingRawHistoryFrames(records, parsed);
+  if (rawFrames.length === 0) {
     return { rawStored: false, rawFrameCount: 0, rawStoredCount: 0 };
   }
 
   try {
-    const parsedIdentity = getParsedHistoryIdentity(parsed);
-    const firstRecord = records[0];
-    const deviceKey =
-      normalizeRingIdentity(parsedIdentity.mac || parsedIdentity.uniMacId || parsedIdentity.deviceId) ||
-      (firstRecord ? getHistoryRecordDeviceKey(firstRecord) : '') ||
-      String(parsedIdentity.mac || parsedIdentity.uniMacId || parsedIdentity.deviceId || '').trim();
-    const recordTimes = records.map(getHistoryRecordTime).filter((time) => time > 0).sort((left, right) => left - right);
-    const recordTimeStart = formatHistoryUnixTime(recordTimes[0]);
-    const recordTimeEnd = formatHistoryUnixTime(recordTimes[recordTimes.length - 1]);
-    const receivedAt = Date.now();
     const storedFrames = readStorage<RingRawHistoryFrame[]>(RING_RAW_HISTORY_KEY, []);
     const keyedFrames = new Map<string, RingRawHistoryFrame>();
 
@@ -231,28 +274,13 @@ const stageRingRawHistoryFrames = (records: RingHistoricalRecord[], parsed: Ring
       if (frame?.rawHash) keyedFrames.set(frame.rawHash, frame);
     }
 
-    rawChunks.forEach((raw, index) => {
-      const rawHex = bytesToHex(raw);
-      const rawHash = hashRawHistoryFrame(`${deviceKey}:${parsed.protocol || ''}:${parsed.type}:${rawHex}`);
-      const previous = keyedFrames.get(rawHash);
-      keyedFrames.set(rawHash, {
-        deviceKey,
-        protocol: parsed.protocol,
-        sourceType: parsed.type,
-        status: parsed.status,
-        rawHex,
-        rawHash,
-        rawByteLength: raw.length,
-        receivedAt: previous?.receivedAt || receivedAt,
-        lastSeenAt: receivedAt,
-        seenCount: (previous?.seenCount || 0) + 1,
-        chunkIndex: index,
-        chunkCount: rawChunks.length,
-        recordCount: records.length,
-        totalNum: Number.isFinite(Number(parsed.totalNum)) ? Number(parsed.totalNum) : undefined,
-        maxSeq: Number.isFinite(Number(parsed.maxSeq)) ? Number(parsed.maxSeq) : undefined,
-        recordTimeStart,
-        recordTimeEnd
+    rawFrames.forEach((frame) => {
+      const previous = keyedFrames.get(frame.rawHash);
+      keyedFrames.set(frame.rawHash, {
+        ...frame,
+        receivedAt: previous?.receivedAt || frame.receivedAt,
+        lastSeenAt: frame.lastSeenAt,
+        seenCount: (previous?.seenCount || 0) + 1
       });
     });
 
@@ -263,13 +291,13 @@ const stageRingRawHistoryFrames = (records: RingHistoricalRecord[], parsed: Ring
 
     return {
       rawStored: true,
-      rawFrameCount: rawChunks.length,
+      rawFrameCount: rawFrames.length,
       rawStoredCount: nextFrames.length
     };
   } catch {
     return {
       rawStored: false,
-      rawFrameCount: rawChunks.length,
+      rawFrameCount: rawFrames.length,
       rawStoredCount: 0
     };
   }

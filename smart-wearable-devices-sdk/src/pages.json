@@ -23,7 +23,6 @@
         "enablePullDownRefresh": true
       }
     },
-    // #ifdef H5
     {
       "path": "pages/health/growth-girlfriend",
       "style": {
@@ -31,7 +30,6 @@
         "navigationStyle": "custom"
       }
     },
-    // #endif
     {
       "path": "pages/family/family",
       "style": {

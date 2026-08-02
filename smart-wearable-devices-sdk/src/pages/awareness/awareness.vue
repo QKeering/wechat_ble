@@ -34,7 +34,8 @@ import type {
 } from '@/types/api/homeDetail';
 import CustomSteps from '@/components/customSteps.vue';
 import ProgressBar from '@/components/progressBar.vue';
-import { submitData } from '@/common/api/homeDetail';
+import { submitData, submitRingHistoryRawFrames } from '@/common/api/homeDetail';
+import { buildRingRawHistoryFrames } from '@/api/ringDevice';
 import { bind, unbind, getBindInfo } from '@/common/api/device';
 import { getGoalInfo } from '@/common/api/user';
 import DetailInfo from '@/components/DetailInfo.vue';
@@ -48,6 +49,21 @@ import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/
 import { MOTION_CALORIE_DISPLAY_UNIT, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 import { formatBatteryStatusForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
 import { getAppForegroundSessionId } from '@/utils/appForegroundSession';
+import {
+  assertBackendUploadBinding,
+  buildUploadSyncMeta,
+  createUploadSessionId,
+  markPendingUploadDataDone,
+  markPendingUploadDataFailed,
+  stagePendingUploadSession,
+  uploadPendingRawFramesInBackground
+} from '@/utils/dataUploadCompensation';
+import {
+  PERIOD_PHASE_ICON,
+  PERIOD_PHASE_LABEL,
+  resolvePeriodPhaseIndex,
+  type PeriodPhaseKey
+} from '@/utils/periodPhase';
 import {
   buildRingHistorySubmitRecords,
   countRingHistoryRecordMetrics,
@@ -128,7 +144,11 @@ let awarenessRefreshPromise: Promise<void> | null = null;
 let awarenessHistorySyncPromise: Promise<void> | null = null;
 let legacyLocalDataUploadPromise: Promise<unknown> | null = null;
 let legacyLocalDataStablePromise: Promise<void> | null = null;
+let awarenessBusinessRefreshPromise: Promise<void> | null = null;
 let awarenessProcessedRefreshPromise: Promise<void> | null = null;
+let pendingAwarenessBusinessRefreshDate = '';
+const legacyHomeHistoryReadInFlight = ref(false);
+const legacyHomeHistoryReadCompletedTick = ref(0);
 let lastAwarenessRefreshAt = 0;
 let lastAwarenessHistorySyncAt = 0;
 let lastAwarenessDeviceTimeSyncAt = 0;
@@ -277,17 +297,20 @@ const selectedDateInfo = ref({
 const popupSteps = ref<any>(null);
 
 const showPeriodDetail = ref(false);
-const periodPhases = ref([
-  { key: 'menstrual', icon: 'M', label: '\u6708\u7ecf\u671f' },
-  { key: 'ovulation', icon: 'O', label: '\u6392\u5375\u671f' },
-  { key: 'fertile', icon: 'F', label: '\u6613\u5b55\u671f' },
-  { key: 'safe', icon: 'S', label: '\u5b89\u5168\u671f' }
-]);const homeDetailRoutes = {
+const periodPhases = ref(
+  (['menstrual', 'ovulation', 'fertile', 'safe'] as PeriodPhaseKey[]).map((key) => ({
+    key,
+    icon: PERIOD_PHASE_ICON[key],
+    label: PERIOD_PHASE_LABEL[key]
+  }))
+);
+const homeDetailRoutes = {
   sleep: '/homeDetail/sleepPage/sleepPage',
   exercise: '/homeDetail/exercise/exercise',
   relax: '/homeDetail/relaxStatus/relaxStatus',
   vitalSigns: '/homeDetail/vitalSigns/vitalSigns'
 } as const;
+const homeDetailNavigating = ref(false);
 const currentPhaseIndex = ref(3);
 const periodTodayDate = ref('');
 const periodTip = ref('');
@@ -452,6 +475,65 @@ const getLegacyLocalDataUploadKey = (
     JSON.stringify(submitMetricCounts)
   ].join('|');
 };
+
+const summarizeBackendUploadBindingForLog = (binding: Awaited<ReturnType<typeof assertBackendUploadBinding>>) => ({
+  ok: binding.ok,
+  reasonCode: binding.reasonCode,
+  reason: binding.reason,
+  deviceMac: binding.deviceMac,
+  bindingId: binding.bindingId,
+  bindingVersion: binding.bindingVersion,
+  dataUserId: binding.dataUserId,
+  protocol: binding.protocol,
+  backendDevice: summarizeAwarenessDevice(binding.device as Record<string, any> | null | undefined)
+});
+
+const assertAwarenessBackendUploadBindingWithLog = async (
+  deviceMac: string,
+  details: Record<string, any>
+) => {
+  const startedAt = Date.now();
+  appendAwarenessDiagnosticLog('binding-check-start', {
+    ...details,
+    deviceMac,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+  try {
+    const binding = await assertBackendUploadBinding(deviceMac);
+    appendAwarenessDiagnosticLog('binding-check-result', {
+      ...details,
+      deviceMac,
+      elapsedMs: Date.now() - startedAt,
+      binding: summarizeBackendUploadBindingForLog(binding),
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+    return binding;
+  } catch (error) {
+    appendAwarenessDiagnosticLog('binding-check-failed', {
+      ...details,
+      deviceMac,
+      elapsedMs: Date.now() - startedAt,
+      error: formatBleErrorMessage(error, 'backend binding check failed'),
+      rawError: getAwarenessRawError(error),
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+    throw error;
+  }
+};
+
+const buildLegacyLocalDataRawFramesForUpload = (payloads: any[], deviceMac: string) => {
+  const keyedFrames = new Map<string, ReturnType<typeof buildRingRawHistoryFrames>[number]>();
+  for (const payload of payloads || []) {
+    if (!payload || typeof payload !== 'object') continue;
+    const parsed = payload.parsed && typeof payload.parsed === 'object' ? payload.parsed : payload;
+    const records = Array.isArray(payload.records) ? payload.records : [];
+    const frames = buildRingRawHistoryFrames(records, parsed, deviceMac);
+    frames.forEach((frame) => {
+      if (frame.rawHash) keyedFrames.set(frame.rawHash, frame);
+    });
+  }
+  return Array.from(keyedFrames.values());
+};
 const summarizeSubmitDataResponse = (response: unknown) => {
   if (response == null || typeof response !== 'object') {
     return {
@@ -562,14 +644,37 @@ const dateList = computed(() => [
   return formatLocalDate(dateList.value[selectedDayIndex.value]?.date || today.value);
 };
 const openHomeDetail = (key: keyof typeof homeDetailRoutes) => {
+  if (homeDetailNavigating.value) return;
   const route = homeDetailRoutes[key];
   const query = `selectedDayIndex=${selectedDayIndex.value}&selectedDate=${encodeURIComponent(getSelectedDetailDate())}`;
-  uni.navigateTo({
-    url: `${route}?${query}`,
-    fail: () => {
-      uni.showToast({ title: '\\u9875\\u9762\\u52a0\\u8f7d\\u5931\\u8d25\\uff0c\\u8bf7\\u7a0d\\u540e\\u91cd\\u8bd5', icon: 'none' });
-    }
-  });
+  const url = `${route}?${query}`;
+  const startedAt = Date.now();
+  homeDetailNavigating.value = true;
+  appendAwarenessDiagnosticLog('home-detail-navigate-start', { key, url });
+  setTimeout(() => {
+    uni.navigateTo({
+      url,
+      success: () => {
+        appendAwarenessDiagnosticLog('home-detail-navigate-success', {
+          key,
+          elapsedMs: Date.now() - startedAt
+        });
+      },
+      fail: (error) => {
+        appendAwarenessDiagnosticLog('home-detail-navigate-fail', {
+          key,
+          elapsedMs: Date.now() - startedAt,
+          error: String((error as any)?.errMsg || error || '')
+        });
+        uni.showToast({ title: '页面加载失败，请稍后重试', icon: 'none' });
+      },
+      complete: () => {
+        setTimeout(() => {
+          homeDetailNavigating.value = false;
+        }, 800);
+      }
+    });
+  }, 0);
 };
 const getPositiveMetricNumber = (...values: unknown[]) => {
   for (const value of values) {
@@ -600,6 +705,92 @@ const getAwarenessValueByKeys = (source: Record<string, any>, keys: string[]) =>
 };
 const getHomeGoalNumber = (keys: string[], fallback: unknown) =>
   getPositiveMetricNumber(getAwarenessValueByKeys(homeGoalInfo.value, keys), fallback);
+const GIRL_HEALTH_ADVICE_KEYS = [
+  'periodTips',
+  'periodTip',
+  'healthTips',
+  'healthTip',
+  'healthAdvice',
+  'advice',
+  'advise',
+  'suggestion',
+  'suggestions',
+  'recommend',
+  'recommendation',
+  'recommendations',
+  'message',
+  'content'
+];
+const GIRL_HEALTH_PHASE_ADVICE_KEYS: Record<number, string[]> = {
+  0: ['menstrual', 'menstruation', 'period'],
+  1: ['ovulation'],
+  2: ['fertile', 'fertility'],
+  3: ['safe', 'luteal']
+};
+const GIRL_HEALTH_PHASE_FALLBACK_TIPS: Record<number, string> = {
+  0: '\u7ecf\u671f\u6ce8\u610f\u4fdd\u6696\uff0c\u907f\u514d\u751f\u51b7\u523a\u6fc0\uff0c\u4fdd\u8bc1\u5145\u8db3\u4f11\u606f\u3002',
+  1: '\u6392\u5375\u671f\u6ce8\u610f\u8eab\u4f53\u53d8\u5316\uff0c\u4fdd\u6301\u89c4\u5f8b\u4f5c\u606f\u548c\u9002\u91cf\u8fd0\u52a8\u3002',
+  2: '\u6613\u5b55\u671f\u8bf7\u7ed3\u5408\u4e2a\u4eba\u8ba1\u5212\uff0c\u505a\u597d\u5907\u5b55\u6216\u907f\u5b55\u5b89\u6392\u3002',
+  3: '\u5efa\u8bae\u4fdd\u6301\u89c4\u5f8b\u4f5c\u606f\uff0c\u6301\u7eed\u8bb0\u5f55\u5468\u671f\u53d8\u5316\u3002'
+};
+const normalizeGirlHealthAdviceText = (value: unknown): string => {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeGirlHealthAdviceText(item)).filter(Boolean).join('\uff1b');
+  }
+  if (typeof value === 'string' || typeof value === 'number') {
+    return String(value).trim();
+  }
+  if (typeof value === 'object') {
+    const source = value as Record<string, any>;
+    for (const key of ['text', 'content', 'desc', 'description', 'message', 'title', 'value']) {
+      const text = normalizeGirlHealthAdviceText(source[key]);
+      if (text) return text;
+    }
+  }
+  return '';
+};
+const getGirlHealthAdviceFromPayload = (source: Record<string, any> | null | undefined): string => {
+  if (!source || typeof source !== 'object') return '';
+  for (const key of GIRL_HEALTH_ADVICE_KEYS) {
+    const value = source[key];
+    const directText = normalizeGirlHealthAdviceText(value);
+    if (directText) return directText;
+
+    if (value && typeof value === 'object') {
+      const phaseKeys = GIRL_HEALTH_PHASE_ADVICE_KEYS[currentPhaseIndex.value] || [];
+      for (const phaseKey of phaseKeys) {
+        const phaseText = normalizeGirlHealthAdviceText((value as Record<string, any>)[phaseKey]);
+        if (phaseText) return phaseText;
+      }
+    }
+  }
+  return '';
+};
+const extractGirlHealthAdvice = (source: any): string => {
+  const candidates = [
+    source,
+    source?.data,
+    source?.result,
+    source?.data?.data,
+    source?.data?.result,
+    source?.result?.data,
+    source?.result?.result,
+    source?.girlHealth,
+    source?.health,
+    source?.prediction,
+    source?.analysis,
+    source?.report
+  ];
+
+  for (const candidate of candidates) {
+    const text = getGirlHealthAdviceFromPayload(candidate);
+    if (text) return text;
+  }
+  return '';
+};
+const getGirlHealthPhaseFallbackTip = () =>
+  GIRL_HEALTH_PHASE_FALLBACK_TIPS[currentPhaseIndex.value] || GIRL_HEALTH_PHASE_FALLBACK_TIPS[3];
 const isPendingMetricStatus = (value: unknown) => /[\u91c7\u96c6\u4e2d\u6d4b\u91cf\u8bfb\u53d6\u8bf7\u6c42\u7b49\u5f85]/.test(String(value ?? ''));
 const getRelaxStatusByScore = (score: number) => {
   if (score >= 80) return '\u5e73\u7a33\u72b6\u6001';
@@ -653,34 +844,11 @@ const relaxStressStatus = computed(() => {
   }
   return normalized || getRelaxStatusByScore(relaxStressNumber.value) || '\u5e73\u7a33\u72b6\u6001';
 });
-const activeIcon = computed(() => {
-  const activeLevel = relaxStressNumber.value;
-
-
-  if (activeLevel < 60) {
-    return '/static/images/homeDetail/cry.png';
-  }
-  else if (activeLevel >= 60 && activeLevel <= 79) {
-    return '/static/images/homeDetail/normal.png';
-  }
-
-  else if (activeLevel >= 80 && activeLevel <= 100) {
-    return '/static/images/homeDetail/smile.png';
-  }
-
-  return '/static/images/homeDetail/normal.png';
-});
 const activityStepNumber = computed(() =>
-  getPositiveMetricNumber(motionOverviewObj.value?.step, userStore.healthData?.stepCount, userStore.healthData?.steps, userStore.latestMetrics?.stepCount)
+  getPositiveMetricNumber(motionOverviewObj.value?.step)
 );
 const activityCalorieRawNumber = computed(() =>
-  getPositiveMetricNumber(
-    motionOverviewObj.value?.calorie,
-    userStore.healthData?.calorie,
-    userStore.healthData?.calories,
-    userStore.healthData?.motionCalorie,
-    userStore.latestMetrics?.calorie
-  )
+  getPositiveMetricNumber(motionOverviewObj.value?.calorie)
 );
 const activityCalorieNumber = computed(
   () =>
@@ -694,13 +862,7 @@ const activityCalorieNumber = computed(
     }) || 0
 );
 const activityMotionTimeNumber = computed(() =>
-  getPositiveMetricNumber(
-    motionOverviewObj.value?.motionTime,
-    userStore.healthData?.activityMinutes,
-    userStore.healthData?.activeMinutes,
-    userStore.healthData?.motionTime,
-    userStore.latestMetrics?.activityMinutes
-  )
+  getPositiveMetricNumber(motionOverviewObj.value?.motionTime)
 );
 const activityStepValue = computed(() => (activityStepNumber.value > 0 ? `${activityStepNumber.value}` : '00'));
 const activityCalorieValue = computed(() => (activityCalorieNumber.value > 0 ? String(Math.round(activityCalorieNumber.value)) : '00'));
@@ -877,13 +1039,12 @@ const bluetoothStatus = computed(() => {
     isReconnecting: userStore.isReconnecting === true || ringStore.isReconnecting === true
   });
   const isDisconnected = !isConnecting && !isConnected;
+  const isVisibleUploadSyncing =
+    userStore.uploadingStatus === 'uploading' ||
+    ringStore.uploadingStatus === 'uploading';
   const isSyncing =
     isConnected &&
-    (homeDataSyncing.value ||
-      userStore.isSending === true ||
-      ringStore.isSending === true ||
-      userStore.uploadingStatus === 'uploading' ||
-      ringStore.uploadingStatus === 'uploading');
+    isVisibleUploadSyncing;
 
   return {
     isDisconnected,
@@ -1079,7 +1240,7 @@ watch(
 );
 
 watch(
-  () => userStore.localData,
+  () => [userStore.localData, legacyHomeHistoryReadCompletedTick.value],
   async (newData) => {
     const protocol = userStore.deviceInfo?.protocol || ringStore.deviceInfo?.protocol || 'unknown';
     const isRwRing = isAwarenessRwRing();
@@ -1101,6 +1262,20 @@ watch(
         snapshot: getAwarenessConnectionSnapshot()
       });
       userStore.updateIsSending(false);
+      return;
+    }
+
+    if (!isRwRing && legacyHomeHistoryReadInFlight.value) {
+      userStore.updateUploadingStatus('2');
+      appendAwarenessDiagnosticLog('legacy-local-data-upload-pending', {
+        protocol,
+        reason: 'history-read-in-flight',
+        localDataCount: localData.length,
+        localDataTail: localData.slice(-3),
+        localDataLength: Array.isArray(local.value) ? local.value.length : 0,
+        stableSnapshot: getLegacyLocalDataStableSnapshot(),
+        snapshot: getAwarenessConnectionSnapshot()
+      });
       return;
     }
 
@@ -1142,103 +1317,197 @@ watch(
         const submitMetricCounts = countRingHistoryRecordMetrics(submitArray as Array<Record<string, any>>);
         const rawRecordSummary = summarizeLegacyUploadRecordsForLog(filteredRecords as Array<Record<string, any>>);
         const submitRecordSummary = summarizeLegacyUploadRecordsForLog(submitArray as Array<Record<string, any>>);
-        if (!isRwRing) {
-          appendAwarenessDiagnosticLog('legacy-local-data-upload-ready', {
-            protocol,
-            localDataCount: localData.length,
-            filteredRecordCount: filteredRecords.length,
-            submitCount: submitArray.length,
-            lastReadTimestamp: userStore.lastReadTimestamp,
-            uploadSinceTimestamp,
-            uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
-            rawMetricCounts,
-            submitMetricCounts,
-            rawRecordSummary,
-            submitRecordSummary,
-            sample: submitArray.slice(0, 2),
-            snapshot: getAwarenessConnectionSnapshot()
-          });
-        }
+        appendAwarenessDiagnosticLog('legacy-local-data-upload-ready', {
+          protocol,
+          isRwRing,
+          localDataCount: localData.length,
+          filteredRecordCount: filteredRecords.length,
+          submitCount: submitArray.length,
+          lastReadTimestamp: userStore.lastReadTimestamp,
+          uploadSinceTimestamp,
+          uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+          rawMetricCounts,
+          submitMetricCounts,
+          rawRecordSummary,
+          submitRecordSummary,
+          sample: submitArray.slice(0, 2),
+          snapshot: getAwarenessConnectionSnapshot()
+        });
 
         if (submitArray.length !== 0) {
           const deviceMac = getRingSubmitDeviceMac(userStore, isIOS.value);
+          const rawFrames = buildLegacyLocalDataRawFramesForUpload(localData, deviceMac);
           const uploadDedupKey = getLegacyLocalDataUploadKey(deviceMac, uploadSinceTimestamp, submitArray as Array<Record<string, any>>, submitMetricCounts);
           const now = Date.now();
           if (legacyLocalDataUploadPromise) {
-            if (!isRwRing) {
-              appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
-                protocol,
-                reason: 'dedup-running',
-                submitCount: submitArray.length,
-                uploadSinceTimestamp,
-                uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
-                submitMetricCounts,
-                submitRecordSummary,
-                deviceMac,
-                snapshot: getAwarenessConnectionSnapshot()
-              });
-            }
+            appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
+              protocol,
+              isRwRing,
+              reason: 'dedup-running',
+              submitCount: submitArray.length,
+              uploadSinceTimestamp,
+              uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+              submitMetricCounts,
+              submitRecordSummary,
+              deviceMac,
+              snapshot: getAwarenessConnectionSnapshot()
+            });
             return;
           }
           if (uploadDedupKey === lastLegacyLocalDataUploadKey && now - lastLegacyLocalDataUploadAt < LEGACY_LOCAL_DATA_UPLOAD_DEDUP_MS) {
-            if (!isRwRing) {
-              appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
-                protocol,
-                reason: 'dedup-recent',
-                elapsedMs: now - lastLegacyLocalDataUploadAt,
-                submitCount: submitArray.length,
-                uploadSinceTimestamp,
-                uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
-                submitMetricCounts,
-                submitRecordSummary,
-                deviceMac,
-                snapshot: getAwarenessConnectionSnapshot()
-              });
+            appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
+              protocol,
+              isRwRing,
+              reason: 'dedup-recent',
+              elapsedMs: now - lastLegacyLocalDataUploadAt,
+              submitCount: submitArray.length,
+              uploadSinceTimestamp,
+              uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+              submitMetricCounts,
+              submitRecordSummary,
+              deviceMac,
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+            return;
+          }
+          const backendBinding = await assertAwarenessBackendUploadBindingWithLog(deviceMac, {
+            protocol,
+            isRwRing,
+            stage: 'legacy-local-data-upload',
+            submitCount: submitArray.length,
+            rawFrameCount: rawFrames.length,
+            uploadSinceTimestamp,
+            uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+            submitMetricCounts
+          });
+          if (!backendBinding.ok) {
+            appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
+              protocol,
+              isRwRing,
+              reason: 'backend-current-binding-invalid',
+              reasonCode: backendBinding.reasonCode,
+              message: backendBinding.reason,
+              submitCount: submitArray.length,
+              rawFrameCount: rawFrames.length,
+              deviceMac,
+              backendDeviceMac: backendBinding.deviceMac,
+              backendDevice: summarizeAwarenessDevice(backendBinding.device as Record<string, any> | null | undefined),
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+            if (backendBinding.reasonCode === 'NO_ACTIVE_BINDING' || backendBinding.reasonCode === 'BOUND_DEVICE_MISMATCH') {
+              await clearFrontendRingBindingState(userStore, ringStore);
             }
             return;
           }
+          const uploadSession = stagePendingUploadSession({
+            uploadSessionId: createUploadSessionId(protocol || 'legacy'),
+            deviceMac,
+            protocol,
+            bindingId: backendBinding.bindingId,
+            bindingVersion: backendBinding.bindingVersion,
+            dataUserId: backendBinding.dataUserId,
+            dataList: submitArray as any,
+            rawFrames
+          });
           homeDataSyncing.value = true;
           userStore.updateUploadingStatus('1');
-          if (!isRwRing) {
-            appendAwarenessDiagnosticLog('legacy-local-data-upload-start', {
-              protocol,
-              submitCount: submitArray.length,
-              uploadSinceTimestamp,
-              uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
-              submitMetricCounts,
-              submitRecordSummary,
-              deviceMac,
-              sample: submitArray.slice(0, 2),
-              snapshot: getAwarenessConnectionSnapshot()
-            });
-          }
+          appendAwarenessDiagnosticLog('legacy-local-data-upload-start', {
+            protocol,
+            isRwRing,
+            uploadSessionId: uploadSession.uploadSessionId,
+            submitCount: submitArray.length,
+            uploadSinceTimestamp,
+            uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+            submitMetricCounts,
+            submitRecordSummary,
+            rawFrameCount: rawFrames.length,
+            deviceMac,
+            sample: submitArray.slice(0, 2),
+            snapshot: getAwarenessConnectionSnapshot()
+          });
+          appendAwarenessDiagnosticLog('upload-start', {
+            protocol,
+            isRwRing,
+            stage: 'legacy-local-data-upload',
+            uploadSessionId: uploadSession.uploadSessionId,
+            submitCount: submitArray.length,
+            uploadSinceTimestamp,
+            uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+            submitMetricCounts,
+            rawFrameCount: rawFrames.length,
+            deviceMac,
+            snapshot: getAwarenessConnectionSnapshot()
+          });
 
           let submitResponse: unknown;
+          let rawSubmitResponse: unknown;
           try {
-            legacyLocalDataUploadPromise = submitData({
-              deviceMac,
-              dataList: submitArray
-            });
+            legacyLocalDataUploadPromise = (async () => {
+              return submitData({
+                deviceMac,
+                dataList: submitArray,
+                ...buildUploadSyncMeta(uploadSession)
+              });
+            })();
             submitResponse = await legacyLocalDataUploadPromise;
+            markPendingUploadDataDone(uploadSession.uploadSessionId, submitResponse);
+          } catch (uploadError) {
+            markPendingUploadDataFailed(uploadSession.uploadSessionId, uploadError);
+            throw uploadError;
           } finally {
             legacyLocalDataUploadPromise = null;
           }
+          if (rawFrames.length > 0) {
+            rawSubmitResponse = { rawStatus: 'scheduled', uploadSessionId: uploadSession.uploadSessionId, rawFrameCount: rawFrames.length };
+            void uploadPendingRawFramesInBackground(uploadSession, (params) => submitRingHistoryRawFrames(params)).catch((rawUploadError) => {
+              appendAwarenessDiagnosticLog('legacy-local-raw-upload-failed', {
+                protocol,
+                uploadSessionId: uploadSession.uploadSessionId,
+                deviceMac,
+                rawFrameCount: rawFrames.length,
+                error: formatBleErrorMessage(rawUploadError, 'raw history upload failed'),
+                rawError: getAwarenessRawError(rawUploadError),
+                snapshot: getAwarenessConnectionSnapshot()
+              });
+            });
+          } else {
+            rawSubmitResponse = { rawStatus: 'none', uploadSessionId: uploadSession.uploadSessionId, rawFrameCount: 0 };
+          }
           lastLegacyLocalDataUploadKey = uploadDedupKey;
           lastLegacyLocalDataUploadAt = Date.now();
+          appendAwarenessDiagnosticLog('legacy-local-data-upload-result', {
+            protocol,
+            isRwRing,
+            uploadSessionId: uploadSession.uploadSessionId,
+            submitCount: submitArray.length,
+            uploadSinceTimestamp,
+            uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+            submitMetricCounts,
+            submitRecordSummary,
+            rawFrameCount: rawFrames.length,
+            rawSubmitResponse: summarizeSubmitDataResponse(rawSubmitResponse),
+            submitResponse: summarizeSubmitDataResponse(submitResponse),
+            snapshot: getAwarenessConnectionSnapshot()
+          });
+          appendAwarenessDiagnosticLog('upload-result', {
+            protocol,
+            isRwRing,
+            stage: 'legacy-local-data-upload',
+            uploadSessionId: uploadSession.uploadSessionId,
+            submitCount: submitArray.length,
+            uploadSinceTimestamp,
+            uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+            submitMetricCounts,
+            rawFrameCount: rawFrames.length,
+            rawSubmitResponse: summarizeSubmitDataResponse(rawSubmitResponse),
+            submitResponse: summarizeSubmitDataResponse(submitResponse),
+            snapshot: getAwarenessConnectionSnapshot()
+          });
           if (!isRwRing) {
-            appendAwarenessDiagnosticLog('legacy-local-data-upload-result', {
-              protocol,
-              submitCount: submitArray.length,
-              uploadSinceTimestamp,
-              uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
-              submitMetricCounts,
-              submitRecordSummary,
-              submitResponse: summarizeSubmitDataResponse(submitResponse),
-              snapshot: getAwarenessConnectionSnapshot()
-            });
             if (shouldKeepLegacyLocalHistoryCacheAfterUpload(submitMetricCounts, submitResponse)) {
               appendAwarenessDiagnosticLog('legacy-local-data-cache-keep', {
                 protocol,
+                isRwRing,
                 reason: 'sleep-not-ingested',
                 submitCount: submitArray.length,
                 uploadSinceTimestamp,
@@ -1279,10 +1548,68 @@ watch(
           await refreshAwarenessAfterDataProcessed('legacy-local-data-upload-complete');
           // uni.hideLoading();
         } else if (!isRwRing) {
+          const deviceMac = getRingSubmitDeviceMac(userStore, isIOS.value);
+          const rawFrames = buildLegacyLocalDataRawFramesForUpload(localData, deviceMac);
+          let rawSubmitResponse: unknown;
+          if (deviceMac && rawFrames.length > 0) {
+            const backendBinding = await assertAwarenessBackendUploadBindingWithLog(deviceMac, {
+              protocol,
+              isRwRing,
+              stage: 'legacy-local-raw-upload',
+              reason: 'empty-submit-array',
+              rawFrameCount: rawFrames.length,
+              uploadSinceTimestamp,
+              uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+              rawMetricCounts,
+              submitMetricCounts
+            });
+            if (backendBinding.ok) {
+              const uploadSession = stagePendingUploadSession({
+                uploadSessionId: createUploadSessionId(protocol || 'legacy_raw'),
+                deviceMac,
+                protocol,
+                bindingId: backendBinding.bindingId,
+                bindingVersion: backendBinding.bindingVersion,
+                dataUserId: backendBinding.dataUserId,
+                dataList: [],
+                rawFrames
+              });
+              rawSubmitResponse = {
+                rawStatus: 'scheduled',
+                uploadSessionId: uploadSession.uploadSessionId,
+                rawFrameCount: rawFrames.length
+              };
+              void uploadPendingRawFramesInBackground(uploadSession, (params) => submitRingHistoryRawFrames(params)).catch((rawUploadError) => {
+                appendAwarenessDiagnosticLog('legacy-local-raw-upload-failed', {
+                  protocol,
+                  reason: 'empty-submit-array',
+                  uploadSessionId: uploadSession.uploadSessionId,
+                  deviceMac,
+                  rawFrameCount: rawFrames.length,
+                  error: formatBleErrorMessage(rawUploadError, 'raw history upload failed'),
+                  rawError: getAwarenessRawError(rawUploadError),
+                  snapshot: getAwarenessConnectionSnapshot()
+                });
+              });
+            } else {
+              rawSubmitResponse = {
+                rawStatus: 'skipped',
+                reasonCode: backendBinding.reasonCode,
+                message: backendBinding.reason,
+                backendDeviceMac: backendBinding.deviceMac
+              };
+              if (backendBinding.reasonCode === 'NO_ACTIVE_BINDING' || backendBinding.reasonCode === 'BOUND_DEVICE_MISMATCH') {
+                await clearFrontendRingBindingState(userStore, ringStore);
+              }
+            }
+          }
           appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
             protocol,
             reason: 'empty-submit-array',
             deferredRefresh: homeDataSyncing.value,
+            deviceMac,
+            rawFrameCount: rawFrames.length,
+            rawSubmitResponse: summarizeSubmitDataResponse(rawSubmitResponse),
             localDataCount: localData.length,
             filteredRecordCount: filteredRecords.length,
             lastReadTimestamp: userStore.lastReadTimestamp,
@@ -1313,20 +1640,22 @@ watch(
     } catch (error) {
       userStore.updateIsSending(false);
       userStore.updateUploadingStatus('0');
-      if (!isRwRing) {
-        appendAwarenessDiagnosticLog('legacy-local-data-upload-failed', {
-          protocol,
-          error: formatBleErrorMessage(error, 'legacy local data upload failed'),
-          rawError: getAwarenessRawError(error),
-          snapshot: getAwarenessConnectionSnapshot()
-        });
-      }
-      uni.hideLoading();
-      uni.showToast({
-        title: '\u6570\u636e\u4e0a\u4f20\u5931\u8d25',
-        icon: 'none',
-        duration: 2000
+      appendAwarenessDiagnosticLog('legacy-local-data-upload-failed', {
+        protocol,
+        isRwRing,
+        error: formatBleErrorMessage(error, 'legacy local data upload failed'),
+        rawError: getAwarenessRawError(error),
+        snapshot: getAwarenessConnectionSnapshot()
       });
+      appendAwarenessDiagnosticLog('upload-failed', {
+        protocol,
+        isRwRing,
+        stage: 'legacy-local-data-upload',
+        error: formatBleErrorMessage(error, 'legacy local data upload failed'),
+        rawError: getAwarenessRawError(error),
+        snapshot: getAwarenessConnectionSnapshot()
+      });
+      uni.hideLoading();
     } finally {
       // userStore.updateIsSending(false);
       homeDataSyncing.value = false;
@@ -1359,11 +1688,13 @@ const isAwarenessNetworkTimeoutError = (error: unknown) => {
   return /timeout|time\s*out|err_connection_timed_out|\u7f51\u7edc\u8bf7\u6c42\u8d85\u65f6/.test(raw);
 };
 const requestAwarenessOverview = async <T>(key: string, date: Date, task: () => Promise<T>): Promise<T | null> => {
+  const startedAt = Date.now();
   try {
     const result = await task();
     appendAwarenessDiagnosticLog('business-overview-request-success', {
       key,
       date: formatLocalDate(date),
+      elapsedMs: Date.now() - startedAt,
       summary: summarizeAwarenessResponse(result),
       snapshot: getAwarenessConnectionSnapshot()
     });
@@ -1372,6 +1703,7 @@ const requestAwarenessOverview = async <T>(key: string, date: Date, task: () => 
     appendAwarenessDiagnosticLog('business-overview-request-failed', {
       key,
       date: formatLocalDate(date),
+      elapsedMs: Date.now() - startedAt,
       error: formatBleErrorMessage(error, '\u9996\u9875\u6570\u636e\u8bf7\u6c42\u5931\u8d25'),
       rawError: getAwarenessRawError(error),
       snapshot: getAwarenessConnectionSnapshot()
@@ -1403,12 +1735,22 @@ const summarizeAwarenessResponse = (value: unknown) => {
   };
 };
 const requestAwarenessAuxiliary = async <T>(key: string, date: Date, task: () => Promise<T>): Promise<T | null> => {
+  const startedAt = Date.now();
   try {
-    return await task();
+    const result = await task();
+    appendAwarenessDiagnosticLog('business-aux-request-success', {
+      key,
+      date: formatLocalDate(date),
+      elapsedMs: Date.now() - startedAt,
+      summary: summarizeAwarenessResponse(result),
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+    return result;
   } catch (error) {
     appendAwarenessDiagnosticLog('business-aux-request-failed', {
       key,
       date: formatLocalDate(date),
+      elapsedMs: Date.now() - startedAt,
       error: formatBleErrorMessage(error, '\u9996\u9875\u8f85\u52a9\u6570\u636e\u8bf7\u6c42\u5931\u8d25'),
       rawError: getAwarenessRawError(error),
       snapshot: getAwarenessConnectionSnapshot()
@@ -1464,6 +1806,7 @@ const getHomeGoalInfoData = async (currentDate = new Date()) => {
 const getStressInfo = async (currentDate = new Date()) => {
 
   const localDate = formatLocalDate(new Date());
+  const stressDetailStartedAt = Date.now();
   let offset = 0;
   if (selectedDayIndex.value === 3) {
     const today = new Date();
@@ -1478,10 +1821,20 @@ const getStressInfo = async (currentDate = new Date()) => {
     date: localDate,
     type: 'day',
     offset
-  }, getAwarenessSilentRequestConfig()).catch((error: unknown) => {
+  }, getAwarenessSilentRequestConfig()).then((result: any) => {
+    appendAwarenessDiagnosticLog('business-overview-request-success', {
+      key: 'stressDetail',
+      date: formatLocalDate(currentDate),
+      elapsedMs: Date.now() - stressDetailStartedAt,
+      summary: summarizeAwarenessResponse(result),
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+    return result;
+  }).catch((error: unknown) => {
     appendAwarenessDiagnosticLog('business-overview-request-failed', {
       key: 'stressDetail',
       date: formatLocalDate(currentDate),
+      elapsedMs: Date.now() - stressDetailStartedAt,
       error: formatBleErrorMessage(error, '\u9996\u9875\u538b\u529b\u8bf7\u6c42\u5931\u8d25'),
       rawError: getAwarenessRawError(error),
       snapshot: getAwarenessConnectionSnapshot()
@@ -1510,8 +1863,28 @@ const getVitalSigns = async (currentDate = new Date()) => {
   }
 };
 
-const refreshAwarenessBusinessOverview = async (date: string) => {
+type AwarenessBusinessRefreshOptions = {
+  allowDuringSync?: boolean;
+  trigger?: string;
+};
+
+const isAwarenessDataSyncInProgress = () =>
+  Boolean(
+    homeDataSyncing.value ||
+      legacyHomeHistoryReadInFlight.value ||
+      awarenessHistorySyncPromise ||
+      awarenessRefreshPromise ||
+      legacyLocalDataUploadPromise
+  );
+
+const runAwarenessBusinessOverviewRefresh = async (date: string, options: AwarenessBusinessRefreshOptions = {}) => {
+  const startedAt = Date.now();
   const currentDate = parseLocalDate(date);
+  appendAwarenessDiagnosticLog('business-overview-refresh-start', {
+    trigger: options.trigger || 'unknown',
+    date,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
   await Promise.all([
     getHomeGoalInfoData(currentDate),
     getBalanceScoreData(currentDate),
@@ -1521,40 +1894,107 @@ const refreshAwarenessBusinessOverview = async (date: string) => {
     getVitalSigns(currentDate)
   ]);
   await Promise.all([initBalanceChart(), initSportChart(), initVitalChart(), initRelaxChart(), initSleepChart()]);
+  appendAwarenessDiagnosticLog('business-overview-refresh-result', {
+    trigger: options.trigger || 'unknown',
+    date,
+    elapsedMs: Date.now() - startedAt,
+    balanceScore: summarizeAwarenessResponse(balanceScoreObj.value),
+    sleepOverview: summarizeAwarenessResponse(sleepOverviewObj.value),
+    motionOverview: summarizeAwarenessResponse(motionOverviewObj.value),
+    stressDetail: summarizeAwarenessResponse(stressDetailObj.value),
+    vitalSign: summarizeAwarenessResponse(vitalSignObj.value),
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+};
+
+const refreshAwarenessBusinessOverview = async (date: string, options: AwarenessBusinessRefreshOptions = {}) => {
+  if (!options.allowDuringSync && isAwarenessDataSyncInProgress()) {
+    pendingAwarenessBusinessRefreshDate = date;
+    appendAwarenessDiagnosticLog('business-overview-refresh-deferred', {
+      trigger: options.trigger || 'unknown',
+      date,
+      reason: 'sync-in-progress',
+      syncing: homeDataSyncing.value,
+      legacyHomeHistoryReadInFlight: legacyHomeHistoryReadInFlight.value,
+      hasAwarenessHistorySyncPromise: Boolean(awarenessHistorySyncPromise),
+      hasAwarenessRefreshPromise: Boolean(awarenessRefreshPromise),
+      hasLegacyLocalDataUploadPromise: Boolean(legacyLocalDataUploadPromise),
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+    return;
+  }
+
+  if (awarenessBusinessRefreshPromise) {
+    pendingAwarenessBusinessRefreshDate = date;
+    appendAwarenessDiagnosticLog('business-overview-refresh-skip', {
+      trigger: options.trigger || 'unknown',
+      date,
+      reason: 'dedup-running',
+      allowDuringSync: options.allowDuringSync === true,
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+    await awarenessBusinessRefreshPromise;
+    if (options.allowDuringSync) {
+      const queuedDate = pendingAwarenessBusinessRefreshDate || date;
+      pendingAwarenessBusinessRefreshDate = '';
+      return refreshAwarenessBusinessOverview(queuedDate, {
+        ...options,
+        allowDuringSync: true,
+        trigger: `${options.trigger || 'unknown'}-after-running`
+      });
+    }
+    return;
+  }
+
+  awarenessBusinessRefreshPromise = runAwarenessBusinessOverviewRefresh(date, options);
+  try {
+    await awarenessBusinessRefreshPromise;
+  } finally {
+    awarenessBusinessRefreshPromise = null;
+  }
 };
 
 const refreshAwarenessAfterDataProcessed = async (reason: string, date = getSelectedDetailDate()) => {
   const now = Date.now();
+  const hadPendingBusinessRefresh = Boolean(pendingAwarenessBusinessRefreshDate);
+  const refreshDate = pendingAwarenessBusinessRefreshDate || date;
+  pendingAwarenessBusinessRefreshDate = '';
+  const shouldForceProcessedRefresh =
+    hadPendingBusinessRefresh || reason.includes('upload-complete') || reason.includes('sync-result');
   if (awarenessProcessedRefreshPromise) {
     appendAwarenessDiagnosticLog('business-processed-refresh-skip', {
       reason: 'dedup-running',
       trigger: reason,
-      date,
+      date: refreshDate,
+      forced: shouldForceProcessedRefresh,
       snapshot: getAwarenessConnectionSnapshot()
     });
     return awarenessProcessedRefreshPromise;
   }
-  if (now - lastAwarenessProcessedRefreshAt < AWARENESS_PROCESSED_REFRESH_DEDUP_MS) {
+  if (!shouldForceProcessedRefresh && now - lastAwarenessProcessedRefreshAt < AWARENESS_PROCESSED_REFRESH_DEDUP_MS) {
     appendAwarenessDiagnosticLog('business-processed-refresh-skip', {
       reason: 'dedup-recent',
       trigger: reason,
-      date,
+      date: refreshDate,
       elapsedMs: now - lastAwarenessProcessedRefreshAt,
       snapshot: getAwarenessConnectionSnapshot()
     });
     return;
   }
   awarenessProcessedRefreshPromise = (async () => {
+    const startedAt = Date.now();
     appendAwarenessDiagnosticLog('business-processed-refresh-start', {
       trigger: reason,
-      date,
+      date: refreshDate,
+      forced: shouldForceProcessedRefresh,
       snapshot: getAwarenessConnectionSnapshot()
     });
-    await refreshAwarenessBusinessOverview(date);
+    await refreshAwarenessBusinessOverview(refreshDate, { allowDuringSync: true, trigger: reason });
     lastAwarenessProcessedRefreshAt = Date.now();
     appendAwarenessDiagnosticLog('business-processed-refresh-result', {
       trigger: reason,
-      date,
+      date: refreshDate,
+      elapsedMs: Date.now() - startedAt,
       balanceScore: summarizeAwarenessResponse(balanceScoreObj.value),
       sleepOverview: summarizeAwarenessResponse(sleepOverviewObj.value),
       motionOverview: summarizeAwarenessResponse(motionOverviewObj.value),
@@ -1588,6 +2028,7 @@ const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string, options: { all
   }
 
   const timezone = -new Date().getTimezoneOffset() / 60;
+  const startedAt = Date.now();
   appendAwarenessDiagnosticLog('device-time-sync-start', {
     trigger,
     isRwRing,
@@ -1604,6 +2045,7 @@ const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string, options: { all
       trigger,
       isRwRing,
       allowLegacy: options.allowLegacy === true,
+      elapsedMs: Date.now() - startedAt,
       timestampMs: now,
       timezone,
       snapshot: getAwarenessConnectionSnapshot()
@@ -1613,6 +2055,7 @@ const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string, options: { all
       trigger,
       isRwRing,
       allowLegacy: options.allowLegacy === true,
+      elapsedMs: Date.now() - startedAt,
       timestampMs: now,
       timezone,
       error: formatBleErrorMessage(error, '\u8bbe\u5907\u65f6\u95f4\u6821\u51c6\u5931\u8d25'),
@@ -1663,7 +2106,10 @@ const syncRwHomeHistoryAndRefreshOverview = async (
     });
 
     try {
+      const deviceTimeStartedAt = Date.now();
       await syncRwHomeDeviceTimeBeforeHistory(reason);
+      const deviceTimeElapsedMs = Date.now() - deviceTimeStartedAt;
+      const historyStartedAt = Date.now();
       const result = await ringBusinessBridge.syncBusinessHistoryPage({
         page: 'awareness',
         date,
@@ -1671,11 +2117,14 @@ const syncRwHomeHistoryAndRefreshOverview = async (
         allowRwDeviceSync: true,
         timeoutMs: RW_HOME_HISTORY_SYNC_TIMEOUT_MS
       });
+      const historySyncElapsedMs = Date.now() - historyStartedAt;
       const records = Array.isArray((result as any)?.records) ? (result as any).records : [];
       appendAwarenessDiagnosticLog('business-sync-background-result', {
         trigger: reason,
         date,
         elapsedMs: Date.now() - startedAt,
+        deviceTimeElapsedMs,
+        historySyncElapsedMs,
         status: (result as any)?.status || (result ? 'success' : 'empty'),
         recordCount: records.length,
         uploaded: (result as any)?.uploaded,
@@ -1691,10 +2140,13 @@ const syncRwHomeHistoryAndRefreshOverview = async (
         recordCount: records.length,
         snapshot: getAwarenessConnectionSnapshot()
       });
-      await refreshAwarenessBusinessOverview(date);
+      const overviewStartedAt = Date.now();
+      await refreshAwarenessBusinessOverview(date, { allowDuringSync: true, trigger: `${reason}-sync-result` });
       appendAwarenessDiagnosticLog('business-sync-refresh-overview-result', {
         trigger: reason,
         date,
+        overviewRefreshElapsedMs: Date.now() - overviewStartedAt,
+        totalElapsedMs: Date.now() - startedAt,
         balanceScore: summarizeAwarenessResponse(balanceScoreObj.value),
         sleepOverview: summarizeAwarenessResponse(sleepOverviewObj.value),
         motionOverview: summarizeAwarenessResponse(motionOverviewObj.value),
@@ -1711,7 +2163,7 @@ const syncRwHomeHistoryAndRefreshOverview = async (
       rawError: getAwarenessRawError(error),
       snapshot: getAwarenessConnectionSnapshot()
     });
-    await refreshAwarenessBusinessOverview(date).catch((overviewError) => {
+    await refreshAwarenessBusinessOverview(date, { allowDuringSync: true, trigger: `${reason}-sync-failed` }).catch((overviewError) => {
       appendAwarenessDiagnosticLog('business-sync-refresh-overview-failed', {
         trigger: reason,
         date,
@@ -1740,7 +2192,7 @@ const handleDateClick = async (index: number) => {
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
   selectData.value = currentDate;
-  await refreshAwarenessBusinessOverview(formatLocalDate(currentDate));
+  await refreshAwarenessBusinessOverview(formatLocalDate(currentDate), { trigger: 'date-click' });
 };
 const openTimePicker = () => {
   calendar.value.open();
@@ -1764,7 +2216,7 @@ const confirm = async (date: any) => {
   selectedDayIndex.value = 3;
   selectData.value = selectedDate;
   const currentDate = formatLocalDate(selectedDate);
-  await refreshAwarenessBusinessOverview(currentDate);
+  await refreshAwarenessBusinessOverview(currentDate, { trigger: 'date-confirm' });
 };
 
 const initBalanceChart = async () => {
@@ -1966,72 +2418,108 @@ const executeCommandsSequentially = async () => {
       });
       if (!isRwRing) {
         await syncRwHomeDeviceTimeBeforeHistory('legacy-home-history-read', { allowLegacy: true });
-        const historyStartedAt = Date.now();
-        const historyDate = formatLocalDate(new Date());
-        const historySinceTimestamp = getAwarenessHistoryReadSinceTimestamp(false);
-        appendAwarenessDiagnosticLog('legacy-home-history-read-start', {
-          protocol,
-          date: historyDate,
-          sinceTimestamp: historySinceTimestamp,
-          sinceText: formatUnixTimestampForLog(historySinceTimestamp),
-          timeoutMs: LEGACY_HOME_HISTORY_SYNC_TIMEOUT_MS,
-          snapshot: getAwarenessConnectionSnapshot()
-        });
-        const historyResult = await readLocalData(false, historySinceTimestamp, undefined, {
-          timeoutMs: LEGACY_HOME_HISTORY_SYNC_TIMEOUT_MS
-        });
-        const records = Array.isArray((historyResult as any)?.records) ? (historyResult as any).records : [];
-        appendAwarenessDiagnosticLog('legacy-home-history-read-result', {
-          protocol,
-          date: historyDate,
-          sinceTimestamp: historySinceTimestamp,
-          sinceText: formatUnixTimestampForLog(historySinceTimestamp),
-          elapsedMs: Date.now() - historyStartedAt,
-          status: (historyResult as any)?.status,
-          uploaded: (historyResult as any)?.uploaded,
-          recordCount: records.length,
-          recordSummary: summarizeLegacyUploadRecordsForLog(records as Array<Record<string, any>>),
-          receivedCount: Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0,
-          localDataLength: Array.isArray(userStore.localData) ? userStore.localData.length : 0,
-          sample: records.slice(0, 2),
-          snapshot: getAwarenessConnectionSnapshot()
-        });
-        if (records.length === 0) {
-          const fallbackStartedAt = Date.now();
-          appendAwarenessDiagnosticLog('legacy-home-history-empty-fallback-start', {
+        legacyHomeHistoryReadInFlight.value = true;
+        let legacyHistoryReadCompleted = false;
+        try {
+          const historyStartedAt = Date.now();
+          const historyDate = formatLocalDate(new Date());
+          const historySinceTimestamp = getAwarenessHistoryReadSinceTimestamp(false);
+          appendAwarenessDiagnosticLog('legacy-home-history-read-start', {
             protocol,
             date: historyDate,
-            primarySinceTimestamp: historySinceTimestamp,
-            primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
-            readAll: true,
-            reason: 'empty-primary-history',
-            timeoutMs: LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS,
+            sinceTimestamp: historySinceTimestamp,
+            sinceText: formatUnixTimestampForLog(historySinceTimestamp),
+            timeoutMs: LEGACY_HOME_HISTORY_SYNC_TIMEOUT_MS,
             snapshot: getAwarenessConnectionSnapshot()
           });
-          const fallbackResult = await readLocalData(true, historyDate, undefined, {
-            timeoutMs: LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS
-          });
-          const fallbackRecords = Array.isArray((fallbackResult as any)?.records) ? (fallbackResult as any).records : [];
-          appendAwarenessDiagnosticLog('legacy-home-history-empty-fallback-result', {
-            protocol,
-            date: historyDate,
-            readAll: true,
-            primarySinceTimestamp: historySinceTimestamp,
-            primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
-            elapsedMs: Date.now() - fallbackStartedAt,
-            status: (fallbackResult as any)?.status,
-            uploaded: (fallbackResult as any)?.uploaded,
-            recordCount: fallbackRecords.length,
-            recordSummary: summarizeLegacyUploadRecordsForLog(fallbackRecords as Array<Record<string, any>>),
-            receivedCount: Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0,
-            localDataLength: Array.isArray(userStore.localData) ? userStore.localData.length : 0,
-            rawMetricCounts: countRingHistoryRecordMetrics(fallbackRecords as Array<Record<string, any>>),
-            sample: fallbackRecords.slice(0, 2),
-            snapshot: getAwarenessConnectionSnapshot()
-          });
+          let records: any[] = [];
+          let primaryHistoryReadError: unknown = null;
+          try {
+            const historyResult = await readLocalData(false, historySinceTimestamp, undefined, {
+              timeoutMs: LEGACY_HOME_HISTORY_SYNC_TIMEOUT_MS
+            });
+            records = Array.isArray((historyResult as any)?.records) ? (historyResult as any).records : [];
+            appendAwarenessDiagnosticLog('legacy-home-history-read-result', {
+              protocol,
+              date: historyDate,
+              sinceTimestamp: historySinceTimestamp,
+              sinceText: formatUnixTimestampForLog(historySinceTimestamp),
+              elapsedMs: Date.now() - historyStartedAt,
+              status: (historyResult as any)?.status,
+              uploaded: (historyResult as any)?.uploaded,
+              recordCount: records.length,
+              recordSummary: summarizeLegacyUploadRecordsForLog(records as Array<Record<string, any>>),
+              receivedCount: Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0,
+              localDataLength: Array.isArray(userStore.localData) ? userStore.localData.length : 0,
+              sample: records.slice(0, 2),
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+          } catch (historyReadError) {
+            primaryHistoryReadError = historyReadError;
+            appendAwarenessDiagnosticLog('legacy-home-history-read-failed', {
+              protocol,
+              date: historyDate,
+              sinceTimestamp: historySinceTimestamp,
+              sinceText: formatUnixTimestampForLog(historySinceTimestamp),
+              elapsedMs: Date.now() - historyStartedAt,
+              error: formatBleErrorMessage(historyReadError, 'legacy history read failed'),
+              rawError: getAwarenessRawError(historyReadError),
+              receivedCount: Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0,
+              localDataLength: Array.isArray(userStore.localData) ? userStore.localData.length : 0,
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+          }
+          if (records.length === 0) {
+            const fallbackStartedAt = Date.now();
+            appendAwarenessDiagnosticLog('legacy-home-history-empty-fallback-start', {
+              protocol,
+              date: historyDate,
+              primarySinceTimestamp: historySinceTimestamp,
+              primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
+              readAll: true,
+              reason: primaryHistoryReadError ? 'primary-history-read-failed' : 'empty-primary-history',
+              primaryError: primaryHistoryReadError ? formatBleErrorMessage(primaryHistoryReadError, 'legacy history read failed') : undefined,
+              primaryRawError: primaryHistoryReadError ? getAwarenessRawError(primaryHistoryReadError) : undefined,
+              timeoutMs: LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS,
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+            const fallbackResult = await readLocalData(true, historyDate, undefined, {
+              timeoutMs: LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS
+            });
+            const fallbackRecords = Array.isArray((fallbackResult as any)?.records) ? (fallbackResult as any).records : [];
+            appendAwarenessDiagnosticLog('legacy-home-history-empty-fallback-result', {
+              protocol,
+              date: historyDate,
+              readAll: true,
+              primarySinceTimestamp: historySinceTimestamp,
+              primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
+              elapsedMs: Date.now() - fallbackStartedAt,
+              status: (fallbackResult as any)?.status,
+              uploaded: (fallbackResult as any)?.uploaded,
+              recordCount: fallbackRecords.length,
+              recordSummary: summarizeLegacyUploadRecordsForLog(fallbackRecords as Array<Record<string, any>>),
+              receivedCount: Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0,
+              localDataLength: Array.isArray(userStore.localData) ? userStore.localData.length : 0,
+              rawMetricCounts: countRingHistoryRecordMetrics(fallbackRecords as Array<Record<string, any>>),
+              sample: fallbackRecords.slice(0, 2),
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+          }
+          legacyHistoryReadCompleted = true;
+        } finally {
+          legacyHomeHistoryReadInFlight.value = false;
+          if (legacyHistoryReadCompleted) {
+            legacyHomeHistoryReadCompletedTick.value = Date.now();
+          }
         }
       }
       lastAwarenessRefreshAt = Date.now();
+      appendAwarenessDiagnosticLog('legacy-home-sync-result', {
+        protocol,
+        elapsedMs: Date.now() - startedAt,
+        hasCachedSnapshot,
+        snapshot: getAwarenessConnectionSnapshot()
+      });
       userStore.updateIsSending(false);
       return;
     } catch (error) {
@@ -2111,31 +2599,14 @@ onShow(async () => {
       const todayTime = new Date().getTime();
       if (detailData != null && detailData != '') {
         if (detailData.predictedCycle != null) {
-          if (detailData.predictedCycle.menstrual != null) {
-            uni.setStorageSync('menstrual', detailData.predictedCycle.menstrual);
-            const targetTime = new Date(detailData.predictedCycle.menstrual.start);
-            const targetEndTime = new Date(detailData.predictedCycle.menstrual.end);
-            if (todayTime >= targetTime.getTime() && todayTime <= targetEndTime.getTime()) {
-              currentPhaseIndex.value = 0;
-              periodTip.value = 'Current menstrual phase';
-            }
-          }
-          if (detailData.predictedCycle.ovulation != null) {
-            const pretargetTime = new Date(detailData.predictedCycle.ovulation.start);
-            const pretargetEndTime = new Date(detailData.predictedCycle.ovulation.end);
-            uni.setStorageSync('ovulation', detailData.predictedCycle.ovulation);
-            if (todayTime >= pretargetTime.getTime() && todayTime <= pretargetEndTime.getTime()) {
-              currentPhaseIndex.value = 1;
-              periodTip.value = 'Current ovulation phase';
-            }
-          }
-          if (detailData.predictedCycle.fertility != null) {
-            uni.setStorageSync('fertility', detailData.predictedCycle.fertility);
-          }
-          if (detailData.predictedCycle.safe != null) {
-            uni.setStorageSync('safe', detailData.predictedCycle.safe);
-          }
+          const cycle = detailData.predictedCycle;
+          uni.setStorageSync('menstrual', cycle.menstrual || cycle.menstruation || cycle.period || null);
+          uni.setStorageSync('ovulation', cycle.ovulation || null);
+          uni.setStorageSync('fertility', cycle.fertility || cycle.fertile || cycle.follicular || null);
+          uni.setStorageSync('safe', cycle.safe || cycle.luteal || null);
+          currentPhaseIndex.value = resolvePeriodPhaseIndex(todayTime, cycle, 'safe');
         }
+        periodTip.value = extractGirlHealthAdvice(detailData) || getGirlHealthPhaseFallbackTip();
       }
       const healthData = await requestAwarenessAuxiliary('girlHealth', today.value, () =>
         getGirlHealth({}, getAwarenessSilentRequestConfig())
@@ -2146,6 +2617,9 @@ onShow(async () => {
       } else {
         showStartGirlCard.value = false;
         showPeriodDetail.value = true;
+        if (!periodTip.value) {
+          periodTip.value = extractGirlHealthAdvice(healthData) || getGirlHealthPhaseFallbackTip();
+        }
       }
       })().catch((error) => {
         appendAwarenessDiagnosticLog('girl-health-background-load-failed', {
@@ -2263,14 +2737,14 @@ onPullDownRefresh(async () => {
       pullDownProgress.value = 60;
       await executeCommandsSequentially();
       pullDownProgress.value = 80;
-      await refreshAwarenessBusinessOverview(formatLocalDate(new Date()));
+      await refreshAwarenessBusinessOverview(formatLocalDate(new Date()), { trigger: 'pull-down-legacy' });
       appendAwarenessDiagnosticLog('legacy-home-pull-down-sync-result', {
         snapshot: getAwarenessConnectionSnapshot()
       });
       pullDownProgress.value = 100;
       return;
     }
-    await refreshAwarenessBusinessOverview(formatLocalDate(new Date()));
+    await refreshAwarenessBusinessOverview(formatLocalDate(new Date()), { trigger: 'pull-down' });
     pullDownProgress.value = 100;
 
 
@@ -2541,10 +3015,6 @@ onPullDownRefresh(async () => {
           </view>
           <view class="module-action flex ai-center">
             <!-- <view class="module-action flex ai-center"> -->
-            <view class="mr-20">
-              <!-- <uv-image src="/static/images/icon05.png" width="56rpx" height="56rpx"></uv-image> -->
-              <uv-image :src="activeIcon" width="56rpx" height="56rpx"></uv-image>
-            </view>
             <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
           </view>
         </view>
@@ -2652,7 +3122,7 @@ onPullDownRefresh(async () => {
         <view class="period-tip flex ai-start">
           <!--  <text class="period-tip-icon fs-28 mr-10" style="color: #5b9bd5; flex-shrink: 0">ℹ</text> -->
           <uv-icon name="error-circle-fill" size="13" style="top: 10rpx" color=" #5b9bd5"></uv-icon>
-          <text class="fs-26" style="font-size: 9px; line-height: 1.6">{{ periodTip }}</text>
+          <text class="period-tip-text">{{ periodTip }}</text>
         </view>
       </view>
     </view>
@@ -2722,6 +3192,13 @@ onPullDownRefresh(async () => {
     background: #eef5fb;
     border-radius: 16rpx;
     padding: 20rpx 24rpx;
+  }
+
+  .period-tip-text {
+    margin-left: 10rpx;
+    color: #667085;
+    font-size: 24rpx;
+    line-height: 1.6;
   }
 }
 

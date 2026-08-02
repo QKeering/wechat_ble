@@ -120,6 +120,7 @@ type GirlHealthModel = {
 };
 import PeriodCycleWheel from './components/wheel.vue';
 import EditPeriodModal from './components/EditPeriodModal.vue';
+import { getPeriodPhaseSegment, resolvePeriodPhaseKey, type PeriodPhaseKey } from '@/utils/periodPhase';
 
 const echarts = require('../../static/echarts.min.js');
 
@@ -257,6 +258,13 @@ const DEFAULT_HEALTH_TIPS: Record<string, string> = {
   luteal: '黄体期保持情绪稳定，补充维生素 B6，适量运动'
 };
 
+const PERIOD_PHASE_HEALTH_TIPS: Record<PeriodPhaseKey, string> = {
+  menstrual: '\u7ecf\u671f\u6ce8\u610f\u4fdd\u6696\uff0c\u907f\u514d\u751f\u51b7\u98df\u7269\uff0c\u4fdd\u8bc1\u5145\u8db3\u4f11\u606f\u3002',
+  ovulation: '\u6392\u5375\u671f\u6ce8\u610f\u8eab\u4f53\u53d8\u5316\uff0c\u4fdd\u6301\u89c4\u5f8b\u4f5c\u606f\u548c\u9002\u91cf\u8fd0\u52a8\u3002',
+  fertile: '\u6613\u5b55\u671f\u8bf7\u7ed3\u5408\u4e2a\u4eba\u8ba1\u5212\uff0c\u505a\u597d\u5907\u5b55\u6216\u907f\u5b55\u5b89\u6392\u3002',
+  safe: '\u5efa\u8bae\u4fdd\u6301\u89c4\u5f8b\u4f5c\u606f\uff0c\u6301\u7eed\u8bb0\u5f55\u5468\u671f\u53d8\u5316\u3002'
+};
+
 const importantReminders = computed(() => {
   const data = girlHealthAll.value;
   const list: { icon: string; color: string; title: string; desc: string }[] = [];
@@ -304,8 +312,8 @@ const importantReminders = computed(() => {
 
   // 健康建议：优先接口数据，否则按当前阶段给默认文案
   const tips = data?.periodTips;
-  const phase = data?.predictedCycle ? detectCurrentPhase(data.predictedCycle) : '';
-  const defaultTip = DEFAULT_HEALTH_TIPS[phase] || '请保持规律作息，均衡饮食，适量运动';
+  const phase = data?.predictedCycle ? detectCurrentPhase(data.predictedCycle) : 'safe';
+  const defaultTip = PERIOD_PHASE_HEALTH_TIPS[phase] || '\u8bf7\u4fdd\u6301\u89c4\u5f8b\u4f5c\u606f\uff0c\u5747\u8861\u996e\u98df\uff0c\u9002\u91cf\u8fd0\u52a8';
   list.push({
     icon: 'bag',
     color: '#F05F8F',
@@ -317,16 +325,8 @@ const importantReminders = computed(() => {
 });
 
 /** 根据 predictedCycle 判断当前日期处于哪个阶段 */
-function detectCurrentPhase(pc: any): string {
-  const today = formatDateYmd(selectedDate.value);
-  const phases = ['menstrual', 'follicular', 'ovulation', 'luteal'] as const;
-  for (const p of phases) {
-    const seg = pc[p];
-    if (seg?.start && seg?.end && today >= seg.start && today <= seg.end) {
-      return p;
-    }
-  }
-  return 'ovulation';
+function detectCurrentPhase(pc: any): PeriodPhaseKey {
+  return resolvePeriodPhaseKey(selectedDate.value, pc, 'safe');
 }
 
 function formatDateMD(ymd: string): string {
@@ -485,10 +485,14 @@ function syncWheelFromGirlHealthAll() {
   const pc = data?.predictedCycle;
   if (!pc) return;
 
-  const menstrualLen = daysInclusive(pc.menstrual?.start, pc.menstrual?.end);
-  const follicularLen = daysInclusive(pc.follicular?.start, pc.follicular?.end);
-  const ovulationLen = daysInclusive(pc.ovulation?.start, pc.ovulation?.end);
-  const lutealLen = daysInclusive(pc.luteal?.start, pc.luteal?.end);
+  const menstrualSeg = getPeriodPhaseSegment(pc, 'menstrual');
+  const fertileSeg = getPeriodPhaseSegment(pc, 'fertile');
+  const ovulationSeg = getPeriodPhaseSegment(pc, 'ovulation');
+  const safeSeg = getPeriodPhaseSegment(pc, 'safe');
+  const menstrualLen = daysInclusive(menstrualSeg?.start, menstrualSeg?.end);
+  const follicularLen = daysInclusive(fertileSeg?.start, fertileSeg?.end);
+  const ovulationLen = daysInclusive(ovulationSeg?.start, ovulationSeg?.end);
+  const lutealLen = daysInclusive(safeSeg?.start, safeSeg?.end);
   phaseLengths.value = {
     menstrual: menstrualLen || undefined,
     follicular: follicularLen || undefined,
@@ -497,8 +501,8 @@ function syncWheelFromGirlHealthAll() {
   };
 
   const sel = startOfLocalDay(selectedDate.value);
-  const mStart = parseYmdToLocalDate(pc.menstrual?.start);
-  const cycleEnd = parseYmdToLocalDate(pc.luteal?.end);
+  const mStart = parseYmdToLocalDate(menstrualSeg?.start);
+  const cycleEnd = parseYmdToLocalDate(safeSeg?.end || ovulationSeg?.end || fertileSeg?.end || menstrualSeg?.end);
   if (!mStart || !cycleEnd) return;
 
   if (sel.getTime() < mStart.getTime() || sel.getTime() > cycleEnd.getTime()) {
@@ -566,7 +570,8 @@ async function loadGirlHealthAll() {
   try {
     const res = await getUserGirlHealthAll({ date: formatDateYmd(selectedDate.value) });
     girlHealthAll.value = res || null;
-	girlHealthEndDate.value = res?.predictedCycle?.luteal?.end || '';
+    const safeSeg = getPeriodPhaseSegment(res?.predictedCycle, 'safe');
+	girlHealthEndDate.value = safeSeg?.end || '';
     syncWheelFromGirlHealthAll();
   } catch {
     girlHealthAll.value = null;

@@ -165,8 +165,17 @@ export interface LegacyReadLocalDataOptions {
 }
 
 const DEFAULT_SCAN_PREFIXES = ['HR', 'IF', 'QK', 'QKeeRing', 'PPlus'];
+const LEGACY_PRIMARY_SERVICE_UUID = 'BAE80001-4F05-4503-8E65-3AF1F7329D1F';
 const LEGACY_SERVICE_MARKERS = ['BAE8', '4F05-4503-8E65-3AF1F7329D1F'];
 const SERVICE_CACHE_KEY = 'deviceServiceCache';
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const isAlreadyConnectedError = (error: unknown) => {
+  const record = (error && typeof error === 'object' ? error : {}) as Record<string, unknown>;
+  const message = `${record.errMsg || record.message || error || ''}`.toLowerCase();
+  return message.includes('already connect') || message.includes('already connected');
+};
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
 
@@ -448,7 +457,40 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     });
   };
 
-  const connectDevice = (deviceId: string, deviceName = '') => {
+  const getConnectedLegacyDeviceIds = () => {
+    return new Promise<string[]>((resolve) => {
+      uni.getConnectedBluetoothDevices({
+        services: [LEGACY_PRIMARY_SERVICE_UUID],
+        success: (result) => {
+          resolve((result.devices || []).map((device) => device.deviceId).filter(Boolean));
+        },
+        fail: () => resolve([])
+      });
+    });
+  };
+
+  const closeBleConnectionQuietly = (deviceId: string) => {
+    if (!deviceId) return Promise.resolve(undefined);
+    return new Promise<unknown>((resolve) => {
+      uni.closeBLEConnection({
+        deviceId,
+        success: resolve,
+        fail: resolve
+      });
+    });
+  };
+
+  const closeConnectedLegacyDevicesQuietly = async (targetDeviceId?: string) => {
+    const connectedDeviceIds = await getConnectedLegacyDeviceIds();
+    await Promise.all(
+      connectedDeviceIds
+        .filter((connectedDeviceId) => connectedDeviceId && connectedDeviceId !== targetDeviceId)
+        .map((connectedDeviceId) => closeBleConnectionQuietly(connectedDeviceId))
+    );
+    return connectedDeviceIds;
+  };
+
+  const createBleConnectionOnce = (deviceId: string, deviceName = '') => {
     return new Promise<RingDeviceInfo>((resolve, reject) => {
       uni.createBLEConnection({
         deviceId,
@@ -460,6 +502,24 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         fail: reject
       });
     });
+  };
+
+  const connectDevice = async (deviceId: string, deviceName = '') => {
+    try {
+      return await createBleConnectionOnce(deviceId, deviceName);
+    } catch (error) {
+      if (!isAlreadyConnectedError(error)) throw error;
+
+      const connectedDeviceIds = await getConnectedLegacyDeviceIds();
+      if (connectedDeviceIds.includes(deviceId)) {
+        return { deviceId, name: deviceName, protocol: 'legacy' as const };
+      }
+
+      await closeConnectedLegacyDevicesQuietly();
+      await closeBleConnectionQuietly(deviceId);
+      await sleep(350);
+      return createBleConnectionOnce(deviceId, deviceName);
+    }
   };
 
   const connectAndDiscover = async (deviceId: string, deviceName = '') => {

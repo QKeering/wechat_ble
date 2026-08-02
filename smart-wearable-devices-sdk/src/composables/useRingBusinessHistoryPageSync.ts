@@ -1,10 +1,21 @@
 import { useRingBLE } from '@/composables/useRingBLE';
-import { submitData } from '@/common/api/homeDetail';
+import { submitData, submitRingHistoryRawFrames } from '@/common/api/homeDetail';
+import { buildRingRawHistoryFrames, type RingRawHistoryFrame } from '@/api/ringDevice';
 import { useRingStore } from '@/stores';
 import { useUserStore } from '@/stores/user';
 import { formatBleErrorMessage, isExpectedBleRuntimeError } from '@/utils/bleError';
 import { hasAnyRingCommunicationReady } from '@/utils/ringConnectionStatus';
 import { getRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
+import { clearFrontendRingBindingState } from '@/utils/ringBinding';
+import {
+  assertBackendUploadBinding,
+  buildUploadSyncMeta,
+  createUploadSessionId,
+  markPendingUploadDataDone,
+  markPendingUploadDataFailed,
+  stagePendingUploadSession,
+  uploadPendingRawFramesInBackground
+} from '@/utils/dataUploadCompensation';
 import { appendRingDiagnosticLog } from './useRwForegroundMeasurement';
 import {
   buildRingHistorySubmitRecords,
@@ -693,10 +704,25 @@ export const useRingBusinessHistoryPageSync = () => {
   const getHistoryPageResultRecords = (result: Awaited<ReturnType<typeof ringBle.readLocalData>>) =>
     Array.isArray((result as any)?.records) ? ((result as any).records as Array<Record<string, any>>) : [];
 
+  const getHistoryPageRawUploadFrames = (results: Array<unknown>, deviceMac: string): RingRawHistoryFrame[] => {
+    const keyedFrames = new Map<string, RingRawHistoryFrame>();
+    for (const result of results) {
+      if (!result || typeof result !== 'object') continue;
+      const parsed = ((result as any).parsed && typeof (result as any).parsed === 'object' ? (result as any).parsed : result) as Record<string, any>;
+      const records = getHistoryPageResultRecords(result as Awaited<ReturnType<typeof ringBle.readLocalData>>);
+      const frames = buildRingRawHistoryFrames(records, parsed, deviceMac);
+      frames.forEach((frame) => {
+        if (frame.rawHash) keyedFrames.set(frame.rawHash, frame);
+      });
+    }
+    return Array.from(keyedFrames.values());
+  };
+
   const uploadHistoryPageRecords = async (
     records: Array<Record<string, any>>,
     details: Record<string, unknown>,
-    sinceTimestamp: number
+    sinceTimestamp: number,
+    rawResults: Array<unknown> = []
   ) => {
     const deviceMac = getRingSubmitDeviceMac(
       userStore,
@@ -714,6 +740,44 @@ export const useRingBusinessHistoryPageSync = () => {
         rawRecordSample: records.slice(0, 2).map(summarizeHistoryPageRecord)
       });
       return null;
+    }
+
+    const backendBinding = await assertBackendUploadBinding(deviceMac, getHistoryPageSilentRequestConfig() as any);
+    if (!backendBinding.ok) {
+      appendRingDiagnosticLog('RW PAGE', 'history-page-upload-skip', {
+        ...details,
+        reason: 'backend-current-binding-invalid',
+        reasonCode: backendBinding.reasonCode,
+        message: backendBinding.reason,
+        deviceMac,
+        backendDeviceMac: backendBinding.deviceMac,
+        backendDevice: backendBinding.device,
+        rawRecordCount: records.length,
+        rawRecordSample: records.slice(0, 2).map(summarizeHistoryPageRecord)
+      });
+      if (backendBinding.reasonCode === 'NO_ACTIVE_BINDING' || backendBinding.reasonCode === 'BOUND_DEVICE_MISMATCH') {
+        await clearFrontendRingBindingState(userStore, ringStore);
+      }
+      return null;
+    }
+
+    const rawFrames = getHistoryPageRawUploadFrames(rawResults, deviceMac);
+    let rawSubmitResponse: unknown = rawFrames.length > 0
+      ? { rawStatus: 'pending', rawFrameCount: rawFrames.length }
+      : { rawStatus: 'none', rawFrameCount: 0 };
+    if (false && rawFrames.length > 0) {
+      try {
+        rawSubmitResponse = await submitRingHistoryRawFrames({ deviceMac, frames: rawFrames }, getHistoryPageSilentRequestConfig());
+      } catch (rawUploadError) {
+        appendRingDiagnosticLog('RW PAGE', 'history-page-raw-upload-failed', {
+          ...details,
+          deviceMac,
+          rawFrameCount: rawFrames.length,
+          error: formatBleErrorMessage(rawUploadError, '原始历史数据保存失败'),
+          rawError: getHistoryPageRawError(rawUploadError)
+        });
+        return null;
+      }
     }
 
     const maxVisibleTimestamp = Math.floor(Date.now() / 1000) + 10 * 60;
@@ -761,6 +825,9 @@ export const useRingBusinessHistoryPageSync = () => {
         ...details,
         reason: records.length === 0 ? 'no-records' : 'no-submittable-records',
         deviceMac,
+        rawFrameCount: rawFrames.length,
+        rawFrameStored: rawFrames.length > 0,
+        rawSubmitResponse,
         rawRecordCount: records.length,
         currentSubmitRecordCount: currentSubmitRecords.length,
         currentCandidateRecordCount: currentCandidateRecords.length,
@@ -779,11 +846,47 @@ export const useRingBusinessHistoryPageSync = () => {
         filteredRecordSample: filteredRecords.slice(0, 2).map(summarizeHistoryPageRecord),
         futureFilteredRecordSample: futureFilteredRecords.slice(0, 2).map(summarizeHistoryPageRecord)
       });
+      if (rawFrames.length > 0) {
+        const rawOnlySession = stagePendingUploadSession({
+          uploadSessionId: createUploadSessionId(`${String(getProtocolCandidate() || 'history')}_raw`),
+          deviceMac: String(deviceMac),
+          protocol: String(getProtocolCandidate() || ''),
+          bindingId: backendBinding.bindingId == null ? undefined : String(backendBinding.bindingId),
+          bindingVersion: backendBinding.bindingVersion == null ? undefined : String(backendBinding.bindingVersion),
+          dataUserId: backendBinding.dataUserId == null ? undefined : String(backendBinding.dataUserId),
+          dataList: [],
+          rawFrames
+        });
+        void uploadPendingRawFramesInBackground(rawOnlySession, (params) =>
+          submitRingHistoryRawFrames(params, getHistoryPageSilentRequestConfig())
+        ).catch((rawUploadError) => {
+          appendRingDiagnosticLog('RW PAGE', 'history-page-raw-upload-failed', {
+            ...details,
+            reason: 'no-submittable-records',
+            uploadSessionId: rawOnlySession.uploadSessionId,
+            deviceMac,
+            rawFrameCount: rawFrames.length,
+            error: formatBleErrorMessage(rawUploadError, 'raw history upload failed'),
+            rawError: getHistoryPageRawError(rawUploadError)
+          });
+        });
+      }
       return null;
     }
+    const uploadSession = stagePendingUploadSession({
+      uploadSessionId: createUploadSessionId(String(getProtocolCandidate() || 'history')),
+      deviceMac: String(deviceMac),
+      protocol: String(getProtocolCandidate() || ''),
+      bindingId: backendBinding.bindingId == null ? undefined : String(backendBinding.bindingId),
+      bindingVersion: backendBinding.bindingVersion == null ? undefined : String(backendBinding.bindingVersion),
+      dataUserId: backendBinding.dataUserId == null ? undefined : String(backendBinding.dataUserId),
+      dataList: submitPreviewRecords,
+      rawFrames
+    });
     const uploadDetails = {
       ...details,
       endpoint: HISTORY_PAGE_UPLOAD_ENDPOINT,
+      uploadSessionId: uploadSession.uploadSessionId,
       uploadTimeoutMs: HISTORY_PAGE_UPLOAD_TIMEOUT_MS,
       backendUploadStarted: true,
       deviceMac,
@@ -801,6 +904,8 @@ export const useRingBusinessHistoryPageSync = () => {
       submitRecordCount: submitPreviewRecords.length,
       rawMetricCounts: countHistoryPageRecordMetrics(records),
       submitMetricCounts: countHistoryPageRecordMetrics(submitPreviewRecords as any),
+      rawFrameCount: rawFrames.length,
+      rawSubmitResponse,
       rawRecordSample: records.slice(0, 2).map(summarizeHistoryPageRecord),
       submitRecordSample: submitPreviewRecords.slice(0, 2)
     };
@@ -808,8 +913,14 @@ export const useRingBusinessHistoryPageSync = () => {
 
     let submitResponse: unknown;
     try {
-      submitResponse = await submitData({ deviceMac, dataList: submitPreviewRecords }, getHistoryPageSilentRequestConfig());
+      submitResponse = await submitData({
+        deviceMac,
+        dataList: submitPreviewRecords,
+        ...buildUploadSyncMeta(uploadSession)
+      }, getHistoryPageSilentRequestConfig());
+      markPendingUploadDataDone(uploadSession.uploadSessionId, submitResponse);
     } catch (uploadError) {
+      markPendingUploadDataFailed(uploadSession.uploadSessionId, uploadError);
       const savedPending = writeHistoryPagePendingUpload(
         deviceMac,
         submitPreviewRecords,
@@ -829,6 +940,21 @@ export const useRingBusinessHistoryPageSync = () => {
         formatBleErrorMessage(uploadError);
       }
       return null;
+    }
+    if (rawFrames.length > 0) {
+      rawSubmitResponse = { rawStatus: 'scheduled', uploadSessionId: uploadSession.uploadSessionId, rawFrameCount: rawFrames.length };
+      void uploadPendingRawFramesInBackground(uploadSession, (params) =>
+        submitRingHistoryRawFrames(params, getHistoryPageSilentRequestConfig())
+      ).catch((rawUploadError) => {
+        appendRingDiagnosticLog('RW PAGE', 'history-page-raw-upload-failed', {
+          ...details,
+          uploadSessionId: uploadSession.uploadSessionId,
+          deviceMac,
+          rawFrameCount: rawFrames.length,
+          error: formatBleErrorMessage(rawUploadError, 'raw history upload failed'),
+          rawError: getHistoryPageRawError(rawUploadError)
+        });
+      });
     }
     clearHistoryPagePendingUpload(deviceMac);
     const uploadedRecordKeyCount = writeHistoryPageUploadedRecordKeys(
@@ -963,9 +1089,13 @@ export const useRingBusinessHistoryPageSync = () => {
 
     const startedAt = Date.now();
     try {
-      const result = await ringBle.readLocalData(readAll, historyStartDate, dataTypes, { timeoutMs });
+      const result = await ringBle.readLocalData(readAll, historyStartDate, dataTypes, {
+        timeoutMs,
+        silentUploadStatus: true
+      });
       const records = getHistoryPageResultRecords(result);
       const uploadRecordGroups: Array<Array<Record<string, any>>> = [records];
+      const uploadRawResults: Array<unknown> = [result];
       const fallbackUploadSummaries: Array<Record<string, unknown>> = [];
       const primaryRawMetricCounts = countHistoryPageRecordMetrics(records);
       const primarySubmitRecords = buildRingHistorySubmitRecords(records as any, sinceTimestamp);
@@ -1014,10 +1144,14 @@ export const useRingBusinessHistoryPageSync = () => {
           appendRingDiagnosticLog('RW PAGE', fallbackEvents.start, fallbackDetails);
           const fallbackStartedAt = Date.now();
           try {
-            const fallbackResult = await ringBle.readLocalData(true, historyStartDate, fallbackDataTypes, { timeoutMs: fallbackTimeoutMs });
+            const fallbackResult = await ringBle.readLocalData(true, historyStartDate, fallbackDataTypes, {
+              timeoutMs: fallbackTimeoutMs,
+              silentUploadStatus: true
+            });
             const fallbackRecords = getHistoryPageResultRecords(fallbackResult);
             const fallbackSubmitRecords = buildRingHistorySubmitRecords(fallbackRecords as any, sinceTimestamp);
             uploadRecordGroups.push(fallbackRecords);
+            uploadRawResults.push(fallbackResult);
             fallbackUploadSummaries.push({
               fallback: fallbackDetails.fallback,
               dataTypes: fallbackDataTypes,
@@ -1071,10 +1205,14 @@ export const useRingBusinessHistoryPageSync = () => {
           appendRingDiagnosticLog('RW PAGE', HISTORY_PAGE_MISSING_VITAL_FALLBACK_EVENTS.start, fallbackDetails);
           const fallbackStartedAt = Date.now();
           try {
-            const fallbackResult = await ringBle.readLocalData(true, historyStartDate, fallbackDataTypes, { timeoutMs: fallbackTimeoutMs });
+            const fallbackResult = await ringBle.readLocalData(true, historyStartDate, fallbackDataTypes, {
+              timeoutMs: fallbackTimeoutMs,
+              silentUploadStatus: true
+            });
             const fallbackRecords = getHistoryPageResultRecords(fallbackResult);
             const fallbackSubmitRecords = buildRingHistorySubmitRecords(fallbackRecords as any, sinceTimestamp);
             uploadRecordGroups.push(fallbackRecords);
+            uploadRawResults.push(fallbackResult);
             fallbackUploadSummaries.push({
               fallback: fallbackDetails.fallback,
               dataTypes: fallbackDataTypes,
@@ -1122,7 +1260,8 @@ export const useRingBusinessHistoryPageSync = () => {
             combinedRawRecordCount: combinedUploadRecords.length,
             combinedSubmitRecordCount: combinedSubmitRecords.length
           },
-          sinceTimestamp
+          sinceTimestamp,
+          uploadRawResults
         );
       } catch (uploadError) {
         appendRingDiagnosticLog('RW PAGE', 'history-page-upload-failed', {

@@ -1,14 +1,14 @@
 <template>
   <div class="app-container">
     <el-form :model="queryParams" ref="queryForm" size="small" :inline="true" v-show="showSearch" label-width="68px">
-      <!-- <el-form-item label="用户ID" prop="userId">
+      <el-form-item label="用户ID" prop="userId">
         <el-input
           v-model="queryParams.userId"
           placeholder="请输入用户ID"
           clearable
           @keyup.enter.native="handleQuery"
         />
-      </el-form-item> -->
+      </el-form-item>
       <el-form-item label="统计日期">
         <el-date-picker
           v-model="daterangeRecordDate"
@@ -25,6 +25,51 @@
         <el-button icon="el-icon-refresh" size="mini" @click="resetQuery">重置</el-button>
       </el-form-item>
     </el-form>
+
+    <el-card class="repair-card" shadow="never">
+      <div slot="header" class="repair-card-header">
+        <span>按日期修复个人解析数据</span>
+        <span class="repair-card-tip">基于 ring_history_raw_frame 原始帧重建 health_raw、sleep_record 和每日汇总</span>
+      </div>
+      <el-form :model="repairForm" size="small" :inline="true" label-width="72px">
+        <el-form-item label="用户ID">
+          <el-input
+            v-model="repairForm.userId"
+            placeholder="必填"
+            clearable
+            style="width: 120px"
+          />
+        </el-form-item>
+        <el-form-item label="设备Mac">
+          <el-input
+            v-model="repairForm.deviceMac"
+            placeholder="可不填，修复该用户当天全部设备"
+            clearable
+            style="width: 260px"
+          />
+        </el-form-item>
+        <el-form-item label="日期">
+          <el-date-picker
+            v-model="repairForm.date"
+            type="date"
+            value-format="yyyy-MM-dd"
+            placeholder="选择日期"
+            style="width: 150px"
+          />
+        </el-form-item>
+        <el-form-item label="清理旧数据">
+          <el-switch v-model="repairForm.clearExisting" />
+        </el-form-item>
+        <el-form-item>
+          <el-button
+            type="primary"
+            icon="el-icon-refresh"
+            :loading="repairLoading"
+            @click="handleRepairByForm"
+          >执行修复</el-button>
+        </el-form-item>
+      </el-form>
+    </el-card>
 
     <el-row :gutter="10" class="mb8">
       <!-- <el-col :span="1.5">
@@ -130,7 +175,7 @@
       <!-- <el-table-column label="睡眠评分(0-100)" align="center" prop="sleepScore" /> -->
       <el-table-column label="健康评分" align="center" prop="healthScore" />
       <!-- <el-table-column label="健康等级(优秀/良好/一般/较差)" align="center" prop="healthLevel" /> -->
-      <el-table-column label="操作" align="center" class-name="small-padding fixed-width" width="100">
+      <el-table-column label="操作" align="center" class-name="small-padding fixed-width" width="240">
         <template slot-scope="scope">
           <el-button
             size="mini"
@@ -138,6 +183,19 @@
             icon="el-icon-view"
             @click="handleViewDetail(scope.row)"
           >查看详情</el-button>
+          <el-button
+            size="mini"
+            type="text"
+            icon="el-icon-document"
+            @click="handleViewRawFrames(scope.row)"
+          >原始帧</el-button>
+          <el-button
+            size="mini"
+            type="text"
+            icon="el-icon-refresh"
+            :disabled="repairLoading"
+            @click="handleRepairByRow(scope.row)"
+          >按日期修复</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -231,11 +289,61 @@
         <el-button @click="detailOpen = false">关 闭</el-button>
       </div>
     </el-dialog>
+
+    <el-dialog title="设备原始帧" :visible.sync="rawFrameOpen" width="1100px" append-to-body>
+      <el-alert
+        title="这里展示的是 ring_history_raw_frame 中按 用户ID + 设备Mac + 日期窗口 关联保存的 BLE 原始帧；健康数据列表本身是每日汇总，不是原始数据。"
+        type="info"
+        :closable="false"
+        show-icon
+        class="raw-frame-tip"
+      />
+      <el-table v-loading="rawFrameLoading" :data="rawFrameList" border size="mini" style="width: 100%">
+        <el-table-column label="用户ID" align="center" prop="userId" width="80" />
+        <el-table-column label="用户唯一标识" align="center" prop="userCode" width="140" />
+        <el-table-column label="昵称" align="center" prop="nickName" width="110" />
+        <el-table-column label="手机号" align="center" prop="phone" width="120" />
+        <el-table-column label="上传账号ID" align="center" prop="uploadUserId" width="95" />
+        <el-table-column label="上传账号" align="center" prop="uploadNickName" width="110" />
+        <el-table-column label="设备Mac" align="center" prop="deviceMac" width="150" />
+        <el-table-column label="类型" align="center" prop="sourceType" width="150" />
+        <el-table-column label="字节数" align="center" prop="rawByteLength" width="80" />
+        <el-table-column label="帧开始时间" align="center" prop="recordTimeStart" width="160">
+          <template slot-scope="scope">
+            <span>{{ parseTime(scope.row.recordTimeStart, '{y}-{m}-{d} {h}:{i}:{s}') || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="帧结束时间" align="center" prop="recordTimeEnd" width="160">
+          <template slot-scope="scope">
+            <span>{{ parseTime(scope.row.recordTimeEnd, '{y}-{m}-{d} {h}:{i}:{s}') || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="接收时间" align="center" prop="receivedAt" width="160">
+          <template slot-scope="scope">
+            <span>{{ parseTime(scope.row.receivedAt, '{y}-{m}-{d} {h}:{i}:{s}') || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="保存次数" align="center" prop="seenCount" width="80" />
+        <el-table-column label="解析状态" align="center" prop="parseStatus" width="90" />
+        <el-table-column label="解析条数" align="center" prop="parsedRecordCount" width="90" />
+        <el-table-column label="raw_hex 预览" align="left" prop="rawHexPreview" min-width="260" show-overflow-tooltip />
+      </el-table>
+      <pagination
+        v-show="rawFrameTotal>0"
+        :total="rawFrameTotal"
+        :page.sync="rawFrameQuery.pageNum"
+        :limit.sync="rawFrameQuery.pageSize"
+        @pagination="getRawFrameList"
+      />
+      <div slot="footer" class="dialog-footer">
+        <el-button @click="rawFrameOpen = false">关 闭</el-button>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script>
-import { getUserHealthDataHistory } from "@/api/user/user"
+import { getUserHealthDataHistory, getUserHealthRawFrames, repairUserHealthRawByDate } from "@/api/user/user"
 
 export default {
   name: "HealthData",
@@ -263,6 +371,24 @@ export default {
       detailOpen: false,
       // 详情数据
       detailData: {},
+      rawFrameOpen: false,
+      rawFrameLoading: false,
+      rawFrameList: [],
+      rawFrameTotal: 0,
+      rawFrameQuery: {
+        pageNum: 1,
+        pageSize: 10,
+        userId: null,
+        deviceMac: null,
+        recordDate: null
+      },
+      repairLoading: false,
+      repairForm: {
+        userId: null,
+        deviceMac: '',
+        date: '',
+        clearExisting: true
+      },
       // 健康等级(优秀/良好/一般/较差)时间范围
       daterangeRecordDate: [],
       // 查询参数
@@ -279,6 +405,7 @@ export default {
     // 获取路由传递的用户ID
     if (this.$route.query.userId) {
       this.queryParams.userId = this.$route.query.userId
+      this.repairForm.userId = this.$route.query.userId
     }
     this.getList()
   },
@@ -326,7 +453,136 @@ export default {
     handleViewDetail(row) {
       this.detailData = row
       this.detailOpen = true
+    },
+    handleViewRawFrames(row) {
+      const userId = row && (row.userId || row.user_id)
+      const deviceMac = row && (row.deviceMac || row.device_mac)
+      const recordDate = this.formatRepairRecordDate(row)
+      if (!userId || !deviceMac || !recordDate) {
+        this.$message.warning('缺少用户、设备或日期，无法查询原始帧')
+        return
+      }
+      this.rawFrameQuery = {
+        pageNum: 1,
+        pageSize: 10,
+        userId,
+        deviceMac,
+        recordDate
+      }
+      this.rawFrameOpen = true
+      this.getRawFrameList()
+    },
+    getRawFrameList() {
+      this.rawFrameLoading = true
+      getUserHealthRawFrames(this.rawFrameQuery).then(response => {
+        this.rawFrameList = response.rows || []
+        this.rawFrameTotal = response.total || 0
+      }).finally(() => {
+        this.rawFrameLoading = false
+      })
+    },
+    formatRepairRecordDate(row) {
+      const value = row && row.recordDate
+      if (!value) return ''
+      if (typeof value === 'string') return value.slice(0, 10)
+      const parsed = this.parseTime(value, '{y}-{m}-{d}')
+      return parsed || ''
+    },
+    formatRepairResultMessage(response) {
+      const result = response && response.data ? response.data : {}
+      const msg = response && response.msg ? response.msg : ''
+      if (!result || !Object.keys(result).length) return msg || '原始数据重新解析完成'
+      const frameCount = Number(result.frameCount || 0)
+      const parsedPointCount = Number(result.parsedPointCount || 0)
+      const sleepSegmentCount = Number(result.sleepSegmentCount || 0)
+      const inputCount = Number(result.inputCount || 0)
+      const deviceCount = Number(result.deviceCount || 0)
+      const successCount = Number(result.successCount || (result.success ? 1 : 0))
+      const scopeText = deviceCount > 0 ? `设备 ${successCount}/${deviceCount} 个` : `设备 ${result.deviceMac || '-'}`
+      return `${msg || '原始数据重新解析完成'}：${scopeText}，原始帧 ${frameCount}，解析点 ${parsedPointCount}，睡眠段 ${sleepSegmentCount}，写入输入 ${inputCount}`
+    },
+    repairRawByDate(payload) {
+      const userId = payload && payload.userId
+      const recordDate = payload && payload.date
+      if (!userId || !recordDate) {
+        this.$message.warning('缺少用户ID或日期，无法重新解析')
+        return Promise.resolve(false)
+      }
+      const deviceText = payload.deviceMac ? `设备 ${payload.deviceMac}` : '该用户当天全部设备'
+      return this.$confirm(`确定按 ${recordDate} 修复用户 ${userId} 的解析数据吗？范围：${deviceText}。会先清理该日期相关解析数据后重建。`, '提示', {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }).then(() => {
+        this.repairLoading = true
+        this.loading = true
+        return repairUserHealthRawByDate({
+          userId,
+          deviceMac: payload.deviceMac || '',
+          date: recordDate,
+          clearExisting: payload.clearExisting !== false
+        })
+      }).then((response) => {
+        this.$message.success(this.formatRepairResultMessage(response))
+        this.getList()
+        if (this.rawFrameOpen) {
+          this.getRawFrameList()
+        }
+        return true
+      }).catch(() => false).finally(() => {
+        this.repairLoading = false
+        this.loading = false
+      })
+    },
+    handleRepairByForm() {
+      const payload = {
+        userId: this.repairForm.userId,
+        deviceMac: this.repairForm.deviceMac,
+        date: this.repairForm.date,
+        clearExisting: this.repairForm.clearExisting
+      }
+      this.repairRawByDate(payload)
+    },
+    handleRepairByRow(row) {
+      const userId = row && (row.userId || row.user_id)
+      const deviceMac = row && (row.deviceMac || row.device_mac)
+      const recordDate = this.formatRepairRecordDate(row)
+      if (!userId || !recordDate) {
+        this.$message.warning('缺少用户或日期，无法重新解析')
+        return
+      }
+      this.repairForm.userId = userId
+      this.repairForm.deviceMac = deviceMac || ''
+      this.repairForm.date = recordDate
+      this.repairRawByDate({
+        userId,
+        deviceMac,
+        date: recordDate,
+        clearExisting: true
+      })
     }
   }
 }
 </script>
+
+<style scoped>
+.repair-card {
+  margin-bottom: 12px;
+}
+
+.repair-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.repair-card-tip {
+  color: #909399;
+  font-size: 12px;
+  font-weight: normal;
+}
+
+.raw-frame-tip {
+  margin-bottom: 12px;
+}
+</style>

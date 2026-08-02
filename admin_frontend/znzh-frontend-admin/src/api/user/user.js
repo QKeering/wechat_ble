@@ -72,3 +72,30 @@ export function getUserHealthDataHistory(query) {
     params: query
   })
 }
+
+// 重新解析用户原始健康数据
+export function repairUserHealthRawToday(data) {
+  return request({
+    url: '/admin/user/healthData/repairRawToday',
+    method: 'post',
+    data
+  })
+}
+
+// 按用户和日期重新解析原始健康数据
+export function repairUserHealthRawByDate(data) {
+  return request({
+    url: '/admin/user/healthData/repairRawByDate',
+    method: 'post',
+    data
+  })
+}
+
+// 查询设备原始帧数据（真正的 BLE raw_hex）
+export function getUserHealthRawFrames(query) {
+  return request({
+    url: '/admin/user/healthData/rawFrames',
+    method: 'get',
+    params: query
+  })
+}

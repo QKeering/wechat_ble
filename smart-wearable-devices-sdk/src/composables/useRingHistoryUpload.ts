@@ -35,6 +35,7 @@ const SLEEP_DEFAULT_SAMPLE_SECONDS = 5 * 60;
 const SLEEP_MIN_SAMPLE_SECONDS = 60;
 const SLEEP_MAX_SAMPLE_SECONDS = 60 * 60;
 const SLEEP_SEGMENT_BACKFILL_SECONDS = 24 * 60 * 60;
+const VITAL_METRIC_BACKFILL_SECONDS = 24 * 60 * 60;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const MAIN_SLEEP_WINDOW_START_HOUR = 21;
 const MAIN_SLEEP_WINDOW_END_HOUR = 11;
@@ -876,8 +877,17 @@ export const isRingHistoryReadComplete = (receivedData: RingHistoryRecord[] = []
     if (item.type === 'local_data') {
       if (item.status === 'no_data' || item.status === 'empty' || item.status === 'filtered') return true;
       if (item.protocol === 'rw' && item.status === 'success' && Array.isArray(item.records)) return true;
-      const firstRecord = Array.isArray(item.records) ? item.records[0] : null;
-      return Boolean(item.totalNum != null && firstRecord?.seq != null && item.totalNum === firstRecord.seq);
+      const totalNum = getNumber(item.totalNum, item.total, item.count);
+      if (item.complete === true || item.isComplete === true || item.done === true) return true;
+      if (totalNum == null || totalNum <= 0) return false;
+      const records = Array.isArray(item.records) ? item.records : [];
+      const itemMaxSeq = getNumber(item.maxSeq, item.max_seq, item.lastSeq, item.last_seq);
+      const recordsMaxSeq = records.reduce((maxSeq, record) => {
+        const seq = getNumber(record?.seq, record?.sequence, record?.index);
+        return seq == null ? maxSeq : Math.max(maxSeq, seq);
+      }, 0);
+      const maxSeq = Math.max(itemMaxSeq || 0, recordsMaxSeq);
+      return Boolean(maxSeq >= totalNum || records.length >= totalNum);
     }
     if (item.type === 'rw_upload_file') return item.status === 'completed' || item.statusCode === 2 || Array.isArray(item.records);
     if (item.type === 'rw_file_list') {
@@ -907,6 +917,10 @@ const getSleepSegmentBackfillSinceTimestamp = (lastReadTimestamp = 0) => {
   return lastReadTimestamp ? Math.max(0, lastReadTimestamp - SLEEP_SEGMENT_BACKFILL_SECONDS) : 0;
 };
 
+const getVitalMetricBackfillSinceTimestamp = (lastReadTimestamp = 0) => {
+  return lastReadTimestamp ? Math.max(0, lastReadTimestamp - VITAL_METRIC_BACKFILL_SECONDS) : 0;
+};
+
 const isRingHistorySleepSubmitRecord = (record: RingHistorySubmitRecord) => {
   const sourceType = String((record as Record<string, any>)?.sourceType || '').toLowerCase();
   if (sourceType === 'l19_sleep_segment' || sourceType.startsWith('rw_sleep')) return true;
@@ -920,22 +934,49 @@ const isRingHistorySleepSubmitRecord = (record: RingHistorySubmitRecord) => {
   );
 };
 
+const isRingHistoryVitalRawRecord = (record: RingHistoryRecord) => {
+  const typeText = getRecordTypeText(record);
+  return Boolean(
+    normalizeHeartRateNumber(
+      getRecordValue(record, HEART_RATE_ALIASES) ??
+        getTypedHistoryNumber(record, [/heart[_-]?rate|(^|[_\-.])hr($|[_\-.])/, /heart_rate_raw/])
+    ) != null ||
+      normalizeHrvNumber(getRecordNumber(record, HRV_ALIASES) ?? getTypedHistoryNumber(record, [/hrv|rmssd/])) != null ||
+      normalizeBloodOxygenNumber(getRecordValue(record, BLOOD_OXYGEN_ALIASES)) != null ||
+      normalizeBloodOxygenNumber(
+        getTypedHistoryNumber(record, [/blood[_-]?oxygen|spo2|oxygen|(^|[_\-.])bo($|[_\-.])/, /blood_oxygen_raw/])
+      ) != null ||
+      /heart[_-]?rate|(^|[_\-.])hr($|[_\-.])|hrv|rmssd|blood[_-]?oxygen|spo2|oxygen/.test(typeText)
+  );
+};
+
+const isRingHistoryVitalSubmitRecord = (record: RingHistorySubmitRecord) =>
+  record.heartRate != null || record.hrv != null || record.spo2 != null;
+
+const getRingHistoryRawRecordBackfillSinceTimestamp = (record: RingHistoryRecord, lastReadTimestamp = 0) => {
+  if (!lastReadTimestamp) return 0;
+  if (isSleepHistoryRecord(record)) return getSleepSegmentBackfillSinceTimestamp(lastReadTimestamp);
+  if (isRingHistoryVitalRawRecord(record)) return getVitalMetricBackfillSinceTimestamp(lastReadTimestamp);
+  return lastReadTimestamp;
+};
+
+const getRingHistorySubmitRecordBackfillSinceTimestamp = (record: RingHistorySubmitRecord, lastReadTimestamp = 0) => {
+  if (!lastReadTimestamp) return 0;
+  if (isRingHistorySleepSubmitRecord(record)) return getSleepSegmentBackfillSinceTimestamp(lastReadTimestamp);
+  if (isRingHistoryVitalSubmitRecord(record)) return getVitalMetricBackfillSinceTimestamp(lastReadTimestamp);
+  return lastReadTimestamp;
+};
+
 const shouldSubmitRingHistoryRecordAfterWindow = (record: RingHistorySubmitRecord, lastReadTimestamp = 0) => {
   if (!lastReadTimestamp) return true;
-  return shouldSubmitRingHistoryRecordAfterSince(
-    record,
-    isRingHistorySleepSubmitRecord(record) ? getSleepSegmentBackfillSinceTimestamp(lastReadTimestamp) : lastReadTimestamp
-  );
+  return shouldSubmitRingHistoryRecordAfterSince(record, getRingHistorySubmitRecordBackfillSinceTimestamp(record, lastReadTimestamp));
 };
 
 export const buildRingHistorySubmitRecords = (records: RingHistoryRecord[] = [], lastReadTimestamp = 0): RingHistorySubmitRecord[] => {
   const submitRecords = records
     .filter((record) => {
       const unixTime = getRingHistoryRecordSyncUnixTime(record);
-      const sinceTimestamp =
-        lastReadTimestamp && isSleepHistoryRecord(record)
-          ? getSleepSegmentBackfillSinceTimestamp(lastReadTimestamp)
-          : lastReadTimestamp;
+      const sinceTimestamp = getRingHistoryRawRecordBackfillSinceTimestamp(record, lastReadTimestamp);
       return !sinceTimestamp || !unixTime || unixTime >= sinceTimestamp;
     })
     .map((record) => {
@@ -1067,10 +1108,7 @@ export const submitRingHistorySyncResult = async (
   const dataList = buildRingHistorySubmitRecords(visibleRecords, options.sinceTimestamp ?? 0);
   const filteredRecords = visibleRecords.filter((record) => {
     const unixTime = getRingHistoryRecordSyncUnixTime(record);
-    const sinceTimestamp =
-      options.sinceTimestamp && isSleepHistoryRecord(record)
-        ? getSleepSegmentBackfillSinceTimestamp(options.sinceTimestamp)
-        : options.sinceTimestamp;
+    const sinceTimestamp = getRingHistoryRawRecordBackfillSinceTimestamp(record, options.sinceTimestamp ?? 0);
     if (sinceTimestamp && unixTime && unixTime < sinceTimestamp) return true;
     return !buildRingHistorySubmitRecords([record], options.sinceTimestamp ?? 0).length;
   });

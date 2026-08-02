@@ -276,6 +276,7 @@ def get_info(db: Session, user: dict[str, Any]) -> dict[str, Any]:
 
 
 def select_menu_rows(db: Session, user_id: int) -> list[dict[str, Any]]:
+    ensure_health_data_menu_permission(db)
     if user_id == 1:
         query = """
             select distinct m.menu_id, m.parent_id, m.menu_name, m.path, m.component, m.`query`, m.route_name,
@@ -301,6 +302,51 @@ def select_menu_rows(db: Session, user_id: int) -> list[dict[str, Any]]:
         """
         rows = db.execute(text(query), {"user_id": user_id}).all()
     return [camelize_row(row) for row in rows]
+
+
+def ensure_health_data_menu_permission(db: Session) -> None:
+    """Keep the health data menu visible for management roles after deployments.
+
+    Some existing environments already have the sys_menu row for user/healthData,
+    but roles created before the menu existed do not have sys_role_menu rows for it.
+    When that happens, non-user_id=1 management accounts can open user management
+    but cannot see the health data page. Grant the child menu to roles that already
+    have the user parent menu instead of broadening access to unrelated roles.
+    """
+    health_menu = db.execute(
+        text("select menu_id, parent_id from sys_menu where path = 'healthData' and component = 'user/healthData/index' limit 1")
+    ).first()
+    if health_menu is None:
+        return
+
+    menu_id = int(health_menu._mapping["menu_id"])
+    parent_id = int(health_menu._mapping["parent_id"] or 0)
+    if parent_id <= 0:
+        return
+
+    db.execute(
+        text("update sys_menu set visible = '0', status = '0' where menu_id = :menu_id"),
+        {"menu_id": menu_id},
+    )
+    db.execute(
+        text(
+            """
+            insert into sys_role_menu(role_id, menu_id)
+            select distinct rm.role_id, :menu_id
+            from sys_role_menu rm
+            inner join sys_role r on r.role_id = rm.role_id
+            where rm.menu_id = :parent_id
+              and r.status = '0'
+              and r.del_flag = '0'
+              and not exists (
+                select 1 from sys_role_menu existing
+                where existing.role_id = rm.role_id and existing.menu_id = :menu_id
+              )
+            """
+        ),
+        {"menu_id": menu_id, "parent_id": parent_id},
+    )
+    db.commit()
 
 
 def capitalize(value: str | None) -> str:

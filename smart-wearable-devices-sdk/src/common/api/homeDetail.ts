@@ -22,9 +22,35 @@ import type {
   UserGirlHealthAllResponse
 } from '@/types/api/homeDetail';
 import type { HttpRequestConfig } from '@/uni_modules/uv-ui-tools/libs/luch-request/index';
+import type { RingRawHistoryFrame } from '@/api/ringDevice';
 // 蓝牙测量完提交数据接口
 export const submitData = (params: submitDataType, config = {}) => {
   return (uni as any).$uv.http.post('/app/data/sync', params, config);
+};
+
+export type RingHistoryRawFramesSubmitParams = {
+  deviceMac: string;
+  uploadSessionId?: string;
+  bindingId?: string | number;
+  bindingVersion?: string;
+  dataUserId?: string | number;
+  protocol?: string;
+  frames: RingRawHistoryFrame[];
+};
+
+export const submitRingHistoryRawFrames = (params: RingHistoryRawFramesSubmitParams, config = {}) => {
+  return (uni as any).$uv.http.post('/app/data/rawHistory/upload', params, config);
+};
+
+export type RingHistoryRawRepairParams = {
+  deviceMac: string;
+  date?: string;
+  recordDate?: string;
+  clearExisting?: boolean;
+};
+
+export const repairRingHistoryRawToday = (params: RingHistoryRawRepairParams, config = {}) => {
+  return (uni as any).$uv.http.post('/app/data/rawHistory/repairToday', params, config);
 };
 
 type GirlHealthSubmitParams = {

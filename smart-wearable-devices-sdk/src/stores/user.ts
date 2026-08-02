@@ -157,6 +157,20 @@ export const useUserStore = defineStore('user', () => {
     return userInfo.value;
   };
 
+  const ensureValidLogin = async () => {
+    if (!token.value) {
+      logout();
+      return false;
+    }
+    try {
+      await fetchUserInfo();
+      return true;
+    } catch {
+      logout();
+      return false;
+    }
+  };
+
   const refreshUserInfo = async (params?: Record<string, any>) => {
     if (params) {
       await updateUserInfo(params);
@@ -227,8 +241,10 @@ export const useUserStore = defineStore('user', () => {
     reconnectCount,
     isShowLoginPopup,
     updateToken,
+    setUserInfo,
     applyLoginResponse,
     fetchUserInfo,
+    ensureValidLogin,
     refreshUserInfo,
     logout,
     setShowLoginPopup,

@@ -44,6 +44,7 @@ type CompatRwHistoryDataName = RwHistoryDataName;
 type CompatRwHistoryDataInput = CompatRwHistoryDataName | CompatRwHistoryDataName[];
 interface CompatReadLocalDataOptions {
   timeoutMs?: number;
+  silentUploadStatus?: boolean;
 }
 const DEFAULT_COMPAT_REFRESH_OPTIONS: CompatRefreshOptions = {
   includeDeviceTime: false,
@@ -249,7 +250,8 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       ...(sinceTimestamp === undefined ? {} : { sinceTimestamp }),
       ...(normalizedDataType ? { dataType: normalizedDataType } : {}),
       ...(normalizedDataTypes?.length ? { dataTypes: normalizedDataTypes } : {}),
-      ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {})
+      ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
+      ...(readOptions.silentUploadStatus === true ? { silentUploadStatus: true } : {})
     };
     return runWithReady(() => {
       const task = () => sdk.syncHistory(historyOptions);
@@ -272,7 +274,8 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
         sinceTimestamp,
         dataType: normalizedDataType,
         dataTypes: normalizedDataTypes,
-        timeoutMs: historyOptions.timeoutMs
+        timeoutMs: historyOptions.timeoutMs,
+        silentUploadStatus: readOptions.silentUploadStatus === true
       });
     });
   };

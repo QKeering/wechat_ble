@@ -89,6 +89,16 @@ const l19IncompleteLocalData = {
   records: [{ seq: 1, unixTime: 1767229261, heartRate: 73 }]
 };
 
+const l19CompletedLocalDataByMaxSeq = {
+  type: 'local_data',
+  status: 'success',
+  totalNum: 3,
+  records: [
+    { seq: 1, unixTime: 1767229261, heartRate: 73 },
+    { seq: 3, unixTime: 1767229381, heartRate: 74 }
+  ]
+};
+
 if (isRingHistoryReadComplete([rwPendingFileList])) {
   throw new Error('RW history should not be treated as complete before listed files upload their payload.');
 }
@@ -121,6 +131,10 @@ if (isRingHistoryReadComplete([l19IncompleteLocalData])) {
   throw new Error('L19 local_data should still require totalNum to match the last packet seq before completion.');
 }
 
+if (!isRingHistoryReadComplete([l19CompletedLocalDataByMaxSeq])) {
+  throw new Error('L19 local_data completion should use the max seq from all records, not only the first record.');
+}
+
 const submitRecords = buildRingHistorySubmitRecords([
   { unixTime: 1767229261, heart_rate: 72, bloodOxygenSaturation: 98, skinTemperature: '36.5°C' },
   { timestamp: 1767229262, ppg: [1, 2, 3], bloodSugar: 58, systolic: 120, diastolic: 79 },
@@ -128,7 +142,7 @@ const submitRecords = buildRingHistorySubmitRecords([
 ], 1767229261);
 
 if (
-  submitRecords.length !== 2 ||
+  submitRecords.length !== 3 ||
   submitRecords[0].heartRate !== 72 ||
   submitRecords[0].spo2 !== 98 ||
   submitRecords[0].temperature !== 36.5 ||
@@ -136,9 +150,36 @@ if (
   submitRecords[1].bloodSugar !== 5.8 ||
   submitRecords[1].systolic !== 120 ||
   submitRecords[1].diastolic !== 79 ||
+  submitRecords[2].heartRate !== 60 ||
   submitRecords.some((record) => record.recordTime === '')
 ) {
   throw new Error(`History submit records should normalize aliases and preserve raw PPG only when timestamped: ${JSON.stringify(submitRecords)}`);
+}
+
+const vitalBackfillSinceTimestamp = Math.floor(Date.parse('2026/08/02 09:30:00') / 1000);
+const vitalBackfillSubmitRecords = buildRingHistorySubmitRecords(
+  [
+    { recordTime: '2026-08-02 09:25:00', dataType: 'heart_rate_raw', value: 91 },
+    { recordTime: '2026-08-02 09:26:00', dataType: 'blood_oxygen_raw', value: 98 },
+    { recordTime: '2026-08-02 09:27:00', dataType: 'hrv', value: 42 },
+    { recordTime: '2026-08-02 09:25:00', stepCount: 123 },
+    { recordTime: '2026-08-01 09:25:00', dataType: 'heart_rate_raw', value: 72 }
+  ],
+  vitalBackfillSinceTimestamp
+);
+
+if (
+  vitalBackfillSubmitRecords.length !== 3 ||
+  !vitalBackfillSubmitRecords.some((record) => record.heartRate === 91) ||
+  !vitalBackfillSubmitRecords.some((record) => record.spo2 === 98) ||
+  !vitalBackfillSubmitRecords.some((record) => record.hrv === 42) ||
+  vitalBackfillSubmitRecords.some((record) => record.stepCount === 123 || record.heartRate === 72)
+) {
+  throw new Error(
+    `Vital history within the backfill window should submit even when older than lastReadTimestamp, while non-vital old records stay filtered: ${JSON.stringify(
+      vitalBackfillSubmitRecords
+    )}`
+  );
 }
 
 const stepSubmitRecords = buildRingHistorySubmitRecords([

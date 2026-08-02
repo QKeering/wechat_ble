@@ -1,131 +1,26 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
-import { onShow, onLoad, onUnload } from '@dcloudio/uni-app';
-import { getAiLabStatus } from '@/common/api/aiLab';
-
-enum APPLY_STATUS {
-  not_apply = -1,
-  applying = 0,
-  passed = 1,
-  rejected = 2
-}
-
-const applyStatus = ref<APPLY_STATUS>(APPLY_STATUS.not_apply);
-const jumpUrl = ref<string>('');
-const remark = ref<string>('');
-const isLoading = ref(false);
-
-const applyText = computed(() => {
-  switch (applyStatus.value) {
-    case APPLY_STATUS.not_apply:
-      return '申请体验';
-    case APPLY_STATUS.applying:
-      return '审核中';
-    case APPLY_STATUS.passed:
-      return '进入体验';
-    case APPLY_STATUS.rejected:
-      return '重新申请';
-    default:
-      return '申请体验';
-  }
-});
-
 const handleApplyClick = () => {
-  if (applyStatus.value === APPLY_STATUS.passed && jumpUrl.value) {
-    // 解析 jumpUrl，提取路由部分
-    // 格式如：https://em.qkeering.com/#/aiPet -> 提取 #/aiPet
-    let route = '';
-    if (jumpUrl.value.includes('#')) {
-      const hashIndex = jumpUrl.value.indexOf('#');
-      route = jumpUrl.value.substring(hashIndex);
-    } else if (jumpUrl.value.includes('em.qkeering.com')) {
-      // 如果包含域名但没有 #，可能是新页面，直接传完整URL
-      uni.navigateTo({ url: `/pages/webview-custom/webview-custom?url=${encodeURIComponent(jumpUrl.value)}` });
-      return;
-    } else {
-      route = jumpUrl.value;
-    }
-
-    uni.navigateTo({
-      url: `/pages/webview-custom/webview-custom?route=${encodeURIComponent(route)}`
-    });
-  } else if (applyStatus.value === APPLY_STATUS.rejected && remark.value) {
-    uni.showModal({
-      title: '申请未通过',
-      content: `拒绝原因：${remark.value}`,
-      showCancel: true,
-      confirmText: '重新申请',
-      cancelText: '取消',
-      success: (res) => {
-        if (res.confirm) {
-          uni.navigateTo({ url: '/pages/awareness/aiApply' });
-        }
-      }
-    });
-  } else if (applyStatus.value === APPLY_STATUS.not_apply || applyStatus.value === APPLY_STATUS.rejected) {
-    uni.navigateTo({ url: '/pages/awareness/aiApply' });
-  }
+  uni.navigateTo({
+    url: '/pages/health/growth-girlfriend'
+  });
 };
-
-const fetchApplyStatus = async () => {
-  if (isLoading.value) return;
-  isLoading.value = true;
-
-  try {
-    const res: any = await getAiLabStatus();
-    if (res) {
-      const { status, jumpUrl: url, remark: reason } = res;
-      applyStatus.value = status as APPLY_STATUS;
-      jumpUrl.value = url || '';
-      remark.value = reason || '';
-    }
-  } catch (error: any) {
-    console.error('获取申请状态失败', error);
-  } finally {
-    isLoading.value = false;
-  }
-};
-
-onLoad(() => {
-  uni.$on('refreshAiStatus', fetchApplyStatus);
-});
-
-onShow(() => {
-  fetchApplyStatus();
-});
-
-onUnload(() => {
-  uni.$off('refreshAiStatus', fetchApplyStatus);
-});
 </script>
 
 <template>
   <view class="ai-lab-container">
-    <!-- AI实验室卡片 -->
-    <view class="ai-lab-card">
-      <!-- 左侧图标 -->
+    <view class="ai-lab-card" @tap="handleApplyClick">
       <view class="ai-lab-icon">
-        <uv-image src="/static/images/brain.png" width="100rpx" height="100rpx"></uv-image>
+        <uv-image src="/static/images/brain.png" width="92rpx" height="92rpx"></uv-image>
       </view>
-      
-      <!-- 中间文字内容 -->
+
       <view class="ai-lab-content">
-        <text class="ai-lab-title">AI智能体Lab</text>
-        <text class="ai-lab-subtitle">AI体验中心</text>
+        <text class="ai-lab-title">小轻AI成长闺蜜</text>
+        <text class="ai-lab-subtitle">会听你说，也更懂你的状态</text>
+        <text class="ai-lab-desc">AI融合多维健康大数据，生成健康、美丽、成长建议</text>
       </view>
-      
-      <!-- 右侧按钮 -->
+
       <view class="ai-lab-button">
-        <uv-button 
-          type="primary" 
-          size="mini" 
-          color="RGB(46,112,252)"
-          @click="handleApplyClick"
-          :disabled="applyStatus === APPLY_STATUS.applying"
-          :custom-style="{ borderRadius: '50rpx', padding: '0 50rpx', height: '70rpx', fontSize: '26rpx' }"
-        >
-          {{ applyText }}
-        </uv-button>
+        <text>进入</text>
       </view>
     </view>
   </view>
@@ -136,52 +31,71 @@ onUnload(() => {
   display: flex;
   justify-content: center;
   align-items: center;
-  // padding: 30rpx 0;
 }
 
 .ai-lab-card {
+  width: 100%;
   display: flex;
   align-items: center;
-  background-color: #ffffff;
-  // border-radius: 50rpx;
-  // box-shadow: 0 4rpx 16rpx rgba(0, 0, 0, 0.05);
-  // padding: 20rpx 30rpx;
-  width: 100%;
-  // max-width: 90%;
   overflow: hidden;
+  border-radius: 36rpx;
+  background: linear-gradient(135deg, #fff8fd 0%, #fff4fa 55%, #fffafd 100%);
 }
 
 .ai-lab-icon {
-  width: 100rpx;
-  height: 100rpx;
+  width: 108rpx;
+  height: 108rpx;
   border-radius: 50%;
-  background-color: RGB(46,112,252);
+  background: linear-gradient(135deg, #5f7cff 0%, #9b6dff 100%);
   display: flex;
   justify-content: center;
   align-items: center;
-  margin-right: 20rpx;
+  margin-right: 22rpx;
+  flex-shrink: 0;
+  box-shadow: 0 8rpx 24rpx rgba(104, 102, 255, 0.22);
 }
 
 .ai-lab-content {
   flex: 1;
-  flex-direction: column;
+  min-width: 0;
   display: flex;
+  flex-direction: column;
 }
 
 .ai-lab-title {
-  font-size: 36rpx;
-  font-weight: bold;
-  color: #333333;
+  font-size: 32rpx;
+  font-weight: 700;
+  color: #2b2f3a;
   line-height: 1.2;
 }
 
 .ai-lab-subtitle {
-  font-size: 28rpx;
-  color: #666666;
   margin-top: 8rpx;
+  font-size: 24rpx;
+  color: #697181;
+  line-height: 1.35;
+}
+
+.ai-lab-desc {
+  margin-top: 4rpx;
+  font-size: 22rpx;
+  color: #8d94a3;
+  line-height: 1.35;
 }
 
 .ai-lab-button {
-  margin-left: 20rpx;
+  width: 84rpx;
+  height: 52rpx;
+  margin-left: 18rpx;
+  border-radius: 26rpx;
+  background: #ffffff;
+  color: #2e70fc;
+  font-size: 24rpx;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 6rpx 18rpx rgba(46, 112, 252, 0.12);
 }
 </style>

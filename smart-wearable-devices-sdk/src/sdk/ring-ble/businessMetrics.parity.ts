@@ -407,8 +407,8 @@ var activeOxygenLegacyAliasSnapshot = buildRingBusinessMetrics([
     }
   }
 ]);
-if (activeOxygenLegacyAliasSnapshot.heartRate !== 82 || activeOxygenLegacyAliasSnapshot.bloodOxygen !== 97 || !String(activeOxygenLegacyAliasSnapshot.temperature).includes("36.9") || activeOxygenLegacyAliasSnapshot.heartRateStatus !== "returned" || activeOxygenLegacyAliasSnapshot.bloodOxygenStatus !== "returned") {
-  throw new Error(`Direct L19 active_OxyGenMeasure aliases should aggregate like normalized SDK metrics: ${JSON.stringify(activeOxygenLegacyAliasSnapshot)}`);
+if (activeOxygenLegacyAliasSnapshot.heartRate !== null || activeOxygenLegacyAliasSnapshot.bloodOxygen !== 97 || !String(activeOxygenLegacyAliasSnapshot.temperature).includes("36.9") || activeOxygenLegacyAliasSnapshot.heartRateStatus !== "" || activeOxygenLegacyAliasSnapshot.bloodOxygenStatus !== "returned") {
+  throw new Error(`Direct L19 active_OxyGenMeasure aliases should update blood oxygen without polluting heart-rate metrics: ${JSON.stringify(activeOxygenLegacyAliasSnapshot)}`);
 }
 var activeTemperatureSkinAliasSnapshot = buildRingBusinessMetrics([
   {

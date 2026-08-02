@@ -18,7 +18,7 @@ from app.core.responses import error, not_migrated, success, table
 from app.core.security import read_request_token
 from app.db.redis import get_redis
 from app.db.session import get_db
-from app.services import admin_backup, ai_lab, auth, code_generator, feedback, server_monitor, system
+from app.services import admin_backup, ai_lab, auth, code_generator, feedback, health, server_monitor, system
 from app.services.crud import camelize_dict, create_row, delete_rows, get_row, list_rows, update_row
 from app.services.device_import import device_template_xlsx, import_device_xlsx
 from app.services.device_qrcode import ensure_payload_qrcode, ensure_rows_qrcode
@@ -957,8 +957,8 @@ def app_user_health_data_query(db: Session, query: dict[str, Any], paginate: boo
     if query.get("deviceMac"):
         clauses.append("device_mac like :device_mac")
         params["device_mac"] = f"%{query['deviceMac']}%"
-    begin_time = query.get("beginTime") or query.get("params[beginTime]")
-    end_time = query.get("endTime") or query.get("params[endTime]")
+    begin_time = query.get("beginTime") or query.get("startDate") or query.get("params[beginTime]")
+    end_time = query.get("endTime") or query.get("endDate") or query.get("params[endTime]")
     if begin_time:
         clauses.append("record_date >= :begin_time")
         params["begin_time"] = begin_time
@@ -983,6 +983,109 @@ def app_user_history_health_data(request: Request, db: Session = Depends(get_db)
     return table(rows, total)
 
 
+def app_user_health_raw_frame_query(db: Session, query: dict[str, Any], paginate: bool = True) -> tuple[list[dict[str, Any]], int]:
+    health.ensure_ring_history_raw_frame_schema(db)
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+
+    user_id = query.get("userId") or query.get("user_id")
+    if user_id not in (None, ""):
+        clauses.append("f.user_id=:user_id")
+        params["user_id"] = user_id
+
+    device_mac = query.get("deviceMac") or query.get("device_mac")
+    if device_mac not in (None, ""):
+        clauses.append("lower(f.device_mac)=lower(:device_mac)")
+        params["device_mac"] = str(device_mac).strip()
+
+    record_date = query.get("recordDate") or query.get("record_date") or query.get("date")
+    if record_date not in (None, ""):
+        query_start, query_end = health.l19_raw_repair_query_window_for_date(record_date)
+        fallback_date = health.raw_history_repair_date(record_date).isoformat()
+        clauses.append(
+            """
+            (
+              (f.record_time_start is not null and f.record_time_start <= :query_end and coalesce(f.record_time_end, f.record_time_start) >= :query_start)
+              or (f.record_time_start is null and date(coalesce(f.received_at, f.first_seen_at))=:fallback_date)
+            )
+            """
+        )
+        params.update({"query_start": query_start, "query_end": query_end, "fallback_date": fallback_date})
+
+    status = query.get("parseStatus") or query.get("parse_status")
+    if status not in (None, ""):
+        clauses.append("f.parse_status=:parse_status")
+        params["parse_status"] = status
+
+    where = f" where {' and '.join(clauses)}" if clauses else ""
+    total = int(
+        db.execute(
+            text(f"select count(*) from ring_history_raw_frame f{where}"),
+            params,
+        ).scalar()
+        or 0
+    )
+    sql = f"""
+        select
+          f.id,
+          f.user_id,
+          f.upload_user_id,
+          u.code as user_code,
+          u.nick_name,
+          u.phone,
+          uploader.nick_name as upload_nick_name,
+          uploader.phone as upload_phone,
+          f.device_mac,
+          f.device_key,
+          f.protocol,
+          f.source_type,
+          f.status,
+          f.raw_hash,
+          f.raw_hex,
+          f.raw_byte_length,
+          f.chunk_index,
+          f.chunk_count,
+          f.record_count,
+          f.total_num,
+          f.max_seq,
+          f.record_time_start,
+          f.record_time_end,
+          f.received_at,
+          f.first_seen_at,
+          f.last_seen_at,
+          f.seen_count,
+          f.parse_status,
+          f.parse_message,
+          f.parsed_record_count,
+          f.create_time,
+          f.update_time
+        from ring_history_raw_frame f
+        left join app_user u on u.id=f.user_id
+        left join app_user uploader on uploader.id=f.upload_user_id
+        {where}
+        order by coalesce(f.record_time_start, f.received_at, f.first_seen_at) desc, f.id desc
+    """
+    if paginate:
+        page_num = int(query.get("pageNum", 1) or 1)
+        page_size = int(query.get("pageSize", 10) or 10)
+        sql += " limit :limit offset :offset"
+        params.update({"limit": page_size, "offset": max(page_num - 1, 0) * page_size})
+    rows = db.execute(text(sql), params).all()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        data = camelize_dict(dict(row._mapping))
+        raw_hex = str(data.get("rawHex") or "")
+        data["rawHexPreview"] = raw_hex[:96] + ("..." if len(raw_hex) > 96 else "")
+        result.append(data)
+    return result, total
+
+
+@router.get("/user/healthData/rawFrames")
+def app_user_health_raw_frames(request: Request, db: Session = Depends(get_db)):
+    rows, total = app_user_health_raw_frame_query(db, dict(request.query_params))
+    return table(rows, total)
+
+
 @router.post("/user/healthData/export")
 def app_user_health_data_export(request: Request, db: Session = Depends(get_db)):
     rows, _ = app_user_health_data_query(db, dict(request.query_params), paginate=False)
@@ -999,6 +1102,92 @@ def app_user_health_data_export(request: Request, db: Session = Depends(get_db))
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={filename}", "download-filename": filename},
     )
+
+
+@router.post("/user/healthData/repairRawToday")
+async def app_user_health_data_repair_raw_today(request: Request, db: Session = Depends(get_db)):
+    return await app_user_health_data_repair_raw_by_date(request, db)
+
+
+@router.post("/user/healthData/repairRawByDate")
+async def app_user_health_data_repair_raw_by_date(request: Request, db: Session = Depends(get_db)):
+    payload = await request.json()
+    user_id = payload.get("userId") or payload.get("user_id")
+    device_mac = payload.get("deviceMac") or payload.get("device_mac")
+    record_date = payload.get("date") or payload.get("recordDate") or payload.get("record_date")
+    if not user_id or not record_date:
+        return error("缺少用户ID或日期，无法重新解析")
+    clear_existing = str(payload.get("clearExisting", payload.get("clear_existing", "true"))).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    from app.api.app import repair_l19_raw_history_data
+
+    normalized_device_mac = health.normalize_ring_history_device_mac(device_mac)
+    if normalized_device_mac:
+        result = repair_l19_raw_history_data(db, int(user_id), normalized_device_mac, record_date, clear_existing)
+        return success(result, "原始数据重新解析完成" if result.get("success") else result.get("message") or "没有可解析原始数据")
+
+    health.ensure_ring_history_raw_frame_schema(db)
+    target_date = health.raw_history_repair_date(record_date)
+    query_start, query_end = health.l19_raw_repair_query_window_for_date(target_date)
+    fallback_date = target_date.isoformat()
+    device_rows = db.execute(
+        text(
+            """
+            select distinct device_mac
+            from ring_history_raw_frame
+            where user_id=:user_id
+              and device_mac is not null
+              and device_mac <> ''
+              and (
+                (record_time_start is not null and record_time_start <= :query_end and coalesce(record_time_end, record_time_start) >= :query_start)
+                or (record_time_start is null and date(coalesce(received_at, first_seen_at))=:fallback_date)
+              )
+            order by device_mac
+            """
+        ),
+        {
+            "user_id": int(user_id),
+            "query_start": query_start,
+            "query_end": query_end,
+            "fallback_date": fallback_date,
+        },
+    ).mappings().all()
+    device_macs = [health.normalize_ring_history_device_mac(row.get("device_mac")) for row in device_rows]
+    device_macs = [item for item in dict.fromkeys(device_macs) if item]
+    if not device_macs:
+        return success(
+            {
+                "success": False,
+                "recordDate": target_date.isoformat(),
+                "userId": int(user_id),
+                "deviceCount": 0,
+                "results": [],
+            },
+            "没有找到该用户该日期的原始数据",
+        )
+
+    results = [
+        repair_l19_raw_history_data(db, int(user_id), item, target_date, clear_existing)
+        for item in device_macs
+    ]
+    success_count = sum(1 for item in results if item.get("success"))
+    result = {
+        "success": success_count > 0,
+        "recordDate": target_date.isoformat(),
+        "userId": int(user_id),
+        "deviceCount": len(device_macs),
+        "successCount": success_count,
+        "frameCount": sum(int(item.get("frameCount") or 0) for item in results),
+        "parsedPointCount": sum(int(item.get("parsedPointCount") or 0) for item in results),
+        "sleepSegmentCount": sum(int(item.get("sleepSegmentCount") or 0) for item in results),
+        "inputCount": sum(int(item.get("inputCount") or 0) for item in results),
+        "results": results,
+    }
+    return success(result, "原始数据重新解析完成" if success_count > 0 else "没有可解析原始数据")
 
 
 @router.put("/monitor/job/changeStatus")

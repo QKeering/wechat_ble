@@ -55,6 +55,18 @@ export type SyncData = {
 export type submitDataType = {
   // 设备MAC（必填）
   deviceMac: string;
+  // 上传会话ID，用于后端幂等、rawFrames 补偿和问题追踪
+  uploadSessionId?: string;
+  // 后端绑定快照，上传前以 /app/device/current 为准
+  bindingId?: string | number;
+  bindingVersion?: string;
+  dataUserId?: string | number;
+  protocol?: string;
+  // rawFrames 已本地留存后再允许后端判断是否可删除设备数据块
+  rawLocalStatus?: 'done' | 'none' | 'failed' | string;
+  rawFrameCount?: number;
+  deviceBlockRefs?: unknown[];
+  uploadStatus?: Record<string, unknown>;
   // 设备电量
   battery?: number;
   // 数据列表（必填）

@@ -1343,7 +1343,6 @@ export const buildRingBusinessMetrics = (normalizedData: any[]): RingBusinessMet
 
     if (item.sourceType === 'active_OxyGenMeasure') {
       const statusText = getDisplayStatusText(itemMetrics);
-      metrics.heartRate = normalizeHeartRateMetric(itemMetrics.heartRate ?? itemMetrics.heart_rate ?? itemMetrics.hr) ?? metrics.heartRate;
       metrics.bloodOxygen =
         normalizeBloodOxygenMetric(
           itemMetrics.bloodOxygen ?? itemMetrics.blood_oxygen ?? itemMetrics.bloodOxygenSaturation ?? itemMetrics.spo2 ?? itemMetrics.oxygen
@@ -1353,7 +1352,6 @@ export const buildRingBusinessMetrics = (normalizedData: any[]): RingBusinessMet
       if (hasTemperatureMetricValue(itemMetrics) && temperature == null) {
         metrics.temperatureStatus = NO_TEMPERATURE_TEXT;
       }
-      if (itemMetrics.heartRate != null) metrics.heartRateStatus = statusText || metrics.heartRateStatus;
       metrics.bloodOxygenStatus = statusText || metrics.bloodOxygenStatus;
       metrics.fatigue = itemMetrics.fatigue ?? metrics.fatigue;
       metrics.fatigueLevel = itemMetrics.fatigueLevel ?? metrics.fatigueLevel;

@@ -1,6 +1,13 @@
 import { effectScope, watch } from 'vue';
-import { bindRingDevice, getBoundRingDevice, unbindRingDevice, uploadRingHistoryRecords } from '@/api';
+import { buildRingRawHistoryFrames, uploadRingHistoryRecords } from '@/api';
+import { bind as bindBackendRingDevice, getBindInfo as getBackendBoundDevice, unbind as unbindBackendRingDevice } from '@/common/api/device';
+import { submitRingHistoryRawFrames } from '@/common/api/homeDetail';
 import { useRingStore } from '@/stores';
+import {
+  createUploadSessionId,
+  stagePendingUploadSession,
+  uploadPendingRawFramesInBackground
+} from '@/utils/dataUploadCompensation';
 import { isSameRingDevice, useRingBleSdk, type UseRingBleSdkOptions } from './useRingBleSdk';
 import type { RingDeviceInfo, RingParsedData } from '@/sdk/ring-ble';
 import { getRwHistoryDataType, parseRwFileTimestamp } from '@/sdk/ring-ble/rw';
@@ -46,6 +53,24 @@ const getRwStableRecordIdentity = (
   (isColonSeparatedBleMac(record.uniMacId) ? record.uniMacId : '') ||
   (isColonSeparatedBleMac(parsed.uniMacId) ? parsed.uniMacId : '') ||
   (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '');
+
+const getHistoryUploadStableDeviceMac = (
+  records: Array<Record<string, any>>,
+  parsed: RingParsedData,
+  device?: RingDeviceInfo
+) =>
+  parsed.mac ||
+  parsed.advertis?.macInfo ||
+  device?.mac ||
+  device?.advertis?.macInfo ||
+  records[0]?.mac ||
+  records[0]?.advertis?.macInfo ||
+  records[0]?.deviceMac ||
+  records[0]?.device_mac ||
+  parsed.uniMacId ||
+  device?.uniMacId ||
+  records[0]?.uniMacId ||
+  '';
 
 const getStableRecordDeviceKey = (record: Record<string, any>) => {
   const stableIdentity = record.mac || record.advertis?.macInfo;
@@ -335,17 +360,17 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
   const sdk = useRingBleSdk({
     ...options,
     getBoundDevice: async () => {
-      const device = await (options.getBoundDevice ? options.getBoundDevice() : getBoundRingDevice());
+      const device = await (options.getBoundDevice ? options.getBoundDevice() : getBackendBoundDevice());
       ringStore.setBoundDevice(device || null);
       return device;
     },
     bindDevice: async (payload) => {
-      const device = await (options.bindDevice ? options.bindDevice(payload) : bindRingDevice(payload));
+      const device = await (options.bindDevice ? options.bindDevice(payload) : bindBackendRingDevice(payload as any));
       ringStore.setBoundDevice(device as any);
       return device;
     },
     unbindDevice: async (payload) => {
-      const result = await (options.unbindDevice ? options.unbindDevice(payload) : unbindRingDevice(payload));
+      const result = await (options.unbindDevice ? options.unbindDevice(payload) : unbindBackendRingDevice(payload as any));
       ringStore.setBoundDevice(null);
       return result;
     },
@@ -354,7 +379,36 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
         ? options.uploadHistoricalRecords(records, parsed)
         : uploadRingHistoryRecords(records, parsed));
       ringStore.appendHistoryRecords(records);
-      return result;
+      const deviceMac = getHistoryUploadStableDeviceMac(records as Array<Record<string, any>>, parsed, ringStore.deviceInfo as RingDeviceInfo);
+      const rawFrames = buildRingRawHistoryFrames(records as Array<Record<string, any>>, parsed as any, deviceMac);
+      if (rawFrames.length === 0) return result;
+      const resultPayload = result && typeof result === 'object' ? { ...(result as Record<string, any>) } : { result };
+      if (!deviceMac) {
+        return {
+          ...resultPayload,
+          rawStored: false,
+          backendRawStored: false,
+          backendRawFrameCount: rawFrames.length,
+          backendRawMessage: 'missing-device-mac'
+        };
+      }
+      const rawUploadSession = stagePendingUploadSession({
+        uploadSessionId: createUploadSessionId(parsed.protocol || 'sdk_raw'),
+        deviceMac,
+        protocol: parsed.protocol,
+        dataList: [],
+        rawFrames
+      });
+      void uploadPendingRawFramesInBackground(rawUploadSession, (params) => submitRingHistoryRawFrames(params)).catch(() => {
+        // Raw frames are compensation evidence. Keep them locally and retry from pending queue; do not break SDK record flow.
+      });
+      return {
+        ...resultPayload,
+        rawStored: true,
+        backendRawStored: 'scheduled',
+        backendRawFrameCount: rawFrames.length,
+        uploadSessionId: rawUploadSession.uploadSessionId
+      };
     }
   });
 

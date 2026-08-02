@@ -203,6 +203,40 @@ def raw_series(db: Session, user_id: int, date_value: str | None, field: str) ->
     return [camelize_dict(dict(row._mapping)) for row in rows]
 
 
+def raw_series_between(
+    db: Session,
+    user_id: int,
+    start_time: datetime | None,
+    end_time: datetime | None,
+    field: str,
+) -> list[dict]:
+    if field not in RAW_SERIES_FIELD_RANGES:
+        raise ValueError(f"unsupported health_raw field: {field}")
+    if not start_time or not end_time:
+        return []
+    clauses = [
+        "user_id=:user_id",
+        f"{field} is not null",
+        f"{field} >= :min_value and {field} <= :max_value",
+        "record_time >= :start_time",
+        "record_time <= :end_time",
+        "record_time <= :max_record_time",
+    ]
+    min_value, max_value = RAW_SERIES_FIELD_RANGES[field]
+    rows = db.execute(
+        text(f"select record_time, device_mac, {field} as value from health_raw where {' and '.join(clauses)} order by record_time"),
+        {
+            "user_id": user_id,
+            "start_time": start_time,
+            "end_time": end_time,
+            "min_value": min_value,
+            "max_value": max_value,
+            "max_record_time": max_visible_record_time(),
+        },
+    ).all()
+    return [camelize_dict(dict(row._mapping)) for row in rows]
+
+
 def date_from_request(request: Request) -> str | None:
     return request.query_params.get("date") or request.query_params.get("recordDate")
 
@@ -233,18 +267,26 @@ def sleep_minutes_by_type(rows) -> dict[str, int]:
 
 def sleep_minutes_from_raw(db: Session, user_id: int, date_value: str | None) -> dict[str, int]:
     values = {"INVALID": 0, "AWAKE": 0, "REM": 0, "LIGHT": 0, "DEEP": 0, "NAP": 0}
+    sleep_window_start, sleep_window_end = health.l19_sleep_window_for_date(date_value) if date_value else (None, None)
     rows = db.execute(
         text(
             """
             select record_time, sleep_state
             from health_raw
-            where user_id=:user_id and (:date_value is null or date(record_time)=:date_value)
+            where user_id=:user_id
+              and (:sleep_window_start is null or record_time >= :sleep_window_start)
+              and (:sleep_window_end is null or record_time <= :sleep_window_end)
               and sleep_state is not null
               and record_time <= :max_record_time
             order by record_time
             """
         ),
-        {"user_id": user_id, "date_value": date_value, "max_record_time": max_visible_record_time()},
+        {
+            "user_id": user_id,
+            "sleep_window_start": sleep_window_start,
+            "sleep_window_end": sleep_window_end,
+            "max_record_time": max_visible_record_time(),
+        },
     ).mappings().all()
     if not rows:
         return values
@@ -257,7 +299,7 @@ def sleep_minutes_from_raw(db: Session, user_id: int, date_value: str | None) ->
         minutes = 5
         if index + 1 < len(items):
             delta = int((items[index + 1][0] - record_time).total_seconds())
-            if 0 < delta <= 900:
+            if 0 < delta <= health.L19_SLEEP_MAX_POINT_GAP_MINUTES * 60:
                 minutes = max(1, round(delta / 60))
         values[key] += minutes
     return values
@@ -272,18 +314,26 @@ def effective_sleep_values(db: Session, user_id: int, date_value: str | None, re
 
 
 def raw_sleep_state_rows(db: Session, user_id: int, date_value: str | None) -> list[dict]:
+    sleep_window_start, sleep_window_end = health.l19_sleep_window_for_date(date_value) if date_value else (None, None)
     rows = db.execute(
         text(
             """
             select record_time, sleep_state
             from health_raw
-            where user_id=:user_id and (:date_value is null or date(record_time)=:date_value)
+            where user_id=:user_id
+              and (:sleep_window_start is null or record_time >= :sleep_window_start)
+              and (:sleep_window_end is null or record_time <= :sleep_window_end)
               and sleep_state is not null
               and record_time <= :max_record_time
             order by record_time
             """
         ),
-        {"user_id": user_id, "date_value": date_value, "max_record_time": max_visible_record_time()},
+        {
+            "user_id": user_id,
+            "sleep_window_start": sleep_window_start,
+            "sleep_window_end": sleep_window_end,
+            "max_record_time": max_visible_record_time(),
+        },
     ).mappings().all()
     return [dict(row) for row in rows if sleep_type_key(row.get("sleep_state")) != "INVALID"]
 
@@ -300,13 +350,96 @@ def raw_sleep_chart_data(db: Session, user_id: int, date_value: str | None) -> l
             next_time = rows[index + 1].get("record_time")
             if isinstance(next_time, datetime):
                 seconds = int((next_time - record_time).total_seconds())
-                if 0 < seconds <= 900:
+                if 0 < seconds <= health.L19_SLEEP_MAX_POINT_GAP_MINUTES * 60:
                     minutes = max(1, round(seconds / 60))
+        end_time = record_time + timedelta(minutes=minutes)
+        stage_key = sleep_type_key(row.get("sleep_state"))
+        stage_code = sleep_stage_code(stage_key)
+        stage_name = SLEEP_STAGE_LABELS.get(stage_key, "")
         chart.append({
             "time": record_time.strftime("%H:%M"),
-            "value": str(minutes),
-            "sleepType": sleep_type_key(row.get("sleep_state")),
+            "startTime": record_time.strftime("%H:%M"),
+            "endTime": end_time.strftime("%H:%M"),
+            # Keep the old Java interface contract: sleepDetail.chartData.value is
+            # the sleep stage code, not duration minutes.
+            "value": stage_code,
+            "duration": minutes,
+            "stageCode": stage_code,
+            "sleepStageCode": stage_code,
+            "sleepStage": stage_key,
+            "sleepStageName": stage_name,
+            "sleepType": stage_key,
+            "sleepTypeName": stage_name,
         })
+    return chart
+
+
+SLEEP_STAGE_LABELS = {
+    "AWAKE": "清醒",
+    "REM": "快速眼动",
+    "LIGHT": "浅睡",
+    "DEEP": "深睡",
+    "NAP": "小睡",
+    "INVALID": "",
+}
+
+SLEEP_STAGE_CODES = {
+    "INVALID": "0",
+    "AWAKE": "1",
+    "REM": "2",
+    "LIGHT": "3",
+    "DEEP": "4",
+    "NAP": "5",
+}
+
+
+def sleep_stage_code(stage_key: str) -> str:
+    return SLEEP_STAGE_CODES.get(stage_key, "0")
+
+
+def sleep_time_hhmm(value) -> str:
+    if isinstance(value, datetime):
+        return value.strftime("%H:%M")
+    text_value = str(value or "")
+    if len(text_value) >= 16 and ":" in text_value[11:16]:
+        return text_value[11:16]
+    return text_value[:5] if ":" in text_value[:5] else ""
+
+
+def sleep_record_chart_point(row) -> dict:
+    item = dict(row._mapping)
+    stage_key = sleep_type_key(item.get("type"))
+    start_time = item.get("start_time")
+    end_time = item.get("end_time")
+    duration = int(item.get("sleep_time") or 0)
+    stage_code = sleep_stage_code(stage_key)
+    stage_name = SLEEP_STAGE_LABELS.get(stage_key, "")
+    return {
+        "time": sleep_time_hhmm(start_time),
+        "startTime": sleep_time_hhmm(start_time),
+        "endTime": sleep_time_hhmm(end_time),
+        # Keep the old Java interface contract: sleepDetail.chartData.value is
+        # the sleep stage code, not duration minutes.
+        "value": stage_code,
+        "duration": duration,
+        "stageCode": stage_code,
+        "sleepStageCode": stage_code,
+        "sleepStage": stage_key,
+        "sleepStageName": stage_name,
+        "sleepType": stage_key,
+        "sleepTypeName": stage_name,
+    }
+
+
+def sleep_record_chart_data(rows) -> list[dict]:
+    chart = []
+    for row in rows:
+        point = sleep_record_chart_point(row)
+        if point["sleepType"] in {"INVALID", "NAP"}:
+            continue
+        if not point["time"]:
+            continue
+        chart.append(point)
     return chart
 
 
@@ -362,6 +495,50 @@ def sleep_records(db: Session, user_id: int, date_value: str | None):
         ),
         {"user_id": user_id, "date_value": date_value},
     ).all()
+
+
+def coerce_datetime(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    text_value = str(value or "").strip()
+    if not text_value:
+        return None
+    normalized_text = text_value.replace("T", " ")
+    for candidate, fmt in (
+        (normalized_text[:19], "%Y-%m-%d %H:%M:%S"),
+        (normalized_text[:16], "%Y-%m-%d %H:%M"),
+        (normalized_text[:10], "%Y-%m-%d"),
+    ):
+        try:
+            return datetime.strptime(candidate, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def sleep_metric_window(db: Session, user_id: int, date_value: str | None) -> tuple[datetime | None, datetime | None]:
+    records = sleep_records(db, user_id, date_value)
+    start_times = []
+    end_times = []
+    for row in records:
+        item = dict(row._mapping)
+        start_time = coerce_datetime(item.get("start_time"))
+        end_time = coerce_datetime(item.get("end_time"))
+        if start_time:
+            start_times.append(start_time)
+        if end_time:
+            end_times.append(end_time)
+    if start_times and end_times:
+        return min(start_times), max(end_times)
+    if date_value:
+        raw_summary = health.sleep_summary_from_raw(db, user_id, date_value)
+        start_time = coerce_datetime(raw_summary.get("sleep_start_time"))
+        end_time = coerce_datetime(raw_summary.get("sleep_end_time"))
+        if start_time and end_time:
+            return start_time, end_time
+    return (None, None)
 
 
 def stress_records(db: Session, user_id: int, date_value: str | None = None, days: int | None = None, include_hrv_only: bool = False):
@@ -480,14 +657,18 @@ def format_raw_point_value(field: str, value) -> str:
     return str(int(round(number)))
 
 
-def raw_points(db: Session, user_id: int, date_value: str | None, field: str) -> list[dict]:
+def raw_points_from_series(series: list[dict], field: str) -> list[dict]:
     return [
         {
             "time": str(item.get("recordTime") or "")[11:16],
             "value": format_raw_point_value(field, item.get("value")),
         }
-        for item in raw_series(db, user_id, date_value, field)
+        for item in series
     ]
+
+
+def raw_points(db: Session, user_id: int, date_value: str | None, field: str) -> list[dict]:
+    return raw_points_from_series(raw_series(db, user_id, date_value, field), field)
 
 
 def raw_values(db: Session, user_id: int, date_value: str | None, field: str) -> list[float]:
@@ -651,6 +832,74 @@ def data_detail_response(
         "startDate": date_value,
         "endDate": date_value,
         "chartData": raw_points(db, user_id, date_value, field),
+    })
+
+
+def sleep_metric_detail_response(
+    db: Session,
+    user_id: int,
+    date_value: str | None,
+    field: str,
+    score_field: str | None = None,
+    summary_avg_field: str | None = None,
+    latest_desc: str | None = None,
+) -> dict:
+    summary = daily_summary(db, user_id, date_value) or {}
+    start_time, end_time = sleep_metric_window(db, user_id, date_value)
+    series = raw_series_between(db, user_id, start_time, end_time, field)
+    values = [
+        float(item.get("value") or 0)
+        for item in series
+        if item.get("value") is not None
+    ]
+    avg_value = sum(values) / len(values) if values else summary.get(summary_avg_field or "")
+    min_value = min(values) if values else None
+    max_value = max(values) if values else None
+    new_value = values[-1] if values else None
+    digits = 1 if field == "temperature" else 0
+
+    def format_detail_metric(value, fallback: str = "0") -> str:
+        if value in (None, ""):
+            return fallback
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if digits <= 0:
+            return str(int(round(number)))
+        return f"{number:.1f}"
+
+    chart_data = raw_points_from_series(series, field)
+    metric_source = "sleep-window-raw" if chart_data else "none"
+    if not chart_data and avg_value not in (None, "", 0, "0") and start_time and end_time:
+        fallback_value = format_detail_metric(avg_value)
+        chart_data = [
+            {"time": start_time.strftime("%H:%M"), "value": fallback_value},
+            {"time": end_time.strftime("%H:%M"), "value": fallback_value},
+        ]
+        metric_source = "daily-summary-fallback"
+        min_value = avg_value
+        max_value = avg_value
+        new_value = avg_value
+
+    return localize_payload_levels({
+        "healthScore": summary.get(score_field) if score_field else summary.get("healthScore"),
+        "latestDesc": latest_desc or summary.get("healthLevel"),
+        "minValue": format_detail_metric(min_value),
+        "maxValue": format_detail_metric(max_value),
+        "newValue": format_detail_metric(new_value),
+        "avgValue": format_detail_metric(avg_value),
+        "avgValueRange": f"{format_detail_metric(min_value)}-{format_detail_metric(max_value)}",
+        "baseValue": format_detail_metric(avg_value),
+        "baseValueMax": format_detail_metric(max_value),
+        "baseValueMin": format_detail_metric(min_value),
+        "diffValue": "0",
+        "type": "sleep",
+        "granularity": "sleep",
+        "startDate": start_time.isoformat(sep=" ") if start_time else date_value,
+        "endDate": end_time.isoformat(sep=" ") if end_time else date_value,
+        "metricSource": metric_source,
+        "chartData": chart_data,
     })
 
 
@@ -866,6 +1115,21 @@ def compact_level_text_key(value: str) -> str:
 
 COMPACT_LEVEL_TEXT_MAP = {compact_level_text_key(source): target for source, target in LEVEL_TEXT_MAP.items()}
 
+NON_LOCALIZED_PAYLOAD_KEYS = {
+    "stagecode",
+    "stage_code",
+    "sleepstagecode",
+    "sleep_stage_code",
+    "sleepstage",
+    "sleep_stage",
+    "sleepstagename",
+    "sleep_stage_name",
+    "sleeptype",
+    "sleep_type",
+    "sleeptypename",
+    "sleep_type_name",
+}
+
 MOJIBAKE_TEXT_REPLACEMENTS = {
     "淇濇寔涓嶅彉": "保持不变",
     "鐢熸椿涔犳儻璇勫垎": "生活习惯评分",
@@ -975,7 +1239,9 @@ def localize_payload_levels(payload, key=None):
             continue
 
         key_text = str(key)
-        if key_text == "status" or key_text == "level" or key_text.endswith("Level"):
+        if key_text.lower() in NON_LOCALIZED_PAYLOAD_KEYS:
+            localized[key] = value
+        elif key_text == "status" or key_text == "level" or key_text.endswith("Level"):
             localized[key] = localize_level_text(value, key=key)
         else:
             localized[key] = localize_level_text(value, key=key)
@@ -2356,27 +2622,370 @@ def redis_delete_key(redis: Redis | None, key: str) -> None:
         return
 
 
-@router.get("/device/bindInfo")
-def bind_info(user: dict = Depends(app_user), db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
-    row = db.execute(
+def normalize_device_mac_norm(value: str | None) -> str:
+    return re.sub(r"[^0-9a-fA-F]", "", str(value or "")).lower()
+
+
+DEVICE_MAC_NORM_SQL = "lower(replace(replace(coalesce(mac,''), ':', ''), '-', ''))"
+FAMILY_DEVICE_MAC_NORM_SQL = "lower(replace(replace(coalesce(device_mac,''), ':', ''), '-', ''))"
+DEVICE_BIND_LOG_TABLE_AVAILABLE: bool | None = None
+
+
+def is_truthy_payload_value(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def binding_conflict(message: str, reason_code: str, extra: dict | None = None) -> dict:
+    data = {"reasonCode": reason_code}
+    if extra:
+        data.update(extra)
+    return error(message, code=409, data=data)
+
+
+def select_current_bound_device(db: Session, user_id: int):
+    return db.execute(
         text(
             """
             select d.*, m.model_key, m.model_name, m.device_version
             from device d left join device_model m on m.id = d.model_id
-            where d.user_id=:user_id and d.del_flag=0 order by d.create_time desc limit 1
+            where d.user_id=:user_id and d.del_flag=0 order by d.update_time desc, d.create_time desc, d.id desc limit 1
             """
         ),
-        {"user_id": user["id"]},
+        {"user_id": user_id},
     ).first()
+
+
+def build_bound_device_response(row, user_id: int, redis: Redis | None = None, service_id: str | None = None, device_name: str | None = None, payload: dict | None = None):
+    if not row:
+        return None
+    data = camelize_dict(dict(row._mapping))
+    mac = data.get("mac") or data.get("deviceMac") or (payload or {}).get("mac")
+    resolved_service_id = service_id if service_id is not None else redis_get_text(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user_id}")
+    resolved_device_name = device_name if device_name is not None else redis_get_text(redis, f"{app_auth.DEVICE_NAME_KEY}{user_id}")
+    payload = payload or {}
+    data.update(
+        {
+            "scope": "personal",
+            "dataUserId": user_id,
+            "ownerUserId": user_id,
+            "mac": mac,
+            "deviceMac": mac,
+            "macNorm": normalize_device_mac_norm(mac),
+            "deviceName": resolved_device_name or data.get("deviceName") or data.get("name"),
+            "name": resolved_device_name or data.get("deviceName") or data.get("name"),
+            "serviceId": resolved_service_id or data.get("serviceId") or payload.get("serviceId"),
+            "protocol": payload.get("protocol") or data.get("protocol"),
+            "bindingVersion": data.get("updateTime") or data.get("createTime") or datetime.now().isoformat(timespec="seconds"),
+            "source": "remote",
+        }
+    )
+    for key in ("deviceId", "uniMacId", "cmdCharId", "dataCharId", "dataServiceId", "advertis"):
+        if payload.get(key) not in (None, ""):
+            data[key] = payload.get(key)
+    return data
+
+
+def device_bind_log_table_available(db: Session) -> bool:
+    global DEVICE_BIND_LOG_TABLE_AVAILABLE
+    if DEVICE_BIND_LOG_TABLE_AVAILABLE is not None:
+        return DEVICE_BIND_LOG_TABLE_AVAILABLE
+    row = db.execute(
+        text(
+            """
+            select 1
+            from information_schema.tables
+            where table_schema=database() and table_name='device_bind_log'
+            limit 1
+            """
+        )
+    ).first()
+    DEVICE_BIND_LOG_TABLE_AVAILABLE = bool(row)
+    return DEVICE_BIND_LOG_TABLE_AVAILABLE
+
+
+def write_device_bind_log(db: Session, *, device_id, device_mac: str, old_user_id, new_user_id, operator_user_id: int, action: str, reason: str):
+    if not device_bind_log_table_available(db):
+        return
+    db.execute(
+        text(
+            """
+            insert into device_bind_log(device_id, device_mac, device_sn, old_user_id, new_user_id, operator_user_id, operator_type, action, reason)
+            values(:device_id, :device_mac, :device_sn, :old_user_id, :new_user_id, :operator_user_id, 1, :action, :reason)
+            """
+        ),
+        {
+            "device_id": device_id,
+            "device_mac": device_mac,
+            "device_sn": device_mac,
+            "old_user_id": old_user_id,
+            "new_user_id": new_user_id,
+            "operator_user_id": operator_user_id,
+            "action": action,
+            "reason": reason,
+        },
+    )
+
+
+def upload_json_snapshot(value, limit: int = 20000) -> str | None:
+    try:
+        text_value = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        return None
+    return text_value[:limit]
+
+
+def ensure_device_upload_session_schema(db: Session) -> bool:
+    try:
+        db.execute(
+            text(
+                """
+                create table if not exists device_upload_session (
+                  id bigint primary key auto_increment,
+                  upload_session_id varchar(96) not null,
+                  operator_user_id bigint null,
+                  data_user_id bigint null,
+                  binding_id bigint null,
+                  binding_version varchar(96) null,
+                  device_mac varchar(64) null,
+                  device_mac_norm varchar(64) null,
+                  protocol varchar(32) null,
+                  status varchar(32) null,
+                  data_status varchar(32) null,
+                  raw_local_status varchar(32) null,
+                  raw_status varchar(32) null,
+                  data_count int null,
+                  raw_frame_count int null,
+                  can_delete_device_blocks tinyint(1) not null default 0,
+                  reason_code varchar(64) null,
+                  last_error varchar(512) null,
+                  request_snapshot longtext null,
+                  response_snapshot longtext null,
+                  create_time datetime null,
+                  update_time datetime null,
+                  unique key uk_upload_session_id (upload_session_id),
+                  key idx_upload_session_device (device_mac_norm, update_time),
+                  key idx_upload_session_user (data_user_id, update_time)
+                ) engine=InnoDB default charset=utf8mb4
+                """
+            )
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        return False
+
+
+def upsert_device_upload_session(db: Session, **values) -> None:
+    if not values.get("upload_session_id") or not ensure_device_upload_session_schema(db):
+        return
+    now = datetime.now()
+    payload = {
+        "upload_session_id": values.get("upload_session_id"),
+        "operator_user_id": values.get("operator_user_id"),
+        "data_user_id": values.get("data_user_id"),
+        "binding_id": values.get("binding_id"),
+        "binding_version": values.get("binding_version"),
+        "device_mac": values.get("device_mac"),
+        "device_mac_norm": normalize_device_mac_norm(values.get("device_mac_norm") or values.get("device_mac")),
+        "protocol": values.get("protocol"),
+        "status": values.get("status"),
+        "data_status": values.get("data_status"),
+        "raw_local_status": values.get("raw_local_status"),
+        "raw_status": values.get("raw_status"),
+        "data_count": values.get("data_count"),
+        "raw_frame_count": values.get("raw_frame_count"),
+        "can_delete_device_blocks": 1 if values.get("can_delete_device_blocks") else 0,
+        "reason_code": values.get("reason_code"),
+        "last_error": values.get("last_error"),
+        "request_snapshot": upload_json_snapshot(values.get("request_snapshot")),
+        "response_snapshot": upload_json_snapshot(values.get("response_snapshot")),
+        "create_time": now,
+        "update_time": now,
+    }
+    try:
+        db.execute(
+            text(
+                """
+                insert into device_upload_session (
+                  upload_session_id, operator_user_id, data_user_id, binding_id, binding_version,
+                  device_mac, device_mac_norm, protocol, status, data_status, raw_local_status, raw_status,
+                  data_count, raw_frame_count, can_delete_device_blocks, reason_code, last_error,
+                  request_snapshot, response_snapshot, create_time, update_time
+                ) values (
+                  :upload_session_id, :operator_user_id, :data_user_id, :binding_id, :binding_version,
+                  :device_mac, :device_mac_norm, :protocol, :status, :data_status, :raw_local_status, :raw_status,
+                  :data_count, :raw_frame_count, :can_delete_device_blocks, :reason_code, :last_error,
+                  :request_snapshot, :response_snapshot, :create_time, :update_time
+                )
+                on duplicate key update
+                  operator_user_id=coalesce(values(operator_user_id), operator_user_id),
+                  data_user_id=coalesce(values(data_user_id), data_user_id),
+                  binding_id=coalesce(values(binding_id), binding_id),
+                  binding_version=coalesce(values(binding_version), binding_version),
+                  device_mac=coalesce(values(device_mac), device_mac),
+                  device_mac_norm=coalesce(values(device_mac_norm), device_mac_norm),
+                  protocol=coalesce(values(protocol), protocol),
+                  status=coalesce(values(status), status),
+                  data_status=coalesce(values(data_status), data_status),
+                  raw_local_status=coalesce(values(raw_local_status), raw_local_status),
+                  raw_status=coalesce(values(raw_status), raw_status),
+                  data_count=coalesce(values(data_count), data_count),
+                  raw_frame_count=coalesce(values(raw_frame_count), raw_frame_count),
+                  can_delete_device_blocks=values(can_delete_device_blocks),
+                  reason_code=coalesce(values(reason_code), reason_code),
+                  last_error=coalesce(values(last_error), last_error),
+                  request_snapshot=coalesce(values(request_snapshot), request_snapshot),
+                  response_snapshot=coalesce(values(response_snapshot), response_snapshot),
+                  update_time=values(update_time)
+                """
+            ),
+            payload,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def ensure_health_upload_exception_schema(db: Session) -> bool:
+    try:
+        db.execute(
+            text(
+                """
+                create table if not exists health_upload_exception (
+                  id bigint primary key auto_increment,
+                  upload_session_id varchar(96) null,
+                  operator_user_id bigint null,
+                  data_user_id bigint null,
+                  device_mac varchar(64) null,
+                  device_mac_norm varchar(64) null,
+                  reason_code varchar(64) null,
+                  message varchar(512) null,
+                  payload_snapshot longtext null,
+                  create_time datetime null,
+                  key idx_upload_exception_session (upload_session_id),
+                  key idx_upload_exception_device (device_mac_norm, create_time)
+                ) engine=InnoDB default charset=utf8mb4
+                """
+            )
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        return False
+
+
+def write_health_upload_exception(db: Session, *, upload_session_id: str | None, operator_user_id: int, data_user_id: int | None, device_mac: str | None, reason_code: str, message: str, payload=None) -> None:
+    if not ensure_health_upload_exception_schema(db):
+        return
+    try:
+        db.execute(
+            text(
+                """
+                insert into health_upload_exception(
+                  upload_session_id, operator_user_id, data_user_id, device_mac, device_mac_norm,
+                  reason_code, message, payload_snapshot, create_time
+                ) values (
+                  :upload_session_id, :operator_user_id, :data_user_id, :device_mac, :device_mac_norm,
+                  :reason_code, :message, :payload_snapshot, :create_time
+                )
+                """
+            ),
+            {
+                "upload_session_id": upload_session_id,
+                "operator_user_id": operator_user_id,
+                "data_user_id": data_user_id,
+                "device_mac": device_mac,
+                "device_mac_norm": normalize_device_mac_norm(device_mac),
+                "reason_code": reason_code,
+                "message": message[:512],
+                "payload_snapshot": upload_json_snapshot(payload),
+                "create_time": datetime.now(),
+            },
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def resolve_upload_family_user_id(db: Session, operator_user_id: int, device_mac_norm: str) -> int | None:
+    if not device_mac_norm:
+        return None
+    row = db.execute(
+        text(
+            f"""
+            select data_user_id
+            from family_member_device
+            where owner_user_id=:owner_user_id
+              and {FAMILY_DEVICE_MAC_NORM_SQL}=:device_mac_norm
+              and del_flag=0 and status='active'
+            order by update_time desc limit 1
+            """
+        ),
+        {"owner_user_id": operator_user_id, "device_mac_norm": device_mac_norm},
+    ).first()
+    return int(row._mapping["data_user_id"]) if row else None
+
+
+def resolve_active_upload_binding(db: Session, operator_user_id: int, device_mac: str | None) -> dict:
+    input_mac_norm = normalize_device_mac_norm(device_mac)
+    row = None
+    if input_mac_norm:
+        row = db.execute(
+            text(
+                f"""
+                select id, user_id, mac, update_time, create_time
+                from device
+                where {DEVICE_MAC_NORM_SQL}=:device_mac_norm and del_flag=0
+                order by update_time desc, create_time desc, id desc limit 1
+                """
+            ),
+            {"device_mac_norm": input_mac_norm},
+        ).first()
+    elif operator_user_id:
+        row = select_current_bound_device(db, operator_user_id)
+    if not row:
+        return {"ok": False, "reasonCode": "NO_ACTIVE_BINDING", "message": "当前没有有效绑定设备", "deviceMacNorm": input_mac_norm}
+    data = dict(row._mapping)
+    active_mac = data.get("mac") or device_mac
+    active_mac_norm = normalize_device_mac_norm(active_mac)
+    active_user_id = int(data.get("user_id") or 0)
+    if active_user_id <= 0:
+        return {"ok": False, "reasonCode": "NO_ACTIVE_BINDING", "message": "设备没有绑定用户", "deviceMac": active_mac, "deviceMacNorm": active_mac_norm}
+    family_user_id = resolve_upload_family_user_id(db, operator_user_id, active_mac_norm)
+    allowed_data_user_id = family_user_id or operator_user_id
+    if active_user_id != operator_user_id and active_user_id != allowed_data_user_id:
+        return {
+            "ok": False,
+            "reasonCode": "BOUND_TO_OTHER_USER",
+            "message": "设备已绑定到其他用户",
+            "deviceMac": active_mac,
+            "deviceMacNorm": active_mac_norm,
+            "dataUserId": active_user_id,
+        }
+    return {
+        "ok": True,
+        "bindingId": data.get("id"),
+        "bindingVersion": data.get("update_time") or data.get("create_time"),
+        "dataUserId": active_user_id,
+        "deviceMac": active_mac,
+        "deviceMacNorm": active_mac_norm,
+        "protocol": data.get("protocol"),
+    }
+
+
+@router.get("/device/bindInfo")
+def bind_info(user: dict = Depends(app_user), db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
+    user_id = int(user["id"])
+    row = select_current_bound_device(db, user_id)
     service_id = redis_get_text(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}")
     device_name = redis_get_text(redis, f"{app_auth.DEVICE_NAME_KEY}{user['id']}")
     if not row:
-        return success({"serviceId": service_id, "deviceName": device_name}, "not bound")
-    data = dict(row._mapping)
-    data = camelize_dict(data)
-    data["serviceId"] = service_id
-    data["deviceName"] = device_name or data.get("deviceName")
-    return success(data)
+        return success(None, "not bound")
+    return success(build_bound_device_response(row, user_id, redis, service_id, device_name))
 
 
 @router.get("/device/current")
@@ -2384,57 +2993,240 @@ def current_device(user: dict = Depends(app_user), db: Session = Depends(get_db)
     return bind_info(user, db, redis)
 
 
-@router.get("/device/bind")
-def bind_device(mac: str, serviceId: str = "", deviceName: str = "", user: dict = Depends(app_user), db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
-    mac = str(mac or "").strip()
+def bind_device_authoritatively(payload: dict, user: dict, db: Session, redis: Redis | None):
+    mac = str(payload.get("mac") or payload.get("deviceMac") or "").strip()
+    mac_norm = normalize_device_mac_norm(mac)
     if not mac:
         return error("设备 MAC 不能为空")
+    if len(mac_norm) < 6:
+        return binding_conflict("设备 MAC 不合法", "INVALID_DEVICE_MAC")
     current_user_id = int(user["id"])
+    service_id = str(payload.get("serviceId") or payload.get("service_id") or "").strip()
+    device_name = str(payload.get("deviceName") or payload.get("device_name") or mac).strip()
+    replace = is_truthy_payload_value(payload.get("replace"))
+
+    current_device = select_current_bound_device(db, current_user_id)
+    current_device_data = dict(current_device._mapping) if current_device else {}
     device_row = db.execute(
         text(
-            """
+            f"""
             select id, user_id from device
-            where lower(mac)=lower(:mac) and del_flag=0
+            where {DEVICE_MAC_NORM_SQL}=:mac_norm and del_flag=0
             order by id desc limit 1
             """
         ),
-        {"mac": mac},
+        {"mac_norm": mac_norm},
     ).first()
+    device_data = dict(device_row._mapping) if device_row else {}
+
+    current_mac_norm = normalize_device_mac_norm(current_device_data.get("mac"))
+    target_device_id = device_data.get("id")
+    target_bound_user_id = device_data.get("user_id")
+
+    bound_by_other_device = db.execute(
+        text(
+            f"""
+            select id, user_id from device
+            where {DEVICE_MAC_NORM_SQL}=:mac_norm and del_flag=0 and user_id is not null and user_id<>:user_id
+            order by id desc limit 1
+            """
+        ),
+        {"mac_norm": mac_norm, "user_id": current_user_id},
+    ).first()
+    if bound_by_other_device:
+        return binding_conflict("该设备已被其他用户绑定，请先解除原绑定", "DEVICE_BOUND_BY_OTHER")
+
+    if current_device_data and current_mac_norm and current_mac_norm != mac_norm and not replace:
+        return binding_conflict(
+            "当前用户已绑定设备，请先解除绑定或确认替换设备",
+            "USER_HAS_ACTIVE_DEVICE",
+            {"currentMac": current_device_data.get("mac"), "targetMac": mac},
+        )
+
     if device_row:
-        bound_user_id = device_row._mapping.get("user_id")
-        if bound_user_id and int(bound_user_id) != current_user_id:
-            return error("该设备已被其他用户绑定，请先解除原绑定")
+        if target_bound_user_id and int(target_bound_user_id) != current_user_id:
+            return binding_conflict("该设备已被其他用户绑定，请先解除原绑定", "DEVICE_BOUND_BY_OTHER")
     family_binding = db.execute(
         text(
-            """
+            f"""
             select data_user_id
             from family_member_device
-            where lower(device_mac)=lower(:mac) and del_flag=0 and status='active'
+            where {FAMILY_DEVICE_MAC_NORM_SQL}=:mac_norm and del_flag=0 and status='active'
             order by update_time desc limit 1
             """
         ),
-        {"mac": mac},
+        {"mac_norm": mac_norm},
     ).first()
     if family_binding:
         family_data_user_id = family_binding._mapping.get("data_user_id")
         if family_data_user_id and int(family_data_user_id) != current_user_id:
-            return error("该设备已被其他用户绑定，请先解除原绑定")
-    result = db.execute(text("update device set user_id=:user_id, device_name=coalesce(nullif(:device_name,''), device_name), update_time=now() where lower(mac)=lower(:mac) and del_flag=0"), {"user_id": current_user_id, "device_name": deviceName, "mac": mac})
+            return binding_conflict("该设备已被其他用户绑定，请先解除原绑定", "DEVICE_BOUND_BY_OTHER")
+
+    if current_device_data and current_mac_norm and current_mac_norm != mac_norm and replace:
+        db.execute(
+            text("update device set user_id=null, update_time=now() where id=:id and user_id=:user_id"),
+            {"id": current_device_data.get("id"), "user_id": current_user_id},
+        )
+        write_device_bind_log(
+            db,
+            device_id=current_device_data.get("id"),
+            device_mac=current_device_data.get("mac") or "",
+            old_user_id=current_user_id,
+            new_user_id=None,
+            operator_user_id=current_user_id,
+            action="replace",
+            reason="personal_replace_old_device",
+        )
+
+    db.execute(
+        text(
+            f"""
+            insert into device(device_name, device_size, sn, mac, del_flag, create_time, update_time)
+            select :device_name, 0, :sn, :mac, 0, now(), now()
+            where not exists (
+              select 1 from device where {DEVICE_MAC_NORM_SQL}=:mac_norm and del_flag=0
+            )
+            """
+        ),
+        {"device_name": device_name, "sn": mac, "mac": mac, "mac_norm": mac_norm},
+    )
+    target_row = db.execute(
+        text(
+            f"""
+            select id, user_id from device
+            where {DEVICE_MAC_NORM_SQL}=:mac_norm and del_flag=0
+            order by id desc limit 1
+            """
+        ),
+        {"mac_norm": mac_norm},
+    ).first()
+    if not target_row:
+        db.rollback()
+        return error("设备绑定失败，请重新搜索后再试")
+    target_device_id = target_row._mapping.get("id")
+    target_bound_user_id = target_row._mapping.get("user_id")
+
+    result = db.execute(
+        text(
+            """
+            update device
+            set user_id=:user_id, device_name=coalesce(nullif(:device_name,''), device_name), update_time=now()
+            where id=:id and del_flag=0
+            """
+        ),
+        {"user_id": current_user_id, "device_name": device_name, "id": target_device_id},
+    )
+    if (result.rowcount or 0) <= 0:
+        db.rollback()
+        return error("设备绑定失败，请重新搜索后再试")
+
+    bound_row = db.execute(
+        text(
+            f"""
+            select d.*, m.model_key, m.model_name, m.device_version
+            from device d left join device_model m on m.id = d.model_id
+            where d.id=:id and d.del_flag=0
+            """
+        ),
+        {"id": target_device_id},
+    ).first()
+    bound_device_id = bound_row._mapping.get("id") if bound_row else target_device_id
+    write_device_bind_log(
+        db,
+        device_id=bound_device_id,
+        device_mac=mac,
+        old_user_id=target_bound_user_id,
+        new_user_id=current_user_id,
+        operator_user_id=current_user_id,
+        action="bind",
+        reason="personal_bind",
+    )
     redis_delete_key(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}")
-    redis_set_text(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}", serviceId)
+    redis_set_text(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}", service_id)
     redis_delete_key(redis, f"{app_auth.DEVICE_NAME_KEY}{user['id']}")
-    redis_set_text(redis, f"{app_auth.DEVICE_NAME_KEY}{user['id']}", deviceName)
+    redis_set_text(redis, f"{app_auth.DEVICE_NAME_KEY}{user['id']}", device_name)
+    db.commit()
+    return success(build_bound_device_response(bound_row, current_user_id, redis, service_id, device_name, payload))
+
+
+@router.post("/device/bind")
+async def bind_device_post(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    try:
+        return bind_device_authoritatively(payload or {}, user, db, redis)
+    except IntegrityError:
+        db.rollback()
+        return binding_conflict("该设备或用户已存在有效绑定，请刷新后重试", "BINDING_UNIQUE_CONFLICT")
+
+
+@router.get("/device/bind")
+def bind_device_get(mac: str, serviceId: str = "", deviceName: str = "", user: dict = Depends(app_user), db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
+    payload = {"mac": mac, "serviceId": serviceId, "deviceName": deviceName}
+    try:
+        return bind_device_authoritatively(payload, user, db, redis)
+    except IntegrityError:
+        db.rollback()
+        return binding_conflict("该设备或用户已存在有效绑定，请刷新后重试", "BINDING_UNIQUE_CONFLICT")
+
+
+def unbind_device_authoritatively(payload: dict, user: dict, db: Session, redis: Redis | None):
+    mac = str(payload.get("mac") or payload.get("deviceMac") or "").strip()
+    mac_norm = normalize_device_mac_norm(mac)
+    if not mac_norm:
+        return error("设备 MAC 不能为空")
+    current_user_id = int(user["id"])
+    target = db.execute(
+        text(
+            f"""
+            select id, mac, user_id from device
+            where {DEVICE_MAC_NORM_SQL}=:mac_norm and user_id=:user_id and del_flag=0
+            order by id desc limit 1
+            """
+        ),
+        {"mac_norm": mac_norm, "user_id": current_user_id},
+    ).first()
+    result = db.execute(
+        text(
+            f"""
+            update device set user_id=null, update_time=now()
+            where {DEVICE_MAC_NORM_SQL}=:mac_norm and user_id=:user_id and del_flag=0
+            """
+        ),
+        {"mac_norm": mac_norm, "user_id": current_user_id},
+    )
+    if target:
+        target_data = dict(target._mapping)
+        write_device_bind_log(
+            db,
+            device_id=target_data.get("id"),
+            device_mac=target_data.get("mac") or mac,
+            old_user_id=current_user_id,
+            new_user_id=None,
+            operator_user_id=current_user_id,
+            action="unbind",
+            reason=str(payload.get("reason") or "personal_unbind"),
+        )
+    redis_delete_key(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}")
+    redis_delete_key(redis, f"{app_auth.DEVICE_NAME_KEY}{user['id']}")
     db.commit()
     return success((result.rowcount or 0) > 0)
+
+
+@router.post("/device/unbind")
+async def unbind_device_post(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return unbind_device_authoritatively(payload or {}, user, db, redis)
 
 
 @router.get("/device/unbind")
-def unbind_device(mac: str, user: dict = Depends(app_user), db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
-    result = db.execute(text("update device set user_id=null, update_time=now() where mac=:mac and user_id=:user_id"), {"mac": mac, "user_id": user["id"]})
-    redis_delete_key(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}")
-    redis_delete_key(redis, f"{app_auth.DEVICE_NAME_KEY}{user['id']}")
-    db.commit()
-    return success((result.rowcount or 0) > 0)
+def unbind_device_get(mac: str, user: dict = Depends(app_user), db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
+    return unbind_device_authoritatively({"mac": mac}, user, db, redis)
 
 
 @router.get("/family/member/list")
@@ -3545,6 +4337,217 @@ def sync_ring_data_records(
     }
 
 
+def repair_l19_raw_history_data(
+    db: Session,
+    user_id: int,
+    device_mac: str,
+    record_date: str | date | datetime | None = None,
+    clear_existing: bool = True,
+    battery=None,
+) -> dict:
+    started_at = perf_counter()
+    normalized_device_mac = health.normalize_ring_history_device_mac(device_mac)
+    target_date = health.raw_history_repair_date(record_date)
+    if not normalized_device_mac:
+        return {
+            "success": False,
+            "message": "缺少设备 MAC，无法重解析",
+            "recordDate": target_date.isoformat(),
+            "elapsedMs": round((perf_counter() - started_at) * 1000),
+        }
+    prepared = health.prepare_l19_raw_history_repair_records(db, user_id, normalized_device_mac, target_date)
+    if not prepared.get("frames"):
+        return {
+            "success": False,
+            "message": "没有找到可重解析的原始数据",
+            "recordDate": target_date.isoformat(),
+            "deviceMac": normalized_device_mac,
+            "frameCount": 0,
+            "elapsedMs": round((perf_counter() - started_at) * 1000),
+        }
+    records = prepared.get("records") or []
+    if not records:
+        health.mark_l19_raw_history_repair_result(
+            db,
+            user_id,
+            normalized_device_mac,
+            prepared.get("rawHashes") or [],
+            False,
+            0,
+            "原始帧未解析出有效记录",
+        )
+        return {
+            "success": False,
+            "message": "原始帧未解析出有效记录",
+            "recordDate": target_date.isoformat(),
+            "deviceMac": normalized_device_mac,
+            "frameCount": prepared.get("frameCount", 0),
+            "parsedPointCount": prepared.get("parsedPointCount", 0),
+            "sleepSegmentCount": prepared.get("sleepSegmentCount", 0),
+            "elapsedMs": round((perf_counter() - started_at) * 1000),
+        }
+
+    clear_result = health.clear_l19_raw_history_repair_window(db, user_id, normalized_device_mac, target_date) if clear_existing else {}
+    sync_result = sync_ring_data_records(db, user_id, records, normalized_device_mac, battery, calculate_summary=False)
+    summary_dates = sorted(set((sync_result.get("touchedDates") or []) + [target_date.isoformat()]))
+    if summary_dates:
+        recalculate_sync_summaries(user_id, summary_dates)
+    success_flag = bool(sync_result.get("success"))
+    health.mark_l19_raw_history_repair_result(
+        db,
+        user_id,
+        normalized_device_mac,
+        prepared.get("rawHashes") or [],
+        success_flag,
+        sync_result.get("count") or 0,
+        None if success_flag else "解析记录写入失败",
+    )
+    elapsed_ms = round((perf_counter() - started_at) * 1000)
+    result = {
+        "success": success_flag,
+        "recordDate": target_date.isoformat(),
+        "deviceMac": normalized_device_mac,
+        "frameCount": prepared.get("frameCount", 0),
+        "parsedPointCount": prepared.get("parsedPointCount", 0),
+        "sleepSegmentCount": prepared.get("sleepSegmentCount", 0),
+        "inputCount": len(records),
+        "clearExisting": bool(clear_existing),
+        "clearResult": clear_result,
+        "syncResult": sync_result,
+        "summaryDates": summary_dates,
+        "sleepWindowStart": prepared.get("sleepWindowStart"),
+        "sleepWindowEnd": prepared.get("sleepWindowEnd"),
+        "elapsedMs": elapsed_ms,
+    }
+    return result
+
+
+@router.post("/data/rawHistory/upload")
+async def data_raw_history_upload(
+    request: Request,
+    user: dict = Depends(app_user),
+    db: Session = Depends(get_db),
+):
+    started_at = perf_counter()
+    payload = await request.json()
+    frames = payload.get("frames") or payload.get("rawFrames") or payload.get("raw_frames") or []
+    if isinstance(frames, dict):
+        frames = [frames]
+    if not isinstance(frames, list):
+        frames = []
+    device_mac = payload.get("deviceMac") or payload.get("device_mac")
+    upload_session_id = str(payload.get("uploadSessionId") or payload.get("upload_session_id") or uuid4())
+    operator_user_id = int(user["id"])
+    binding = resolve_active_upload_binding(db, operator_user_id, device_mac)
+    if not binding.get("ok"):
+        result = {
+            "uploadSessionId": upload_session_id,
+            "rawStatus": "failed",
+            "reasonCode": binding.get("reasonCode"),
+            "message": binding.get("message"),
+            "inputFrameCount": len(frames),
+            "canDeleteDeviceBlocks": False,
+            "elapsedMs": round((perf_counter() - started_at) * 1000),
+        }
+        write_health_upload_exception(
+            db,
+            upload_session_id=upload_session_id,
+            operator_user_id=operator_user_id,
+            data_user_id=binding.get("dataUserId"),
+            device_mac=device_mac,
+            reason_code=binding.get("reasonCode") or "UPLOAD_BINDING_INVALID",
+            message=binding.get("message") or "上传设备绑定无效",
+            payload={"frameCount": len(frames), "deviceMac": device_mac},
+        )
+        upsert_device_upload_session(
+            db,
+            upload_session_id=upload_session_id,
+            operator_user_id=operator_user_id,
+            data_user_id=binding.get("dataUserId"),
+            binding_id=payload.get("bindingId") or payload.get("binding_id"),
+            binding_version=payload.get("bindingVersion") or payload.get("binding_version"),
+            device_mac=device_mac,
+            protocol=payload.get("protocol"),
+            status="raw_failed",
+            raw_status="failed",
+            raw_frame_count=len(frames),
+            can_delete_device_blocks=False,
+            reason_code=binding.get("reasonCode"),
+            last_error=binding.get("message"),
+            request_snapshot={"frameCount": len(frames), "deviceMac": device_mac},
+            response_snapshot=result,
+        )
+        return error(result.get("message") or "上传设备绑定无效", code=409, data=result)
+    target_user_id = int(binding["dataUserId"])
+    resolved_device_mac = binding.get("deviceMac") or device_mac or ""
+    result = health.store_ring_history_raw_frames(db, target_user_id, resolved_device_mac, frames, upload_user_id=operator_user_id)
+    result["uploadSessionId"] = upload_session_id
+    result["dataUserId"] = target_user_id
+    result["deviceMac"] = resolved_device_mac
+    result["deviceMacNorm"] = binding.get("deviceMacNorm")
+    result["bindingId"] = binding.get("bindingId")
+    result["bindingVersion"] = binding.get("bindingVersion")
+    result["rawStatus"] = "done" if result.get("rawStored") or not frames else "partial"
+    result["canDeleteDeviceBlocks"] = False
+    result["inputFrameCount"] = len(frames)
+    result["elapsedMs"] = round((perf_counter() - started_at) * 1000)
+    upsert_device_upload_session(
+        db,
+        upload_session_id=upload_session_id,
+        operator_user_id=operator_user_id,
+        data_user_id=target_user_id,
+        binding_id=binding.get("bindingId"),
+        binding_version=binding.get("bindingVersion"),
+        device_mac=resolved_device_mac,
+        protocol=payload.get("protocol") or (frames[0].get("protocol") if frames and isinstance(frames[0], dict) else None),
+        status="raw_done" if result.get("rawStatus") == "done" else "raw_partial",
+        raw_status=result.get("rawStatus"),
+        raw_frame_count=result.get("rawFrameCount"),
+        can_delete_device_blocks=False,
+        request_snapshot={"frameCount": len(frames), "deviceMac": resolved_device_mac},
+        response_snapshot=result,
+    )
+    write_algorithm_log(
+        "data_raw_history_upload",
+        user_id=target_user_id,
+        device_mac=resolved_device_mac,
+        upload_session_id=upload_session_id,
+        input_frame_count=len(frames),
+        stored_count=result.get("storedCount"),
+        updated_count=result.get("updatedCount"),
+        skipped_count=result.get("skippedCount"),
+        elapsed_ms=result["elapsedMs"],
+    )
+    return success(result, f"原始数据保存 {result.get('rawFrameCount', 0)} 帧")
+
+
+@router.post("/data/rawHistory/repairToday")
+async def data_raw_history_repair_today(
+    request: Request,
+    user: dict = Depends(app_user),
+    db: Session = Depends(get_db),
+):
+    payload = await request.json()
+    device_mac = payload.get("deviceMac") or payload.get("device_mac")
+    record_date = payload.get("date") or payload.get("recordDate") or payload.get("record_date")
+    clear_existing = str(payload.get("clearExisting", payload.get("clear_existing", "true"))).strip().lower() not in {"0", "false", "no", "off"}
+    target_user_id = family.resolve_sync_user_id(db, int(user["id"]), device_mac)
+    result = repair_l19_raw_history_data(db, target_user_id, device_mac or "", record_date, clear_existing, payload.get("battery"))
+    write_algorithm_log(
+        "data_raw_history_repair",
+        user_id=target_user_id,
+        device_mac=device_mac,
+        record_date=result.get("recordDate"),
+        success=result.get("success"),
+        frame_count=result.get("frameCount"),
+        parsed_point_count=result.get("parsedPointCount"),
+        sleep_segment_count=result.get("sleepSegmentCount"),
+        input_count=result.get("inputCount"),
+        elapsed_ms=result.get("elapsedMs"),
+    )
+    return success(result, "原始数据重新解析完成" if result.get("success") else result.get("message") or "没有可解析原始数据")
+
+
 @router.post("/data/sync")
 async def data_sync(
     request: Request,
@@ -3554,15 +4557,92 @@ async def data_sync(
 ):
     started_at = perf_counter()
     payload = await request.json()
+    upload_session_id = str(payload.get("uploadSessionId") or payload.get("upload_session_id") or uuid4())
+    operator_user_id = int(user["id"])
     records = payload.get("dataList") or payload.get("records") or payload.get("data") or payload.get("list") or []
     if isinstance(records, dict):
         records = [records]
     if not records:
-        return success(False)
+        result = {
+            "uploadSessionId": upload_session_id,
+            "success": False,
+            "dataStatus": "empty",
+            "coverageStatus": "missing",
+            "inputCount": 0,
+            "count": 0,
+            "healthCount": 0,
+            "sleepCount": 0,
+            "failCount": 0,
+            "canDeleteDeviceBlocks": False,
+            "elapsedMs": round((perf_counter() - started_at) * 1000),
+        }
+        upsert_device_upload_session(
+            db,
+            upload_session_id=upload_session_id,
+            operator_user_id=operator_user_id,
+            data_status="empty",
+            status="empty",
+            data_count=0,
+            raw_local_status=payload.get("rawLocalStatus") or payload.get("raw_local_status"),
+            raw_frame_count=payload.get("rawFrameCount") or payload.get("raw_frame_count"),
+            can_delete_device_blocks=False,
+            request_snapshot={"inputCount": 0},
+            response_snapshot=result,
+        )
+        return success(result, "没有可同步数据")
     device_mac = payload.get("deviceMac") or payload.get("device_mac")
-    target_user_id = family.resolve_sync_user_id(db, int(user["id"]), device_mac)
+    binding = resolve_active_upload_binding(db, operator_user_id, device_mac)
+    if not binding.get("ok"):
+        result = {
+            "uploadSessionId": upload_session_id,
+            "success": False,
+            "dataStatus": "failed",
+            "coverageStatus": "missing",
+            "reasonCode": binding.get("reasonCode"),
+            "message": binding.get("message"),
+            "inputCount": len(records),
+            "count": 0,
+            "healthCount": 0,
+            "sleepCount": 0,
+            "failCount": len(records),
+            "canDeleteDeviceBlocks": False,
+            "elapsedMs": round((perf_counter() - started_at) * 1000),
+        }
+        write_health_upload_exception(
+            db,
+            upload_session_id=upload_session_id,
+            operator_user_id=operator_user_id,
+            data_user_id=binding.get("dataUserId"),
+            device_mac=device_mac,
+            reason_code=binding.get("reasonCode") or "UPLOAD_BINDING_INVALID",
+            message=binding.get("message") or "上传设备绑定无效",
+            payload={"inputCount": len(records), "deviceMac": device_mac},
+        )
+        upsert_device_upload_session(
+            db,
+            upload_session_id=upload_session_id,
+            operator_user_id=operator_user_id,
+            data_user_id=binding.get("dataUserId"),
+            binding_id=payload.get("bindingId") or payload.get("binding_id"),
+            binding_version=payload.get("bindingVersion") or payload.get("binding_version"),
+            device_mac=device_mac,
+            protocol=payload.get("protocol"),
+            status="data_failed",
+            data_status="failed",
+            raw_local_status=payload.get("rawLocalStatus") or payload.get("raw_local_status"),
+            raw_frame_count=payload.get("rawFrameCount") or payload.get("raw_frame_count"),
+            data_count=0,
+            can_delete_device_blocks=False,
+            reason_code=binding.get("reasonCode"),
+            last_error=binding.get("message"),
+            request_snapshot={"inputCount": len(records), "deviceMac": device_mac},
+            response_snapshot=result,
+        )
+        return error(result.get("message") or "上传设备绑定无效", code=409, data=result)
+    target_user_id = int(binding["dataUserId"])
+    resolved_device_mac = binding.get("deviceMac") or device_mac
     battery = payload.get("battery")
-    result = sync_ring_data_records(db, target_user_id, records, device_mac, battery, calculate_summary=False)
+    result = sync_ring_data_records(db, target_user_id, records, resolved_device_mac, battery, calculate_summary=False)
     summary_dates = result.get("touchedDates") or []
     summary_inline = 0 < len(summary_dates) <= SYNC_INLINE_SUMMARY_DATE_LIMIT
     if summary_inline:
@@ -3573,11 +4653,60 @@ async def data_sync(
     result["summaryScheduled"] = bool(summary_dates) and not summary_inline
     result["summaryInline"] = summary_inline
     result["summarySkipped"] = not summary_inline
+    success_count = int(result.get("count") or 0)
+    fail_count = int(result.get("failCount") or 0)
+    data_status = "done" if success_count > 0 and fail_count == 0 else ("partial" if success_count > 0 else "failed")
+    requested_coverage_status = str(payload.get("coverageStatus") or payload.get("coverage_status") or "").strip().lower()
+    coverage_status = requested_coverage_status or ("complete" if data_status == "done" else ("partial" if data_status == "partial" else "missing"))
+    raw_local_status = str(payload.get("rawLocalStatus") or payload.get("raw_local_status") or "").strip().lower()
+    if raw_local_status not in {"done", "none", "failed"}:
+        raw_local_status = "none"
+    try:
+        raw_frame_count = int(payload.get("rawFrameCount") or payload.get("raw_frame_count") or 0)
+    except (TypeError, ValueError):
+        raw_frame_count = 0
+    can_delete_device_blocks = data_status == "done" and raw_local_status == "done"
+    result["uploadSessionId"] = upload_session_id
+    result["dataUserId"] = target_user_id
+    result["deviceMac"] = resolved_device_mac
+    result["deviceMacNorm"] = binding.get("deviceMacNorm")
+    result["bindingId"] = binding.get("bindingId")
+    result["bindingVersion"] = binding.get("bindingVersion")
+    result["dataStatus"] = data_status
+    result["coverageStatus"] = coverage_status
+    result["rawLocalStatus"] = raw_local_status
+    result["rawFrameCount"] = raw_frame_count
+    result["canDeleteDeviceBlocks"] = can_delete_device_blocks
     result["elapsedMs"] = round((perf_counter() - started_at) * 1000)
+    upsert_device_upload_session(
+        db,
+        upload_session_id=upload_session_id,
+        operator_user_id=operator_user_id,
+        data_user_id=target_user_id,
+        binding_id=binding.get("bindingId"),
+        binding_version=binding.get("bindingVersion"),
+        device_mac=resolved_device_mac,
+        protocol=payload.get("protocol") or binding.get("protocol"),
+        status="data_done" if data_status == "done" else f"data_{data_status}",
+        data_status=data_status,
+        raw_local_status=raw_local_status,
+        raw_status=payload.get("rawStatus") or payload.get("raw_status"),
+        data_count=success_count,
+        raw_frame_count=raw_frame_count,
+        can_delete_device_blocks=can_delete_device_blocks,
+        request_snapshot={
+            "inputCount": len(records),
+            "deviceMac": resolved_device_mac,
+            "rawFrameCount": raw_frame_count,
+            "rawLocalStatus": raw_local_status,
+        },
+        response_snapshot=result,
+    )
     write_algorithm_log(
         "data_sync",
         user_id=target_user_id,
-        device_mac=device_mac,
+        device_mac=resolved_device_mac,
+        upload_session_id=upload_session_id,
         input_count=len(records),
         elapsed_ms=result["elapsedMs"],
         count=result.get("count"),
@@ -3591,6 +4720,11 @@ async def data_sync(
         device_update_ms=result.get("deviceUpdateMs"),
         summary_ms=result.get("summaryMs"),
         summary_dates=result.get("summaryDates"),
+        data_status=data_status,
+        coverage_status=coverage_status,
+        raw_local_status=raw_local_status,
+        raw_frame_count=raw_frame_count,
+        can_delete_device_blocks=can_delete_device_blocks,
     )
     return success(
         result,
@@ -4097,18 +5231,24 @@ def health_activity_regularity(user: dict = Depends(app_user), db: Session = Dep
 @router.get("/data/heartRate/heartRateDetail")
 @router.get("/data/sleep/heartRateDetail")
 def heart_rate_detail(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
+    if "/data/sleep/" in str(request.url.path):
+        return localized_success(sleep_metric_detail_response(db, int(user["id"]), date_from_request(request), "heart_rate", "heartRateScore", "heartRateAvg"))
     return localized_success(data_detail_response(db, int(user["id"]), date_from_request(request), "heart_rate", "heartRateScore", "heartRateAvg"))
 
 
 @router.get("/data/hrv/hrvDetail")
 @router.get("/data/sleep/hrvDetail")
 def hrv_detail(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
+    if "/data/sleep/" in str(request.url.path):
+        return localized_success(sleep_metric_detail_response(db, int(user["id"]), date_from_request(request), "hrv", "hrvScore", "hrvAvg"))
     return localized_success(data_detail_response(db, int(user["id"]), date_from_request(request), "hrv", "hrvScore", "hrvAvg"))
 
 
 @router.get("/data/bloodOxygen/bloodOxygenDetail")
 @router.get("/data/sleep/bloodOxygenDetail")
 def blood_oxygen_detail(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
+    if "/data/sleep/" in str(request.url.path):
+        return localized_success(sleep_metric_detail_response(db, int(user["id"]), date_from_request(request), "spo2", "spo2Score", "spo2Avg"))
     return localized_success(data_detail_response(db, int(user["id"]), date_from_request(request), "spo2", "spo2Score", "spo2Avg"))
 
 
@@ -4326,13 +5466,7 @@ def sleep_detail(request: Request, user: dict = Depends(app_user), db: Session =
     records = sleep_records(db, user_id, date_value)
     values = effective_sleep_values(db, user_id, date_value, records)
     summary = daily_summary(db, user_id, date_value) or {}
-    chart_data = [
-        {
-            "time": str(dict(row._mapping).get("start_time") or "")[11:16],
-            "value": str(dict(row._mapping).get("sleep_time") or 0),
-        }
-        for row in records
-    ]
+    chart_data = sleep_record_chart_data(records)
     if not chart_data:
         chart_data = raw_sleep_chart_data(db, user_id, date_value)
     return localized_success({

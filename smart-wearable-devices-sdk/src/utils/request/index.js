@@ -75,6 +75,17 @@ export const Request = () => {
 
       // 判断是否登录失效
       const isLoginExpired = code === 401 || code === 403;
+      const isAuthFreeRequest = custom.auth === false;
+      if (isLoginExpired && isAuthFreeRequest) {
+        return Promise.reject({
+          code,
+          msg: normalizeNetworkErrorMessage(msg),
+          rawMsg: msg,
+          result,
+          url,
+          authFree: true
+        });
+      }
       const isStaleAuthResponse = isLoginExpired && currentToken && tokenAtRequest !== currentToken;
       if (isStaleAuthResponse) {
         return Promise.reject({

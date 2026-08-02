@@ -1,5 +1,7 @@
 const storage = new Map<string, unknown>();
 let remoteCurrentDeviceCalls = 0;
+let remoteCurrentDeviceFails = false;
+let remoteBoundDevice: Record<string, any> | null = null;
 const getRemoteCurrentDeviceCalls = () => remoteCurrentDeviceCalls;
 
 (globalThis as any).uni = {
@@ -31,7 +33,40 @@ const getRemoteCurrentDeviceCalls = () => remoteCurrentDeviceCalls;
           throw new Error(`Unexpected device API URL: ${url}`);
         }
         remoteCurrentDeviceCalls += 1;
-        return storage.get('qkeer:bound-ring-device');
+        if (remoteCurrentDeviceFails) {
+          throw new Error('remote unavailable');
+        }
+        return {
+          code: 200,
+          data: remoteBoundDevice
+        };
+      },
+      post: async (url: string, data: Record<string, any>) => {
+        if (url === '/app/device/bind') {
+          remoteBoundDevice = {
+            ...data,
+            scope: 'personal',
+            dataUserId: 1,
+            ownerUserId: 1,
+            source: 'remote',
+            mac: data.mac || data.deviceMac,
+            deviceMac: data.mac || data.deviceMac,
+            deviceName: data.deviceName || data.name,
+            name: data.name || data.deviceName
+          };
+          return {
+            code: 200,
+            data: remoteBoundDevice
+          };
+        }
+        if (url === '/app/device/unbind') {
+          remoteBoundDevice = null;
+          return {
+            code: 200,
+            data: true
+          };
+        }
+        throw new Error(`Unexpected device API URL: ${url}`);
       }
     }
   }
@@ -75,12 +110,26 @@ storage.set('qkeer:bound-ring-device', {
   name: 'SY03'
 });
 const advertisOnlyBoundInfo = await getBindInfo();
-if (advertisOnlyBoundInfo?.advertis?.macInfo !== '3E:00:00:00:05:1B') {
-  throw new Error(`Legacy device API should keep RW bindings identified only by advertis macInfo: ${JSON.stringify(advertisOnlyBoundInfo)}`);
+if (advertisOnlyBoundInfo !== null || storage.get('qkeer:bound-ring-device') !== null) {
+  throw new Error(`Device API should clear local mirror when backend has no active binding: ${JSON.stringify(advertisOnlyBoundInfo)}`);
 }
 if (getRemoteCurrentDeviceCalls() !== 2) {
   throw new Error(`Legacy device API should invalidate the current-device cache after unbind: ${getRemoteCurrentDeviceCalls()}`);
 }
+
+remoteCurrentDeviceFails = true;
+storage.set('qkeer:bound-ring-device', {
+  protocol: 'rw',
+  advertis: {
+    macInfo: '3E:00:00:00:05:1B'
+  },
+  name: 'SY03'
+});
+const fallbackBoundInfo = await getBindInfo({ refresh: true });
+if (fallbackBoundInfo?.advertis?.macInfo !== '3E:00:00:00:05:1B') {
+  throw new Error(`Device API should use local mirror only when backend request fails: ${JSON.stringify(fallbackBoundInfo)}`);
+}
+remoteCurrentDeviceFails = false;
 
 storage.set('qkeer:bound-ring-device', {
   protocol: 'rw',

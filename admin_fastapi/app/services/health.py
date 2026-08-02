@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -50,6 +52,7 @@ def initialize_health_schema(db: Session) -> None:
                 if column_name not in refreshed:
                     raise
                 existing = refreshed
+    ensure_ring_history_raw_frame_schema(db)
 
 
 HEALTH_RAW_FIELD_RANGES = {
@@ -64,10 +67,651 @@ HEALTH_RAW_FIELD_RANGES = {
 
 HEALTH_RECORD_FUTURE_TOLERANCE = timedelta(minutes=10)
 HEALTH_TIMEZONE = timezone(timedelta(hours=8))
+L19_SLEEP_WINDOW_START_HOUR = 21
+L19_SLEEP_WINDOW_END_HOUR = 11
+L19_SLEEP_DEFAULT_SAMPLE_MINUTES = 5
+L19_SLEEP_MAX_POINT_GAP_MINUTES = 90
+L19_RAW_RECORD_MIN_DATE = date(2020, 1, 1)
+RING_HISTORY_RAW_FRAME_TABLE = "ring_history_raw_frame"
 
 
 def max_visible_record_time() -> datetime:
     return datetime.now(HEALTH_TIMEZONE).replace(tzinfo=None) + HEALTH_RECORD_FUTURE_TOLERANCE
+
+
+def ensure_ring_history_raw_frame_schema(db: Session) -> None:
+    """Persist device raw history frames before parsed records are cleaned or repaired."""
+    db.execute(
+        text(
+            """
+            create table if not exists ring_history_raw_frame (
+              id bigint primary key auto_increment,
+              user_id bigint not null,
+              upload_user_id bigint null,
+              device_mac varchar(64) not null,
+              device_key varchar(128) null,
+              protocol varchar(32) null,
+              source_type varchar(64) null,
+              status varchar(32) null,
+              raw_hash varchar(80) not null,
+              raw_hex longtext not null,
+              raw_byte_length int null,
+              chunk_index int null,
+              chunk_count int null,
+              record_count int null,
+              total_num int null,
+              max_seq int null,
+              record_time_start datetime null,
+              record_time_end datetime null,
+              received_at datetime null,
+              first_seen_at datetime not null,
+              last_seen_at datetime not null,
+              seen_count int not null default 1,
+              parse_status varchar(32) not null default 'pending',
+              parse_message varchar(255) null,
+              parsed_record_count int not null default 0,
+              create_time datetime null,
+              update_time datetime null,
+              unique key uk_raw_user_device_hash (user_id, device_mac, raw_hash),
+              key idx_raw_upload_user (upload_user_id),
+              key idx_raw_user_device_time (user_id, device_mac, record_time_start, record_time_end),
+              key idx_raw_parse_status (parse_status)
+            ) engine=InnoDB default charset=utf8mb4
+            """
+        )
+    )
+    db.commit()
+    bind = db.get_bind()
+    inspector = inspect(bind)
+    existing = {column["name"] for column in inspector.get_columns(RING_HISTORY_RAW_FRAME_TABLE)}
+    for column_name, column_ddl in {
+        "upload_user_id": "bigint null after user_id",
+    }.items():
+        if column_name in existing:
+            continue
+        try:
+            db.execute(text(f"alter table {RING_HISTORY_RAW_FRAME_TABLE} add column {column_name} {column_ddl}"))
+            db.commit()
+            existing.add(column_name)
+        except Exception:
+            db.rollback()
+            refreshed = {column["name"] for column in inspect(bind).get_columns(RING_HISTORY_RAW_FRAME_TABLE)}
+            if column_name not in refreshed:
+                raise
+            existing = refreshed
+
+
+def raw_history_repair_date(value: Any = None) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if value not in (None, ""):
+        text_value = str(value).strip()
+        if text_value:
+            try:
+                return datetime.strptime(text_value[:10], "%Y-%m-%d").date()
+            except ValueError:
+                parsed = coerce_datetime(text_value)
+                if parsed is not None:
+                    return parsed.date()
+    return datetime.now(HEALTH_TIMEZONE).date()
+
+
+def l19_sleep_window_for_date(record_date: Any) -> tuple[datetime, datetime]:
+    target_date = raw_history_repair_date(record_date)
+    start_time = datetime.combine(target_date - timedelta(days=1), datetime.min.time()) + timedelta(hours=L19_SLEEP_WINDOW_START_HOUR)
+    end_time = datetime.combine(target_date, datetime.min.time()) + timedelta(hours=L19_SLEEP_WINDOW_END_HOUR)
+    return start_time, end_time
+
+
+def l19_day_window_for_date(record_date: Any) -> tuple[datetime, datetime]:
+    target_date = raw_history_repair_date(record_date)
+    start_time = datetime.combine(target_date, datetime.min.time())
+    return start_time, start_time + timedelta(days=1)
+
+
+def l19_raw_repair_query_window_for_date(record_date: Any) -> tuple[datetime, datetime]:
+    sleep_start, sleep_end = l19_sleep_window_for_date(record_date)
+    day_start, day_end = l19_day_window_for_date(record_date)
+    return min(sleep_start, day_start), max(sleep_end, day_end)
+
+
+def is_time_in_l19_sleep_window(value: Any, record_date: Any) -> bool:
+    record_time = coerce_datetime(value)
+    if record_time is None:
+        return False
+    start_time, end_time = l19_sleep_window_for_date(record_date)
+    return start_time <= record_time <= end_time
+
+
+def is_time_in_l19_repair_scope(value: Any, record_date: Any) -> bool:
+    record_time = coerce_datetime(value)
+    if record_time is None:
+        return False
+    sleep_start, sleep_end = l19_sleep_window_for_date(record_date)
+    day_start, day_end = l19_day_window_for_date(record_date)
+    return (sleep_start <= record_time <= sleep_end) or (day_start <= record_time < day_end)
+
+
+def normalize_ring_history_device_mac(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def normalize_ring_history_raw_hex(value: Any) -> str:
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex().upper()
+    if isinstance(value, (list, tuple)):
+        bytes_value = [
+            int(item) & 0xFF
+            for item in value
+            if isinstance(item, (int, float)) and 0 <= int(item) <= 255
+        ]
+        return bytes(bytes_value).hex().upper()
+    text_value = str(value or "").strip()
+    if not text_value:
+        return ""
+    cleaned = "".join(char for char in text_value if char in "0123456789abcdefABCDEF")
+    if len(cleaned) % 2 == 1:
+        cleaned = cleaned[:-1]
+    return cleaned.upper()
+
+
+def _raw_frame_int(frame: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = frame.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            number = int(float(value))
+        except (TypeError, ValueError):
+            continue
+        return number
+    return None
+
+
+def _raw_frame_str(frame: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = frame.get(key)
+        if value in (None, ""):
+            continue
+        text_value = str(value).strip()
+        if text_value:
+            return text_value
+    return None
+
+
+def _raw_frame_datetime(frame: dict[str, Any], *keys: str) -> datetime | None:
+    for key in keys:
+        value = frame.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+            if timestamp > 1_000_000_000_000:
+                timestamp = timestamp / 1000.0
+            try:
+                return datetime.fromtimestamp(timestamp, HEALTH_TIMEZONE).replace(tzinfo=None)
+            except (OverflowError, OSError, ValueError):
+                continue
+        parsed = coerce_datetime(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def ring_history_frame_hash(user_id: int, device_mac: str, protocol: str | None, source_type: str | None, raw_hex: str) -> str:
+    source = f"{user_id}:{normalize_ring_history_device_mac(device_mac)}:{protocol or ''}:{source_type or ''}:{raw_hex}"
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def store_ring_history_raw_frames(
+    db: Session,
+    user_id: int,
+    device_mac: str,
+    frames: list[Any],
+    upload_user_id: int | None = None,
+) -> dict[str, Any]:
+    ensure_ring_history_raw_frame_schema(db)
+    normalized_device_mac = normalize_ring_history_device_mac(device_mac)
+    if not normalized_device_mac:
+        return {"rawStored": False, "storedCount": 0, "updatedCount": 0, "skippedCount": len(frames or []), "rawFrameCount": 0}
+    now = datetime.now(HEALTH_TIMEZONE).replace(tzinfo=None)
+    stored_count = 0
+    updated_count = 0
+    skipped_count = 0
+    raw_hashes: list[str] = []
+    for raw_frame in frames or []:
+        frame = raw_frame if isinstance(raw_frame, dict) else {}
+        raw_hex = normalize_ring_history_raw_hex(frame.get("rawHex") or frame.get("raw_hex") or frame.get("raw"))
+        if not raw_hex:
+            skipped_count += 1
+            continue
+        protocol = _raw_frame_str(frame, "protocol")
+        source_type = _raw_frame_str(frame, "sourceType", "source_type", "type")
+        raw_hash = ring_history_frame_hash(user_id, normalized_device_mac, protocol, source_type, raw_hex)
+        raw_hashes.append(raw_hash)
+        received_at = _raw_frame_datetime(frame, "receivedAt", "received_at") or now
+        values = {
+            "user_id": user_id,
+            "upload_user_id": upload_user_id,
+            "device_mac": normalized_device_mac,
+            "device_key": _raw_frame_str(frame, "deviceKey", "device_key"),
+            "protocol": protocol,
+            "source_type": source_type,
+            "status": _raw_frame_str(frame, "status"),
+            "raw_hash": raw_hash,
+            "raw_hex": raw_hex,
+            "raw_byte_length": _raw_frame_int(frame, "rawByteLength", "raw_byte_length") or len(raw_hex) // 2,
+            "chunk_index": _raw_frame_int(frame, "chunkIndex", "chunk_index"),
+            "chunk_count": _raw_frame_int(frame, "chunkCount", "chunk_count"),
+            "record_count": _raw_frame_int(frame, "recordCount", "record_count"),
+            "total_num": _raw_frame_int(frame, "totalNum", "total_num"),
+            "max_seq": _raw_frame_int(frame, "maxSeq", "max_seq"),
+            "record_time_start": _raw_frame_datetime(frame, "recordTimeStart", "record_time_start"),
+            "record_time_end": _raw_frame_datetime(frame, "recordTimeEnd", "record_time_end"),
+            "received_at": received_at,
+            "first_seen_at": received_at,
+            "last_seen_at": now,
+            "seen_count": 1,
+            "parse_status": "pending",
+            "parsed_record_count": 0,
+            "create_time": now,
+            "update_time": now,
+        }
+        existing = db.execute(
+            text(
+                """
+                select id, seen_count
+                from ring_history_raw_frame
+                where user_id=:user_id and device_mac=:device_mac and raw_hash=:raw_hash
+                limit 1
+                """
+            ),
+            {"user_id": user_id, "device_mac": normalized_device_mac, "raw_hash": raw_hash},
+        ).mappings().first()
+        if existing:
+            db.execute(
+                text(
+                    """
+                    update ring_history_raw_frame
+                    set upload_user_id=coalesce(:upload_user_id, upload_user_id),
+                        device_key=:device_key,
+                        protocol=:protocol,
+                        source_type=:source_type,
+                        status=:status,
+                        raw_hex=:raw_hex,
+                        raw_byte_length=:raw_byte_length,
+                        chunk_index=:chunk_index,
+                        chunk_count=:chunk_count,
+                        record_count=:record_count,
+                        total_num=:total_num,
+                        max_seq=:max_seq,
+                        record_time_start=coalesce(:record_time_start, record_time_start),
+                        record_time_end=coalesce(:record_time_end, record_time_end),
+                        received_at=coalesce(:received_at, received_at),
+                        last_seen_at=:last_seen_at,
+                        seen_count=coalesce(seen_count, 0) + 1,
+                        update_time=:update_time
+                    where id=:id
+                    """
+                ),
+                {**values, "id": existing["id"]},
+            )
+            updated_count += 1
+        else:
+            db.execute(
+                text(
+                    """
+                    insert into ring_history_raw_frame (
+                      user_id, upload_user_id, device_mac, device_key, protocol, source_type, status,
+                      raw_hash, raw_hex, raw_byte_length, chunk_index, chunk_count,
+                      record_count, total_num, max_seq, record_time_start, record_time_end,
+                      received_at, first_seen_at, last_seen_at, seen_count, parse_status,
+                      parsed_record_count, create_time, update_time
+                    ) values (
+                      :user_id, :upload_user_id, :device_mac, :device_key, :protocol, :source_type, :status,
+                      :raw_hash, :raw_hex, :raw_byte_length, :chunk_index, :chunk_count,
+                      :record_count, :total_num, :max_seq, :record_time_start, :record_time_end,
+                      :received_at, :first_seen_at, :last_seen_at, :seen_count, :parse_status,
+                      :parsed_record_count, :create_time, :update_time
+                    )
+                    """
+                ),
+                values,
+            )
+            stored_count += 1
+    db.commit()
+    return {
+        "rawStored": stored_count + updated_count > 0,
+        "storedCount": stored_count,
+        "updatedCount": updated_count,
+        "skippedCount": skipped_count,
+        "rawFrameCount": stored_count + updated_count,
+        "rawHashes": raw_hashes,
+    }
+
+
+def list_ring_history_raw_frames(db: Session, user_id: int, device_mac: str, record_date: Any) -> list[dict[str, Any]]:
+    ensure_ring_history_raw_frame_schema(db)
+    normalized_device_mac = normalize_ring_history_device_mac(device_mac)
+    query_start, query_end = l19_raw_repair_query_window_for_date(record_date)
+    fallback_date = raw_history_repair_date(record_date).isoformat()
+    rows = db.execute(
+        text(
+            """
+            select *
+            from ring_history_raw_frame
+            where user_id=:user_id
+              and device_mac=:device_mac
+              and (
+                (record_time_start is not null and record_time_start <= :query_end and coalesce(record_time_end, record_time_start) >= :query_start)
+                or (record_time_start is null and date(first_seen_at)=:fallback_date)
+              )
+            order by coalesce(record_time_start, first_seen_at), id
+            """
+        ),
+        {
+            "user_id": user_id,
+            "device_mac": normalized_device_mac,
+            "query_start": query_start,
+            "query_end": query_end,
+            "fallback_date": fallback_date,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _bytes_from_hex(raw_hex: str) -> bytes:
+    try:
+        return bytes.fromhex(normalize_ring_history_raw_hex(raw_hex))
+    except ValueError:
+        return b""
+
+
+def _read_uint16_le(data: bytes, offset: int) -> int:
+    return data[offset] | (data[offset + 1] << 8)
+
+
+def _read_int16_le(data: bytes, offset: int) -> int:
+    value = _read_uint16_le(data, offset)
+    return value - 0x10000 if value & 0x8000 else value
+
+
+def _read_uint32_le(data: bytes, offset: int) -> int:
+    return data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24)
+
+
+def _visible_l19_record_time(unix_time: int) -> datetime | None:
+    if unix_time <= 0:
+        return None
+    try:
+        record_time = datetime.fromtimestamp(unix_time, HEALTH_TIMEZONE).replace(tzinfo=None)
+    except (OverflowError, OSError, ValueError):
+        return None
+    if record_time.date() < L19_RAW_RECORD_MIN_DATE or record_time > max_visible_record_time():
+        return None
+    return record_time
+
+
+def parse_l19_raw_history_frame(frame: dict[str, Any]) -> list[dict[str, Any]]:
+    data = _bytes_from_hex(frame.get("raw_hex") or frame.get("rawHex") or "")
+    if len(data) < 8:
+        return []
+    total_num = _read_uint32_le(data, 4)
+    if total_num in (0, 0xFFFFFFFF):
+        return []
+    records: list[dict[str, Any]] = []
+    offset = 8
+    while offset + 21 <= len(data):
+        seq = _read_uint32_le(data, offset)
+        unix_time = _read_uint32_le(data, offset + 4)
+        record_time = _visible_l19_record_time(unix_time)
+        step_count = _read_uint16_le(data, offset + 8)
+        heart_rate = data[offset + 10]
+        spo2 = data[offset + 11]
+        hrv = data[offset + 12]
+        stress = data[offset + 13]
+        temperature = round(_read_int16_le(data, offset + 14) / 100.0, 2)
+        activity_level = data[offset + 16]
+        sleep_type = data[offset + 17]
+        perfusion = data[offset + 18]
+        rr_count = data[offset + 20]
+        rr_start = offset + 21
+        rr_intervals: list[int] = []
+        for index in range(rr_count):
+            rr_offset = rr_start + index * 2
+            if rr_offset + 1 >= len(data):
+                break
+            rr_intervals.append(_read_uint16_le(data, rr_offset))
+        if record_time is not None:
+            item: dict[str, Any] = {
+                "recordTime": record_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "unixTime": unix_time,
+                "seq": seq,
+                "protocol": frame.get("protocol") or "legacy",
+                "sourceType": "l19_raw_frame_repair",
+                "rawDataType": "l19_local_data",
+                "sleepType": sleep_type,
+                "sleepState": sleep_type,
+            }
+            if step_count > 0:
+                item["stepCount"] = step_count
+            if 30 <= heart_rate <= 220:
+                item["heartRate"] = heart_rate
+            if 70 <= spo2 <= 100:
+                item["spo2"] = spo2
+            if 1 <= hrv <= 300:
+                item["hrv"] = hrv
+            if 0 <= stress <= 100:
+                item["stress"] = stress
+            if 25.0 <= temperature <= 45.0:
+                item["temperature"] = temperature
+            if 0 <= activity_level <= 4:
+                item["motionIntensity"] = activity_level
+            if perfusion > 0:
+                item["perfusionIndex"] = perfusion
+            if rr_intervals:
+                item["rrIntervals"] = json.dumps(rr_intervals, ensure_ascii=False)
+            records.append(item)
+        offset += 21 + rr_count * 2
+    return records
+
+
+def _record_time_from_submit_item(item: dict[str, Any]) -> datetime | None:
+    return coerce_datetime(item.get("recordTime") or item.get("record_time") or item.get("time") or item.get("timestamp"))
+
+
+def build_l19_sleep_segment_records(records: list[dict[str, Any]], record_date: Any) -> list[dict[str, Any]]:
+    start_window, end_window = l19_sleep_window_for_date(record_date)
+    keyed_points: dict[datetime, int] = {}
+    for item in records:
+        record_time = _record_time_from_submit_item(item)
+        if record_time is None or record_time < start_window or record_time > end_window:
+            continue
+        try:
+            sleep_state = int(item.get("sleepState") if item.get("sleepState") is not None else item.get("sleepType"))
+        except (TypeError, ValueError):
+            continue
+        if sleep_state not in {1, 2, 3, 4, 5}:
+            continue
+        keyed_points[record_time] = sleep_state
+    points = sorted(keyed_points.items(), key=lambda pair: pair[0])
+    if not points:
+        return []
+
+    segments: list[dict[str, Any]] = []
+    current_state = points[0][1]
+    segment_start = points[0][0]
+    segment_end = segment_start
+    for index, (record_time, state) in enumerate(points):
+        next_time = points[index + 1][0] if index + 1 < len(points) else None
+        minutes = L19_SLEEP_DEFAULT_SAMPLE_MINUTES
+        if next_time is not None:
+            gap_minutes = int((next_time - record_time).total_seconds() // 60)
+            if 0 < gap_minutes <= L19_SLEEP_MAX_POINT_GAP_MINUTES:
+                minutes = max(1, gap_minutes)
+        point_end = min(record_time + timedelta(minutes=minutes), end_window)
+        if index == 0:
+            segment_end = point_end
+            continue
+        if state == current_state and record_time <= segment_end + timedelta(minutes=1):
+            if point_end > segment_end:
+                segment_end = point_end
+            continue
+        duration = max(0, round((segment_end - segment_start).total_seconds() / 60))
+        if duration > 0:
+            segments.append({
+                "recordTime": segment_start.strftime("%Y-%m-%d %H:%M:%S"),
+                "startTime": segment_start.strftime("%Y-%m-%d %H:%M:%S"),
+                "endTime": segment_end.strftime("%Y-%m-%d %H:%M:%S"),
+                "dateRef": raw_history_repair_date(record_date).isoformat(),
+                "sleepType": current_state,
+                "sleepState": current_state,
+                "sleepDuration": duration,
+                "sourceType": "l19_sleep_segment_repair",
+                "rawDataType": "sleep_segment",
+            })
+        current_state = state
+        segment_start = record_time
+        segment_end = point_end
+
+    duration = max(0, round((segment_end - segment_start).total_seconds() / 60))
+    if duration > 0:
+        segments.append({
+            "recordTime": segment_start.strftime("%Y-%m-%d %H:%M:%S"),
+            "startTime": segment_start.strftime("%Y-%m-%d %H:%M:%S"),
+            "endTime": segment_end.strftime("%Y-%m-%d %H:%M:%S"),
+            "dateRef": raw_history_repair_date(record_date).isoformat(),
+            "sleepType": current_state,
+            "sleepState": current_state,
+            "sleepDuration": duration,
+            "sourceType": "l19_sleep_segment_repair",
+            "rawDataType": "sleep_segment",
+        })
+    return segments
+
+
+def prepare_l19_raw_history_repair_records(db: Session, user_id: int, device_mac: str, record_date: Any) -> dict[str, Any]:
+    target_date = raw_history_repair_date(record_date)
+    frames = list_ring_history_raw_frames(db, user_id, device_mac, target_date)
+    parsed_records: list[dict[str, Any]] = []
+    raw_hashes: list[str] = []
+    for frame in frames:
+        raw_hash = str(frame.get("raw_hash") or "")
+        if raw_hash:
+            raw_hashes.append(raw_hash)
+        parsed_records.extend(parse_l19_raw_history_frame(frame))
+
+    keyed_records: dict[tuple[str, Any], dict[str, Any]] = {}
+    for item in parsed_records:
+        record_time = _record_time_from_submit_item(item)
+        if record_time is None or not is_time_in_l19_repair_scope(record_time, target_date):
+            continue
+        key = (record_time.strftime("%Y-%m-%d %H:%M:%S"), item.get("seq"))
+        keyed_records[key] = item
+    direct_records = sorted(keyed_records.values(), key=lambda item: str(item.get("recordTime") or ""))
+    sleep_segment_records = build_l19_sleep_segment_records(direct_records, target_date)
+    sleep_start, sleep_end = l19_sleep_window_for_date(target_date)
+    day_start, day_end = l19_day_window_for_date(target_date)
+    return {
+        "recordDate": target_date.isoformat(),
+        "frames": frames,
+        "rawHashes": raw_hashes,
+        "parsedPointRecords": direct_records,
+        "sleepSegmentRecords": sleep_segment_records,
+        "records": direct_records + sleep_segment_records,
+        "frameCount": len(frames),
+        "parsedPointCount": len(direct_records),
+        "sleepSegmentCount": len(sleep_segment_records),
+        "sleepWindowStart": sleep_start,
+        "sleepWindowEnd": sleep_end,
+        "dayWindowStart": day_start,
+        "dayWindowEnd": day_end,
+    }
+
+
+def clear_l19_raw_history_repair_window(db: Session, user_id: int, device_mac: str, record_date: Any) -> dict[str, int]:
+    target_date = raw_history_repair_date(record_date)
+    normalized_device_mac = normalize_ring_history_device_mac(device_mac)
+    sleep_start, sleep_end = l19_sleep_window_for_date(target_date)
+    day_start, day_end = l19_day_window_for_date(target_date)
+    health_result = db.execute(
+        text(
+            """
+            delete from health_raw
+            where user_id=:user_id
+              and device_mac=:device_mac
+              and (
+                (record_time >= :day_start and record_time < :day_end)
+                or (record_time >= :sleep_start and record_time <= :sleep_end)
+              )
+            """
+        ),
+        {
+            "user_id": user_id,
+            "device_mac": normalized_device_mac,
+            "day_start": day_start,
+            "day_end": day_end,
+            "sleep_start": sleep_start,
+            "sleep_end": sleep_end,
+        },
+    )
+    sleep_result = db.execute(
+        text(
+            """
+            delete from sleep_record
+            where user_id=:user_id and date_ref=:record_date
+            """
+        ),
+        {"user_id": user_id, "record_date": target_date.isoformat()},
+    )
+    db.commit()
+    return {
+        "healthRawDeleted": int(health_result.rowcount or 0),
+        "sleepRecordDeleted": int(sleep_result.rowcount or 0),
+    }
+
+
+def mark_l19_raw_history_repair_result(
+    db: Session,
+    user_id: int,
+    device_mac: str,
+    raw_hashes: list[str],
+    success: bool,
+    parsed_count: int,
+    message: str | None = None,
+) -> None:
+    unique_hashes = [item for item in dict.fromkeys(raw_hashes) if item]
+    if not unique_hashes:
+        return
+    placeholders = []
+    params: dict[str, Any] = {
+        "user_id": user_id,
+        "device_mac": normalize_ring_history_device_mac(device_mac),
+        "parse_status": "parsed" if success else "failed",
+        "parse_message": (message or "")[:255],
+        "parsed_record_count": parsed_count,
+        "update_time": datetime.now(HEALTH_TIMEZONE).replace(tzinfo=None),
+    }
+    for index, raw_hash in enumerate(unique_hashes):
+        key = f"hash_{index}"
+        placeholders.append(f":{key}")
+        params[key] = raw_hash
+    db.execute(
+        text(
+            f"""
+            update ring_history_raw_frame
+            set parse_status=:parse_status,
+                parse_message=:parse_message,
+                parsed_record_count=:parsed_record_count,
+                update_time=:update_time
+            where user_id=:user_id and device_mac=:device_mac and raw_hash in ({', '.join(placeholders)})
+            """
+        ),
+        params,
+    )
+    db.commit()
 
 
 def ranged_aggregate_expr(aggregate: str, column: str) -> str:
@@ -401,18 +1045,26 @@ def sleep_summary_from_records(db: Session, user_id: int, record_date: str) -> d
 
 
 def sleep_summary_from_raw(db: Session, user_id: int, record_date: str) -> dict[str, Any]:
+    sleep_window_start, sleep_window_end = l19_sleep_window_for_date(record_date)
     rows = db.execute(
         text(
             """
             select record_time, sleep_state
             from health_raw
-            where user_id=:user_id and date(record_time)=:record_date
+            where user_id=:user_id
+              and record_time >= :sleep_window_start
+              and record_time <= :sleep_window_end
               and sleep_state is not null
               and record_time <= :max_record_time
             order by record_time
             """
         ),
-        {"user_id": user_id, "record_date": record_date, "max_record_time": max_visible_record_time()},
+        {
+            "user_id": user_id,
+            "sleep_window_start": sleep_window_start,
+            "sleep_window_end": sleep_window_end,
+            "max_record_time": max_visible_record_time(),
+        },
     ).mappings().all()
     values = {"AWAKE": 0, "REM": 0, "LIGHT": 0, "DEEP": 0, "NAP": 0}
     awake_count = 0
@@ -430,7 +1082,7 @@ def sleep_summary_from_raw(db: Session, user_id: int, record_date: str) -> dict[
         minutes = 5
         if index + 1 < len(valid_rows) and valid_rows[index + 1][0] is not None:
             seconds = int((valid_rows[index + 1][0] - record_time).total_seconds())
-            if 0 < seconds <= 900:
+            if 0 < seconds <= L19_SLEEP_MAX_POINT_GAP_MINUTES * 60:
                 minutes = max(1, round(seconds / 60))
         if key in values:
             values[key] += minutes
