@@ -2346,6 +2346,19 @@ const getProcessedOption = () => {
 
   newOption.xAxis.data = xData;
   newOption.series[0].data = seriesData;
+
+  const numericSeriesData = seriesData
+    .map((value: unknown) => Number(value))
+    .filter((value: number) => Number.isFinite(value) && value > 0);
+  if (numericSeriesData.length) {
+    const dataMin = Math.min(...numericSeriesData);
+    const dataMax = Math.max(...numericSeriesData);
+    const paddedMin = Math.max(0, Math.floor((dataMin - 10) / 10) * 10);
+    const paddedMax = Math.max(paddedMin + 20, Math.ceil((dataMax + 10) / 10) * 10);
+    newOption.yAxis.min = paddedMin;
+    newOption.yAxis.max = paddedMax;
+    newOption.yAxis.splitNumber = Math.max(4, Math.round((paddedMax - paddedMin) / 20));
+  }
   return newOption;
 };
 const getRelaxOption = () => {
