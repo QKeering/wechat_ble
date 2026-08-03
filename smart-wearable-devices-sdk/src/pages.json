@@ -367,6 +367,20 @@
   "optimization": {
     "subPackages": true // 分包优化，隔离依赖
   },
+  "preloadRule": {
+    "pages/awareness/awareness": {
+      "network": "all",
+      "packages": ["homeDetail", "pagesA/mines"]
+    },
+    "pages/health/health": {
+      "network": "all",
+      "packages": ["homeDetail", "pagesA/healths"]
+    },
+    "pages/mine/mine": {
+      "network": "all",
+      "packages": ["pagesA/mines", "homeDetail"]
+    }
+  },
   "globalStyle": {
     "navigationBarTextStyle": "black",
     "navigationBarTitleText": "智能穿戴设备",

@@ -452,7 +452,23 @@ export const useRingStore = defineStore('ring', () => {
   };
 
   const setBoundDevice = (payload: RingBoundDevice | null) => {
-    boundDevice.value = payload;
+    const normalizedPayload = payload ? (normalizeStoreDeviceInfo(payload as RingDeviceInfo) as RingBoundDevice) : null;
+    boundDevice.value = normalizedPayload;
+    if (!normalizedPayload) return;
+
+    const boundKey = getDeviceSnapshotKey(normalizedPayload as RingDeviceInfo);
+    const currentKey = getDeviceSnapshotKey(deviceInfo.value);
+    const currentReady = hasReadyCommunicationFields(deviceInfo.value);
+    if (boundKey && (!currentKey || currentKey !== boundKey)) {
+      setDeviceInfo(normalizedPayload as RingDeviceInfo);
+      return;
+    }
+    if (!currentReady && boundKey) {
+      deviceInfo.value = normalizeStoreDeviceInfo({
+        ...(normalizedPayload as RingDeviceInfo),
+        ...(deviceInfo.value || {})
+      });
+    }
   };
 
   const setReceivedData = (payload: RingParsedData[]) => {
@@ -523,14 +539,13 @@ export const useRingStore = defineStore('ring', () => {
   };
 
   const syncRwStableDeviceIdentity = (device: RingDeviceInfo) => {
-    if (device.protocol !== 'rw') return;
-    const stableMac = device.mac || device.advertis?.macInfo;
+    const stableMac = getStoreStableDeviceMac(device);
     if (!stableMac) return;
 
     const shouldSync = (storedIdentity: string) =>
       !storedIdentity || !hasMatchingStableDeviceIdentity([storedIdentity], [stableMac]);
     if (shouldSync(normalMac.value)) setNormalMac(stableMac);
-    if (shouldSync(iosMacId.value)) setIosMacId(stableMac);
+    if (device.protocol === 'rw' && shouldSync(iosMacId.value)) setIosMacId(stableMac);
   };
 
   const markReadyConnection = () => {
@@ -776,14 +791,37 @@ function hasReadyCommunicationFields(device: RingDeviceInfo) {
 
 function normalizeStoreDeviceInfo(device: RingDeviceInfo) {
   const protocol = device.protocol || resolveRingProtocol(device);
-  if (protocol !== 'rw') return device;
-  const stableMac = device.mac || device.advertis?.macInfo;
+  const stableMac = getStoreStableDeviceMac({ ...device, protocol });
   if (!stableMac && device.protocol === protocol) return device;
   return {
     ...device,
     protocol,
-    ...(stableMac && !device.mac ? { mac: stableMac } : {})
+    ...(stableMac && !device.mac ? { mac: stableMac } : {}),
+    ...(stableMac && !device.advertis?.macInfo
+      ? { advertis: { ...(device.advertis || {}), macInfo: stableMac } }
+      : {})
   };
+}
+
+function getStoreStableDeviceMac(device: RingDeviceInfo | Record<string, any> | null | undefined) {
+  if (!device) return '';
+  const source = device as Record<string, any>;
+  const advertis = source.advertis as Record<string, any> | undefined;
+  return String(
+    source.mac ||
+      source.deviceMac ||
+      source.device_mac ||
+      source.bluetoothMac ||
+      source.bleMac ||
+      source.macAddr ||
+      source.mac_addr ||
+      advertis?.macInfo ||
+      advertis?.mac ||
+      advertis?.macAddress ||
+      advertis?.deviceMac ||
+      (isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : '') ||
+      (isColonSeparatedBleMac(source.deviceId) ? source.deviceId : '')
+  ).trim();
 }
 
 function getDeviceSnapshotKey(device: RingDeviceInfo) {

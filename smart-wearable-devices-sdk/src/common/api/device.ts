@@ -9,6 +9,12 @@ export interface HttpRequestConfigCompat {
 
 interface GetBindInfoParams {
   refresh?: boolean;
+  /**
+   * Only for display-only pages when backend /app/device/current is temporarily unavailable.
+   * Auto-connect and upload must keep the default false so local stale cache cannot become
+   * the authoritative bound device.
+   */
+  allowLocalFallback?: boolean;
 }
 
 const BIND_INFO_REMOTE_CACHE_MS = 5000;
@@ -225,7 +231,16 @@ export const getBindInfo = async (
     await clearBoundRingDevice();
     return null;
   }
-  return local;
+  if (!params.allowLocalFallback) {
+    return null;
+  }
+  return normalizeRingBoundDevice({
+    ...(local as any),
+    source: 'local-unverified',
+    bindingStatus: 'unverified',
+    bindingVerified: false,
+    remoteBindingUnavailable: true
+  } as any) as DeviceInfo | null;
 };
 
 export const scan = async (params: { sn: string }, _config: HttpRequestConfigCompat = {}): Promise<DeviceInfo> => {
@@ -238,8 +253,35 @@ export const scan = async (params: { sn: string }, _config: HttpRequestConfigCom
   };
 };
 
-export const deviceModelList = async (_params = {}, _config: HttpRequestConfigCompat = {}): Promise<DeviceModel[]> => {
+const normalizeDeviceModelListResponse = (payload: unknown): DeviceModel[] => {
+  if (Array.isArray(payload)) return payload as DeviceModel[];
+  const source = payload && typeof payload === 'object' ? (payload as Record<string, any>) : null;
+  if (!source) return [];
+  for (const key of ['data', 'rows', 'list', 'records']) {
+    const value = source[key];
+    if (Array.isArray(value)) return value as DeviceModel[];
+    if (value && typeof value === 'object') {
+      const nested = normalizeDeviceModelListResponse(value);
+      if (nested.length > 0) return nested;
+    }
+  }
   return [];
+};
+
+export const deviceModelList = async (
+  params: Record<string, any> = {},
+  config: HttpRequestConfigCompat = {}
+): Promise<DeviceModel[]> => {
+  const response = await (uni as any).$uv.http.get('/app/device/model/list', {
+    ...config,
+    params,
+    custom: {
+      toast: false,
+      catch: true,
+      ...(config.custom || {})
+    }
+  });
+  return normalizeDeviceModelListResponse(response).filter((item) => item?.modelKey || item?.modelName);
 };
 
 export const getInfo = async (_params = {}, _config: HttpRequestConfigCompat = {}): Promise<DeviceInfo | null> => {

@@ -112,13 +112,19 @@ const getProcessedOption = () => {
   const axisData = buildMetricSleepTimelineAxis(chartData, props.sleepSegmentObj, false);
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = fullSeriesData as any;
+  newOption.yAxis = {
+    ...newOption.yAxis,
+    min: 0,
+    max: 180,
+    splitNumber: 6
+  };
   if (chartData.length > 0) {
     // 过滤掉null值，计算有效数据的最大值
     const validData = fullSeriesData.filter((value) => value !== null && !isNaN(value)) as number[];
     if (validData.length > 0) {
       const maxValue = Math.max(...validData);
       // 如果最大值超过100，则动态调整Y轴最大值
-      if (maxValue > 100) {
+      if (maxValue > 180) {
         const yAxisConfigs = [
           { max: 120, splitNumber: 6 },
           { max: 140, splitNumber: 7 },

@@ -9,5 +9,4 @@ export * from './legacy/normalizer';
 export * from './legacy/protocol';
 export * from './legacy/parser';
 export * from './legacy/workflows';
-export * from './qkeer-v2';
 export * from './rw';

@@ -38,8 +38,36 @@ export type RingHistoryRawFramesSubmitParams = {
   frames: RingRawHistoryFrame[];
 };
 
-export const submitRingHistoryRawFrames = (params: RingHistoryRawFramesSubmitParams, config = {}) => {
-  return (uni as any).$uv.http.post('/app/data/rawHistory/upload', params, config);
+const buildSilentRawUploadConfig = (config: HttpRequestConfig = {}): HttpRequestConfig => ({
+  ...config,
+  timeout: Number((config as any).timeout || 8000),
+  custom: {
+    toast: false,
+    catch: true,
+    ...((config as any).custom || {})
+  }
+});
+
+const isRawEnqueueUnsupportedResponse = (response: unknown) => {
+  const payload = response as { code?: unknown; statusCode?: unknown; data?: { code?: unknown; statusCode?: unknown } };
+  const code = Number(payload?.code ?? payload?.statusCode ?? payload?.data?.code ?? payload?.data?.statusCode);
+  return code === 404 || code === 405;
+};
+
+export const submitRingHistoryRawFrames = async (
+  params: RingHistoryRawFramesSubmitParams,
+  config: HttpRequestConfig = {}
+) => {
+  const requestConfig = buildSilentRawUploadConfig(config);
+  try {
+    const response = await (uni as any).$uv.http.post('/app/data/rawHistory/enqueue', params, requestConfig);
+    if (isRawEnqueueUnsupportedResponse(response)) {
+      throw new Error('raw enqueue api unsupported');
+    }
+    return response;
+  } catch (error) {
+    return (uni as any).$uv.http.post('/app/data/rawHistory/upload', params, requestConfig);
+  }
 };
 
 export type RingHistoryRawRepairParams = {

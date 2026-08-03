@@ -24,7 +24,7 @@ export const baseOption: AnyEchartOption = {
   yAxis: {
     type: 'value',
     min: 0,
-    max: 100,
+    max: 150,
     interval: 20, // 坐标轴刻度间隔
     axisLine: {
       show: false

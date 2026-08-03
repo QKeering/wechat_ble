@@ -24,6 +24,8 @@ export interface SubmitRingHistorySyncResultResult {
   sampleFilteredRecords: RingHistoryRecord[];
   sampleFutureFilteredRecords: RingHistoryRecord[];
   sampleSubmittedRecords: RingHistorySubmitRecord[];
+  alreadyUploadedCount?: number;
+  uploadedRecordKeyCount?: number;
   submitResponse?: unknown;
 }
 
@@ -39,6 +41,8 @@ const VITAL_METRIC_BACKFILL_SECONDS = 24 * 60 * 60;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const MAIN_SLEEP_WINDOW_START_HOUR = 21;
 const MAIN_SLEEP_WINDOW_END_HOUR = 11;
+const RING_HISTORY_UPLOADED_RECORD_KEYS_STORAGE_KEY = 'qkeer:ring-history-uploaded-record-keys:v1';
+const RING_HISTORY_UPLOADED_RECORD_KEYS_MAX_COUNT = 3000;
 const RING_HISTORY_SUBMIT_DEDUPE_FIELDS = [
   'recordTime',
   'stepCount',
@@ -686,6 +690,98 @@ const resolveSleepDateRef = (explicitDateRef: unknown, startTime?: string, endTi
 const getRingHistorySubmitDedupeKey = (record: RingHistorySubmitRecord) =>
   JSON.stringify(RING_HISTORY_SUBMIT_DEDUPE_FIELDS.map((field) => [field, record[field] ?? null]));
 
+const normalizeUploadedRecordDeviceKey = (deviceMac: string | undefined) => String(deviceMac || '').trim().toUpperCase();
+
+const readUploadedRingHistoryRecordKeys = (deviceMac: string) => {
+  const deviceKey = normalizeUploadedRecordDeviceKey(deviceMac);
+  if (!deviceKey) return new Set<string>();
+  try {
+    const stored = uni.getStorageSync(RING_HISTORY_UPLOADED_RECORD_KEYS_STORAGE_KEY);
+    if (!stored || typeof stored !== 'object') return new Set<string>();
+    const record = stored as {
+      devices?: Record<string, { keys?: string[]; updatedAt?: number }>;
+      deviceMac?: string;
+      keys?: string[];
+    };
+    const deviceRecord = record.devices?.[deviceKey];
+    if (deviceRecord && Array.isArray(deviceRecord.keys)) {
+      return new Set(deviceRecord.keys.filter(Boolean).map((item) => String(item)));
+    }
+    const legacyDeviceKey = normalizeUploadedRecordDeviceKey(record.deviceMac);
+    if (legacyDeviceKey === deviceKey && Array.isArray(record.keys)) {
+      return new Set(record.keys.filter(Boolean).map((item) => String(item)));
+    }
+    return new Set<string>();
+  } catch {
+    return new Set<string>();
+  }
+};
+
+const writeUploadedRingHistoryRecordKeys = (deviceMac: string, keys: string[]) => {
+  const deviceKey = normalizeUploadedRecordDeviceKey(deviceMac);
+  if (!deviceKey) return 0;
+  const previous = readUploadedRingHistoryRecordKeys(deviceMac);
+  keys.filter(Boolean).forEach((key) => previous.add(String(key)));
+  try {
+    const stored = uni.getStorageSync(RING_HISTORY_UPLOADED_RECORD_KEYS_STORAGE_KEY);
+    const payload =
+      stored && typeof stored === 'object'
+        ? (stored as { devices?: Record<string, { keys?: string[]; updatedAt?: number }>; deviceMac?: string; keys?: string[] })
+        : {};
+    const devices = { ...(payload.devices || {}) };
+    const legacyDeviceKey = normalizeUploadedRecordDeviceKey(payload.deviceMac);
+    if (legacyDeviceKey && Array.isArray(payload.keys) && !devices[legacyDeviceKey]) {
+      devices[legacyDeviceKey] = { keys: payload.keys.filter(Boolean).map((item) => String(item)), updatedAt: Date.now() };
+    }
+    devices[deviceKey] = {
+      keys: Array.from(previous).slice(-RING_HISTORY_UPLOADED_RECORD_KEYS_MAX_COUNT),
+      updatedAt: Date.now()
+    };
+    uni.setStorageSync(RING_HISTORY_UPLOADED_RECORD_KEYS_STORAGE_KEY, { devices, updatedAt: Date.now() });
+    return devices[deviceKey]?.keys?.length || 0;
+  } catch {
+    return previous.size;
+  }
+};
+
+const filterAlreadyUploadedRingHistoryRecords = (records: RingHistorySubmitRecord[], uploadedKeys: Set<string>) => {
+  const submitRecords: RingHistorySubmitRecord[] = [];
+  const alreadyUploadedRecords: RingHistorySubmitRecord[] = [];
+  records.forEach((record) => {
+    if (uploadedKeys.has(getRingHistorySubmitDedupeKey(record))) {
+      alreadyUploadedRecords.push(record);
+      return;
+    }
+    submitRecords.push(record);
+  });
+  return { submitRecords, alreadyUploadedRecords };
+};
+
+export const filterUploadedRingHistorySubmitRecordsForDevice = (
+  deviceMac: string,
+  records: RingHistorySubmitRecord[]
+) => {
+  const uploadedKeys = readUploadedRingHistoryRecordKeys(deviceMac);
+  const result = filterAlreadyUploadedRingHistoryRecords(records, uploadedKeys);
+  return {
+    ...result,
+    uploadedRecordKeyCount: uploadedKeys.size
+  };
+};
+
+export const markUploadedRingHistorySubmitRecordsForDevice = (
+  deviceMac: string,
+  records: RingHistorySubmitRecord[]
+) => writeUploadedRingHistoryRecordKeys(deviceMac, records.map((record) => getRingHistorySubmitDedupeKey(record)));
+
+const isRingHistorySubmitResponseSuccessful = (response: unknown) => {
+  const payload = (response as any)?.data ?? response;
+  if (!payload || typeof payload !== 'object') return true;
+  if ((payload as any).success === false) return false;
+  const code = Number((payload as any).code);
+  return !Number.isFinite(code) || code === 0 || code === 200;
+};
+
 const dedupeRingHistorySubmitRecords = (records: RingHistorySubmitRecord[]) => {
   const seen = new Set<string>();
   const deduped: RingHistorySubmitRecord[] = [];
@@ -1105,13 +1201,16 @@ export const submitRingHistorySyncResult = async (
   const maxVisibleTimestamp = Math.floor(Date.now() / 1000) + HISTORY_FUTURE_TOLERANCE_SECONDS;
   const futureFilteredRecords = rawRecords.filter((record) => isRingHistoryRecordAfterMaxVisible(record, maxVisibleTimestamp));
   const visibleRecords = rawRecords.filter((record) => !isRingHistoryRecordAfterMaxVisible(record, maxVisibleTimestamp));
-  const dataList = buildRingHistorySubmitRecords(visibleRecords, options.sinceTimestamp ?? 0);
+  const builtDataList = buildRingHistorySubmitRecords(visibleRecords, options.sinceTimestamp ?? 0);
   const filteredRecords = visibleRecords.filter((record) => {
     const unixTime = getRingHistoryRecordSyncUnixTime(record);
     const sinceTimestamp = getRingHistoryRawRecordBackfillSinceTimestamp(record, options.sinceTimestamp ?? 0);
     if (sinceTimestamp && unixTime && unixTime < sinceTimestamp) return true;
     return !buildRingHistorySubmitRecords([record], options.sinceTimestamp ?? 0).length;
   });
+  const deviceMac = String(options.deviceMac || '').trim();
+  const uploadedRecordKeys = readUploadedRingHistoryRecordKeys(deviceMac);
+  const { submitRecords: dataList, alreadyUploadedRecords } = filterAlreadyUploadedRingHistoryRecords(builtDataList, uploadedRecordKeys);
   const rawMetricCounts = countRingHistoryRecordMetrics(rawRecords as Array<Record<string, any>>);
   const submitMetricCounts = countRingHistoryRecordMetrics(dataList as Array<Record<string, any>>);
   if (dataList.length === 0) {
@@ -1127,16 +1226,24 @@ export const submitRingHistorySyncResult = async (
       submitMetricCounts,
       sampleFilteredRecords: filteredRecords.slice(0, 2),
       sampleFutureFilteredRecords: futureFilteredRecords.slice(0, 2),
-      sampleSubmittedRecords: []
+      sampleSubmittedRecords: [],
+      alreadyUploadedCount: alreadyUploadedRecords.length,
+      uploadedRecordKeyCount: uploadedRecordKeys.size
     };
   }
 
-  const deviceMac = String(options.deviceMac || '').trim();
   if (!deviceMac) {
     throw new Error('缺少设备 MAC，历史数据未提交');
   }
 
   const submitResponse = await options.submit({ deviceMac, dataList });
+  if (!isRingHistorySubmitResponseSuccessful(submitResponse)) {
+    throw new Error('历史数据提交失败');
+  }
+  const uploadedRecordKeyCount = writeUploadedRingHistoryRecordKeys(
+    deviceMac,
+    dataList.map((record) => getRingHistorySubmitDedupeKey(record))
+  );
   const maxTimestamp = dataList.reduce((latest, record) => {
     return Math.max(latest, getRingHistoryRecordSyncUnixTime(record) || 0);
   }, 0);
@@ -1153,6 +1260,8 @@ export const submitRingHistorySyncResult = async (
     submitMetricCounts,
     sampleFilteredRecords: filteredRecords.slice(0, 2),
     sampleFutureFilteredRecords: futureFilteredRecords.slice(0, 2),
+    alreadyUploadedCount: alreadyUploadedRecords.length,
+    uploadedRecordKeyCount,
     submitResponse,
     sampleSubmittedRecords: dataList.slice(0, 2)
   };
@@ -1176,16 +1285,30 @@ export const getRingSubmitDeviceMac = (userStore: any, isIOS: boolean, ...device
     return '';
   }
 
-  const currentStableMac = info.mac || info.advertis?.macInfo;
-  const stableMac = userStore.normalMac || currentStableMac;
+  const stableMac = getLegacyStableSubmitMac(allDeviceSources, userStore);
+  if (stableMac) return stableMac;
+
   return (
-    (isIOS ? stableMac || info.uniMacId : info.deviceId || stableMac) ||
-    userStore.normalMac ||
-    info.advertis?.macInfo ||
-    info.deviceId ||
-    info.uniMacId ||
+    (isIOS ? info.uniMacId || info.deviceId : (isColonSeparatedBleMac(info.deviceId) ? info.deviceId : '') || info.deviceId) ||
+    (isColonSeparatedBleMac(userStore.iosMacId) ? userStore.iosMacId : '') ||
     ''
   );
+};
+
+const getLegacyStableSubmitMac = (sources: Array<Record<string, any>>, userStore: any) => {
+  const candidates: unknown[] = [];
+  for (const source of sources) {
+    candidates.push(
+      source?.mac,
+      source?.deviceMac,
+      source?.normalMac,
+      source?.advertis?.macInfo,
+      isColonSeparatedBleMac(source?.uniMacId) ? source?.uniMacId : '',
+      isColonSeparatedBleMac(source?.deviceId) ? source?.deviceId : ''
+    );
+  }
+  candidates.push(userStore?.normalMac, isColonSeparatedBleMac(userStore?.iosMacId) ? userStore?.iosMacId : '');
+  return candidates.map((item) => String(item || '').trim()).find(Boolean) || '';
 };
 
 const getRwStableSubmitMac = (device?: Record<string, any> | null) => {

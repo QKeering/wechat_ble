@@ -47,6 +47,46 @@ const copy = {
   nearTip: `2. ${t(35831, 30830, 35748, 25106, 25351, 24050, 24320, 26426, 24182, 38752, 36817, 25163, 26426, 12290)}`
 };
 
+const FALLBACK_DEVICE_MODEL_KEYS = ['L19', 'RW', 'SY03', 'SY15', 'BH3', 'QK'];
+const normalizeModelSearchText = (value: unknown) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s:_-]+/g, '');
+const uniqueModelKeywords = (values: unknown[]) => Array.from(new Set(values.map(normalizeModelSearchText).filter(Boolean)));
+const buildModelFilterKeywords = (filter: string) => {
+  const normalizedFilter = normalizeModelSearchText(filter);
+  const matchedModel = deviceModels.value.find((item) =>
+    [item.modelKey, item.modelName, item.deviceVersion].some((value) => normalizeModelSearchText(value) === normalizedFilter)
+  );
+  const rawKeywords: unknown[] = [
+    filter,
+    matchedModel?.modelKey,
+    matchedModel?.modelName,
+    matchedModel?.deviceVersion
+  ];
+  const compact = uniqueModelKeywords(rawKeywords).join(' ');
+  if (compact.includes('l19')) rawKeywords.push('L19', 'QKL19', 'QKeerRingL19', 'OKL19');
+  if (compact.includes('rw')) rawKeywords.push('RW');
+  if (compact.includes('sy03')) rawKeywords.push('SY03');
+  if (compact.includes('sy15')) rawKeywords.push('SY15', 'SY15A', 'SY15-A');
+  if (compact.includes('bh3')) rawKeywords.push('BH3');
+  if (compact.includes('qk')) rawKeywords.push('QK', 'QKeer', 'QKeeRing');
+  return uniqueModelKeywords(rawKeywords);
+};
+const buildDeviceModelSearchable = (device: ScanDeviceInfo) =>
+  uniqueModelKeywords([
+    device.displayName,
+    device.deviceName,
+    device.name,
+    device.localName,
+    device.productModel,
+    device.productId,
+    device.modelKey,
+    device.protocol,
+    device.sn
+  ]).join(' ');
+
 const appendConnectPageDiagnosticLog = (event: string, details?: unknown) => {
   const detailPayload =
     details && typeof details === 'object' && !Array.isArray(details)
@@ -101,22 +141,10 @@ const devices = computed(() => {
   }
   if (filters.length === 0) return businessDevices;
 
+  const modelKeywords = filters.flatMap((item) => buildModelFilterKeywords(String(item)));
   return businessDevices.filter((device) => {
-    const deviceRecord = device as ScanDeviceInfo;
-    const searchable = [
-      deviceRecord.displayName,
-      deviceRecord.deviceName,
-      deviceRecord.name,
-      deviceRecord.localName,
-      deviceRecord.productModel,
-      deviceRecord.productId,
-      deviceRecord.modelKey
-    ]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase();
-
-    return filters.some((item) => searchable.includes(String(item).toLowerCase()));
+    const searchable = buildDeviceModelSearchable(device as ScanDeviceInfo);
+    return modelKeywords.some((item) => searchable.includes(item));
   });
 });
 
@@ -308,11 +336,14 @@ const confirmType = (e: any) => {
 
 const loadDeviceModelsSafely = async () => {
   try {
-    deviceModels.value = await deviceModelList();
-    columns.value = [[copy.all, ...deviceModels.value.map((item) => item.modelKey)]];
+    const remoteModels = await deviceModelList();
+    deviceModels.value = remoteModels;
+    const remoteKeys = remoteModels.map((item) => item.modelKey || item.modelName).filter(Boolean);
+    const mergedKeys = Array.from(new Set([...remoteKeys, ...FALLBACK_DEVICE_MODEL_KEYS]));
+    columns.value = [[copy.all, ...mergedKeys]];
   } catch {
     deviceModels.value = [];
-    columns.value = [[copy.all]];
+    columns.value = [[copy.all, ...FALLBACK_DEVICE_MODEL_KEYS]];
   }
 };
 

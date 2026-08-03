@@ -10,7 +10,12 @@ import {
 } from '@/composables/useRingMetricReadings';
 import { useRingStore } from '@/stores';
 import { useUserStore } from '@/stores/user';
-import { enqueueRwDiagnosticUpload } from '@/utils/rwDiagnosticUpload';
+import {
+  appendRingDiagnosticLog,
+  isRingDiagnosticNodeRuntime,
+  RING_DIAGNOSTIC_LOG_STORAGE_KEY
+} from '@/utils/ringDiagnosticLog';
+export { appendRingDiagnosticLog };
 
 export type RwForegroundMetric =
   | 'heart_rate'
@@ -34,9 +39,6 @@ const RW_FOREGROUND_METRIC_RESULT_TIMEOUT_MS_BY_METRIC: Partial<Record<RwForegro
 };
 const RW_APP_COMPAT_PRIME_METRICS = new Set<RwForegroundMetric>(['heart_rate', 'blood_oxygen']);
 
-const RING_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
-const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
-const RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH = 4000;
 const RW_REALTIME_METRIC_KEYS: Record<RwForegroundMetric, number> = {
   heart_rate: 0x0224,
   blood_oxygen: 0x024e,
@@ -96,51 +98,10 @@ type RingDiagnosticLogEntry = {
 let rwMetricReadToken = 0;
 let activeRwMetric: RwForegroundMetric | null = null;
 
-const isNodeRuntime = () => Boolean((globalThis as any).process?.versions?.node);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const padDiagnosticNumber = (value: number, length: number) => `${value}`.padStart(length, '0');
-const formatDiagnosticTime = (date = new Date()) =>
-  `${padDiagnosticNumber(date.getHours(), 2)}:${padDiagnosticNumber(date.getMinutes(), 2)}:${padDiagnosticNumber(date.getSeconds(), 2)}.${padDiagnosticNumber(date.getMilliseconds(), 3)}`;
-
-const normalizeDiagnosticDetails = (details: unknown) => {
-  if (details == null) return '';
-  let text = '';
-  if (typeof details === 'string') {
-    text = details;
-  } else {
-    try {
-      text = JSON.stringify(details);
-    } catch {
-      text = String(details);
-    }
-  }
-  return text.length > RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH
-    ? `${text.slice(0, RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH)}...<truncated>`
-    : text;
-};
-
-export const appendRingDiagnosticLog = (source: string, event: string, details?: unknown) => {
-  if (isNodeRuntime()) return;
-  try {
-    const raw = uni.getStorageSync?.(RING_DIAGNOSTIC_LOG_STORAGE_KEY);
-    const logs = Array.isArray(raw) ? raw : [];
-    const entry = {
-      id: Date.now() * 1000 + Math.floor(Math.random() * 1000),
-      time: formatDiagnosticTime(),
-      source,
-      event,
-      details: normalizeDiagnosticDetails(details)
-    };
-    logs.push(entry);
-    uni.setStorageSync?.(RING_DIAGNOSTIC_LOG_STORAGE_KEY, logs.slice(-RING_DIAGNOSTIC_LOG_MAX_COUNT));
-    enqueueRwDiagnosticUpload(entry);
-  } catch {
-    // Diagnostic logging must never affect measurement.
-  }
-};
 
 const readRingDiagnosticLogs = (): RingDiagnosticLogEntry[] => {
-  if (isNodeRuntime()) return [];
+  if (isRingDiagnosticNodeRuntime()) return [];
   try {
     const raw = uni.getStorageSync?.(RING_DIAGNOSTIC_LOG_STORAGE_KEY);
     return Array.isArray(raw) ? raw.filter((item) => item && typeof item === 'object') : [];

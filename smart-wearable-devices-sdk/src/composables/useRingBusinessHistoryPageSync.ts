@@ -16,6 +16,7 @@ import {
   stagePendingUploadSession,
   uploadPendingRawFramesInBackground
 } from '@/utils/dataUploadCompensation';
+import { getDeviceHistoryCheckpoint, setDeviceHistoryCheckpoint } from '@/utils/deviceHistoryCheckpoint';
 import { appendRingDiagnosticLog } from './useRwForegroundMeasurement';
 import {
   buildRingHistorySubmitRecords,
@@ -77,6 +78,7 @@ const HISTORY_PAGE_PENDING_UPLOAD_MAX_COUNT = 300;
 const HISTORY_PAGE_UPLOADED_RECORD_KEYS_STORAGE_KEY = 'qkeer:rw-history-page-uploaded-record-keys:v1';
 const HISTORY_PAGE_UPLOADED_RECORD_KEYS_MAX_COUNT = 2000;
 const HISTORY_PAGE_SLEEP_BACKFILL_SECONDS = 24 * 60 * 60;
+const HISTORY_PAGE_VITAL_BACKFILL_SECONDS = 24 * 60 * 60;
 const HISTORY_PAGE_SUBMIT_FAILED_MESSAGE = '历史数据提交失败';
 const HISTORY_PAGE_FALLBACK_READ_FAILED_MESSAGE = '历史数据兜底读取失败';
 const HISTORY_PAGE_EMPTY_FALLBACK_EVENTS = {
@@ -524,12 +526,34 @@ const isHistoryPageSleepSubmitRecord = (record: RingHistorySubmitRecord) => {
   );
 };
 
+const isHistoryPageVitalSubmitRecord = (record: RingHistorySubmitRecord) =>
+  record.heartRate != null ||
+  record.hrv != null ||
+  record.spo2 != null ||
+  record.stress != null ||
+  record.temperature != null ||
+  record.bloodSugar != null ||
+  record.systolic != null ||
+  record.diastolic != null ||
+  (record as Record<string, any>).bloodPressure != null ||
+  (record as Record<string, any>).blood_pressure != null;
+
+const getHistoryPageRecordBackfillSinceTimestamp = (record: RingHistorySubmitRecord, lastReadTimestamp: number) => {
+  if (!lastReadTimestamp) return 0;
+  if (isHistoryPageSleepSubmitRecord(record)) {
+    return Math.max(0, lastReadTimestamp - HISTORY_PAGE_SLEEP_BACKFILL_SECONDS);
+  }
+  if (isHistoryPageVitalSubmitRecord(record)) {
+    return Math.max(0, lastReadTimestamp - HISTORY_PAGE_VITAL_BACKFILL_SECONDS);
+  }
+  return lastReadTimestamp;
+};
+
 const isHistoryPageRecordAfterLastReadWindow = (record: RingHistorySubmitRecord, lastReadTimestamp: number) => {
   if (!lastReadTimestamp) return true;
   const unixTime = getRingHistoryRecordSyncUnixTime(record);
   if (!unixTime) return true;
-  if (!isHistoryPageSleepSubmitRecord(record)) return unixTime > lastReadTimestamp;
-  return unixTime > Math.max(0, lastReadTimestamp - HISTORY_PAGE_SLEEP_BACKFILL_SECONDS);
+  return unixTime > getHistoryPageRecordBackfillSinceTimestamp(record, lastReadTimestamp);
 };
 
 const summarizeHistoryPageSubmitResponse = (response: unknown) => {
@@ -564,6 +588,23 @@ const summarizeHistoryPageSubmitResponse = (response: unknown) => {
 const getHistoryPageResponseObject = (response: unknown): Record<string, any> | null => {
   if (!response || typeof response !== 'object' || Array.isArray(response)) return null;
   return response as Record<string, any>;
+};
+
+const isHistoryPageSubmitResponseSuccessful = (response: unknown) => {
+  const summary = summarizeHistoryPageSubmitResponse(response);
+  const code = Number(summary.code);
+  if (Number.isFinite(code) && code !== 0 && code !== 200) return false;
+  if (summary.success === false) return false;
+  return summary.hasResponse;
+};
+
+const createHistoryPageSubmitResponseError = (response: unknown) => {
+  const summary = summarizeHistoryPageSubmitResponse(response);
+  const message = summary.message || `history upload response code ${summary.code ?? 'unknown'}`;
+  const error = new Error(String(message));
+  (error as any).response = response;
+  (error as any).summary = summary;
+  return error;
 };
 
 const summarizeHistoryPageQueryResponse = (response: unknown) => {
@@ -741,6 +782,7 @@ export const useRingBusinessHistoryPageSync = () => {
       });
       return null;
     }
+    const uploadProtocol = getCurrentProtocol() || 'legacy';
 
     const backendBinding = await assertBackendUploadBinding(deviceMac, getHistoryPageSilentRequestConfig() as any);
     if (!backendBinding.ok) {
@@ -755,7 +797,7 @@ export const useRingBusinessHistoryPageSync = () => {
         rawRecordCount: records.length,
         rawRecordSample: records.slice(0, 2).map(summarizeHistoryPageRecord)
       });
-      if (backendBinding.reasonCode === 'NO_ACTIVE_BINDING' || backendBinding.reasonCode === 'BOUND_DEVICE_MISMATCH') {
+      if (backendBinding.reasonCode === 'NO_ACTIVE_BINDING') {
         await clearFrontendRingBindingState(userStore, ringStore);
       }
       return null;
@@ -792,14 +834,16 @@ export const useRingBusinessHistoryPageSync = () => {
     const filteredRecords = visibleRecords.filter((record) => {
       const unixTime = getRingHistoryRecordSyncUnixTime(record);
       const recordSubmitPreview = buildRingHistorySubmitRecords([record] as any, sinceTimestamp);
-      const isSleepRecord = recordSubmitPreview.some((item) => isHistoryPageSleepSubmitRecord(item));
       const recordSinceTimestamp =
-        sinceTimestamp && isSleepRecord ? Math.max(0, sinceTimestamp - HISTORY_PAGE_SLEEP_BACKFILL_SECONDS) : sinceTimestamp;
+        sinceTimestamp && recordSubmitPreview.length > 0
+          ? Math.min(...recordSubmitPreview.map((item) => getHistoryPageRecordBackfillSinceTimestamp(item, sinceTimestamp)))
+          : sinceTimestamp;
       if (recordSinceTimestamp && unixTime && unixTime < recordSinceTimestamp) return true;
       return recordSubmitPreview.length === 0;
     });
     const currentSubmitRecords = buildRingHistorySubmitRecords(visibleRecords as any, sinceTimestamp);
-    const uploadLastReadTimestamp = Number(userStore.lastReadTimestamp || 0);
+    const uploadCheckpointProtocol = uploadProtocol;
+    const uploadLastReadTimestamp = getDeviceHistoryCheckpoint(deviceMac, uploadCheckpointProtocol);
     const lastReadFilteredRecords = uploadLastReadTimestamp > 0
       ? currentSubmitRecords.filter((record) => {
           return !isHistoryPageRecordAfterLastReadWindow(record, uploadLastReadTimestamp);
@@ -848,35 +892,65 @@ export const useRingBusinessHistoryPageSync = () => {
       });
       if (rawFrames.length > 0) {
         const rawOnlySession = stagePendingUploadSession({
-          uploadSessionId: createUploadSessionId(`${String(getProtocolCandidate() || 'history')}_raw`),
+          uploadSessionId: createUploadSessionId(`${uploadProtocol}_raw`),
           deviceMac: String(deviceMac),
-          protocol: String(getProtocolCandidate() || ''),
+          protocol: uploadProtocol,
           bindingId: backendBinding.bindingId == null ? undefined : String(backendBinding.bindingId),
           bindingVersion: backendBinding.bindingVersion == null ? undefined : String(backendBinding.bindingVersion),
           dataUserId: backendBinding.dataUserId == null ? undefined : String(backendBinding.dataUserId),
           dataList: [],
           rawFrames
         });
+        appendRingDiagnosticLog('RW PAGE', 'upload-start', {
+          ...details,
+          stage: 'history-page-raw-upload',
+          reason: 'no-submittable-records',
+          uploadSessionId: rawOnlySession.uploadSessionId,
+          deviceMac,
+          rawFrameCount: rawFrames.length
+        });
         void uploadPendingRawFramesInBackground(rawOnlySession, (params) =>
           submitRingHistoryRawFrames(params, getHistoryPageSilentRequestConfig())
-        ).catch((rawUploadError) => {
-          appendRingDiagnosticLog('RW PAGE', 'history-page-raw-upload-failed', {
-            ...details,
-            reason: 'no-submittable-records',
-            uploadSessionId: rawOnlySession.uploadSessionId,
-            deviceMac,
-            rawFrameCount: rawFrames.length,
-            error: formatBleErrorMessage(rawUploadError, 'raw history upload failed'),
-            rawError: getHistoryPageRawError(rawUploadError)
+        )
+          .then((rawResponse) => {
+            appendRingDiagnosticLog('RW PAGE', 'upload-result', {
+              ...details,
+              stage: 'history-page-raw-upload',
+              reason: 'no-submittable-records',
+              uploadSessionId: rawOnlySession.uploadSessionId,
+              deviceMac,
+              rawFrameCount: rawFrames.length,
+              rawResponse: summarizeHistoryPageSubmitResponse(rawResponse)
+            });
+          })
+          .catch((rawUploadError) => {
+            appendRingDiagnosticLog('RW PAGE', 'history-page-raw-upload-failed', {
+              ...details,
+              reason: 'no-submittable-records',
+              uploadSessionId: rawOnlySession.uploadSessionId,
+              deviceMac,
+              rawFrameCount: rawFrames.length,
+              error: formatBleErrorMessage(rawUploadError, 'raw history upload failed'),
+              rawError: getHistoryPageRawError(rawUploadError)
+            });
+            appendRingDiagnosticLog('RW PAGE', 'upload-failed', {
+              ...details,
+              stage: 'history-page-raw-upload',
+              reason: 'no-submittable-records',
+              uploadSessionId: rawOnlySession.uploadSessionId,
+              deviceMac,
+              rawFrameCount: rawFrames.length,
+              error: formatBleErrorMessage(rawUploadError, 'raw history upload failed'),
+              rawError: getHistoryPageRawError(rawUploadError)
+            });
           });
-        });
       }
       return null;
     }
     const uploadSession = stagePendingUploadSession({
-      uploadSessionId: createUploadSessionId(String(getProtocolCandidate() || 'history')),
+      uploadSessionId: createUploadSessionId(uploadProtocol),
       deviceMac: String(deviceMac),
-      protocol: String(getProtocolCandidate() || ''),
+      protocol: uploadProtocol,
       bindingId: backendBinding.bindingId == null ? undefined : String(backendBinding.bindingId),
       bindingVersion: backendBinding.bindingVersion == null ? undefined : String(backendBinding.bindingVersion),
       dataUserId: backendBinding.dataUserId == null ? undefined : String(backendBinding.dataUserId),
@@ -910,6 +984,10 @@ export const useRingBusinessHistoryPageSync = () => {
       submitRecordSample: submitPreviewRecords.slice(0, 2)
     };
     appendRingDiagnosticLog('RW PAGE', 'history-page-upload-start', uploadDetails);
+    appendRingDiagnosticLog('RW PAGE', 'upload-start', {
+      ...uploadDetails,
+      stage: 'history-page-data-upload'
+    });
 
     let submitResponse: unknown;
     try {
@@ -918,6 +996,9 @@ export const useRingBusinessHistoryPageSync = () => {
         dataList: submitPreviewRecords,
         ...buildUploadSyncMeta(uploadSession)
       }, getHistoryPageSilentRequestConfig());
+      if (!isHistoryPageSubmitResponseSuccessful(submitResponse)) {
+        throw createHistoryPageSubmitResponseError(submitResponse);
+      }
       markPendingUploadDataDone(uploadSession.uploadSessionId, submitResponse);
     } catch (uploadError) {
       markPendingUploadDataFailed(uploadSession.uploadSessionId, uploadError);
@@ -936,6 +1017,17 @@ export const useRingBusinessHistoryPageSync = () => {
         error: formatBleErrorMessage(uploadError, HISTORY_PAGE_SUBMIT_FAILED_MESSAGE),
         rawError: getHistoryPageRawError(uploadError)
       });
+      appendRingDiagnosticLog('RW PAGE', 'upload-failed', {
+        ...uploadDetails,
+        stage: 'history-page-data-upload',
+        backendUploaded: false,
+        backendSubmitted: false,
+        pendingUploadSaved: Boolean(savedPending),
+        pendingUploadCount: savedPending?.dataList.length || submitPreviewRecords.length,
+        pendingAttemptCount: savedPending?.attemptCount || (pendingUpload?.attemptCount || 0) + 1,
+        error: formatBleErrorMessage(uploadError, HISTORY_PAGE_SUBMIT_FAILED_MESSAGE),
+        rawError: getHistoryPageRawError(uploadError)
+      });
       if (!isExpectedBleRuntimeError(uploadError)) {
         formatBleErrorMessage(uploadError);
       }
@@ -943,18 +1035,45 @@ export const useRingBusinessHistoryPageSync = () => {
     }
     if (rawFrames.length > 0) {
       rawSubmitResponse = { rawStatus: 'scheduled', uploadSessionId: uploadSession.uploadSessionId, rawFrameCount: rawFrames.length };
+      appendRingDiagnosticLog('RW PAGE', 'upload-start', {
+        ...details,
+        stage: 'history-page-raw-upload',
+        uploadSessionId: uploadSession.uploadSessionId,
+        deviceMac,
+        rawFrameCount: rawFrames.length
+      });
       void uploadPendingRawFramesInBackground(uploadSession, (params) =>
         submitRingHistoryRawFrames(params, getHistoryPageSilentRequestConfig())
-      ).catch((rawUploadError) => {
-        appendRingDiagnosticLog('RW PAGE', 'history-page-raw-upload-failed', {
-          ...details,
-          uploadSessionId: uploadSession.uploadSessionId,
-          deviceMac,
-          rawFrameCount: rawFrames.length,
-          error: formatBleErrorMessage(rawUploadError, 'raw history upload failed'),
-          rawError: getHistoryPageRawError(rawUploadError)
+      )
+        .then((rawResponse) => {
+          appendRingDiagnosticLog('RW PAGE', 'upload-result', {
+            ...details,
+            stage: 'history-page-raw-upload',
+            uploadSessionId: uploadSession.uploadSessionId,
+            deviceMac,
+            rawFrameCount: rawFrames.length,
+            rawResponse: summarizeHistoryPageSubmitResponse(rawResponse)
+          });
+        })
+        .catch((rawUploadError) => {
+          appendRingDiagnosticLog('RW PAGE', 'history-page-raw-upload-failed', {
+            ...details,
+            uploadSessionId: uploadSession.uploadSessionId,
+            deviceMac,
+            rawFrameCount: rawFrames.length,
+            error: formatBleErrorMessage(rawUploadError, 'raw history upload failed'),
+            rawError: getHistoryPageRawError(rawUploadError)
+          });
+          appendRingDiagnosticLog('RW PAGE', 'upload-failed', {
+            ...details,
+            stage: 'history-page-raw-upload',
+            uploadSessionId: uploadSession.uploadSessionId,
+            deviceMac,
+            rawFrameCount: rawFrames.length,
+            error: formatBleErrorMessage(rawUploadError, 'raw history upload failed'),
+            rawError: getHistoryPageRawError(rawUploadError)
+          });
         });
-      });
     }
     clearHistoryPagePendingUpload(deviceMac);
     const uploadedRecordKeyCount = writeHistoryPageUploadedRecordKeys(
@@ -964,8 +1083,9 @@ export const useRingBusinessHistoryPageSync = () => {
     const maxTimestamp = submitPreviewRecords.reduce((latest, record) => {
       return Math.max(latest, getRingHistoryRecordSyncUnixTime(record) || 0);
     }, 0);
-    const previousLastReadTimestamp = Number(userStore.lastReadTimestamp || 0);
+    const previousLastReadTimestamp = getDeviceHistoryCheckpoint(deviceMac, uploadCheckpointProtocol);
     if (maxTimestamp > 0 && maxTimestamp > previousLastReadTimestamp) {
+      setDeviceHistoryCheckpoint(deviceMac, uploadCheckpointProtocol, maxTimestamp);
       userStore.updateLastReadTimestamp(maxTimestamp);
     }
     appendRingDiagnosticLog('RW PAGE', 'history-page-upload-result', {
@@ -995,6 +1115,7 @@ export const useRingBusinessHistoryPageSync = () => {
       maxVisibleTimestamp,
       maxTimestamp,
       previousLastReadTimestamp,
+      uploadCheckpointProtocol,
       lastReadTimestamp: userStore.lastReadTimestamp,
       rawMetricCounts: countHistoryPageRecordMetrics(records),
       uploadRawMetricCounts: countHistoryPageRecordMetrics(records),
@@ -1004,6 +1125,28 @@ export const useRingBusinessHistoryPageSync = () => {
       futureFilteredRecordSample: futureFilteredRecords.slice(0, 2).map(summarizeHistoryPageRecord),
       submitResponse: summarizeHistoryPageSubmitResponse(submitResponse),
       submitRecordSample: submitPreviewRecords.slice(0, 2)
+    });
+    appendRingDiagnosticLog('RW PAGE', 'upload-result', {
+      ...details,
+      stage: 'history-page-data-upload',
+      endpoint: HISTORY_PAGE_UPLOAD_ENDPOINT,
+      uploadSessionId: uploadSession.uploadSessionId,
+      uploadTimeoutMs: HISTORY_PAGE_UPLOAD_TIMEOUT_MS,
+      deviceMac,
+      submitted: true,
+      uploaded: true,
+      backendSubmitted: true,
+      backendUploaded: true,
+      count: submitPreviewRecords.length,
+      recordCount: submitPreviewRecords.length,
+      rawRecordCount: records.length,
+      maxTimestamp,
+      previousLastReadTimestamp,
+      uploadCheckpointProtocol,
+      lastReadTimestamp: userStore.lastReadTimestamp,
+      rawMetricCounts: countHistoryPageRecordMetrics(records),
+      submitMetricCounts: countHistoryPageRecordMetrics(submitPreviewRecords as any),
+      submitResponse: summarizeHistoryPageSubmitResponse(submitResponse)
     });
     return {
       submitted: true,

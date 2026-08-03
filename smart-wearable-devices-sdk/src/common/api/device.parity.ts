@@ -126,8 +126,16 @@ storage.set('qkeer:bound-ring-device', {
   name: 'SY03'
 });
 const fallbackBoundInfo = await getBindInfo({ refresh: true });
-if (fallbackBoundInfo?.advertis?.macInfo !== '3E:00:00:00:05:1B') {
-  throw new Error(`Device API should use local mirror only when backend request fails: ${JSON.stringify(fallbackBoundInfo)}`);
+if (fallbackBoundInfo !== null) {
+  throw new Error(`Device API should not use local mirror as authoritative binding when backend request fails: ${JSON.stringify(fallbackBoundInfo)}`);
+}
+const displayFallbackBoundInfo = await getBindInfo({ refresh: true, allowLocalFallback: true });
+if (
+  displayFallbackBoundInfo?.advertis?.macInfo !== '3E:00:00:00:05:1B' ||
+  displayFallbackBoundInfo?.bindingStatus !== 'unverified' ||
+  displayFallbackBoundInfo?.source !== 'local-unverified'
+) {
+  throw new Error(`Device API should expose local mirror only as unverified display fallback: ${JSON.stringify(displayFallbackBoundInfo)}`);
 }
 remoteCurrentDeviceFails = false;
 

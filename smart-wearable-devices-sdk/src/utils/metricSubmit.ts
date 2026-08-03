@@ -12,12 +12,19 @@ const pickFirstText = (...values: unknown[]) => {
 export const getMetricSubmitDeviceMac = (userStore: any, isIOS = false) => {
   const info = userStore?.deviceInfo || {};
   const advertisMac = info.advertis?.macInfo;
+  const stableMac = pickFirstText(
+    info.mac,
+    advertisMac,
+    isColonSeparatedMac(info.uniMacId) ? info.uniMacId : '',
+    userStore?.normalMac,
+    isColonSeparatedMac(userStore?.iosMacId) ? userStore?.iosMacId : ''
+  );
 
-  if (isIOS) {
-    return pickFirstText(userStore?.normalMac, info.mac, advertisMac, isColonSeparatedMac(info.uniMacId) ? info.uniMacId : '', info.deviceId, userStore?.iosMacId);
-  }
+  if (stableMac) return stableMac;
 
-  return pickFirstText(info.deviceId, info.mac, advertisMac, userStore?.normalMac, isColonSeparatedMac(info.uniMacId) ? info.uniMacId : '', userStore?.iosMacId);
+  if (isIOS) return pickFirstText(info.deviceId, userStore?.iosMacId);
+
+  return pickFirstText(isColonSeparatedMac(info.deviceId) ? info.deviceId : '', info.deviceId, info.uniMacId, userStore?.iosMacId);
 };
 
 export const formatMetricRecordTime = (value?: unknown) => {

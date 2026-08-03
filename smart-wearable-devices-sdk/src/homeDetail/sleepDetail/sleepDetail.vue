@@ -98,6 +98,7 @@ const loadSleepDetailData = async (trigger = 'manual') => {
     runSleepDetailEndpointTask('heart-rate-detail', date, loadId, () => getRatDetail(targetDate, loadId))
   ]);
   if (isCurrentSleepDetailLoad(loadId)) {
+    applySleepSegmentNormalization();
     updateSleepDetailCharts();
   }
   appendSleepDetailPageLog('sleep-detail-page-load-done', {
@@ -207,6 +208,7 @@ const getSleepDetailInfo = async (targetDate = new Date(), loadId?: number) => {
   });
   if (res && isCurrentSleepDetailLoad(loadId)) {
     sleepDetailObj.value = res;
+    applySleepSegmentNormalization();
   }
 };
 // 睡眠区间
@@ -214,6 +216,7 @@ const getSleepSegmentInfo = async (targetDate = new Date(), loadId?: number) => 
   const res = await getSleepSegment({ date: formatLocalDate(targetDate) });
   if (res && isCurrentSleepDetailLoad(loadId)) {
     sleepSegmentObj.value = res;
+    applySleepSegmentNormalization();
   }
 };
 // 获取心率详情
@@ -249,6 +252,64 @@ const formatMinutesToTime = (minutesStr: string): string => {
   return `${hours}小时${remainingMinutes.toString().padStart(2, '0')}分钟`;
 };
 // 判断数组对象的所有value属性是否等于'0'
+const SLEEP_STAGE_LABELS = {
+  deep: String.fromCharCode(28145, 30561),
+  light: String.fromCharCode(27973, 30561),
+  rem: String.fromCharCode(24555, 36895, 30524, 21160),
+  awake: String.fromCharCode(28165, 37266),
+  nap: String.fromCharCode(23567, 30561)
+};
+const SLEEP_STAGE_ORDER = [
+  SLEEP_STAGE_LABELS.deep,
+  SLEEP_STAGE_LABELS.light,
+  SLEEP_STAGE_LABELS.rem,
+  SLEEP_STAGE_LABELS.awake,
+  SLEEP_STAGE_LABELS.nap
+];
+const toSleepStageMinutes = (value: unknown) => {
+  const minutes = Number(value);
+  return Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes) : 0;
+};
+const applySleepSegmentNormalization = () => {
+  const segment = sleepSegmentObj.value;
+  const detail = sleepDetailObj.value;
+  if (!segment?.chartDataSection || !detail) return;
+
+  const sectionMinutes = new Map<string, number>();
+  segment.chartDataSection.forEach((item: any) => {
+    const label = String(item?.time || '');
+    if (!label) return;
+    sectionMinutes.set(label, toSleepStageMinutes(item?.value));
+  });
+
+  const sleepDuration = toSleepStageMinutes((detail as any).sleepDuration);
+  const asleepMinutes =
+    toSleepStageMinutes(sectionMinutes.get(SLEEP_STAGE_LABELS.deep)) +
+    toSleepStageMinutes(sectionMinutes.get(SLEEP_STAGE_LABELS.light)) +
+    toSleepStageMinutes(sectionMinutes.get(SLEEP_STAGE_LABELS.rem)) +
+    toSleepStageMinutes(sectionMinutes.get(SLEEP_STAGE_LABELS.nap));
+  if (sleepDuration > 0) {
+    const maxAwakeInSleepWindow = Math.max(0, sleepDuration - asleepMinutes);
+    const rawAwake = toSleepStageMinutes(sectionMinutes.get(SLEEP_STAGE_LABELS.awake));
+    sectionMinutes.set(SLEEP_STAGE_LABELS.awake, Math.min(rawAwake, maxAwakeInSleepWindow));
+  }
+
+  const chartDataSection = SLEEP_STAGE_ORDER.map((label) => ({
+    time: label,
+    value: String(sectionMinutes.get(label) || 0)
+  }));
+  const total = chartDataSection.reduce((sum, item) => sum + toSleepStageMinutes(item.value), 0);
+  const chartData = chartDataSection.map((item) => ({
+    time: item.time,
+    value: String(total ? Math.round((toSleepStageMinutes(item.value) / total) * 100) : 0)
+  }));
+  sleepSegmentObj.value = {
+    ...segment,
+    chartData,
+    chartDataSection
+  };
+};
+
 const areAllValuesZero = (dataArray: any[]): boolean => {
   if (!dataArray || dataArray.length === 0) {
     return false;

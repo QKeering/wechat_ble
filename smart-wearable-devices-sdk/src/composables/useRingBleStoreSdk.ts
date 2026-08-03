@@ -8,6 +8,7 @@ import {
   stagePendingUploadSession,
   uploadPendingRawFramesInBackground
 } from '@/utils/dataUploadCompensation';
+import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import { isSameRingDevice, useRingBleSdk, type UseRingBleSdkOptions } from './useRingBleSdk';
 import type { RingDeviceInfo, RingParsedData } from '@/sdk/ring-ble';
 import { getRwHistoryDataType, parseRwFileTimestamp } from '@/sdk/ring-ble/rw';
@@ -54,22 +55,27 @@ const getRwStableRecordIdentity = (
   (isColonSeparatedBleMac(parsed.uniMacId) ? parsed.uniMacId : '') ||
   (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '');
 
+const getStableDeviceMacFromSource = (source?: Record<string, any> | null) => {
+  if (!source) return '';
+  return String(
+    source.mac ||
+      source.deviceMac ||
+      source.device_mac ||
+      source.advertis?.macInfo ||
+      source.advertis?.mac ||
+      (isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : '') ||
+      (isColonSeparatedBleMac(source.deviceId) ? source.deviceId : '')
+  ).trim();
+};
+
 const getHistoryUploadStableDeviceMac = (
   records: Array<Record<string, any>>,
   parsed: RingParsedData,
   device?: RingDeviceInfo
 ) =>
-  parsed.mac ||
-  parsed.advertis?.macInfo ||
-  device?.mac ||
-  device?.advertis?.macInfo ||
-  records[0]?.mac ||
-  records[0]?.advertis?.macInfo ||
-  records[0]?.deviceMac ||
-  records[0]?.device_mac ||
-  parsed.uniMacId ||
-  device?.uniMacId ||
-  records[0]?.uniMacId ||
+  getStableDeviceMacFromSource(device as Record<string, any>) ||
+  getStableDeviceMacFromSource(parsed as Record<string, any>) ||
+  getStableDeviceMacFromSource(records[0]) ||
   '';
 
 const getStableRecordDeviceKey = (record: Record<string, any>) => {
@@ -356,6 +362,25 @@ export const useRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
 
 const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
   const ringStore = useRingStore();
+  const getAuthoritativeUploadDevice = (): RingDeviceInfo => {
+    const bound = ringStore.boundDevice as RingDeviceInfo | null;
+    const current = ringStore.deviceInfo as RingDeviceInfo;
+    if (!bound) return current;
+    return {
+      ...current,
+      ...bound,
+      protocol: bound.protocol || current.protocol
+    };
+  };
+
+  const isUploadPayloadForAuthoritativeDevice = (
+    records: Array<Record<string, any>>,
+    parsed: RingParsedData,
+    device: RingDeviceInfo
+  ) => {
+    if (!isRecordForCurrentDevice(parsed as Record<string, any>, device)) return false;
+    return !records.some((record) => hasRecordDeviceIdentity(record) && !isRecordForCurrentDevice(record, device));
+  };
 
   const sdk = useRingBleSdk({
     ...options,
@@ -375,11 +400,64 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
       return result;
     },
     uploadHistoricalRecords: async (records, parsed) => {
-      const result = await (options.uploadHistoricalRecords
-        ? options.uploadHistoricalRecords(records, parsed)
-        : uploadRingHistoryRecords(records, parsed));
+      const uploadDevice = getAuthoritativeUploadDevice();
+      const protocol = parsed?.protocol || uploadDevice?.protocol || 'unknown';
+      const uploadRecords = records as Array<Record<string, any>>;
+      const deviceMac = getHistoryUploadStableDeviceMac(uploadRecords, parsed, uploadDevice);
+      const startedAt = Date.now();
+      appendRingDiagnosticLog('RW SDK', 'upload-start', {
+        stage: 'sdk-history-record-upload',
+        protocol,
+        deviceMac,
+        parsedType: parsed?.type,
+        recordCount: Array.isArray(records) ? records.length : 0
+      });
+      if (!isUploadPayloadForAuthoritativeDevice(uploadRecords, parsed, uploadDevice)) {
+        appendRingDiagnosticLog('RW SDK', 'upload-skipped', {
+          stage: 'sdk-history-record-upload',
+          reason: 'device-mismatch',
+          protocol,
+          deviceMac,
+          parsedType: parsed?.type,
+          recordCount: Array.isArray(records) ? records.length : 0,
+          boundDeviceMac: getStableDeviceMacFromSource(ringStore.boundDevice as Record<string, any> | null),
+          currentDeviceMac: getStableDeviceMacFromSource(ringStore.deviceInfo as Record<string, any>)
+        });
+        return {
+          skipped: true,
+          reason: 'device-mismatch',
+          rawStored: false,
+          backendRawStored: false,
+          backendRawFrameCount: 0
+        };
+      }
+      let result: unknown;
+      try {
+        result = await (options.uploadHistoricalRecords
+          ? options.uploadHistoricalRecords(records, parsed)
+          : uploadRingHistoryRecords(records, parsed));
+        appendRingDiagnosticLog('RW SDK', 'upload-result', {
+          stage: 'sdk-history-record-upload',
+          protocol,
+          deviceMac,
+          parsedType: parsed?.type,
+          recordCount: Array.isArray(records) ? records.length : 0,
+          elapsedMs: Date.now() - startedAt,
+          result
+        });
+      } catch (error) {
+        appendRingDiagnosticLog('RW SDK', 'upload-failed', {
+          stage: 'sdk-history-record-upload',
+          protocol,
+          deviceMac,
+          parsedType: parsed?.type,
+          recordCount: Array.isArray(records) ? records.length : 0,
+          elapsedMs: Date.now() - startedAt,
+          error: error instanceof Error ? error.message : String((error as any)?.errMsg || error || 'upload failed')
+        });
+        throw error;
+      }
       ringStore.appendHistoryRecords(records);
-      const deviceMac = getHistoryUploadStableDeviceMac(records as Array<Record<string, any>>, parsed, ringStore.deviceInfo as RingDeviceInfo);
       const rawFrames = buildRingRawHistoryFrames(records as Array<Record<string, any>>, parsed as any, deviceMac);
       if (rawFrames.length === 0) return result;
       const resultPayload = result && typeof result === 'object' ? { ...(result as Record<string, any>) } : { result };
@@ -399,9 +477,35 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
         dataList: [],
         rawFrames
       });
-      void uploadPendingRawFramesInBackground(rawUploadSession, (params) => submitRingHistoryRawFrames(params)).catch(() => {
-        // Raw frames are compensation evidence. Keep them locally and retry from pending queue; do not break SDK record flow.
+      appendRingDiagnosticLog('RW SDK', 'upload-start', {
+        stage: 'sdk-raw-history-upload',
+        protocol,
+        deviceMac,
+        uploadSessionId: rawUploadSession.uploadSessionId,
+        rawFrameCount: rawFrames.length
       });
+      void uploadPendingRawFramesInBackground(rawUploadSession, (params) => submitRingHistoryRawFrames(params))
+        .then((rawResponse) => {
+          appendRingDiagnosticLog('RW SDK', 'upload-result', {
+            stage: 'sdk-raw-history-upload',
+            protocol,
+            deviceMac,
+            uploadSessionId: rawUploadSession.uploadSessionId,
+            rawFrameCount: rawFrames.length,
+            rawResponse
+          });
+        })
+        .catch((error) => {
+          appendRingDiagnosticLog('RW SDK', 'upload-failed', {
+            stage: 'sdk-raw-history-upload',
+            protocol,
+            deviceMac,
+            uploadSessionId: rawUploadSession.uploadSessionId,
+            rawFrameCount: rawFrames.length,
+            error: error instanceof Error ? error.message : String((error as any)?.errMsg || error || 'raw upload failed')
+          });
+          // Raw frames are compensation evidence. Do not break SDK record flow.
+        });
       return {
         ...resultPayload,
         rawStored: true,

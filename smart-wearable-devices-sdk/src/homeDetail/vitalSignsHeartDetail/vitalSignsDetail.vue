@@ -190,6 +190,9 @@ const getProcessedOption = () => {
   // 替换xAxis.data和series.data为扩展后的数据
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = fullSeriesData;
+  newOption.yAxis.min = 0;
+  newOption.yAxis.max = 180;
+  newOption.yAxis.splitNumber = 6;
 
   if (chartData.value && chartData.value.length > 0) {
     // 过滤掉null值，计算有效数据的最大值
@@ -197,7 +200,7 @@ const getProcessedOption = () => {
     if (validData.length > 0) {
       const maxValue = Math.max(...validData);
       // 如果最大值超过100，则动态调整Y轴最大值
-      if (maxValue > 100) {
+      if (maxValue > 180) {
         const yAxisConfigs = [
           { max: 120, splitNumber: 6 },
           { max: 140, splitNumber: 7 },

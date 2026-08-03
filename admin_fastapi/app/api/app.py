@@ -265,6 +265,85 @@ def sleep_minutes_by_type(rows) -> dict[str, int]:
     return values
 
 
+def sleep_stage_total(values: dict[str, int]) -> int:
+    return int(values.get("REM", 0) or 0) + int(values.get("LIGHT", 0) or 0) + int(values.get("DEEP", 0) or 0) + int(values.get("NAP", 0) or 0)
+
+
+def normalized_raw_sleep_state_rows(rows) -> list[dict]:
+    keyed_rows: dict[datetime, dict] = {}
+    for row in rows:
+        item = dict(row)
+        record_time = item.get("record_time")
+        if isinstance(record_time, str):
+            try:
+                record_time = datetime.fromisoformat(record_time.replace("Z", "+00:00")).replace(tzinfo=None)
+            except ValueError:
+                record_time = None
+        if record_time is None:
+            continue
+        if sleep_type_key(item.get("sleep_state")) == "INVALID":
+            continue
+        item["record_time"] = record_time
+        keyed_rows[record_time] = item
+    return [keyed_rows[key] for key in sorted(keyed_rows.keys())]
+
+
+def raw_sleep_state_intervals_from_rows(rows) -> list[dict]:
+    """Convert raw sleep state points into sleep intervals.
+
+    Keep this compatibility wrapper in app.py because deployments may update
+    app.py before app.services.health. If the service helper exists, use it;
+    otherwise use the same local fallback so sleepOverview/sleepDetail do not
+    fail with a 500.
+    """
+    service_func = getattr(health, "raw_sleep_state_intervals_from_rows", None)
+    if callable(service_func):
+        return service_func(rows)
+
+    ordered_rows = normalized_raw_sleep_state_rows(rows or [])
+    intervals: list[dict] = []
+    default_minutes = int(getattr(health, "L19_SLEEP_DEFAULT_SAMPLE_MINUTES", 5) or 5)
+    max_gap_minutes = int(getattr(health, "L19_SLEEP_MAX_POINT_GAP_MINUTES", 90) or 90)
+    active_stage_keys = set(getattr(health, "SLEEP_ACTIVE_STAGE_KEYS", {"REM", "LIGHT", "DEEP", "NAP"}))
+
+    for index, row in enumerate(ordered_rows):
+        record_time = row.get("record_time")
+        if not isinstance(record_time, datetime):
+            continue
+        minutes = default_minutes
+        if index + 1 < len(ordered_rows):
+            next_time = ordered_rows[index + 1].get("record_time")
+            if isinstance(next_time, datetime):
+                seconds = int((next_time - record_time).total_seconds())
+                if 0 < seconds <= max_gap_minutes * 60:
+                    minutes = max(1, round(seconds / 60))
+        intervals.append({
+            "start": record_time,
+            "end": record_time + timedelta(minutes=minutes),
+            "stage_key": sleep_type_key(row.get("sleep_state")),
+            "minutes": minutes,
+        })
+
+    active_intervals = [item for item in intervals if item.get("stage_key") in active_stage_keys]
+    if not active_intervals:
+        return []
+
+    sleep_start = min(item["start"] for item in active_intervals)
+    sleep_end = max(item["end"] for item in active_intervals)
+    clipped: list[dict] = []
+    for item in intervals:
+        stage_key = item.get("stage_key")
+        if stage_key == "AWAKE":
+            start_time = max(item["start"], sleep_start)
+            end_time = min(item["end"], sleep_end)
+            minutes = max(0, round((end_time - start_time).total_seconds() / 60))
+            if minutes <= 0:
+                continue
+            item = {**item, "start": start_time, "end": end_time, "minutes": minutes}
+        clipped.append(item)
+    return clipped
+
+
 def sleep_minutes_from_raw(db: Session, user_id: int, date_value: str | None) -> dict[str, int]:
     values = {"INVALID": 0, "AWAKE": 0, "REM": 0, "LIGHT": 0, "DEEP": 0, "NAP": 0}
     sleep_window_start, sleep_window_end = health.l19_sleep_window_for_date(date_value) if date_value else (None, None)
@@ -290,27 +369,36 @@ def sleep_minutes_from_raw(db: Session, user_id: int, date_value: str | None) ->
     ).mappings().all()
     if not rows:
         return values
-    items = [
-        (row["record_time"], sleep_type_key(row["sleep_state"]))
-        for row in rows
-        if row["record_time"] is not None and sleep_type_key(row["sleep_state"]) != "INVALID"
-    ]
-    for index, (record_time, key) in enumerate(items):
-        minutes = 5
-        if index + 1 < len(items):
-            delta = int((items[index + 1][0] - record_time).total_seconds())
-            if 0 < delta <= health.L19_SLEEP_MAX_POINT_GAP_MINUTES * 60:
-                minutes = max(1, round(delta / 60))
-        values[key] += minutes
+    for item in raw_sleep_state_intervals_from_rows(rows):
+        key = str(item.get("stage_key") or "")
+        minutes = int(item.get("minutes") or 0)
+        if key in values and minutes > 0:
+            values[key] += minutes
     return values
 
 
-def effective_sleep_values(db: Session, user_id: int, date_value: str | None, records=None) -> dict[str, int]:
+def should_prefer_raw_sleep_values(record_values: dict[str, int], raw_values: dict[str, int]) -> bool:
+    record_total = sleep_stage_total(record_values)
+    raw_total = sleep_stage_total(raw_values)
+    if raw_total <= 0:
+        return False
+    sample_minutes = int(getattr(health, "L19_SLEEP_DEFAULT_SAMPLE_MINUTES", 5) or 5)
+    return abs(raw_total - record_total) > sample_minutes
+
+
+def resolved_sleep_values(db: Session, user_id: int, date_value: str | None, records=None) -> tuple[dict[str, int], bool]:
     records = records if records is not None else sleep_records(db, user_id, date_value)
-    values = sleep_minutes_by_type(records)
-    if values["REM"] + values["LIGHT"] + values["DEEP"] + values["NAP"] > 0:
-        return values
-    return sleep_minutes_from_raw(db, user_id, date_value)
+    record_values = sleep_minutes_by_type(records)
+    record_total = sleep_stage_total(record_values)
+    raw_values = sleep_minutes_from_raw(db, user_id, date_value)
+    if record_total <= 0 or should_prefer_raw_sleep_values(record_values, raw_values):
+        return raw_values, True
+    return record_values, False
+
+
+def effective_sleep_values(db: Session, user_id: int, date_value: str | None, records=None) -> dict[str, int]:
+    values, _ = resolved_sleep_values(db, user_id, date_value, records)
+    return values
 
 
 def raw_sleep_state_rows(db: Session, user_id: int, date_value: str | None) -> list[dict]:
@@ -335,25 +423,19 @@ def raw_sleep_state_rows(db: Session, user_id: int, date_value: str | None) -> l
             "max_record_time": max_visible_record_time(),
         },
     ).mappings().all()
-    return [dict(row) for row in rows if sleep_type_key(row.get("sleep_state")) != "INVALID"]
+    return normalized_raw_sleep_state_rows(rows)
 
 
 def raw_sleep_chart_data(db: Session, user_id: int, date_value: str | None) -> list[dict]:
     rows = raw_sleep_state_rows(db, user_id, date_value)
     chart = []
-    for index, row in enumerate(rows):
-        record_time = row.get("record_time")
-        if not isinstance(record_time, datetime):
+    for item in raw_sleep_state_intervals_from_rows(rows):
+        record_time = item.get("start")
+        end_time = item.get("end")
+        minutes = int(item.get("minutes") or 0)
+        if not isinstance(record_time, datetime) or not isinstance(end_time, datetime) or minutes <= 0:
             continue
-        minutes = 5
-        if index + 1 < len(rows):
-            next_time = rows[index + 1].get("record_time")
-            if isinstance(next_time, datetime):
-                seconds = int((next_time - record_time).total_seconds())
-                if 0 < seconds <= health.L19_SLEEP_MAX_POINT_GAP_MINUTES * 60:
-                    minutes = max(1, round(seconds / 60))
-        end_time = record_time + timedelta(minutes=minutes)
-        stage_key = sleep_type_key(row.get("sleep_state"))
+        stage_key = str(item.get("stage_key") or "")
         stage_code = sleep_stage_code(stage_key)
         stage_name = SLEEP_STAGE_LABELS.get(stage_key, "")
         chart.append({
@@ -446,13 +528,81 @@ def sleep_record_chart_data(rows) -> list[dict]:
 def raw_sleep_time_range(db: Session, user_id: int, date_value: str | None) -> tuple[str, str]:
     if not date_value:
         return "00:00", "00:00"
-    summary = health.sleep_summary_from_raw(db, user_id, date_value)
-    start_time = summary.get("sleep_start_time")
-    end_time = summary.get("sleep_end_time")
+    intervals = raw_sleep_chart_data(db, user_id, date_value)
+    if not intervals:
+        return "00:00", "00:00"
+    start_time = intervals[0].get("startTime")
+    end_time = intervals[-1].get("endTime")
     return (
-        start_time.strftime("%H:%M") if isinstance(start_time, datetime) else "00:00",
-        end_time.strftime("%H:%M") if isinstance(end_time, datetime) else "00:00",
+        str(start_time or "00:00")[:5],
+        str(end_time or "00:00")[:5],
     )
+
+
+def sleep_record_time_range(rows) -> tuple[str, str]:
+    active_points = []
+    fallback_points = []
+    for row in rows or []:
+        item = dict(row._mapping)
+        stage_key = sleep_type_key(item.get("type"))
+        start_time = item.get("start_time")
+        end_time = item.get("end_time")
+        if start_time:
+            fallback_points.append(("start", start_time))
+        if end_time:
+            fallback_points.append(("end", end_time))
+        if stage_key in {"REM", "LIGHT", "DEEP", "NAP"}:
+            if start_time:
+                active_points.append(("start", start_time))
+            if end_time:
+                active_points.append(("end", end_time))
+    points = active_points or fallback_points
+    if not points:
+        return "00:00", "00:00"
+    start_values = [value for kind, value in points if kind == "start"]
+    end_values = [value for kind, value in points if kind == "end"]
+    start_time = min(start_values) if start_values else None
+    end_time = max(end_values) if end_values else None
+    return (
+        sleep_time_hhmm(start_time) or "00:00",
+        sleep_time_hhmm(end_time) or "00:00",
+    )
+
+
+def sleep_range_minutes(start_time: str, end_time: str) -> int:
+    try:
+        start_minutes = int(str(start_time)[:2]) * 60 + int(str(start_time)[3:5])
+        end_minutes = int(str(end_time)[:2]) * 60 + int(str(end_time)[3:5])
+    except (TypeError, ValueError):
+        return 0
+    if start_minutes == end_minutes:
+        return 0
+    if end_minutes < start_minutes:
+        end_minutes += 24 * 60
+    return max(0, end_minutes - start_minutes)
+
+
+def clamp_awake_to_sleep_range(values: dict[str, int], start_time: str, end_time: str) -> dict[str, int]:
+    result = {
+        "INVALID": max(0, int(values.get("INVALID", 0) or 0)),
+        "AWAKE": max(0, int(values.get("AWAKE", 0) or 0)),
+        "REM": max(0, int(values.get("REM", 0) or 0)),
+        "LIGHT": max(0, int(values.get("LIGHT", 0) or 0)),
+        "DEEP": max(0, int(values.get("DEEP", 0) or 0)),
+        "NAP": max(0, int(values.get("NAP", 0) or 0)),
+    }
+    range_minutes = sleep_range_minutes(start_time, end_time)
+    if range_minutes <= 0:
+        return result
+    active_minutes = sleep_stage_total(result)
+    result["AWAKE"] = min(result["AWAKE"], max(0, range_minutes - active_minutes))
+    return result
+
+
+def sleep_values_time_range(db: Session, user_id: int, date_value: str | None, records, prefer_raw_sleep: bool) -> tuple[str, str]:
+    if records and not prefer_raw_sleep:
+        return sleep_record_time_range(records)
+    return raw_sleep_time_range(db, user_id, date_value)
 
 
 def gaussian(value: float, ideal: float, sigma: float) -> float:
@@ -3547,7 +3697,9 @@ def family_sleep_overview(memberId: int, request: Request, user: dict = Depends(
     date_value = date_from_request(request)
     user_id = int(member["dataUserId"])
     records = sleep_records(db, user_id, date_value)
-    values = effective_sleep_values(db, user_id, date_value, records)
+    values, prefer_raw_sleep = resolved_sleep_values(db, user_id, date_value, records)
+    start_time, end_time = sleep_values_time_range(db, user_id, date_value, records, prefer_raw_sleep)
+    values = clamp_awake_to_sleep_range(values, start_time, end_time)
     awake = values["AWAKE"]
     rem = values["REM"]
     light = values["LIGHT"]
@@ -4131,7 +4283,50 @@ def java_sync_health_raw_values(table, item, user_id: int, device_mac: str | Non
     return {key: value for key, value in values.items() if key in table.c and value is not None}
 
 
+def has_sync_sleep_boundary_value(item, aliases):
+    value = first_item_value(item, aliases)
+    return value not in (None, "")
+
+
+def is_sync_sleep_segment_item(item) -> bool:
+    source_type = str(first_item_value(item, ("sourceType", "source_type")) or "").strip().lower()
+    raw_data_type = str(first_item_value(item, ("rawDataType", "raw_data_type")) or "").strip().lower()
+    if "sleep_segment" in source_type or "sleep_segment" in raw_data_type:
+        return True
+    if source_type.startswith("rw_sleep") or raw_data_type.startswith("rw_sleep"):
+        return True
+
+    has_start = has_sync_sleep_boundary_value(
+        item,
+        (
+            "startTime",
+            "start_time",
+            "beginTime",
+            "begin_time",
+            "sleepStartTime",
+            "sleep_start_time",
+        ),
+    )
+    has_end = has_sync_sleep_boundary_value(
+        item,
+        (
+            "endTime",
+            "end_time",
+            "stopTime",
+            "stop_time",
+            "finishTime",
+            "finish_time",
+            "sleepEndTime",
+            "sleep_end_time",
+        ),
+    )
+    return has_start and has_end
+
+
 def java_sync_sleep_record_values(table, item, user_id: int):
+    if not is_sync_sleep_segment_item(item):
+        return None
+
     sleep_type = sleep_record_state_value(item)
     duration_value = first_item_value(
         item,
@@ -4194,8 +4389,78 @@ def java_sync_sleep_record_values(table, item, user_id: int):
     return {key: value for key, value in values.items() if key in table.c and value is not None}
 
 
-def upsert_sync_sleep_records(db: Session, table, records: list[dict]):
+def is_sync_sleep_nap_type(value) -> bool:
+    try:
+        return int(float(value)) == 5
+    except (TypeError, ValueError):
+        return str(value or "").strip().upper() == "NAP"
+
+
+def sync_sleep_type_sort_value(value) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 5 if str(value or "").strip().upper() == "NAP" else 0
+
+
+def sync_sleep_record_dedupe_key(values: dict):
+    return (
+        values.get("user_id"),
+        values.get("date_ref"),
+        values.get("type"),
+        values.get("start_time"),
+        values.get("end_time"),
+        values.get("sleep_time"),
+    )
+
+
+def dedupe_sync_sleep_records(records: list[dict]) -> list[dict]:
+    keyed_records = {}
     for values in records:
+        keyed_records[sync_sleep_record_dedupe_key(values)] = values
+    return sorted(
+        keyed_records.values(),
+        key=lambda item: (
+            str(item.get("date_ref") or ""),
+            item.get("start_time") or datetime.min,
+            item.get("end_time") or datetime.min,
+            sync_sleep_type_sort_value(item.get("type")),
+        ),
+    )
+
+
+def delete_overlapping_sync_sleep_records(db: Session, table, values: dict) -> int:
+    start_time = values.get("start_time")
+    end_time = values.get("end_time")
+    user_id = values.get("user_id")
+    if user_id is None or start_time is None or end_time is None or end_time <= start_time:
+        return 0
+    if "start_time" not in table.c or "end_time" not in table.c:
+        return 0
+
+    query = (
+        table.delete()
+        .where(table.c.user_id == user_id)
+        .where(table.c.start_time < end_time)
+        .where(table.c.end_time > start_time)
+    )
+    if "date_ref" in table.c and values.get("date_ref") is not None:
+        query = query.where(table.c.date_ref == values["date_ref"])
+    if "type" in table.c and not is_sync_sleep_nap_type(values.get("type")):
+        # 设备主睡眠分段重复上报时，只替换主睡眠分段，避免误删用户手动小睡。
+        query = query.where(table.c.type != 5)
+
+    result = db.execute(query)
+    return int(result.rowcount or 0)
+
+
+def upsert_sync_sleep_records(db: Session, table, records: list[dict]) -> dict:
+    deduped_records = dedupe_sync_sleep_records(records)
+    deleted_overlap_count = 0
+    inserted_count = 0
+    updated_count = 0
+    for values in deduped_records:
+        deleted_overlap_count += delete_overlapping_sync_sleep_records(db, table, values)
         existing_id = db.execute(
             select(table.c.id)
             .where(table.c.user_id == values["user_id"])
@@ -4206,10 +4471,20 @@ def upsert_sync_sleep_records(db: Session, table, records: list[dict]):
         ).scalar()
         if existing_id:
             db.execute(table.update().where(table.c.id == existing_id).values(**values))
+            updated_count += 1
         else:
             db.execute(table.insert().values(**values))
-    if records:
+            inserted_count += 1
+    if deduped_records:
         db.commit()
+    return {
+        "inputCount": len(records),
+        "dedupedCount": len(deduped_records),
+        "duplicateInputCount": max(len(records) - len(deduped_records), 0),
+        "deletedOverlapCount": deleted_overlap_count,
+        "insertedCount": inserted_count,
+        "updatedCount": updated_count,
+    }
 
 
 def upsert_sync_health_raw_record(db: Session, table, values: dict):
@@ -4299,7 +4574,7 @@ def sync_ring_data_records(
     db.commit()
     health_write_ms = round((perf_counter() - health_write_started_at) * 1000)
     sleep_write_started_at = perf_counter()
-    upsert_sync_sleep_records(db, sleep_table, sleep_record_values)
+    sleep_write_result = upsert_sync_sleep_records(db, sleep_table, sleep_record_values)
     sleep_write_ms = round((perf_counter() - sleep_write_started_at) * 1000)
     device_update_started_at = perf_counter()
     update_device_sync(db, user_id, device_mac, battery)
@@ -4318,13 +4593,18 @@ def sync_ring_data_records(
                     "elapsedMs": item_summary_ms,
                     "hasSummary": bool(summary),
                 })
-    sleep_count = len(sleep_record_values)
+    sleep_count = int(sleep_write_result.get("dedupedCount") or 0)
     total_count = health_count + sleep_count
     return {
         "success": total_count > 0,
         "count": total_count,
         "healthCount": health_count,
         "sleepCount": sleep_count,
+        "sleepInputCount": sleep_write_result.get("inputCount", len(sleep_record_values)),
+        "sleepDuplicateInputCount": sleep_write_result.get("duplicateInputCount", 0),
+        "sleepOverlapDeletedCount": sleep_write_result.get("deletedOverlapCount", 0),
+        "sleepInsertedCount": sleep_write_result.get("insertedCount", 0),
+        "sleepUpdatedCount": sleep_write_result.get("updatedCount", 0),
         "failCount": fail_count,
         "touchedDates": sorted(touched_dates),
         "syncElapsedMs": round((perf_counter() - started_at) * 1000),
@@ -4420,6 +4700,112 @@ def repair_l19_raw_history_data(
         "elapsedMs": elapsed_ms,
     }
     return result
+
+
+@router.post("/data/rawHistory/enqueue")
+async def data_raw_history_enqueue(
+    request: Request,
+    user: dict = Depends(app_user),
+    db: Session = Depends(get_db),
+):
+    started_at = perf_counter()
+    payload = await request.json()
+    frames = payload.get("frames") or payload.get("rawFrames") or payload.get("raw_frames") or []
+    if isinstance(frames, dict):
+        frames = [frames]
+    if not isinstance(frames, list):
+        frames = []
+    device_mac = payload.get("deviceMac") or payload.get("device_mac")
+    upload_session_id = str(payload.get("uploadSessionId") or payload.get("upload_session_id") or uuid4())
+    operator_user_id = int(user["id"])
+    protocol = payload.get("protocol") or (frames[0].get("protocol") if frames and isinstance(frames[0], dict) else None)
+    binding = resolve_active_upload_binding(db, operator_user_id, device_mac)
+    if not binding.get("ok"):
+        result = {
+            "uploadSessionId": upload_session_id,
+            "rawStatus": "failed",
+            "reasonCode": binding.get("reasonCode"),
+            "message": binding.get("message"),
+            "inputFrameCount": len(frames),
+            "canDeleteDeviceBlocks": False,
+            "elapsedMs": round((perf_counter() - started_at) * 1000),
+        }
+        write_health_upload_exception(
+            db,
+            upload_session_id=upload_session_id,
+            operator_user_id=operator_user_id,
+            data_user_id=binding.get("dataUserId"),
+            device_mac=device_mac,
+            reason_code=binding.get("reasonCode") or "UPLOAD_BINDING_INVALID",
+            message=binding.get("message") or "上传设备绑定无效",
+            payload={"frameCount": len(frames), "deviceMac": device_mac, "rawMode": "enqueue"},
+        )
+        upsert_device_upload_session(
+            db,
+            upload_session_id=upload_session_id,
+            operator_user_id=operator_user_id,
+            data_user_id=binding.get("dataUserId"),
+            binding_id=payload.get("bindingId") or payload.get("binding_id"),
+            binding_version=payload.get("bindingVersion") or payload.get("binding_version"),
+            device_mac=device_mac,
+            protocol=protocol,
+            status="raw_failed",
+            raw_status="failed",
+            raw_frame_count=len(frames),
+            can_delete_device_blocks=False,
+            reason_code=binding.get("reasonCode"),
+            last_error=binding.get("message"),
+            request_snapshot={"frameCount": len(frames), "deviceMac": device_mac, "rawMode": "enqueue"},
+            response_snapshot=result,
+        )
+        return error(result.get("message") or "上传设备绑定无效", code=409, data=result)
+    target_user_id = int(binding["dataUserId"])
+    resolved_device_mac = binding.get("deviceMac") or device_mac or ""
+    result = health.enqueue_ring_history_raw_upload_job(
+        db,
+        target_user_id,
+        resolved_device_mac,
+        frames,
+        upload_session_id,
+        upload_user_id=operator_user_id,
+        binding_id=binding.get("bindingId"),
+        binding_version=binding.get("bindingVersion"),
+        protocol=protocol,
+    )
+    result["deviceMacNorm"] = binding.get("deviceMacNorm") or result.get("deviceMacNorm")
+    result["bindingId"] = binding.get("bindingId")
+    result["bindingVersion"] = binding.get("bindingVersion")
+    result["canDeleteDeviceBlocks"] = False
+    result["inputFrameCount"] = len(frames)
+    result["elapsedMs"] = round((perf_counter() - started_at) * 1000)
+    upsert_device_upload_session(
+        db,
+        upload_session_id=upload_session_id,
+        operator_user_id=operator_user_id,
+        data_user_id=target_user_id,
+        binding_id=binding.get("bindingId"),
+        binding_version=binding.get("bindingVersion"),
+        device_mac=resolved_device_mac,
+        protocol=protocol,
+        status="raw_queued" if result.get("rawStatus") != "success" else "raw_done",
+        raw_status="queued" if result.get("rawStatus") != "success" else "done",
+        raw_frame_count=result.get("rawFrameCount"),
+        can_delete_device_blocks=False,
+        request_snapshot={"frameCount": len(frames), "deviceMac": resolved_device_mac, "rawMode": "enqueue"},
+        response_snapshot=result,
+    )
+    write_algorithm_log(
+        "data_raw_history_enqueue",
+        user_id=target_user_id,
+        device_mac=resolved_device_mac,
+        upload_session_id=upload_session_id,
+        input_frame_count=len(frames),
+        job_id=result.get("jobId"),
+        payload_hash=result.get("payloadHash"),
+        raw_status=result.get("rawStatus"),
+        elapsed_ms=result["elapsedMs"],
+    )
+    return success(result, f"原始数据已进入后台队列 {result.get('rawFrameCount', 0)} 帧")
 
 
 @router.post("/data/rawHistory/upload")
@@ -5442,7 +5828,9 @@ def sleep_overview(request: Request, user: dict = Depends(app_user), db: Session
     date_value = date_from_request(request)
     user_id = int(user["id"])
     records = sleep_records(db, user_id, date_value)
-    values = effective_sleep_values(db, user_id, date_value, records)
+    values, prefer_raw_sleep = resolved_sleep_values(db, user_id, date_value, records)
+    start_time, end_time = sleep_values_time_range(db, user_id, date_value, records, prefer_raw_sleep)
+    values = clamp_awake_to_sleep_range(values, start_time, end_time)
     awake = values["AWAKE"]
     rem = values["REM"]
     light = values["LIGHT"]
@@ -5464,9 +5852,9 @@ def sleep_detail(request: Request, user: dict = Depends(app_user), db: Session =
     date_value = date_from_request(request)
     user_id = int(user["id"])
     records = sleep_records(db, user_id, date_value)
-    values = effective_sleep_values(db, user_id, date_value, records)
+    values, prefer_raw_sleep = resolved_sleep_values(db, user_id, date_value, records)
     summary = daily_summary(db, user_id, date_value) or {}
-    chart_data = sleep_record_chart_data(records)
+    chart_data = raw_sleep_chart_data(db, user_id, date_value) if prefer_raw_sleep else sleep_record_chart_data(records)
     if not chart_data:
         chart_data = raw_sleep_chart_data(db, user_id, date_value)
     return localized_success({
@@ -5485,8 +5873,7 @@ def sleep_segment(request: Request, user: dict = Depends(app_user), db: Session 
     date_value = date_from_request(request)
     user_id = int(user["id"])
     records = sleep_records(db, user_id, date_value)
-    values = effective_sleep_values(db, user_id, date_value, records)
-    total = sum(values.values())
+    values, prefer_raw_sleep = resolved_sleep_values(db, user_id, date_value, records)
     labels = [
         ("DEEP", "深睡"),
         ("LIGHT", "浅睡"),
@@ -5494,15 +5881,9 @@ def sleep_segment(request: Request, user: dict = Depends(app_user), db: Session 
         ("AWAKE", "清醒"),
         ("NAP", "小睡"),
     ]
-    start_time = "00:00"
-    end_time = "00:00"
-    if records:
-        first = dict(records[0]._mapping).get("start_time")
-        last = dict(records[-1]._mapping).get("end_time")
-        start_time = str(first)[11:16] if first else "00:00"
-        end_time = str(last)[11:16] if last else "00:00"
-    else:
-        start_time, end_time = raw_sleep_time_range(db, user_id, date_value)
+    start_time, end_time = sleep_values_time_range(db, user_id, date_value, records, prefer_raw_sleep)
+    values = clamp_awake_to_sleep_range(values, start_time, end_time)
+    total = sum(values.values())
     return localized_success({
         "startTime": start_time,
         "endTime": end_time,
@@ -5522,27 +5903,16 @@ def sleep_summary(request: Request, user: dict = Depends(app_user), db: Session 
     date_value = date_from_request(request)
     user_id = int(user["id"])
     records = sleep_records(db, user_id, date_value)
-    values = effective_sleep_values(db, user_id, date_value, records)
+    values, prefer_raw_sleep = resolved_sleep_values(db, user_id, date_value, records)
+    start_time, end_time = sleep_values_time_range(db, user_id, date_value, records, prefer_raw_sleep)
+    values = clamp_awake_to_sleep_range(values, start_time, end_time)
     awake = values["AWAKE"]
     rem = values["REM"]
     light = values["LIGHT"]
     deep = values["DEEP"]
     nap = values["NAP"]
     sleep_minutes = rem + light + deep + nap
-    bed_time = 0
-    if records:
-        first = dict(records[0]._mapping).get("start_time")
-        last = dict(records[-1]._mapping).get("end_time")
-        if first and last:
-            bed_time = max(0, int((last - first).total_seconds() // 60))
-    else:
-        sleep_start, sleep_end = raw_sleep_time_range(db, user_id, date_value)
-        if sleep_start != "00:00" or sleep_end != "00:00":
-            start_minutes = int(sleep_start[:2]) * 60 + int(sleep_start[3:5])
-            end_minutes = int(sleep_end[:2]) * 60 + int(sleep_end[3:5])
-            if end_minutes < start_minutes:
-                end_minutes += 24 * 60
-            bed_time = max(0, end_minutes - start_minutes)
+    bed_time = sleep_range_minutes(start_time, end_time)
     return localized_success({
         "sleepMinutes": str(sleep_minutes),
         "avgSleepMinutes7d": str(sleep_minutes),

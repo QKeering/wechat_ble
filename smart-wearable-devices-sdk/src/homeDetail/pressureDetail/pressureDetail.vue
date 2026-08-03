@@ -144,19 +144,12 @@ const getProcessedOption = () => {
   const maxValue = validSeriesData.length > 0 ? Math.max(...validSeriesData) : 0;
   maxNumber.value = maxValue;
   minNumber.value = validSeriesData.length > 0 ? Math.min(...validSeriesData) : 0;
-  if (maxValue > 50) {
-    newOption.yAxis = {
-      ...newOption.yAxis,
-      max: 100,
-      interval: 20
-    };
-  } else {
-    newOption.yAxis = {
-      ...newOption.yAxis,
-      max: 50,
-      interval: 10
-    };
-  }
+  newOption.yAxis = {
+    ...newOption.yAxis,
+    min: 0,
+    max: 150,
+    interval: 30
+  };
   newOption.xAxis.axisLabel = {
     ...newOption.xAxis.axisLabel,
     interval: 0,

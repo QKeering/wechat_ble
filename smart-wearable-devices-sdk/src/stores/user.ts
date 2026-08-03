@@ -295,7 +295,6 @@ export const useUserStore = defineStore('user', () => {
     updateReconnectingStatus: ringStore.updateReconnectingStatus,
     updateReconnectResult: ringStore.updateReconnectResult,
     updateUploadingStatus: ringStore.updateUploadingStatus,
-    clearRuntime: ringStore.clearRuntime,
-    setUserInfo
+    clearRuntime: ringStore.clearRuntime
   };
 });

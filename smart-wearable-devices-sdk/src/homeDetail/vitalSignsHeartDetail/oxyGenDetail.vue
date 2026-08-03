@@ -194,6 +194,9 @@ const getProcessedOption = () => {
   // 替换xAxis.data和series.data为扩展后的数据
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = fullSeriesData;
+  newOption.yAxis.min = 70;
+  newOption.yAxis.max = 100;
+  newOption.yAxis.splitNumber = 6;
 
   newOption.xAxis.axisLabel = {
     ...newOption.xAxis.axisLabel,

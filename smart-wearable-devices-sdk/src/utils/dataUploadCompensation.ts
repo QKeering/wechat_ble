@@ -1,9 +1,10 @@
 import type { RingRawHistoryFrame } from '@/api/ringDevice';
 import { getBoundRingIdentity } from '@/utils/ringBinding';
+import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 
 export type UploadDataStatus = 'pending' | 'done' | 'partial' | 'failed' | 'empty';
 export type UploadRawLocalStatus = 'done' | 'none' | 'failed';
-export type UploadRawServerStatus = 'pending' | 'done' | 'failed' | 'none';
+export type UploadRawServerStatus = 'pending' | 'queued' | 'done' | 'failed' | 'none';
 
 export interface PendingUploadSession<T = Record<string, any>> {
   uploadSessionId: string;
@@ -16,8 +17,11 @@ export interface PendingUploadSession<T = Record<string, any>> {
   protocol?: string;
   dataList: T[];
   rawFrames: RingRawHistoryFrame[];
+  dataListCount?: number;
+  rawFrameCount?: number;
+  rawFrameHashes?: string[];
   deviceBlockRefs?: unknown[];
-  status: 'pending' | 'data_done' | 'raw_done' | 'done' | 'data_failed' | 'raw_failed';
+  status: 'pending' | 'data_done' | 'raw_queued' | 'raw_done' | 'done' | 'data_failed' | 'raw_failed';
   dataStatus: UploadDataStatus;
   rawLocalStatus: UploadRawLocalStatus;
   rawStatus: UploadRawServerStatus;
@@ -46,6 +50,8 @@ export interface BackendUploadBindingSnapshot {
 
 const PENDING_UPLOAD_QUEUE_STORAGE_KEY = 'qkeer:pending_upload_queue:v1';
 const PENDING_UPLOAD_QUEUE_MAX_COUNT = 80;
+const PENDING_UPLOAD_QUEUE_STORAGE_MAX_COUNT = 40;
+const PENDING_UPLOAD_QUEUE_RAW_HASH_MAX_COUNT = 20;
 
 export const normalizeUploadDeviceMac = (value: unknown) => String(value || '').replace(/[^0-9a-fA-F]/g, '').toLowerCase();
 
@@ -89,23 +95,49 @@ export const assertBackendUploadBinding = async (
   deviceMac: string,
   config: Record<string, any> = {}
 ): Promise<BackendUploadBindingSnapshot> => {
+  const startedAt = Date.now();
+  const requestedDeviceMacNorm = normalizeUploadDeviceMac(deviceMac);
+  appendRingDiagnosticLog('UPLOAD', 'binding-check-start', {
+    deviceMac,
+    requestedDeviceMacNorm,
+    endpoint: '/app/device/current',
+    timeoutMs: 8000
+  });
   let response: unknown;
   try {
+    const custom = safeObject(config.custom) || {};
     response = await (uni as any).$uv.http.get('/app/device/current', {
+      ...config,
       timeout: 8000,
-      custom: { toast: false, catch: true },
-      ...config
+      custom: { ...custom, toast: false, catch: true }
     });
   } catch (error) {
-    return {
+    const result = {
       ok: false,
       reasonCode: 'CURRENT_BINDING_REQUEST_FAILED',
       reason: error instanceof Error ? error.message : String((error as any)?.errMsg || error || 'request failed')
     };
+    appendRingDiagnosticLog('UPLOAD', 'binding-check-failed', {
+      deviceMac,
+      requestedDeviceMacNorm,
+      elapsedMs: Date.now() - startedAt,
+      reasonCode: result.reasonCode,
+      reason: result.reason
+    });
+    return result;
   }
   const device = pickDeviceObject(response);
   if (!device) {
-    return { ok: false, reasonCode: 'NO_ACTIVE_BINDING', reason: 'backend has no active bound device', response };
+    const result = { ok: false, reasonCode: 'NO_ACTIVE_BINDING', reason: 'backend has no active bound device', response };
+    appendRingDiagnosticLog('UPLOAD', 'binding-check-result', {
+      deviceMac,
+      requestedDeviceMacNorm,
+      elapsedMs: Date.now() - startedAt,
+      ok: false,
+      reasonCode: result.reasonCode,
+      reason: result.reason
+    });
+    return result;
   }
   const backendDeviceMac =
     device.deviceMac ||
@@ -116,7 +148,7 @@ export const assertBackendUploadBinding = async (
     device.uniMacId ||
     device.deviceId;
   if (!isSameUploadDeviceMac(deviceMac, backendDeviceMac)) {
-    return {
+    const result = {
       ok: false,
       reasonCode: 'BOUND_DEVICE_MISMATCH',
       reason: 'frontend upload device does not match backend current binding',
@@ -124,8 +156,19 @@ export const assertBackendUploadBinding = async (
       deviceMac: String(backendDeviceMac || ''),
       response
     };
+    appendRingDiagnosticLog('UPLOAD', 'binding-check-result', {
+      deviceMac,
+      requestedDeviceMacNorm,
+      backendDeviceMac: String(backendDeviceMac || ''),
+      backendDeviceMacNorm: normalizeUploadDeviceMac(backendDeviceMac),
+      elapsedMs: Date.now() - startedAt,
+      ok: false,
+      reasonCode: result.reasonCode,
+      reason: result.reason
+    });
+    return result;
   }
-  return {
+  const result = {
     ok: true,
     device,
     bindingId: device.bindingId || device.id || device.deviceId,
@@ -135,6 +178,19 @@ export const assertBackendUploadBinding = async (
     protocol: device.protocol,
     response
   };
+  appendRingDiagnosticLog('UPLOAD', 'binding-check-result', {
+    deviceMac,
+    requestedDeviceMacNorm,
+    backendDeviceMac: String(backendDeviceMac || ''),
+    backendDeviceMacNorm: normalizeUploadDeviceMac(backendDeviceMac),
+    elapsedMs: Date.now() - startedAt,
+    ok: true,
+    bindingId: result.bindingId,
+    bindingVersion: result.bindingVersion,
+    dataUserId: result.dataUserId,
+    protocol: result.protocol
+  });
+  return result;
 };
 
 const readQueue = <T = Record<string, any>>(): PendingUploadSession<T>[] => {
@@ -147,12 +203,77 @@ const readQueue = <T = Record<string, any>>(): PendingUploadSession<T>[] => {
   }
 };
 
+const summarizeResponseForStorage = (response: unknown) => {
+  const payload = unwrapResponsePayload(response);
+  const source = safeObject(payload);
+  if (!source) return response == null ? undefined : String(response).slice(0, 300);
+  return {
+    code: source.code,
+    msg: source.msg,
+    dataStatus: source.dataStatus,
+    rawStatus: source.rawStatus,
+    canDeleteDeviceBlocks: source.canDeleteDeviceBlocks,
+    uploadSessionId: source.uploadSessionId
+  };
+};
+
+const buildStorageSession = (session: PendingUploadSession): PendingUploadSession => {
+  const rawFrames = Array.isArray(session.rawFrames) ? session.rawFrames : [];
+  const dataList = Array.isArray(session.dataList) ? session.dataList : [];
+  return {
+    ...session,
+    dataList: [],
+    rawFrames: [],
+    deviceBlockRefs: undefined,
+    dataListCount: session.dataListCount ?? dataList.length,
+    rawFrameCount: session.rawFrameCount ?? rawFrames.length,
+    rawFrameHashes: rawFrames
+      .map((frame) => frame?.rawHash)
+      .filter((hash): hash is string => Boolean(hash))
+      .slice(-PENDING_UPLOAD_QUEUE_RAW_HASH_MAX_COUNT),
+    dataResponse: summarizeResponseForStorage(session.dataResponse),
+    rawResponse: summarizeResponseForStorage(session.rawResponse),
+    lastError: session.lastError ? String(session.lastError).slice(0, 500) : undefined
+  };
+};
+
 const writeQueue = (queue: PendingUploadSession[]) => {
   const nextQueue = queue
     .filter((item) => item && item.uploadSessionId && item.deviceMac)
     .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
     .slice(0, PENDING_UPLOAD_QUEUE_MAX_COUNT);
-  uni.setStorageSync(PENDING_UPLOAD_QUEUE_STORAGE_KEY, nextQueue);
+  const storageQueue = nextQueue.slice(0, PENDING_UPLOAD_QUEUE_STORAGE_MAX_COUNT).map(buildStorageSession);
+  try {
+    uni.setStorageSync(PENDING_UPLOAD_QUEUE_STORAGE_KEY, storageQueue);
+  } catch {
+    try {
+      uni.setStorageSync(PENDING_UPLOAD_QUEUE_STORAGE_KEY, storageQueue.slice(0, 10).map((session) => ({
+        uploadSessionId: session.uploadSessionId,
+        deviceMac: session.deviceMac,
+        deviceMacNorm: session.deviceMacNorm,
+        protocol: session.protocol,
+        bindingId: session.bindingId,
+        bindingVersion: session.bindingVersion,
+        dataUserId: session.dataUserId,
+        status: session.status,
+        dataStatus: session.dataStatus,
+        rawLocalStatus: session.rawLocalStatus,
+        rawStatus: session.rawStatus,
+        canDeleteDeviceBlocks: session.canDeleteDeviceBlocks,
+        retryCount: session.retryCount,
+        rawRetryCount: session.rawRetryCount,
+        dataList: [],
+        rawFrames: [],
+        dataListCount: session.dataListCount,
+        rawFrameCount: session.rawFrameCount,
+        lastError: session.lastError,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt
+      })));
+    } catch {
+      // Pending queue is diagnostic/compensation state. Never let local storage quota break the live upload path.
+    }
+  }
   return nextQueue;
 };
 
@@ -262,12 +383,22 @@ export const markPendingUploadDataFailed = (uploadSessionId: string, error: unkn
   }));
 
 export const markPendingUploadRawDone = (uploadSessionId: string, response?: unknown) =>
-  updatePendingUploadSession(uploadSessionId, (session) => ({
-    ...session,
-    status: session.dataStatus === 'done' || session.dataStatus === 'empty' ? 'done' : 'raw_done',
-    rawStatus: 'done',
-    rawResponse: response
-  }));
+  updatePendingUploadSession(uploadSessionId, (session) => {
+    const payload = unwrapResponsePayload(response) as Record<string, any> | null;
+    const queued = Boolean(payload?.rawQueued) || String(payload?.rawStatus || '').toLowerCase() === 'queued';
+    const nextRawStatus: UploadRawServerStatus = queued ? 'queued' : 'done';
+    return {
+      ...session,
+      status:
+        session.dataStatus === 'done' || session.dataStatus === 'empty'
+          ? 'done'
+          : queued
+            ? 'raw_queued'
+            : 'raw_done',
+      rawStatus: nextRawStatus,
+      rawResponse: response
+    };
+  });
 
 export const markPendingUploadRawFailed = (uploadSessionId: string, error: unknown) =>
   updatePendingUploadSession(uploadSessionId, (session) => ({
@@ -295,6 +426,23 @@ export const buildUploadSyncMeta = (session: PendingUploadSession) => ({
   }
 });
 
+const RAW_BACKGROUND_UPLOAD_DEDUP_MS = 10 * 60 * 1000;
+const rawUploadInflightByDevice = new Map<string, Promise<unknown>>();
+const rawUploadInflightBySignature = new Map<string, Promise<unknown>>();
+const rawUploadRecentSuccessAt = new Map<string, number>();
+
+const buildRawUploadSignature = (session: PendingUploadSession) => {
+  const rawKeys = session.rawFrames
+    .map((frame) => {
+      if (!frame || typeof frame !== 'object') return '';
+      return frame.rawHash || `${frame.protocol || ''}|${frame.sourceType || ''}|${frame.rawHex || ''}`;
+    })
+    .filter(Boolean);
+  const firstKey = rawKeys[0] || '';
+  const lastKey = rawKeys[rawKeys.length - 1] || '';
+  return `${session.deviceMacNorm || normalizeUploadDeviceMac(session.deviceMac)}|${session.protocol || ''}|${rawKeys.length}|${firstKey}|${lastKey}`;
+};
+
 export const uploadPendingRawFramesInBackground = (
   session: PendingUploadSession,
   uploader: (params: {
@@ -306,21 +454,62 @@ export const uploadPendingRawFramesInBackground = (
     frames: RingRawHistoryFrame[];
   }) => Promise<unknown>
 ) => {
-  if (!session.rawFrames.length || session.rawStatus === 'done') return Promise.resolve(null);
-  return uploader({
-    uploadSessionId: session.uploadSessionId,
-    deviceMac: session.deviceMac,
-    bindingId: session.bindingId,
-    bindingVersion: session.bindingVersion,
-    protocol: session.protocol,
-    frames: session.rawFrames
-  })
-    .then((response) => {
-      markPendingUploadRawDone(session.uploadSessionId, response);
-      return response;
+  if (!session.rawFrames.length || session.rawStatus === 'done' || session.rawStatus === 'queued') {
+    return Promise.resolve(null);
+  }
+  const now = Date.now();
+  const deviceKey = session.deviceMacNorm || normalizeUploadDeviceMac(session.deviceMac) || session.deviceMac;
+  const signature = buildRawUploadSignature(session);
+  const sameSignatureUploading = rawUploadInflightBySignature.get(signature);
+  if (sameSignatureUploading) {
+    return sameSignatureUploading
+      .then((response) => {
+        markPendingUploadRawDone(session.uploadSessionId, response);
+        return response;
+      })
+      .catch((error) => {
+        markPendingUploadRawFailed(session.uploadSessionId, error);
+        throw error;
+      });
+  }
+  const recentSuccessAt = rawUploadRecentSuccessAt.get(signature);
+  if (recentSuccessAt && now - recentSuccessAt <= RAW_BACKGROUND_UPLOAD_DEDUP_MS) {
+    const response = {
+      rawQueued: true,
+      rawStatus: 'queued',
+      rawSkipped: true,
+      reasonCode: 'DUPLICATE_RAW_BACKGROUND_UPLOAD',
+      uploadSessionId: session.uploadSessionId,
+      rawFrameCount: session.rawFrames.length
+    };
+    markPendingUploadRawDone(session.uploadSessionId, response);
+    return Promise.resolve(response);
+  }
+  const runUpload = () =>
+    uploader({
+      uploadSessionId: session.uploadSessionId,
+      deviceMac: session.deviceMac,
+      bindingId: session.bindingId,
+      bindingVersion: session.bindingVersion,
+      protocol: session.protocol,
+      frames: session.rawFrames
     })
-    .catch((error) => {
-      markPendingUploadRawFailed(session.uploadSessionId, error);
-      throw error;
-    });
+      .then((response) => {
+        rawUploadRecentSuccessAt.set(signature, Date.now());
+        markPendingUploadRawDone(session.uploadSessionId, response);
+        return response;
+      })
+      .catch((error) => {
+        rawUploadRecentSuccessAt.delete(signature);
+        markPendingUploadRawFailed(session.uploadSessionId, error);
+        throw error;
+      });
+  const previousDeviceUpload = rawUploadInflightByDevice.get(deviceKey);
+  const scheduledUpload = (previousDeviceUpload ? previousDeviceUpload.catch(() => null).then(runUpload) : runUpload()).finally(() => {
+    if (rawUploadInflightByDevice.get(deviceKey) === scheduledUpload) rawUploadInflightByDevice.delete(deviceKey);
+    if (rawUploadInflightBySignature.get(signature) === scheduledUpload) rawUploadInflightBySignature.delete(signature);
+  });
+  rawUploadInflightByDevice.set(deviceKey, scheduledUpload);
+  rawUploadInflightBySignature.set(signature, scheduledUpload);
+  return scheduledUpload;
 };

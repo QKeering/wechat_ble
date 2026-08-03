@@ -133,6 +133,13 @@ const getProcessedOption = () => {
       }
     }
   }
+  const hrvAxisMax = Math.max(200, Number(newOption.yAxis.max) || 0);
+  newOption.yAxis = {
+    ...newOption.yAxis,
+    min: 0,
+    max: hrvAxisMax,
+    splitNumber: Math.max(6, Math.ceil(hrvAxisMax / 20))
+  };
   // 控制x轴只显示指定刻度（00:00/06:00/12:00/18:00/24:00）
   // 设置x轴
   newOption.xAxis.axisLabel = {

@@ -53,6 +53,7 @@ def initialize_health_schema(db: Session) -> None:
                     raise
                 existing = refreshed
     ensure_ring_history_raw_frame_schema(db)
+    ensure_ring_history_raw_upload_job_schema(db)
 
 
 HEALTH_RAW_FIELD_RANGES = {
@@ -71,8 +72,10 @@ L19_SLEEP_WINDOW_START_HOUR = 21
 L19_SLEEP_WINDOW_END_HOUR = 11
 L19_SLEEP_DEFAULT_SAMPLE_MINUTES = 5
 L19_SLEEP_MAX_POINT_GAP_MINUTES = 90
+SLEEP_ACTIVE_STAGE_KEYS = {"REM", "LIGHT", "DEEP", "NAP"}
 L19_RAW_RECORD_MIN_DATE = date(2020, 1, 1)
 RING_HISTORY_RAW_FRAME_TABLE = "ring_history_raw_frame"
+RING_HISTORY_RAW_UPLOAD_JOB_TABLE = "ring_history_raw_upload_job"
 
 
 def max_visible_record_time() -> datetime:
@@ -141,6 +144,45 @@ def ensure_ring_history_raw_frame_schema(db: Session) -> None:
             existing = refreshed
 
 
+def ensure_ring_history_raw_upload_job_schema(db: Session) -> None:
+    """Queue raw history payloads so request handlers can return before per-frame writes."""
+    db.execute(
+        text(
+            """
+            create table if not exists ring_history_raw_upload_job (
+              id bigint primary key auto_increment,
+              upload_session_id varchar(96) not null,
+              user_id bigint not null,
+              upload_user_id bigint null,
+              binding_id bigint null,
+              binding_version varchar(96) null,
+              device_mac varchar(64) not null,
+              device_mac_norm varchar(64) not null,
+              protocol varchar(32) null,
+              payload_hash varchar(80) not null,
+              payload_json longtext not null,
+              raw_frame_count int not null default 0,
+              status varchar(32) not null default 'queued',
+              retry_count int not null default 0,
+              error_msg varchar(512) null,
+              stored_count int null,
+              updated_count int null,
+              skipped_count int null,
+              create_time datetime null,
+              update_time datetime null,
+              started_at datetime null,
+              finished_at datetime null,
+              unique key uk_raw_upload_job_session (upload_session_id),
+              unique key uk_raw_upload_job_payload (user_id, device_mac_norm, payload_hash),
+              key idx_raw_upload_job_status (status, update_time),
+              key idx_raw_upload_job_device (user_id, device_mac_norm, update_time)
+            ) engine=InnoDB default charset=utf8mb4
+            """
+        )
+    )
+    db.commit()
+
+
 def raw_history_repair_date(value: Any = None) -> date:
     if isinstance(value, datetime):
         return value.date()
@@ -196,6 +238,10 @@ def is_time_in_l19_repair_scope(value: Any, record_date: Any) -> bool:
 
 def normalize_ring_history_device_mac(value: Any) -> str:
     return str(value or "").strip().upper()
+
+
+def normalize_ring_history_device_mac_key(value: Any) -> str:
+    return "".join(char for char in normalize_ring_history_device_mac(value) if char in "0123456789ABCDEF").lower()
 
 
 def normalize_ring_history_raw_hex(value: Any) -> str:
@@ -392,6 +438,224 @@ def store_ring_history_raw_frames(
     }
 
 
+def enqueue_ring_history_raw_upload_job(
+    db: Session,
+    user_id: int,
+    device_mac: str,
+    frames: list[Any],
+    upload_session_id: str,
+    upload_user_id: int | None = None,
+    binding_id: int | str | None = None,
+    binding_version: str | None = None,
+    protocol: str | None = None,
+) -> dict[str, Any]:
+    ensure_ring_history_raw_upload_job_schema(db)
+    normalized_device_mac = normalize_ring_history_device_mac(device_mac)
+    device_mac_norm = normalize_ring_history_device_mac_key(normalized_device_mac)
+    frame_list = [frame for frame in (frames or []) if isinstance(frame, dict)]
+    if not upload_session_id:
+        upload_session_id = hashlib.sha256(
+            f"{user_id}:{device_mac_norm}:{datetime.now(HEALTH_TIMEZONE).timestamp()}".encode("utf-8")
+        ).hexdigest()[:32]
+    payload_json = json.dumps({"frames": frame_list}, ensure_ascii=False, default=str, separators=(",", ":"))
+    payload_hash = hashlib.sha256(f"{user_id}:{device_mac_norm}:{payload_json}".encode("utf-8")).hexdigest()
+    now = datetime.now(HEALTH_TIMEZONE).replace(tzinfo=None)
+    payload = {
+        "upload_session_id": upload_session_id,
+        "user_id": user_id,
+        "upload_user_id": upload_user_id,
+        "binding_id": binding_id,
+        "binding_version": binding_version,
+        "device_mac": normalized_device_mac,
+        "device_mac_norm": device_mac_norm,
+        "protocol": protocol,
+        "payload_hash": payload_hash,
+        "payload_json": payload_json,
+        "raw_frame_count": len(frame_list),
+        "status": "queued",
+        "retry_count": 0,
+        "error_msg": None,
+        "create_time": now,
+        "update_time": now,
+    }
+    db.execute(
+        text(
+            """
+            insert into ring_history_raw_upload_job (
+              upload_session_id, user_id, upload_user_id, binding_id, binding_version,
+              device_mac, device_mac_norm, protocol, payload_hash, payload_json,
+              raw_frame_count, status, retry_count, error_msg, create_time, update_time
+            ) values (
+              :upload_session_id, :user_id, :upload_user_id, :binding_id, :binding_version,
+              :device_mac, :device_mac_norm, :protocol, :payload_hash, :payload_json,
+              :raw_frame_count, :status, :retry_count, :error_msg, :create_time, :update_time
+            )
+            on duplicate key update
+              upload_session_id=values(upload_session_id),
+              upload_user_id=coalesce(values(upload_user_id), upload_user_id),
+              binding_id=coalesce(values(binding_id), binding_id),
+              binding_version=coalesce(values(binding_version), binding_version),
+              protocol=coalesce(values(protocol), protocol),
+              payload_json=values(payload_json),
+              raw_frame_count=values(raw_frame_count),
+              status=case when status='success' then status else values(status) end,
+              retry_count=case when status='success' then retry_count else 0 end,
+              error_msg=null,
+              update_time=values(update_time)
+            """
+        ),
+        payload,
+    )
+    db.commit()
+    row = db.execute(
+        text(
+            """
+            select id, status, retry_count
+            from ring_history_raw_upload_job
+            where upload_session_id=:upload_session_id
+               or (user_id=:user_id and device_mac_norm=:device_mac_norm and payload_hash=:payload_hash)
+            order by id desc
+            limit 1
+            """
+        ),
+        {
+            "upload_session_id": upload_session_id,
+            "user_id": user_id,
+            "device_mac_norm": device_mac_norm,
+            "payload_hash": payload_hash,
+        },
+    ).mappings().first()
+    return {
+        "rawQueued": True,
+        "rawStatus": row.get("status") if row else "queued",
+        "uploadSessionId": upload_session_id,
+        "jobId": row.get("id") if row else None,
+        "dataUserId": user_id,
+        "deviceMac": normalized_device_mac,
+        "deviceMacNorm": device_mac_norm,
+        "protocol": protocol,
+        "payloadHash": payload_hash,
+        "rawFrameCount": len(frame_list),
+        "retryCount": row.get("retry_count") if row else 0,
+    }
+
+
+def process_ring_history_raw_upload_jobs(db: Session, limit: int = 20, max_retry: int = 5) -> dict[str, Any]:
+    ensure_ring_history_raw_upload_job_schema(db)
+    safe_limit = max(1, min(int(limit or 20), 200))
+    safe_max_retry = max(1, min(int(max_retry or 5), 20))
+    rows = db.execute(
+        text(
+            f"""
+            select *
+            from ring_history_raw_upload_job
+            where status in ('queued', 'failed')
+              and retry_count < :max_retry
+            order by update_time asc, id asc
+            limit {safe_limit}
+            """
+        ),
+        {"max_retry": safe_max_retry},
+    ).mappings().all()
+    processed = 0
+    success_count = 0
+    failed_count = 0
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        job_id = int(row["id"])
+        now = datetime.now(HEALTH_TIMEZONE).replace(tzinfo=None)
+        db.execute(
+            text(
+                """
+                update ring_history_raw_upload_job
+                set status='running',
+                    started_at=:started_at,
+                    update_time=:update_time
+                where id=:id
+                  and status in ('queued', 'failed')
+                """
+            ),
+            {"id": job_id, "started_at": now, "update_time": now},
+        )
+        db.commit()
+        try:
+            payload = json.loads(row.get("payload_json") or "{}")
+            frames = payload.get("frames") if isinstance(payload, dict) else []
+            if not isinstance(frames, list):
+                frames = []
+            store_result = store_ring_history_raw_frames(
+                db,
+                int(row["user_id"]),
+                row.get("device_mac") or "",
+                frames,
+                upload_user_id=row.get("upload_user_id"),
+            )
+            finished_at = datetime.now(HEALTH_TIMEZONE).replace(tzinfo=None)
+            db.execute(
+                text(
+                    """
+                    update ring_history_raw_upload_job
+                    set status='success',
+                        error_msg=null,
+                        stored_count=:stored_count,
+                        updated_count=:updated_count,
+                        skipped_count=:skipped_count,
+                        finished_at=:finished_at,
+                        update_time=:update_time
+                    where id=:id
+                    """
+                ),
+                {
+                    "id": job_id,
+                    "stored_count": store_result.get("storedCount", 0),
+                    "updated_count": store_result.get("updatedCount", 0),
+                    "skipped_count": store_result.get("skippedCount", 0),
+                    "finished_at": finished_at,
+                    "update_time": finished_at,
+                },
+            )
+            db.commit()
+            processed += 1
+            success_count += 1
+            results.append({"id": job_id, "status": "success", **store_result})
+        except Exception as exc:
+            db.rollback()
+            failed_at = datetime.now(HEALTH_TIMEZONE).replace(tzinfo=None)
+            next_retry_count = int(row.get("retry_count") or 0) + 1
+            db.execute(
+                text(
+                    """
+                    update ring_history_raw_upload_job
+                    set status='failed',
+                        retry_count=:retry_count,
+                        error_msg=:error_msg,
+                        finished_at=:finished_at,
+                        update_time=:update_time
+                    where id=:id
+                    """
+                ),
+                {
+                    "id": job_id,
+                    "retry_count": next_retry_count,
+                    "error_msg": str(exc)[:512],
+                    "finished_at": failed_at,
+                    "update_time": failed_at,
+                },
+            )
+            db.commit()
+            processed += 1
+            failed_count += 1
+            results.append({"id": job_id, "status": "failed", "error": str(exc)[:512]})
+    return {
+        "processed": processed,
+        "success": success_count,
+        "failed": failed_count,
+        "limit": safe_limit,
+        "maxRetry": safe_max_retry,
+        "results": results,
+    }
+
+
 def list_ring_history_raw_frames(db: Session, user_id: int, device_mac: str, record_date: Any) -> list[dict[str, Any]]:
     ensure_ring_history_raw_frame_schema(db)
     normalized_device_mac = normalize_ring_history_device_mac(device_mac)
@@ -522,6 +786,40 @@ def _record_time_from_submit_item(item: dict[str, Any]) -> datetime | None:
     return coerce_datetime(item.get("recordTime") or item.get("record_time") or item.get("time") or item.get("timestamp"))
 
 
+def clip_l19_sleep_segment_records_to_active_sleep(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    active_ranges: list[tuple[datetime, datetime]] = []
+    for item in segments:
+        stage_key = sleep_type_key(item.get("sleepState") if item.get("sleepState") is not None else item.get("sleepType"))
+        start_time = coerce_datetime(item.get("startTime"))
+        end_time = coerce_datetime(item.get("endTime"))
+        if stage_key in SLEEP_ACTIVE_STAGE_KEYS and start_time is not None and end_time is not None and end_time > start_time:
+            active_ranges.append((start_time, end_time))
+    if not active_ranges:
+        return []
+
+    sleep_start = min(item[0] for item in active_ranges)
+    sleep_end = max(item[1] for item in active_ranges)
+    clipped_segments: list[dict[str, Any]] = []
+    for item in segments:
+        start_time = coerce_datetime(item.get("startTime"))
+        end_time = coerce_datetime(item.get("endTime"))
+        if start_time is None or end_time is None:
+            continue
+        clipped_start = max(start_time, sleep_start)
+        clipped_end = min(end_time, sleep_end)
+        duration = max(0, round((clipped_end - clipped_start).total_seconds() / 60))
+        if duration <= 0:
+            continue
+        clipped_segments.append({
+            **item,
+            "recordTime": clipped_start.strftime("%Y-%m-%d %H:%M:%S"),
+            "startTime": clipped_start.strftime("%Y-%m-%d %H:%M:%S"),
+            "endTime": clipped_end.strftime("%Y-%m-%d %H:%M:%S"),
+            "sleepDuration": duration,
+        })
+    return clipped_segments
+
+
 def build_l19_sleep_segment_records(records: list[dict[str, Any]], record_date: Any) -> list[dict[str, Any]]:
     start_window, end_window = l19_sleep_window_for_date(record_date)
     keyed_points: dict[datetime, int] = {}
@@ -589,7 +887,7 @@ def build_l19_sleep_segment_records(records: list[dict[str, Any]], record_date: 
             "sourceType": "l19_sleep_segment_repair",
             "rawDataType": "sleep_segment",
         })
-    return segments
+    return clip_l19_sleep_segment_records_to_active_sleep(segments)
 
 
 def prepare_l19_raw_history_repair_records(db: Session, user_id: int, device_mac: str, record_date: Any) -> dict[str, Any]:
@@ -978,6 +1276,71 @@ def sleep_type_key(value: Any) -> str:
     return mapping.get(text_value, "INVALID")
 
 
+def raw_sleep_state_intervals_from_rows(rows: list[dict[str, Any]] | Any) -> list[dict[str, Any]]:
+    """Convert raw L19 sleep state points to clipped intervals.
+
+    Raw rows are queried with the broad 21:00-11:00 sleep window. The device can
+    report clear-awake points before the user actually falls asleep and after
+    wake-up. Those points are useful raw data, but must not be counted in the
+    sleep detail statistics. We keep awake only between the first and last
+    active sleep state.
+    """
+    keyed_rows: dict[datetime, dict[str, Any]] = {}
+    for row in rows or []:
+        item = dict(row)
+        record_time = coerce_datetime(item.get("record_time"))
+        if record_time is None:
+            continue
+        stage_key = sleep_type_key(item.get("sleep_state"))
+        if stage_key == "INVALID":
+            continue
+        item["record_time"] = record_time
+        item["sleep_stage_key"] = stage_key
+        keyed_rows[record_time] = item
+
+    ordered_rows = [keyed_rows[key] for key in sorted(keyed_rows.keys())]
+    intervals: list[dict[str, Any]] = []
+    for index, row in enumerate(ordered_rows):
+        record_time = row.get("record_time")
+        if not isinstance(record_time, datetime):
+            continue
+        minutes = L19_SLEEP_DEFAULT_SAMPLE_MINUTES
+        if index + 1 < len(ordered_rows):
+            next_time = ordered_rows[index + 1].get("record_time")
+            if isinstance(next_time, datetime):
+                seconds = int((next_time - record_time).total_seconds())
+                if 0 < seconds <= L19_SLEEP_MAX_POINT_GAP_MINUTES * 60:
+                    minutes = max(1, round(seconds / 60))
+        end_time = record_time + timedelta(minutes=minutes)
+        intervals.append({
+            "start": record_time,
+            "end": end_time,
+            "stage_key": row.get("sleep_stage_key"),
+            "minutes": minutes,
+        })
+
+    active_intervals = [item for item in intervals if item.get("stage_key") in SLEEP_ACTIVE_STAGE_KEYS]
+    if not active_intervals:
+        return []
+
+    sleep_start = min(item["start"] for item in active_intervals)
+    sleep_end = max(item["end"] for item in active_intervals)
+    clipped: list[dict[str, Any]] = []
+    for item in intervals:
+        start_time = max(item["start"], sleep_start)
+        end_time = min(item["end"], sleep_end)
+        if end_time <= start_time:
+            continue
+        minutes = max(1, round((end_time - start_time).total_seconds() / 60))
+        clipped.append({
+            **item,
+            "start": start_time,
+            "end": end_time,
+            "minutes": minutes,
+        })
+    return clipped
+
+
 def calculate_sleep_score(awake: int, rem: int, light: int, deep: int, nap: int) -> int:
     total_time = awake + rem + light + deep + nap
     if total_time <= 0:
@@ -1070,29 +1433,21 @@ def sleep_summary_from_raw(db: Session, user_id: int, record_date: str) -> dict[
     awake_count = 0
     sleep_start = None
     sleep_end = None
-    sleep_keys = {"REM", "LIGHT", "DEEP", "NAP"}
-    valid_rows = [
-        (coerce_datetime(row.get("record_time")), sleep_type_key(row.get("sleep_state")))
-        for row in rows
-        if sleep_type_key(row.get("sleep_state")) != "INVALID"
-    ]
-    for index, (record_time, key) in enumerate(valid_rows):
-        if record_time is None:
+    for item in raw_sleep_state_intervals_from_rows(rows):
+        record_time = item.get("start")
+        key = str(item.get("stage_key") or "")
+        minutes = int(item.get("minutes") or 0)
+        if not isinstance(record_time, datetime) or minutes <= 0:
             continue
-        minutes = 5
-        if index + 1 < len(valid_rows) and valid_rows[index + 1][0] is not None:
-            seconds = int((valid_rows[index + 1][0] - record_time).total_seconds())
-            if 0 < seconds <= L19_SLEEP_MAX_POINT_GAP_MINUTES * 60:
-                minutes = max(1, round(seconds / 60))
         if key in values:
             values[key] += minutes
         if key == "AWAKE":
             awake_count += 1
-        if key in sleep_keys:
+        if key in SLEEP_ACTIVE_STAGE_KEYS:
             if sleep_start is None or record_time < sleep_start:
                 sleep_start = record_time
-            current_end = record_time + timedelta(minutes=minutes)
-            if sleep_end is None or current_end > sleep_end:
+            current_end = item.get("end")
+            if isinstance(current_end, datetime) and (sleep_end is None or current_end > sleep_end):
                 sleep_end = current_end
 
     total_sleep = values["REM"] + values["LIGHT"] + values["DEEP"] + values["NAP"]

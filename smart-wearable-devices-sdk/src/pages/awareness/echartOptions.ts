@@ -194,9 +194,9 @@ export const vitalOption = {
   },
   yAxis: {
     type: 'value',
-    min: 20,
-    max: 100,
-    splitNumber: 4,
+    min: 0,
+    max: 260,
+    splitNumber: 6,
     axisLine: { show: false },
     axisTick: { show: false },
     axisLabel: {
@@ -261,7 +261,7 @@ export const relaxOption = {
   yAxis: {
     type: 'value',
     min: 0,
-    max: 100,
+    max: 300,
     splitNumber: 5,
     axisLine: { show: false },
     axisTick: { show: false },

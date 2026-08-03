@@ -189,6 +189,9 @@ const getProcessedOption = () => {
   // 替换xAxis.data和series.data为完整数据
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = fullSeriesData;
+  newOption.yAxis.min = 0;
+  newOption.yAxis.max = 200;
+  newOption.yAxis.interval = 40;
 
   newOption.xAxis.axisLabel = {
     ...newOption.xAxis.axisLabel,
@@ -237,13 +240,6 @@ const getProcessedOption = () => {
   }
 
   // 根据数据最大值动态调整y轴
-  const validSeriesData = fullSeriesData.filter((value): value is number => value !== null && !isNaN(value));
-  const maxValue = Math.max(...validSeriesData);
-  if (maxValue > 50) {
-    newOption.yAxis.max = Math.ceil(maxValue / 10) * 10;
-    newOption.yAxis.interval = Math.ceil(maxValue / 50) * 10;
-  }
-
   return newOption;
 };
 const initChart = async (chartRef: any) => {

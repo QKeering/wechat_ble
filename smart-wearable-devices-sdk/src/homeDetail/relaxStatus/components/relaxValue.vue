@@ -49,11 +49,11 @@ const getProcessedOption = () => {
   newOption.xAxis.data = xData;
   newOption.series[0].data = seriesData;
 
-  const maxValue = Math.max(...seriesData, 0);
   newOption.yAxis = {
     ...newOption.yAxis,
-    max: maxValue > 50 ? 100 : 50,
-    interval: maxValue > 50 ? 20 : 10
+    min: 0,
+    max: 150,
+    interval: 30
   };
 
   newOption.xAxis.axisLabel = {

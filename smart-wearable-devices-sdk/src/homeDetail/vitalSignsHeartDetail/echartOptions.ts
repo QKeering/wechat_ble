@@ -34,8 +34,8 @@ export const heartRateOption = {
   yAxis: {
     type: 'value',
     min: 0,
-    max: 100,
-    splitNumber: 5,
+    max: 180,
+    splitNumber: 6,
     axisLine: { show: false },
     axisTick: { show: false },
     axisLabel: { show: true },
