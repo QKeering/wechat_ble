@@ -7,11 +7,7 @@ export const createRingBleFacade = (state: RingBleState, runtime?: RingBleRuntim
   return createLegacyRingAdapter(state, runtime);
 };
 
-export const createRingBleAdapterByProtocol = (
-  protocol: RingProtocolKind,
-  state: RingBleState,
-  runtime?: RingBleRuntime
-): LegacyRingAdapter => {
+export const createRingBleAdapterByProtocol = (protocol: RingProtocolKind, state: RingBleState, runtime?: RingBleRuntime): LegacyRingAdapter => {
   if (protocol === 'rw') {
     return createRwRingAdapter(state, runtime);
   }
@@ -21,11 +17,7 @@ export const createRingBleAdapterByProtocol = (
 };
 
 /** 异步创建适配器，qkeer-v2 通过动态 import 按需加载，减小主包体积 */
-export const createRingBleAdapterByProtocolAsync = async (
-  protocol: RingProtocolKind,
-  state: RingBleState,
-  runtime?: RingBleRuntime
-): Promise<LegacyRingAdapter> => {
+export const createRingBleAdapterByProtocolAsync = async (protocol: RingProtocolKind, state: RingBleState, runtime?: RingBleRuntime): Promise<LegacyRingAdapter> => {
   if (protocol === 'qkeer-v2') {
     const { createQkeerV2RingAdapter } = await import('./qkeer-v2');
     return createQkeerV2RingAdapter(state, runtime);
