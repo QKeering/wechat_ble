@@ -173,7 +173,9 @@ function addStyle(customStyle, target = 'object') {
 function addUnit(value = 'auto', unit = uni?.$uv?.config?.unit ? uni?.$uv?.config?.unit : 'px') {
 	value = String(value)
 	// 用uvui内置验证规则中的number判断是否为数值
-	return number(value) ? `${value}${unit}` : value
+	if (!number(value)) return value
+	if (isNaN(Number(value))) return 'auto'
+	return value + unit
 }
 
 /**

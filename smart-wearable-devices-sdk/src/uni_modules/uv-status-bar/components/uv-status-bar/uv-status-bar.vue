@@ -30,7 +30,12 @@
 			style() {
 				const style = {}
 				// 状态栏高度，由于某些安卓和微信开发工具无法识别css的顶部状态栏变量，所以使用js获取的方式
-				style.height = this.$uv.addUnit(this.$uv.sys().statusBarHeight, 'px')
+				const sysInfo = this.$uv.sys()
+				const statusBarHeight = sysInfo.statusBarHeight
+					|| (sysInfo.safeArea && sysInfo.safeArea.top)
+					|| (sysInfo.safeAreaInsets && sysInfo.safeAreaInsets.top)
+					|| 0
+				style.height = this.$uv.addUnit(statusBarHeight, 'px')
 				if(this.bgColor){
 					if (this.bgColor.indexOf("gradient") > -1) {// 渐变色
 						style.backgroundImage = this.bgColor;
