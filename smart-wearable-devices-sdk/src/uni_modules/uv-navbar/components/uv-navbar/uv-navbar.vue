@@ -4,7 +4,7 @@
 			class="uv-navbar__placeholder"
 			v-if="fixed && placeholder"
 			:style="{
-				height: $uv.addUnit($uv.getPx(height) + $uv.sys().statusBarHeight,'px'),
+				height: $uv.addUnit($uv.getPx(height) + statusBarHeight,'px'),
 			}"
 		></view>
 		<view :class="[fixed && 'uv-navbar--fixed']">
@@ -109,6 +109,13 @@
 			}
 		},
 		computed: {
+			statusBarHeight() {
+				const info = this.$uv.sys()
+				return info.statusBarHeight
+					|| (info.safeArea && info.safeArea.top)
+					|| (info.safeAreaInsets && info.safeAreaInsets.top)
+					|| 0
+			},
 			getBgColor(){
 				const style = {};
 				if(this.bgColor){
@@ -139,7 +146,7 @@
 			bgImgStyle() {
 				const style = {};
 				if(this.safeAreaInsetTop) {
-					style.height = this.$uv.addUnit(this.$uv.sys().statusBarHeight + 44, 'px');
+					style.height = this.$uv.addUnit(this.statusBarHeight + this.height, 'px');
 				} else {
 					style.height = '44px';
 				}

@@ -3130,13 +3130,21 @@ onShow(async () => {
     }
     clearMineSleepProbeIsolationLock('mine-page-show');
     let boundInfo: any = null;
-    // Read bound device info.
-    try {
-      boundInfo = await getBindInfo();
-      bindInfo.value = boundInfo;
-    } catch (error) {
+    // 并行发起 API 请求和 BLE 连接检查，不再串行等待
+    const boundInfoPromise = getBindInfo().catch((error) => {
       logMineBleIssue(error, '\u7ed1\u5b9a\u4fe1\u606f\u6682\u65f6\u65e0\u6cd5\u83b7\u53d6');
-    }
+      return null;
+    });
+    const { deviceId: prevDeviceId, serviceId: prevServiceId } = userStore.deviceInfo;
+    const connectedCheckPromise =
+      prevDeviceId && prevServiceId
+        ? isDeviceConnected(prevDeviceId, prevServiceId || '').catch(() => false)
+        : Promise.resolve(false);
+
+    boundInfo = await boundInfoPromise;
+    if (boundInfo) bindInfo.value = boundInfo;
+
+    const alreadyConnected = await connectedCheckPromise;
     appendMineDiagnosticLog('page-show', {
       hasBoundIdentity: hasBoundRingIdentity(boundInfo),
       isLoading: isLoading.value,
@@ -3161,7 +3169,6 @@ onShow(async () => {
     }
     const { deviceId, serviceId } = userStore.deviceInfo;
     if (deviceId && serviceId) {
-      const alreadyConnected = await isDeviceConnected(deviceId, serviceId || '');
       if (alreadyConnected) {
         // Only run commands after the communication fields are ready.
         if (hasMineCommunicationReady()) {

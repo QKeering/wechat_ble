@@ -9,5 +9,6 @@ export * from './legacy/normalizer';
 export * from './legacy/protocol';
 export * from './legacy/parser';
 export * from './legacy/workflows';
-export * from './qkeer-v2';
+// qkeer-v2 按需懒加载，不在主包中静态引入
+export { createRingBleAdapterByProtocolAsync } from './facade';
 export * from './rw';

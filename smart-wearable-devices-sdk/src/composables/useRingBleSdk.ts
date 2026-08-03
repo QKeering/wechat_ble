@@ -4,6 +4,7 @@ import {
   cleanupLegacyRing,
   connectLegacyRing,
   createRingBleAdapterByProtocol,
+  createRingBleAdapterByProtocolAsync,
   disconnectLegacyRing,
   ensureLegacyBluetoothReady,
   handleRingParsedData,
@@ -792,7 +793,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   const switchAdapter = async (protocol: RingProtocolKind) => {
     if (adapter.protocol === protocol) return adapter;
     await adapter.cleanup();
-    adapter = createRingBleAdapterByProtocol(protocol, state, runtime);
+    adapter = await createRingBleAdapterByProtocolAsync(protocol, state, runtime);
     return adapter;
   };
 

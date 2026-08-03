@@ -2562,6 +2562,31 @@ const clearTimer = () => {
   }
 };
 const showStartGirlCard = ref(false);
+// 后台异步加载页面数据，不阻塞页面首次渲染
+const refreshPageDataAndCharts = async () => {
+  try {
+    if (selectedDayIndex.value) {
+      const dayIndex = Number(selectedDayIndex.value) ?? 2;
+      selectedDayIndex.value = dayIndex;
+      if (dayIndex !== 3) {
+        await handleDateClick(selectedDayIndex.value);
+      } else {
+        if (selectData.value) {
+          const formattedDate = uni.$uv.timeFormat(selectData.value, 'yyyy-mm-dd');
+          if (formattedDate && formattedDate !== 'NaN-NaN-NaN') {
+            await confirm({ fulldate: formattedDate });
+          }
+        }
+      }
+    }
+    await Promise.all([initBalanceChart(), initSportChart(), initVitalChart(), initRelaxChart(), initSleepChart()]);
+    pullDownProgress.value = 100;
+  } finally {
+    pullDownRefresh.value = false;
+    pullDownProgress.value = 0;
+  }
+};
+
 onLoad(async () => {
   if (!userStore.token) {
     return;
@@ -2648,26 +2673,10 @@ onShow(async () => {
     // await connectReload();
     userStore.fetchUserInfo();
     pullDownProgress.value = 30;
-    if (selectedDayIndex.value) {
 
-      const dayIndex = Number(selectedDayIndex.value) ?? 2;
-      selectedDayIndex.value = dayIndex;
+    // 后台异步加载数据和图表，不阻塞页面首次渲染
+    void refreshPageDataAndCharts();
 
-      if (dayIndex !== 3) {
-        await handleDateClick(selectedDayIndex.value);
-      } else {
-
-        if (selectData.value) {
-
-          const formattedDate = uni.$uv.timeFormat(selectData.value, 'yyyy-mm-dd');
-          if (formattedDate && formattedDate !== 'NaN-NaN-NaN') {
-            await confirm({ fulldate: formattedDate });
-          }
-        }
-      }
-    }
-
-    await Promise.all([initBalanceChart(), initSportChart(), initVitalChart(), initRelaxChart(), initSleepChart()]);
     if (isAwarenessRwRing()) {
       void syncRwHomeHistoryAndRefreshOverview(getSelectedDetailDate(), 'page-show');
     } else if (hasAwarenessCommunicationReady()) {

@@ -364,8 +364,22 @@
       ]
     }
   ],
+  "preloadRule": {
+    "pages/awareness/awareness": {
+      "network": "wifi",
+      "packages": ["homeDetail"]
+    },
+    "pages/health/health": {
+      "network": "wifi",
+      "packages": ["homeDetail"]
+    },
+    "pages/mine/mine": {
+      "network": "wifi",
+      "packages": ["pagesA/mines"]
+    }
+  },
   "optimization": {
-    "subPackages": true // 分包优化，隔离依赖
+    "subPackages": true
   },
   "globalStyle": {
     "navigationBarTextStyle": "black",
