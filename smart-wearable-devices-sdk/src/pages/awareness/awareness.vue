@@ -168,10 +168,23 @@ let lastAwarenessHomeUploadSessionKey = '';
 let lastLegacyLocalDataUploadKey = '';
 let lastLegacyLocalDataUploadAt = 0;
 let lastAwarenessProcessedRefreshAt = 0;
+let cachedBackendUploadBinding:
+  | {
+      deviceMacNorm: string;
+      checkedAt: number;
+      binding: Awaited<ReturnType<typeof assertBackendUploadBinding>>;
+    }
+  | null = null;
+const closedLegacyLocalDataUploadSessions = new Map<
+  string,
+  { uploadDedupKey: string; uploadedUntil: number; completedAt: number; uploadSessionKey: string }
+>();
 const RW_AWARENESS_REFRESH_DEDUP_MS = 8000;
 const RW_AWARENESS_HISTORY_DEDUP_MS = 45000;
 const RW_AWARENESS_DEVICE_TIME_SYNC_DEDUP_MS = 10 * 60 * 1000;
 const LEGACY_LOCAL_DATA_UPLOAD_DEDUP_MS = 60 * 1000;
+const LEGACY_LOCAL_DATA_CLOSED_SESSION_TTL_MS = 30 * 60 * 1000;
+const AWARENESS_BACKEND_BINDING_CACHE_MS = 15000;
 const LEGACY_LOCAL_DATA_STABLE_WAIT_MS = 1200;
 const LEGACY_LOCAL_DATA_STABLE_POLL_MS = 250;
 const LEGACY_LOCAL_DATA_STABLE_TIMEOUT_MS = 3000;
@@ -389,6 +402,24 @@ const isAwarenessHistoryPayloadForDevice = (payload: Record<string, any>, device
 };
 const filterAwarenessHistoryRecordsForDevice = (records: any[], deviceMac: string) =>
   (records || []).filter((record) => !hasAwarenessPayloadDeviceIdentity(record) || isAwarenessPayloadSourceForDevice(record, deviceMac));
+const getAwarenessHistoryPayloadsForDevice = (payloads: any[], deviceMac: string) => {
+  const allPayloads = (payloads || []).filter(isRingHistoryPayload) as Array<Record<string, any>>;
+  if (!deviceMac) {
+    return {
+      allPayloads,
+      matchedPayloads: allPayloads,
+      skippedDeviceMismatchCount: 0
+    };
+  }
+  const matchedPayloads = allPayloads.filter((payload) => isAwarenessHistoryPayloadForDevice(payload, deviceMac));
+  return {
+    allPayloads,
+    matchedPayloads,
+    skippedDeviceMismatchCount: Math.max(0, allPayloads.length - matchedPayloads.length)
+  };
+};
+const getAwarenessCurrentHistoryPayloadsForUpload = () =>
+  getAwarenessHistoryPayloadsForDevice(Array.isArray(userStore.receivedData) ? userStore.receivedData : [], getAwarenessUploadDeviceMac());
 const updateAwarenessDeviceHistoryCheckpoint = (timestamp: number, reason: string) => {
   const deviceMac = getAwarenessCheckpointDeviceMac();
   const protocol = getAwarenessCheckpointProtocol();
@@ -539,34 +570,125 @@ const summarizeLegacyHistoryPayloadsForLog = (payloads: Array<Record<string, any
 });
 const waitForAwarenessMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const getLegacyLocalDataStableSnapshot = () => {
-  const historyPayloads = Array.isArray(userStore.receivedData) ? userStore.receivedData.filter(isRingHistoryPayload) : [];
-  const records = Array.isArray(local.value) ? (local.value as Array<Record<string, any>>) : [];
+  const deviceMac = getAwarenessUploadDeviceMac();
+  const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  const { allPayloads, matchedPayloads, skippedDeviceMismatchCount } = getAwarenessCurrentHistoryPayloadsForUpload();
+  const allRecords = Array.isArray(local.value) ? (local.value as Array<Record<string, any>>) : [];
+  const records = deviceMac ? filterAwarenessHistoryRecordsForDevice(allRecords, deviceMac) : allRecords;
   const uploadSinceTimestamp = getAwarenessHistoryUploadSinceTimestamp(false);
-  const submitRecords = buildRingHistorySubmitRecords(records, uploadSinceTimestamp);
+  const builtSubmitRecords = buildRingHistorySubmitRecords(records, uploadSinceTimestamp);
+  const uploadedRecordFilter = deviceMac
+    ? filterUploadedRingHistorySubmitRecordsForDevice(deviceMac, builtSubmitRecords)
+    : { submitRecords: builtSubmitRecords, alreadyUploadedRecords: [], uploadedRecordKeyCount: 0 };
+  const submitRecords = uploadedRecordFilter.submitRecords;
   const rawRange = summarizeRingHistoryTimeRangeForLog(records, false);
+  const builtSubmitRange = summarizeRingHistoryTimeRangeForLog(builtSubmitRecords as Array<Record<string, any>>, false);
   const submitRange = summarizeRingHistoryTimeRangeForLog(submitRecords as Array<Record<string, any>>, false);
-  const completed = isRingHistoryReadComplete(historyPayloads as Array<Record<string, any>>);
+  const completed = isRingHistoryReadComplete(matchedPayloads as Array<Record<string, any>>);
+  const submitMetricCounts = countRingHistoryRecordMetrics(submitRecords as Array<Record<string, any>>);
+  const uploadDedupKey = deviceMac ? getLegacyLocalDataUploadKey(deviceMac, uploadSinceTimestamp, submitRecords, submitMetricCounts) : '';
+  const checkpointTimestamp = getAwarenessLastReadTimestamp();
+  const latestKnownTimestamp = Math.max(rawRange.maxTimestamp || 0, builtSubmitRange.maxTimestamp || 0, submitRange.maxTimestamp || 0);
+  const checkpointCovered =
+    Boolean(deviceMacNorm) && checkpointTimestamp > 0 && latestKnownTimestamp > 0 && checkpointTimestamp >= latestKnownTimestamp;
 
   return {
     signature: [
-      historyPayloads.length,
+      deviceMacNorm || 'unknown-device',
+      allPayloads.length,
+      matchedPayloads.length,
+      skippedDeviceMismatchCount,
+      allRecords.length,
       records.length,
+      builtSubmitRecords.length,
       submitRecords.length,
       rawRange.minTimestamp || 0,
       rawRange.maxTimestamp || 0,
+      builtSubmitRange.minTimestamp || 0,
+      builtSubmitRange.maxTimestamp || 0,
       submitRange.minTimestamp || 0,
       submitRange.maxTimestamp || 0,
-      completed ? 1 : 0
+      completed ? 1 : 0,
+      checkpointTimestamp || 0,
+      checkpointCovered ? 1 : 0,
+      uploadDedupKey
     ].join('|'),
-    payloadCount: historyPayloads.length,
+    deviceMac,
+    deviceMacNorm,
+    payloadCount: allPayloads.length,
+    matchingPayloadCount: matchedPayloads.length,
+    skippedDeviceMismatchCount,
+    totalRecordCount: allRecords.length,
     recordCount: records.length,
+    builtSubmitCount: builtSubmitRecords.length,
     submitCount: submitRecords.length,
+    alreadyUploadedCount: uploadedRecordFilter.alreadyUploadedRecords.length,
+    uploadedRecordKeyCount: uploadedRecordFilter.uploadedRecordKeyCount,
     completed,
     uploadSinceTimestamp,
     uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+    checkpointTimestamp,
+    checkpointText: formatUnixTimestampForLog(checkpointTimestamp),
+    checkpointCovered,
+    uploadDedupKey,
     rawRange,
+    builtSubmitRange,
     submitRange
   };
+};
+const pruneClosedLegacyLocalDataUploadSessions = () => {
+  const now = Date.now();
+  closedLegacyLocalDataUploadSessions.forEach((value, key) => {
+    if (!value?.completedAt || now - value.completedAt > LEGACY_LOCAL_DATA_CLOSED_SESSION_TTL_MS) {
+      closedLegacyLocalDataUploadSessions.delete(key);
+    }
+  });
+};
+const getLegacyLocalDataStableSkipReason = (snapshot: ReturnType<typeof getLegacyLocalDataStableSnapshot>) => {
+  pruneClosedLegacyLocalDataUploadSessions();
+  if (!snapshot.deviceMacNorm) return 'missing-device-mac';
+  if (snapshot.payloadCount > 0 && snapshot.matchingPayloadCount === 0 && snapshot.skippedDeviceMismatchCount > 0) {
+    return 'all-payloads-device-mismatch';
+  }
+  if (snapshot.recordCount > 0 && snapshot.checkpointCovered) return 'checkpoint-covered';
+  if (snapshot.builtSubmitCount > 0 && snapshot.submitCount === 0) {
+    return snapshot.alreadyUploadedCount >= snapshot.builtSubmitCount ? 'all-submit-records-already-uploaded' : 'no-submit-candidate';
+  }
+  const closed = closedLegacyLocalDataUploadSessions.get(snapshot.deviceMacNorm);
+  if (
+    closed &&
+    closed.uploadDedupKey &&
+    snapshot.uploadDedupKey &&
+    closed.uploadDedupKey === snapshot.uploadDedupKey &&
+    Date.now() - closed.completedAt <= LEGACY_LOCAL_DATA_CLOSED_SESSION_TTL_MS
+  ) {
+    return 'upload-session-closed';
+  }
+  return '';
+};
+const closeLegacyLocalDataUploadSession = (deviceMac: string, uploadDedupKey: string, uploadedUntil = 0) => {
+  const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  if (!deviceMacNorm || !uploadDedupKey) return;
+  closedLegacyLocalDataUploadSessions.set(deviceMacNorm, {
+    uploadDedupKey,
+    uploadedUntil,
+    completedAt: Date.now(),
+    uploadSessionKey: getAwarenessHomeUploadSessionKey()
+  });
+};
+const shouldSkipLegacyLocalDataStableWait = (trigger: string, protocol: string) => {
+  const stableSnapshot = getLegacyLocalDataStableSnapshot();
+  const reason = getLegacyLocalDataStableSkipReason(stableSnapshot);
+  if (!reason) return false;
+  legacyLocalDataStableReadyAt = 0;
+  appendAwarenessDiagnosticLog('legacy-local-data-stable-wait-skip', {
+    protocol,
+    trigger,
+    reason,
+    stableSnapshot,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+  return true;
 };
 const waitForLegacyLocalDataStableBeforeUpload = async (trigger: string, protocol: string) => {
   if (legacyLocalDataStablePromise) return legacyLocalDataStablePromise;
@@ -634,6 +756,11 @@ const waitForLegacyLocalDataStableBeforeUpload = async (trigger: string, protoco
 const isLegacyLocalDataStableReadyForUpload = () =>
   Boolean(legacyLocalDataStableReadyAt && Date.now() - legacyLocalDataStableReadyAt <= LEGACY_LOCAL_DATA_STABLE_READY_TTL_MS);
 const scheduleLegacyLocalDataUploadAfterStableWait = (trigger: string, protocol: string) => {
+  if (shouldSkipLegacyLocalDataStableWait(trigger, protocol)) {
+    userStore.updateUploadingStatus('2');
+    userStore.updateIsSending(false);
+    return;
+  }
   if (legacyLocalDataStableUploadScheduled || legacyLocalDataStablePromise) {
     appendAwarenessDiagnosticLog('legacy-local-data-stable-wait-skip', {
       protocol,
@@ -726,6 +853,37 @@ const assertAwarenessBackendUploadBindingWithLog = async (
     });
     throw error;
   }
+};
+const assertAwarenessBackendUploadBindingCached = async (deviceMac: string, details: Record<string, any>) => {
+  const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  const now = Date.now();
+  if (
+    deviceMacNorm &&
+    cachedBackendUploadBinding &&
+    cachedBackendUploadBinding.deviceMacNorm === deviceMacNorm &&
+    now - cachedBackendUploadBinding.checkedAt <= AWARENESS_BACKEND_BINDING_CACHE_MS
+  ) {
+    appendAwarenessDiagnosticLog('binding-check-cache-result', {
+      ...details,
+      deviceMac,
+      elapsedMs: 0,
+      binding: summarizeBackendUploadBindingForLog(cachedBackendUploadBinding.binding),
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+    return cachedBackendUploadBinding.binding;
+  }
+
+  const binding = await assertAwarenessBackendUploadBindingWithLog(deviceMac, details);
+  if (deviceMacNorm && binding.ok) {
+    cachedBackendUploadBinding = {
+      deviceMacNorm,
+      checkedAt: Date.now(),
+      binding
+    };
+  } else if (cachedBackendUploadBinding?.deviceMacNorm === deviceMacNorm) {
+    cachedBackendUploadBinding = null;
+  }
+  return binding;
 };
 
 const buildLegacyLocalDataRawFramesForUpload = (payloads: any[], deviceMac: string) => {
@@ -1298,9 +1456,20 @@ const bluetoothStatus = computed(() => {
   const isVisibleUploadSyncing =
     userStore.uploadingStatus === 'uploading' ||
     ringStore.uploadingStatus === 'uploading';
+  const isBackgroundSyncing =
+    isConnected &&
+    !isVisibleUploadSyncing &&
+    Boolean(
+      homeDataSyncing.value ||
+        legacyHomeHistoryReadInFlight.value ||
+        legacyHomeHistoryReadPromise ||
+        legacyLocalDataStablePromise ||
+        legacyLocalDataStableUploadScheduled ||
+        legacyLocalDataUploadPromise
+    );
   const isSyncing =
     isConnected &&
-    isVisibleUploadSyncing;
+    (isVisibleUploadSyncing || isBackgroundSyncing);
 
   return {
     isDisconnected,
@@ -1310,7 +1479,7 @@ const bluetoothStatus = computed(() => {
 
 
     statusText: isConnecting ? '\u8fde\u63a5\u4e2d' : '',
-    syncingText: isSyncing ? '\u4e0a\u4f20\u4e2d' : '',
+    syncingText: isVisibleUploadSyncing ? '\u4e0a\u4f20\u4e2d' : isBackgroundSyncing ? '\u540e\u53f0\u540c\u6b65\u4e2d' : '',
     batteryText: isConnected ? displayBatteryValue.value : '',
 
 
@@ -1500,7 +1669,23 @@ watch(
   async (newData) => {
     const protocol = userStore.deviceInfo?.protocol || ringStore.deviceInfo?.protocol || 'unknown';
     const isRwRing = isAwarenessRwRing();
-    let localData: any[] = Array.isArray(userStore.receivedData) ? userStore.receivedData.filter(isRingHistoryPayload) : [];
+    const uploadDeviceMacAtStart = getAwarenessUploadDeviceMac();
+    const payloadScopeAtStart = getAwarenessHistoryPayloadsForDevice(
+      Array.isArray(userStore.receivedData) ? userStore.receivedData : [],
+      uploadDeviceMacAtStart
+    );
+    let localData: any[] = payloadScopeAtStart.matchedPayloads;
+    if (payloadScopeAtStart.skippedDeviceMismatchCount > 0) {
+      appendAwarenessDiagnosticLog('legacy-local-data-payload-skip', {
+        protocol,
+        reason: 'device-mismatch',
+        deviceMac: uploadDeviceMacAtStart,
+        totalPayloadCount: payloadScopeAtStart.allPayloads.length,
+        matchedPayloadCount: payloadScopeAtStart.matchedPayloads.length,
+        skippedDeviceMismatchCount: payloadScopeAtStart.skippedDeviceMismatchCount,
+        snapshot: getAwarenessConnectionSnapshot()
+      });
+    }
     if (!localData || localData.length === 0) {
       userStore.updateIsSending(false);
       return;
@@ -1567,6 +1752,49 @@ watch(
         // uni.hideLoading();
 
         if (!isRwRing) {
+          const precheckDeviceMac = getAwarenessUploadDeviceMac();
+          if (!precheckDeviceMac) {
+            userStore.updateUploadingStatus('2');
+            appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
+              protocol,
+              reason: 'missing-device-mac-before-stable-wait',
+              localDataCount: localData.length,
+              stableSnapshot: getLegacyLocalDataStableSnapshot(),
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+            return;
+          }
+          const backendBindingForStableWait = await assertAwarenessBackendUploadBindingCached(precheckDeviceMac, {
+            protocol,
+            isRwRing,
+            stage: 'legacy-local-data-stable-wait',
+            localDataCount: localData.length,
+            stableSnapshot: getLegacyLocalDataStableSnapshot()
+          });
+          if (!backendBindingForStableWait.ok) {
+            userStore.updateUploadingStatus('2');
+            appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
+              protocol,
+              reason: 'backend-current-binding-invalid-before-stable-wait',
+              reasonCode: backendBindingForStableWait.reasonCode,
+              message: backendBindingForStableWait.reason,
+              localDataCount: localData.length,
+              deviceMac: precheckDeviceMac,
+              backendDeviceMac: backendBindingForStableWait.deviceMac,
+              backendDevice: summarizeAwarenessDevice(backendBindingForStableWait.device as Record<string, any> | null | undefined),
+              stableSnapshot: getLegacyLocalDataStableSnapshot(),
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+            if (backendBindingForStableWait.reasonCode === 'NO_ACTIVE_BINDING') {
+              await clearFrontendRingBindingState(userStore, ringStore);
+            }
+            return;
+          }
+          if (shouldSkipLegacyLocalDataStableWait('legacy-local-data-upload', protocol)) {
+            userStore.updateUploadingStatus('2');
+            userStore.updateIsSending(false);
+            return;
+          }
           if (!isLegacyLocalDataStableReadyForUpload()) {
             userStore.updateUploadingStatus('2');
             appendAwarenessDiagnosticLog('legacy-local-data-upload-pending', {
@@ -1581,7 +1809,7 @@ watch(
             return;
           }
           legacyLocalDataStableReadyAt = 0;
-          localData = Array.isArray(userStore.receivedData) ? userStore.receivedData.filter(isRingHistoryPayload) : [];
+          localData = getAwarenessCurrentHistoryPayloadsForUpload().matchedPayloads;
           if (!localData.length || !isRingHistoryReadComplete(localData)) {
             userStore.updateUploadingStatus('2');
             appendAwarenessDiagnosticLog('legacy-local-data-upload-pending', {
@@ -1598,6 +1826,19 @@ watch(
 
         const allFilteredRecords = local.value || [];
         const deviceMac = getAwarenessUploadDeviceMac();
+        if (!deviceMac) {
+          userStore.updateUploadingStatus('2');
+          appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
+            protocol,
+            isRwRing,
+            reason: 'missing-device-mac',
+            localDataCount: localData.length,
+            rawRecordCount: allFilteredRecords.length,
+            stableSnapshot: getLegacyLocalDataStableSnapshot(),
+            snapshot: getAwarenessConnectionSnapshot()
+          });
+          return;
+        }
         const filteredRecords = filterAwarenessHistoryRecordsForDevice(allFilteredRecords, deviceMac);
         const uploadSinceTimestamp = getAwarenessHistoryUploadSinceTimestamp(isRwRing);
         const rawMetricCounts = countRingHistoryRecordMetrics(filteredRecords as Array<Record<string, any>>);
@@ -1664,7 +1905,7 @@ watch(
             });
             return;
           }
-          const backendBinding = await assertAwarenessBackendUploadBindingWithLog(deviceMac, {
+          const backendBinding = await assertAwarenessBackendUploadBindingCached(deviceMac, {
             protocol,
             isRwRing,
             stage: 'legacy-local-data-upload',
@@ -1873,10 +2114,12 @@ watch(
               (timestamp): timestamp is number =>
                 Boolean(timestamp && timestamp > 0 && (!uploadSinceTimestamp || timestamp >= uploadSinceTimestamp))
             );
+          let maxSubmittedTimestamp = 0;
           if (submittedTimestamps.length > 0) {
-            const maxTimestamp = Math.max(...submittedTimestamps);
-            updateAwarenessDeviceHistoryCheckpoint(maxTimestamp, 'legacy-local-data-upload-complete');
+            maxSubmittedTimestamp = Math.max(...submittedTimestamps);
+            updateAwarenessDeviceHistoryCheckpoint(maxSubmittedTimestamp, 'legacy-local-data-upload-complete');
           }
+          closeLegacyLocalDataUploadSession(deviceMac, uploadDedupKey, maxSubmittedTimestamp);
 
           scheduleAwarenessAfterDataProcessed('legacy-local-data-upload-complete');
           // uni.hideLoading();
@@ -1912,7 +2155,7 @@ watch(
           }
           let rawSubmitResponse: unknown;
           if (deviceMac && rawFrames.length > 0) {
-            const backendBinding = await assertAwarenessBackendUploadBindingWithLog(deviceMac, {
+            const backendBinding = await assertAwarenessBackendUploadBindingCached(deviceMac, {
               protocol,
               isRwRing,
               stage: 'legacy-local-raw-upload',
@@ -2281,11 +2524,8 @@ type AwarenessBusinessRefreshOptions = {
 const isAwarenessDataSyncInProgress = () =>
   Boolean(
     homeDataSyncing.value ||
-      legacyHomeHistoryReadInFlight.value ||
       awarenessHistorySyncPromise ||
-      awarenessRefreshPromise ||
-      legacyLocalDataStablePromise ||
-      legacyLocalDataUploadPromise
+      awarenessRefreshPromise
   );
 
 const runAwarenessBusinessOverviewRefresh = async (date: string, options: AwarenessBusinessRefreshOptions = {}) => {
@@ -2617,7 +2857,7 @@ const handleDateClick = async (index: number, options: AwarenessBusinessRefreshO
 const openTimePicker = () => {
   calendar.value.open();
 };
-const confirm = async (date: any) => {
+const confirm = async (date: any, options: AwarenessBusinessRefreshOptions = {}) => {
 
   let selectedDate;
   selectedDate = new Date(date.fulldate);
@@ -2636,7 +2876,10 @@ const confirm = async (date: any) => {
   selectedDayIndex.value = 3;
   selectData.value = selectedDate;
   const currentDate = formatLocalDate(selectedDate);
-  await refreshAwarenessBusinessOverview(currentDate, { trigger: 'date-confirm' });
+  await refreshAwarenessBusinessOverview(currentDate, {
+    trigger: options.trigger || 'date-confirm',
+    allowDuringSync: options.allowDuringSync
+  });
 };
 
 const initBalanceChart = async () => {
@@ -3053,12 +3296,21 @@ const refreshPageDataAndCharts = async () => {
       const dayIndex = Number(selectedDayIndex.value) ?? 2;
       selectedDayIndex.value = dayIndex;
       if (dayIndex !== 3) {
-        await handleDateClick(selectedDayIndex.value);
+        await handleDateClick(selectedDayIndex.value, {
+          allowDuringSync: true,
+          trigger: 'page-show-data-load'
+        });
       } else {
         if (selectData.value) {
           const formattedDate = uni.$uv.timeFormat(selectData.value, 'yyyy-mm-dd');
           if (formattedDate && formattedDate !== 'NaN-NaN-NaN') {
-            await confirm({ fulldate: formattedDate });
+            await confirm(
+              { fulldate: formattedDate },
+              {
+                allowDuringSync: true,
+                trigger: 'page-show-data-load'
+              }
+            );
           }
         }
       }
