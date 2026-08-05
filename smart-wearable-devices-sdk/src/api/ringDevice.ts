@@ -304,18 +304,43 @@ const stageRingRawHistoryFrames = (records: RingHistoricalRecord[], parsed: Ring
 };
 
 const getParsedRawChunks = (parsed: RingParsedData) => {
-  const rawChunks = (parsed as Record<string, any>)?.rawChunks;
+  const source = parsed as Record<string, any>;
+  const rawChunks = source?.rawChunks || source?.raw_frames || source?.rawFrames || source?.frames;
   if (Array.isArray(rawChunks)) {
     return rawChunks.map(normalizeRawBytes).filter((raw) => raw.length > 0);
   }
 
-  const raw = normalizeRawBytes(parsed.raw);
+  const raw = normalizeRawBytes(source.raw ?? source.rawHex ?? source.raw_hex ?? source.hex ?? source.payload ?? source.frame);
   return raw.length > 0 ? [raw] : [];
 };
 
 const normalizeRawBytes = (value: unknown) => {
-  if (!Array.isArray(value)) return [];
-  return value
+  let bytes: unknown[] = [];
+  if (Array.isArray(value)) {
+    bytes = value;
+  } else if (typeof value === 'string') {
+    const hex = value.replace(/[^0-9a-f]/gi, '');
+    if (hex.length >= 2 && hex.length % 2 === 0) {
+      bytes = hex.match(/.{2}/g)?.map((item) => parseInt(item, 16)) || [];
+    }
+  } else if (value && typeof value === 'object') {
+    const objectValue = value as Record<string, any>;
+    const nestedRaw = objectValue.raw ?? objectValue.rawHex ?? objectValue.raw_hex ?? objectValue.hex ?? objectValue.payload ?? objectValue.frame;
+    if (nestedRaw !== undefined && nestedRaw !== value) {
+      return normalizeRawBytes(nestedRaw);
+    }
+    if (Array.isArray(objectValue.data)) {
+      bytes = objectValue.data;
+    } else if (typeof ArrayBuffer !== 'undefined') {
+      if (value instanceof ArrayBuffer) {
+        bytes = Array.from(new Uint8Array(value));
+      } else if (typeof ArrayBuffer.isView === 'function' && ArrayBuffer.isView(value as ArrayBufferView)) {
+        const view = value as ArrayBufferView;
+        bytes = Array.from(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+      }
+    }
+  }
+  return bytes
     .map((byte) => Number(byte))
     .filter((byte) => Number.isFinite(byte) && byte >= 0 && byte <= 255)
     .map((byte) => Math.floor(byte));

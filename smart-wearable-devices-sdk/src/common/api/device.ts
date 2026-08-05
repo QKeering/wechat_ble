@@ -243,14 +243,76 @@ export const getBindInfo = async (
   } as any) as DeviceInfo | null;
 };
 
-export const scan = async (params: { sn: string }, _config: HttpRequestConfigCompat = {}): Promise<DeviceInfo> => {
+const normalizeMacLikeText = (value: unknown) => {
+  const raw = String(value || '').trim();
+  const hex = raw.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+  if (hex.length !== 12) return '';
+  return hex.match(/.{2}/g)?.join(':') || '';
+};
+
+const buildScanFallbackDevice = (sn: string): DeviceInfo | null => {
+  const mac = normalizeMacLikeText(sn);
+  if (mac) {
+    return {
+      sn,
+      mac,
+      deviceId: mac,
+      uniMacId: mac,
+      deviceName: sn,
+      name: sn
+    } as DeviceInfo;
+  }
+
+  const name = String(sn || '').trim();
   return {
-    sn: params.sn,
-    mac: params.sn,
-    deviceId: params.sn,
-    deviceName: params.sn,
-    name: params.sn
+    sn,
+    deviceId: name,
+    uniMacId: name,
+    deviceName: name,
+    name
+  } as DeviceInfo;
+};
+
+export const scan = async (params: { sn: string }, config: HttpRequestConfigCompat = {}): Promise<DeviceInfo> => {
+  const sn = String(params.sn || '').trim();
+  if (!sn) {
+    throw new Error('Empty QR code');
+  }
+
+  const requestConfig = {
+    ...config,
+    params: {
+      ...(config.params || {}),
+      sn
+    },
+    custom: {
+      toast: false,
+      catch: true,
+      ...(config.custom || {})
+    }
   };
+
+  try {
+    const response = await (uni as any).$uv.http.get('/app/device/scanQRCode', requestConfig);
+    assertBackendSuccess(response);
+    const remote = normalizeBindInfoResponse(response);
+    if (remote) {
+      return normalizeRingBoundDevice({
+        ...remote,
+        sn: (remote as any).sn || sn,
+        deviceName: (remote as any).deviceName || (remote as any).name || sn,
+        name: (remote as any).name || (remote as any).deviceName || sn
+      } as any) as DeviceInfo;
+    }
+  } catch (error) {
+    const fallback = buildScanFallbackDevice(sn);
+    if (fallback) return fallback;
+    throw error;
+  }
+
+  const fallback = buildScanFallbackDevice(sn);
+  if (fallback) return fallback;
+  throw new Error('QR code did not match any device');
 };
 
 const normalizeDeviceModelListResponse = (payload: unknown): DeviceModel[] => {

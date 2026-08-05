@@ -4948,6 +4948,11 @@ async def data_sync(
     records = payload.get("dataList") or payload.get("records") or payload.get("data") or payload.get("list") or []
     if isinstance(records, dict):
         records = [records]
+    raw_frames = payload.get("rawFrames") or payload.get("raw_frames") or payload.get("frames") or []
+    if isinstance(raw_frames, dict):
+        raw_frames = [raw_frames]
+    if not isinstance(raw_frames, list):
+        raw_frames = []
     if not records:
         result = {
             "uploadSessionId": upload_session_id,
@@ -5028,6 +5033,26 @@ async def data_sync(
     target_user_id = int(binding["dataUserId"])
     resolved_device_mac = binding.get("deviceMac") or device_mac
     battery = payload.get("battery")
+    raw_store_result = None
+    if raw_frames:
+        try:
+            raw_store_result = health.store_ring_history_raw_frames(
+                db,
+                target_user_id,
+                resolved_device_mac,
+                raw_frames,
+                upload_user_id=operator_user_id,
+            )
+        except Exception as exc:
+            db.rollback()
+            raw_store_result = {
+                "rawStored": False,
+                "rawFrameCount": len(raw_frames),
+                "rawStoredCount": 0,
+                "rawUpdatedCount": 0,
+                "rawSkippedCount": len(raw_frames),
+                "error": str(exc),
+            }
     result = sync_ring_data_records(db, target_user_id, records, resolved_device_mac, battery, calculate_summary=False)
     summary_dates = result.get("touchedDates") or []
     summary_inline = 0 < len(summary_dates) <= SYNC_INLINE_SUMMARY_DATE_LIMIT
@@ -5048,9 +5073,22 @@ async def data_sync(
     if raw_local_status not in {"done", "none", "failed"}:
         raw_local_status = "none"
     try:
-        raw_frame_count = int(payload.get("rawFrameCount") or payload.get("raw_frame_count") or 0)
+        raw_frame_count = int(
+            (raw_store_result or {}).get("rawFrameCount")
+            or payload.get("rawFrameCount")
+            or payload.get("raw_frame_count")
+            or 0
+        )
     except (TypeError, ValueError):
         raw_frame_count = 0
+    if raw_store_result:
+        result["rawStored"] = bool(raw_store_result.get("rawStored"))
+        result["rawStatus"] = "done" if raw_store_result.get("rawStored") else "failed"
+        result["rawStoredCount"] = int(raw_store_result.get("rawStoredCount") or raw_store_result.get("storedCount") or 0)
+        result["rawUpdatedCount"] = int(raw_store_result.get("rawUpdatedCount") or raw_store_result.get("updatedCount") or 0)
+        result["rawSkippedCount"] = int(raw_store_result.get("rawSkippedCount") or raw_store_result.get("skippedCount") or 0)
+        result["rawStoreError"] = raw_store_result.get("error")
+        raw_local_status = "done" if raw_store_result.get("rawStored") else "failed"
     can_delete_device_blocks = data_status == "done" and raw_local_status == "done"
     result["uploadSessionId"] = upload_session_id
     result["dataUserId"] = target_user_id
@@ -5076,7 +5114,7 @@ async def data_sync(
         status="data_done" if data_status == "done" else f"data_{data_status}",
         data_status=data_status,
         raw_local_status=raw_local_status,
-        raw_status=payload.get("rawStatus") or payload.get("raw_status"),
+        raw_status=result.get("rawStatus") or payload.get("rawStatus") or payload.get("raw_status"),
         data_count=success_count,
         raw_frame_count=raw_frame_count,
         can_delete_device_blocks=can_delete_device_blocks,
@@ -5085,6 +5123,7 @@ async def data_sync(
             "deviceMac": resolved_device_mac,
             "rawFrameCount": raw_frame_count,
             "rawLocalStatus": raw_local_status,
+            "inlineRawFrameCount": len(raw_frames),
         },
         response_snapshot=result,
     )
@@ -5110,6 +5149,12 @@ async def data_sync(
         coverage_status=coverage_status,
         raw_local_status=raw_local_status,
         raw_frame_count=raw_frame_count,
+        inline_raw_frame_count=len(raw_frames),
+        raw_status=result.get("rawStatus"),
+        raw_stored=result.get("rawStored"),
+        raw_stored_count=result.get("rawStoredCount"),
+        raw_updated_count=result.get("rawUpdatedCount"),
+        raw_skipped_count=result.get("rawSkippedCount"),
         can_delete_device_blocks=can_delete_device_blocks,
     )
     return success(
@@ -6010,9 +6055,37 @@ def get_user_girl_health_all(user: dict = Depends(app_user), db: Session = Depen
     last_period_time = str(girl.get("lastPeriodTime") or "")
     dates = [item for item in last_period_time.split(",") if item]
     last_start = girl.get("lastPeriodTimePoint") or (min(dates) if dates else None)
+    profile = {
+        "id": girl.get("id"),
+        "userId": girl.get("userId") or user["id"],
+        "user_id": girl.get("userId") or user["id"],
+        "birthday": girl.get("birthDay"),
+        "birthDay": girl.get("birthDay"),
+        "cycleDay": girl.get("periodCycle"),
+        "periodCycle": girl.get("periodCycle"),
+        "cycleLength": girl.get("periodCycle"),
+        "menstruationDay": girl.get("periodRuntime"),
+        "periodRuntime": girl.get("periodRuntime"),
+        "menstrualLength": girl.get("periodRuntime"),
+        "lastMenstruationDate": last_start,
+        "lastMenstrualStartDate": last_start,
+        "lastPeriodTimePoint": last_start,
+        "lastPeriodTime": dates or last_period_time,
+        "cycleRegularity": girl.get("isRuleType"),
+        "isRuleType": girl.get("isRuleType"),
+        "healthConditions": girl.get("otherUnhealth"),
+        "otherUnhealth": girl.get("otherUnhealth"),
+    }
     payload = {
         "lastMenstrualStartDate": last_start,
         "cycleLength": girl.get("periodCycle"),
+        "cycleDay": girl.get("periodCycle"),
+        "menstruationDay": girl.get("periodRuntime"),
+        "periodRuntime": girl.get("periodRuntime"),
+        "lastMenstruationDate": last_start,
+        "lastPeriodTimePoint": last_start,
+        "lastPeriodTime": dates or last_period_time,
+        "profile": profile,
         "records": [
             {
                 "ts": epoch_seconds(row._mapping["record_date"]),
@@ -6031,7 +6104,14 @@ def get_user_girl_health_all(user: dict = Depends(app_user), db: Session = Depen
         payload,
         context={"source": "getUserGirlHealthAll", "userId": int(user["id"]), "userName": user.get("nickName")},
     )
-    predicted_cycle = response.get("predictedCycle") if isinstance(response, dict) else None
+    result = response if isinstance(response, dict) else {}
+    result = {**payload, **result}
+    response_profile = result.get("profile")
+    result["profile"] = {
+        **profile,
+        **(response_profile if isinstance(response_profile, dict) else {}),
+    }
+    predicted_cycle = result.get("predictedCycle") if isinstance(result, dict) else None
     luteal = predicted_cycle.get("luteal") if isinstance(predicted_cycle, dict) else None
     luteal_end = luteal.get("end") if isinstance(luteal, dict) else None
     if luteal_end and girl.get("id"):
@@ -6044,7 +6124,7 @@ def get_user_girl_health_all(user: dict = Depends(app_user), db: Session = Depen
             db.commit()
         except ValueError:
             pass
-    return success(response)
+    return success(result)
 
 
 @router.get("/system/dict/data/type/{dict_type}")

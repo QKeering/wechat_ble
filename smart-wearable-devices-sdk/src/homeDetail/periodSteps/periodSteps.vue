@@ -3,6 +3,14 @@ import { ref, computed } from 'vue';
 import { onLoad , onShow} from '@dcloudio/uni-app';
 import { addGirlHealth } from '@/common/api/homeDetail';
 
+const GIRL_HEALTH_PROFILE_UPDATED_STORAGE_KEY = 'qkeer_girl_health_profile_updated_at';
+const GIRL_HEALTH_PROFILE_EXISTS_STORAGE_KEY_PREFIX = 'qkeer_girl_health_profile_exists';
+const GIRL_HEALTH_PROFILE_STORAGE_KEY_PREFIX = 'qkeer_girl_health_profile';
+const getGirlHealthProfileExistsStorageKey = (userId?: unknown) =>
+  `${GIRL_HEALTH_PROFILE_EXISTS_STORAGE_KEY_PREFIX}:${String(userId || 'anonymous')}`;
+const getGirlHealthProfileStorageKey = (userId?: unknown) =>
+  `${GIRL_HEALTH_PROFILE_STORAGE_KEY_PREFIX}:${String(userId || 'anonymous')}`;
+
 // ────────── Step3: 月历选择最近一次月经 ──────────
 const calendarMonthOffset = ref(0); // 0=当月, -1=上月
 
@@ -128,6 +136,7 @@ const submitQuestionnaire = async () => {
   // Step6: 健康情况（多选，逗号拼接）
   const healthConditionsStr = Array.from(selectedConditions.value).join(',');
   const userData = uni.getStorageSync("userInfo") || {};
+  const currentUserId = userData?.id || userData?.userId || userData?.user_id || userData?.uid;
   
   const params = {
     birthday,
@@ -136,20 +145,36 @@ const submitQuestionnaire = async () => {
     lastMenstruationDate,
     cycleRegularity,
     healthConditions: healthConditionsStr,
-    userId: userData?.id
+    userId: currentUserId
   };
   const legacyParamsForReference = {
     birthDay:birthday, //出生日期
     periodCycle:cycleDay, //经期周期
     periodRuntime:menstruationDay,//持续天数
     lastPeriodTime:periodDatesArr, //月经开始结束周期
+    lastPeriodTimePoint: lastMenstruationDate, // 最近一次月经开始日
     isRuleType:cycleRegularity, //周期规律
     otherUnhealth: healthConditionsStr,//其他病状
-	userId:userData.id
+	userId:currentUserId
   };
   try {
     uni.showLoading({ title: '提交中...', mask: true });
-    await addGirlHealth(params);
+    await addGirlHealth({ ...params, ...legacyParamsForReference });
+    uni.setStorageSync(GIRL_HEALTH_PROFILE_UPDATED_STORAGE_KEY, Date.now());
+    if (currentUserId) {
+      uni.setStorageSync(getGirlHealthProfileExistsStorageKey(currentUserId), true);
+      uni.setStorageSync(getGirlHealthProfileStorageKey(currentUserId), {
+        ...params,
+        user_id: currentUserId,
+        birthDay: birthday,
+        periodCycle: cycleDay,
+        periodRuntime: menstruationDay,
+        lastPeriodTime: periodDatesArr,
+        lastPeriodTimePoint: lastMenstruationDate,
+        isRuleType: cycleRegularity,
+        otherUnhealth: healthConditionsStr
+      });
+    }
     uni.hideLoading();
     uni.showToast({ title: '提交成功', icon: 'success' });
     setTimeout(() => uni.navigateBack({ delta: 10 }), 1500);

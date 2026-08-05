@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, nextTick, watch } from 'vue';
 import { onLoad, onUnload } from '@dcloudio/uni-app';
 import {
   getRingBusinessDeviceKey,
@@ -29,6 +29,10 @@ const boundInfo = ref<ScanDeviceInfo | null>(null);
 const boundInfoLoaded = ref(false);
 const autoReconnectStatus = ref<'idle' | 'connecting' | 'success' | 'failed'>('idle');
 const autoReconnectMessage = ref('');
+const scanTarget = ref('');
+const scanTargetName = ref('');
+const directScan = ref(false);
+const scanTargetAutoConnectDone = ref(false);
 
 const picker = ref<any>(null);
 const columns = ref([['全部']]);
@@ -86,6 +90,38 @@ const buildDeviceModelSearchable = (device: ScanDeviceInfo) =>
     device.protocol,
     device.sn
   ]).join(' ');
+const normalizeScanTargetText = (value: unknown) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^0-9a-z]/g, '');
+const getScanTargetCandidates = (device: ScanDeviceInfo) =>
+  [
+    device.deviceId,
+    device.uniMacId,
+    device.mac,
+    device.advertis?.macInfo,
+    device.displayName,
+    device.deviceName,
+    device.name,
+    device.localName,
+    device.sn
+  ]
+    .map(normalizeScanTargetText)
+    .filter(Boolean);
+const isScanTargetDevice = (device: ScanDeviceInfo) => {
+  const target = normalizeScanTargetText(scanTarget.value);
+  if (!target) return false;
+  return getScanTargetCandidates(device).some(
+    (candidate) =>
+      candidate === target ||
+      candidate.endsWith(target) ||
+      target.endsWith(candidate) ||
+      (target.length >= 6 && candidate.includes(target)) ||
+      (candidate.length >= 6 && target.includes(candidate))
+  );
+};
+const findScanTargetDevice = () => devices.value.find((device) => isScanTargetDevice(device as ScanDeviceInfo));
 
 const appendConnectPageDiagnosticLog = (event: string, details?: unknown) => {
   const detailPayload =
@@ -119,7 +155,25 @@ const getConnectPageSnapshot = () => ({
 
 const isReadyCurrentDevice = () => ring.isConnected.value && ring.isReady.value && Boolean(ring.deviceInfo.value.deviceId);
 const hasBoundDevice = computed(() => boundInfoLoaded.value && hasBoundRingIdentity(boundInfo.value));
-const showScanArea = computed(() => boundInfoLoaded.value && !hasBoundDevice.value);
+const isDirectScanMode = computed(() => boundInfoLoaded.value && directScan.value && Boolean(scanTarget.value) && !hasBoundDevice.value);
+const showScanArea = computed(() => boundInfoLoaded.value && !hasBoundDevice.value && !isDirectScanMode.value);
+const directScanStatusClass = computed(() => {
+  if (autoReconnectStatus.value === 'success' || autoReconnectStatus.value === 'failed') return autoReconnectStatus.value;
+  return isScanning.value || connecting.value ? 'connecting' : '';
+});
+const directScanTitle = computed(() => {
+  if (autoReconnectStatus.value === 'failed') return '未连接到二维码设备';
+  if (connecting.value) return '正在连接二维码设备';
+  if (isScanning.value) return '正在查找二维码设备';
+  return '搜索已结束，点击重新查找';
+});
+const directScanDesc = computed(() => {
+  if (autoReconnectMessage.value) return autoReconnectMessage.value;
+  if (autoReconnectStatus.value === 'failed') return '请靠近戒指后重新查找。';
+  if (connecting.value) return '已找到目标设备，正在建立蓝牙连接并绑定。';
+  if (isScanning.value) return '正在按二维码设备信息查找附近戒指，请保持戒指靠近手机。';
+  return '未找到目标设备时，请靠近戒指后重新查找。';
+});
 const autoReconnectTitle = computed(() => {
   if (autoReconnectStatus.value === 'success') return '已连接绑定设备';
   if (autoReconnectStatus.value === 'failed') return '绑定设备连接失败';
@@ -156,7 +210,7 @@ const scanBusinessDevices = (options: { force?: boolean; reason?: string } = {})
     });
     return Promise.resolve();
   }
-  if (!options.force && isReadyCurrentDevice()) {
+  if (!options.force && isReadyCurrentDevice() && !scanTarget.value) {
     appendConnectPageDiagnosticLog('connect-page-scan-skipped-ready', {
       reason: options.reason || 'ready-device',
       snapshot: getConnectPageSnapshot()
@@ -234,18 +288,29 @@ const handleResultRetryClick = () => {
   if (connecting.value || isScanning.value) return;
   scanBusinessDevices({ force: true, reason: 'manual-reload' });
 };
+const handleDirectScanRetryClick = () => {
+  if (connecting.value || isScanning.value) return;
+  scanTargetAutoConnectDone.value = false;
+  autoReconnectStatus.value = 'connecting';
+  autoReconnectMessage.value = '';
+  scanBusinessDevices({ force: true, reason: 'direct-scan-retry' });
+};
 // 是否为 iOS 设备。
 const isIOS = computed(() => {
   const systemInfo = uni.getSystemInfoSync();
   return systemInfo.platform.toLowerCase().includes('ios');
 });
 
-const handleConnect = (device: ScanDeviceInfo) => {
-  if (isConnectedBusinessDevice(device)) return;
+const prepareConnectDevice = (device: ScanDeviceInfo) => {
   selectedDevice.value = device;
   deviceId.value = device.deviceId || '';
   deviceName.value = getRingBusinessDeviceName(device);
   iosDeviceIds.value = getRingDeviceStableIdentity(device as any);
+};
+
+const handleConnect = (device: ScanDeviceInfo) => {
+  if (isConnectedBusinessDevice(device)) return;
+  prepareConnectDevice(device);
   popup.value?.open?.();
 };
 const cancelConnect = (force = false) => {
@@ -301,24 +366,57 @@ const confirmConnect = async () => {
       throw new Error('未找到可连接的戒指设备');
     }
     appendConnectPageDiagnosticLog('connect-page-success', getConnectPageSnapshot());
+    if (isDirectScanMode.value) {
+      autoReconnectStatus.value = 'success';
+      autoReconnectMessage.value = '设备已连接并绑定，即将返回。';
+    }
     refreshDeviceInfoAfterConnect();
     cancelConnect(true);
     setTimeout(() => {
       uni.navigateBack();
     }, 1000);
   } catch (err) {
+    const errorMessage = formatBleErrorMessage(err, '请靠近戒指后重试');
+    if (isDirectScanMode.value) {
+      autoReconnectStatus.value = 'failed';
+      autoReconnectMessage.value = errorMessage;
+    }
     appendConnectPageDiagnosticLog('connect-page-fail', {
-      message: formatBleErrorMessage(err, '请靠近戒指后重试'),
+      message: errorMessage,
       snapshot: getConnectPageSnapshot()
     });
     uni.showToast({
-      title: `连接失败：${formatBleErrorMessage(err, '请靠近戒指后重试')}`,
+      title: `连接失败：${errorMessage}`,
       icon: 'none'
     });
   } finally {
     connecting.value = false;
   }
 };
+
+const tryAutoConnectScanTarget = async () => {
+  if (!scanTarget.value || scanTargetAutoConnectDone.value || connecting.value || hasBoundDevice.value) return;
+  const targetDevice = findScanTargetDevice();
+  if (!targetDevice) return;
+  scanTargetAutoConnectDone.value = true;
+  appendConnectPageDiagnosticLog('connect-page-scan-target-matched', {
+    scanTarget: scanTarget.value,
+    target: summarizeConnectPageDevice(targetDevice as ScanDeviceInfo),
+    snapshot: getConnectPageSnapshot()
+  });
+  autoReconnectStatus.value = 'connecting';
+  autoReconnectMessage.value = '已找到目标设备，正在建立蓝牙连接并绑定。';
+  prepareConnectDevice(targetDevice as ScanDeviceInfo);
+  await nextTick();
+  void confirmConnect();
+};
+
+watch(
+  () => [devices.value.length, isScanning.value, connecting.value, boundInfoLoaded.value, scanTarget.value],
+  () => {
+    void tryAutoConnectScanTarget();
+  }
+);
 
 const openPicker = () => {
   picker.value.open();
@@ -347,12 +445,21 @@ const loadDeviceModelsSafely = async () => {
   }
 };
 
-onLoad(async () => {
+onLoad(async (query = {}) => {
+  const queryRecord = query as Record<string, any>;
+  const target = queryRecord.scanTarget || queryRecord.sn || '';
+  scanTarget.value = target ? decodeURIComponent(String(target)) : '';
+  scanTargetName.value = queryRecord.scanName ? decodeURIComponent(String(queryRecord.scanName)) : '';
+  directScan.value = queryRecord.directScan === '1' || queryRecord.directScan === 'true';
+  if (directScan.value && scanTarget.value) {
+    autoReconnectStatus.value = 'connecting';
+    autoReconnectMessage.value = '';
+  }
   await loadBoundInfo();
   if (hasBoundDevice.value) {
     void retryBoundReconnect();
   } else {
-    scanBusinessDevices({ reason: 'page-load-no-bound-device' });
+    scanBusinessDevices({ reason: scanTarget.value ? 'page-load-scan-target' : 'page-load-no-bound-device' });
   }
   loadDeviceModelsSafely();
 });
@@ -382,6 +489,25 @@ onUnload(() => {
         ></uv-button>
       </view>
     </view>
+    <view v-else-if="isDirectScanMode" class="bound-reconnect-card r-50 p-40">
+      <view class="bound-status-icon" :class="directScanStatusClass"></view>
+      <view class="bound-title fs-40 mt-30">{{ directScanTitle }}</view>
+      <view class="bound-desc fs-30 mt-20">{{ directScanDesc }}</view>
+      <view class="bound-device mt-30">
+        <view class="bound-device-name">{{ scanTargetName || copy.unknownDevice }}</view>
+        <view class="bound-device-id mt-10">{{ scanTarget }}</view>
+      </view>
+      <view v-if="!isScanning && !connecting" class="bound-actions flex jc-center mt-40">
+        <uv-button
+          text="重新查找"
+          shape="circle"
+          color="#2E70FC"
+          :customTextStyle="{ 'font-size': '34rpx' }"
+          :customStyle="{ padding: '42rpx 0', width: '220rpx' }"
+          @click="handleDirectScanRetryClick"
+        ></uv-button>
+      </view>
+    </view>
     <!-- 搜索中状态 -->
     <view
       v-if="showScanArea"
@@ -389,7 +515,7 @@ onUnload(() => {
       :class="{ 'search-loading-clickable': !isScanning }"
       @click="handleSearchAreaClick"
     >
-      <uv-image src="/static/images/mine/logo3.png" width="260rpx" height="260rpx" mode="aspectFit"></uv-image>
+      <uv-image src="/static/images/mine/logo3.png" width="260rpx" height="260rpx" mode="aspectFit" observe-lazy-load></uv-image>
       <view class="loading-title fs-36">{{ isScanning ? '正在搜索戒指…' : '搜索已结束，点击重新搜索' }}</view>
       <view class="loading-desc t-979797 mt-10">
         {{ isScanning ? '正在查找附近可用戒指，请保持戒指靠近手机。' : '未找到目标设备时，请靠近戒指后点这里重新搜索。' }}
@@ -405,7 +531,7 @@ onUnload(() => {
         <!-- <view class="results flex ai-center" @click="startScan"> -->
         <view class="results flex ai-center" :class="{ disabled: isScanning || connecting }" @click="handleResultRetryClick">
           <view class="results-title fs-36 mr-20">{{ copy.searchResult }}</view>
-          <uv-image src="/static/images/mine/reload.png" width="36rpx" height="36rpx"></uv-image>
+          <uv-image src="/static/images/mine/reload.png" width="36rpx" height="36rpx" observe-lazy-load></uv-image>
         </view>
 
         <!-- 筛选/跳转项 -->
@@ -448,7 +574,7 @@ onUnload(() => {
       <view class="pt-50 pl-40 pr-40 pb-40">
         <!-- 图标与标题 -->
         <view class="popup-header flex fd-c ai-center mb-70">
-          <uv-image src="/static/images/mine/logo3.png" width="132rpx" height="132rpx" mode="aspectFit"></uv-image>
+          <uv-image src="/static/images/mine/logo3.png" width="132rpx" height="132rpx" mode="aspectFit" observe-lazy-load></uv-image>
           <view class="popup-title mt-30 fs-44">{{ copy.unknownDevice }}</view>
         </view>
 

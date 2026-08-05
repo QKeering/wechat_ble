@@ -29,6 +29,7 @@ export interface SyncLegacyHistoryOptions {
   timeoutMs?: number;
   deleteAfterUpload?: boolean;
   silentUploadStatus?: boolean;
+  skipUpload?: boolean;
 }
 
 export interface SyncLegacyHistoryResult {
@@ -510,7 +511,7 @@ export const syncLegacyHistory = async (
         runtime?.onParsedData?.(parsedWithDevice);
 
         let uploadResult: unknown;
-        if (recordsWithDevice.length > 0) {
+        if (recordsWithDevice.length > 0 && options.skipUpload !== true) {
           notifyUploadStatus('uploading');
           uploadResult = await runtime?.uploadHistoricalRecords?.(recordsWithDevice, parsedWithDevice);
           notifyUploadStatus('success');
@@ -580,8 +581,11 @@ export const syncLegacyHistory = async (
       };
     }
 
-    notifyUploadStatus('uploading');
-    const uploadResult = await runtime?.uploadHistoricalRecords?.(records, parsed);
+    let uploadResult: unknown;
+    if (options.skipUpload !== true) {
+      notifyUploadStatus('uploading');
+      uploadResult = await runtime?.uploadHistoricalRecords?.(records, parsed);
+    }
 
     let deleted = false;
     if (deleteAfterUpload && parsed.status !== 'partial' && isLegacyHistoryUploadSafeToDelete(uploadResult)) {
@@ -591,7 +595,7 @@ export const syncLegacyHistory = async (
       deleted = deleteParsed.status !== 'failed' && deleteParsed.success !== false;
     }
 
-    notifyUploadStatus('success');
+    if (options.skipUpload !== true) notifyUploadStatus('success');
     return {
       status: parsed.status || 'success',
       records,
@@ -728,6 +732,9 @@ const refreshQkeerV2BusinessMetrics = async (
   const commandTimeoutMs = Math.min(timeoutMs, 3000);
   const waitTimeoutMs = Math.min(timeoutMs, 6000);
   const historyWaitTimeoutMs = Math.min(timeoutMs, 5000);
+  const includeDeviceInfo = options.includeDeviceInfo ?? true;
+  const includeRealtimeMetrics = options.includeRealtimeMetrics ?? true;
+  const includeHistorySnapshot = options.includeHistorySnapshot ?? true;
   const todayZeroMs = new Date(new Date().toDateString()).getTime();
   const ok: string[] = [];
   const failed: Array<{ step: string; message: string }> = [];
@@ -747,18 +754,20 @@ const refreshQkeerV2BusinessMetrics = async (
     }
   };
 
-  await runStep(
-    'battery',
-    () => adapter.sendBatteryCommand(),
-    () => adapter.waitForParsedData((parsed) => parsed.type === 'battery', waitTimeoutMs)
-  );
+  if (includeDeviceInfo) {
+    await runStep(
+      'battery',
+      () => adapter.sendBatteryCommand(),
+      () => adapter.waitForParsedData((parsed) => parsed.type === 'battery', waitTimeoutMs)
+    );
 
-  await runStep(
-    'firmware',
-    () => adapter.sendFirmwareVersion(),
-    () => adapter.waitForParsedData((parsed) => parsed.type === 'firmware_version', waitTimeoutMs)
-  );
-  ok.push('software');
+    await runStep(
+      'firmware',
+      () => adapter.sendFirmwareVersion(),
+      () => adapter.waitForParsedData((parsed) => parsed.type === 'firmware_version', waitTimeoutMs)
+    );
+    ok.push('software');
+  }
 
   if (options.includeDeviceTime ?? true) {
     await runStep(
@@ -768,43 +777,45 @@ const refreshQkeerV2BusinessMetrics = async (
     );
   }
 
-  await runStep(
-    'heart_rate',
-    () => adapter.sendActiveMeasureCommand(),
-    () =>
-      adapter.waitForParsedData(
-        (parsed) =>
-          parsed.type === 'active_measure' ||
-          (parsed.type === 'qkeer_v2_health' && (parsed.heartRate != null || parsed.heartrate != null)),
-        waitTimeoutMs
-      )
-  );
+  if (includeRealtimeMetrics) {
+    await runStep(
+      'heart_rate',
+      () => adapter.sendActiveMeasureCommand(),
+      () =>
+        adapter.waitForParsedData(
+          (parsed) =>
+            parsed.type === 'active_measure' ||
+            (parsed.type === 'qkeer_v2_health' && (parsed.heartRate != null || parsed.heartrate != null)),
+          waitTimeoutMs
+        )
+    );
 
-  await runStep(
-    'blood_oxygen',
-    () => adapter.sendOxyGenCommand(),
-    () =>
-      adapter.waitForParsedData(
-        (parsed) =>
-          parsed.type === 'active_OxyGenMeasure' ||
-          (parsed.type === 'qkeer_v2_health' && (parsed.bloodOxygen != null || parsed.spo2 != null)),
-        waitTimeoutMs
-      )
-  );
+    await runStep(
+      'blood_oxygen',
+      () => adapter.sendOxyGenCommand(),
+      () =>
+        adapter.waitForParsedData(
+          (parsed) =>
+            parsed.type === 'active_OxyGenMeasure' ||
+            (parsed.type === 'qkeer_v2_health' && (parsed.bloodOxygen != null || parsed.spo2 != null)),
+          waitTimeoutMs
+        )
+    );
 
-  await runStep(
-    'last_data',
-    () => adapter.sendBodyTemperatureCommand(),
-    () =>
-      adapter.waitForParsedData(
-        (parsed) =>
-          parsed.type === 'active_Temperature' ||
-          parsed.type === 'qkeer_v2_last_data' ||
-          parsed.type === 'qkeer_v2_last_data_sleep' ||
-          parsed.type === 'qkeer_v2_heartbeat',
-        waitTimeoutMs
-      )
-  );
+    await runStep(
+      'last_data',
+      () => adapter.sendBodyTemperatureCommand(),
+      () =>
+        adapter.waitForParsedData(
+          (parsed) =>
+            parsed.type === 'active_Temperature' ||
+            parsed.type === 'qkeer_v2_last_data' ||
+            parsed.type === 'qkeer_v2_last_data_sleep' ||
+            parsed.type === 'qkeer_v2_heartbeat',
+          waitTimeoutMs
+        )
+    );
+  }
 
   if (options.includeCollectPeriod ?? true) {
     await runStep(
@@ -814,19 +825,21 @@ const refreshQkeerV2BusinessMetrics = async (
     );
   }
 
-  await runStep(
-    'history_snapshot',
-    () => adapter.readLocalData({ sinceTimestamp: todayZeroMs, readAll: false }),
-    () =>
-      adapter.waitForParsedData(
-        (parsed) =>
-          parsed.type === 'local_data' ||
-          parsed.type === 'qkeer_v2_health_list' ||
-          parsed.type === 'qkeer_v2_step_list' ||
-          parsed.type === 'qkeer_v2_sleep_list',
-        historyWaitTimeoutMs
-      )
-  );
+  if (includeHistorySnapshot) {
+    await runStep(
+      'history_snapshot',
+      () => adapter.readLocalData({ sinceTimestamp: todayZeroMs, readAll: false }),
+      () =>
+        adapter.waitForParsedData(
+          (parsed) =>
+            parsed.type === 'local_data' ||
+            parsed.type === 'qkeer_v2_health_list' ||
+            parsed.type === 'qkeer_v2_step_list' ||
+            parsed.type === 'qkeer_v2_sleep_list',
+          historyWaitTimeoutMs
+        )
+    );
+  }
 
   return {
     status: failed.length === 0 ? 'success' : ok.length > 0 ? 'partial' : 'failed',

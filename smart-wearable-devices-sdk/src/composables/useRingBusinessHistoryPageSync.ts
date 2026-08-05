@@ -13,6 +13,7 @@ import {
   createUploadSessionId,
   markPendingUploadDataDone,
   markPendingUploadDataFailed,
+  markPendingUploadRawDone,
   stagePendingUploadSession,
   uploadPendingRawFramesInBackground
 } from '@/utils/dataUploadCompensation';
@@ -32,6 +33,7 @@ export interface SyncRingBusinessHistoryPageOptions {
   dataTypes: RwHistoryDataName[];
   readAll?: boolean;
   allowRwDeviceSync?: boolean;
+  allowBackendUpload?: boolean;
   timeoutMs?: number;
 }
 
@@ -79,6 +81,7 @@ const HISTORY_PAGE_UPLOADED_RECORD_KEYS_STORAGE_KEY = 'qkeer:rw-history-page-upl
 const HISTORY_PAGE_UPLOADED_RECORD_KEYS_MAX_COUNT = 2000;
 const HISTORY_PAGE_SLEEP_BACKFILL_SECONDS = 24 * 60 * 60;
 const HISTORY_PAGE_VITAL_BACKFILL_SECONDS = 24 * 60 * 60;
+const HISTORY_PAGE_BACKEND_UPLOAD_ALLOWED_PAGES = new Set(['awareness', 'home']);
 const HISTORY_PAGE_SUBMIT_FAILED_MESSAGE = '历史数据提交失败';
 const HISTORY_PAGE_FALLBACK_READ_FAILED_MESSAGE = '历史数据兜底读取失败';
 const HISTORY_PAGE_EMPTY_FALLBACK_EVENTS = {
@@ -113,6 +116,10 @@ const getHistoryPageSilentRequestConfig = (): HistoryPageSilentRequestConfig => 
   timeout: HISTORY_PAGE_UPLOAD_TIMEOUT_MS,
   custom: { toast: false, catch: true }
 });
+
+const canHistoryPageUploadToBackend = (options: SyncRingBusinessHistoryPageOptions) =>
+  options.allowBackendUpload === true && HISTORY_PAGE_BACKEND_UPLOAD_ALLOWED_PAGES.has(String(options.page || '').trim());
+
 const getHistoryPageRawError = (error: unknown) => {
   if (typeof error === 'string') return error;
   if (error instanceof Error) return error.message;
@@ -580,6 +587,12 @@ const summarizeHistoryPageSubmitResponse = (response: unknown) => {
     summaryMs: summarySource.summaryMs,
     summarySkipped: summarySource.summarySkipped,
     summaryScheduled: summarySource.summaryScheduled,
+    rawStored: summarySource.rawStored,
+    rawStatus: summarySource.rawStatus,
+    rawFrameCount: summarySource.rawFrameCount,
+    rawStoredCount: summarySource.rawStoredCount,
+    rawUpdatedCount: summarySource.rawUpdatedCount,
+    rawSkippedCount: summarySource.rawSkippedCount,
     touchedDates: Array.isArray(summarySource.touchedDates) ? summarySource.touchedDates.slice(0, 4) : summarySource.touchedDates,
     summaryDates: Array.isArray(summarySource.summaryDates) ? summarySource.summaryDates.slice(0, 4) : summarySource.summaryDates
   };
@@ -588,6 +601,22 @@ const summarizeHistoryPageSubmitResponse = (response: unknown) => {
 const getHistoryPageResponseObject = (response: unknown): Record<string, any> | null => {
   if (!response || typeof response !== 'object' || Array.isArray(response)) return null;
   return response as Record<string, any>;
+};
+
+const isHistoryPageRawPersistedBySubmit = (response: unknown, expectedRawFrameCount: number) => {
+  if (expectedRawFrameCount <= 0) return false;
+  const summary = summarizeHistoryPageSubmitResponse(response);
+  const rawStatus = String(summary.rawStatus || '').toLowerCase();
+  const rawFrameCount = Number(summary.rawFrameCount || 0);
+  const rawStoredCount = Number(summary.rawStoredCount || 0);
+  const rawUpdatedCount = Number(summary.rawUpdatedCount || 0);
+  return (
+    summary.rawStored === true ||
+    rawStatus === 'done' ||
+    rawStoredCount > 0 ||
+    rawUpdatedCount > 0 ||
+    rawFrameCount >= expectedRawFrameCount
+  );
 };
 
 const isHistoryPageSubmitResponseSuccessful = (response: unknown) => {
@@ -1000,6 +1029,10 @@ export const useRingBusinessHistoryPageSync = () => {
         throw createHistoryPageSubmitResponseError(submitResponse);
       }
       markPendingUploadDataDone(uploadSession.uploadSessionId, submitResponse);
+      if (isHistoryPageRawPersistedBySubmit(submitResponse, rawFrames.length)) {
+        rawSubmitResponse = submitResponse;
+        markPendingUploadRawDone(uploadSession.uploadSessionId, submitResponse);
+      }
     } catch (uploadError) {
       markPendingUploadDataFailed(uploadSession.uploadSessionId, uploadError);
       const savedPending = writeHistoryPagePendingUpload(
@@ -1033,7 +1066,7 @@ export const useRingBusinessHistoryPageSync = () => {
       }
       return null;
     }
-    if (rawFrames.length > 0) {
+    if (rawFrames.length > 0 && !isHistoryPageRawPersistedBySubmit(submitResponse, rawFrames.length)) {
       rawSubmitResponse = { rawStatus: 'scheduled', uploadSessionId: uploadSession.uploadSessionId, rawFrameCount: rawFrames.length };
       appendRingDiagnosticLog('RW PAGE', 'upload-start', {
         ...details,
@@ -1197,6 +1230,7 @@ export const useRingBusinessHistoryPageSync = () => {
       historyStartDate,
       dataTypes,
       readAll,
+      allowBackendUpload: options.allowBackendUpload === true,
       sinceTimestamp,
       timeoutMs
     };
@@ -1391,33 +1425,35 @@ export const useRingBusinessHistoryPageSync = () => {
 
       const combinedUploadRecords = uploadRecordGroups.flat();
       const combinedSubmitRecords = buildRingHistorySubmitRecords(combinedUploadRecords as any, sinceTimestamp);
-      try {
-        await uploadHistoryPageRecords(
-          combinedUploadRecords,
-          {
-            ...logDetails,
-            uploadMode: 'merged-after-fallback',
-            primaryRawRecordCount: records.length,
-            primarySubmitRecordCount: primarySubmitRecords.length,
-            fallbackUploadSummaries,
-            combinedRawRecordCount: combinedUploadRecords.length,
-            combinedSubmitRecordCount: combinedSubmitRecords.length
-          },
-          sinceTimestamp,
-          uploadRawResults
-        );
-      } catch (uploadError) {
-        appendRingDiagnosticLog('RW PAGE', 'history-page-upload-failed', {
-          ...logDetails,
-          uploadMode: 'merged-after-fallback',
-          backendUploaded: false,
-          backendSubmitted: false,
-          error: formatBleErrorMessage(uploadError, HISTORY_PAGE_SUBMIT_FAILED_MESSAGE),
-          rawError: getHistoryPageRawError(uploadError)
-        });
-        if (!isExpectedBleRuntimeError(uploadError)) {
-          formatBleErrorMessage(uploadError);
+      const uploadDetails = {
+        ...logDetails,
+        uploadMode: 'merged-after-fallback',
+        primaryRawRecordCount: records.length,
+        primarySubmitRecordCount: primarySubmitRecords.length,
+        fallbackUploadSummaries,
+        combinedRawRecordCount: combinedUploadRecords.length,
+        combinedSubmitRecordCount: combinedSubmitRecords.length
+      };
+      if (canHistoryPageUploadToBackend(options)) {
+        try {
+          await uploadHistoryPageRecords(combinedUploadRecords, uploadDetails, sinceTimestamp, uploadRawResults);
+        } catch (uploadError) {
+          appendRingDiagnosticLog('RW PAGE', 'history-page-upload-failed', {
+            ...uploadDetails,
+            backendUploaded: false,
+            backendSubmitted: false,
+            error: formatBleErrorMessage(uploadError, HISTORY_PAGE_SUBMIT_FAILED_MESSAGE),
+            rawError: getHistoryPageRawError(uploadError)
+          });
+          if (!isExpectedBleRuntimeError(uploadError)) {
+            formatBleErrorMessage(uploadError);
+          }
         }
+      } else {
+        appendRingDiagnosticLog('RW PAGE', 'history-page-upload-skip', {
+          ...uploadDetails,
+          reason: 'backend-upload-not-allowed-for-page'
+        });
       }
 
       return latestFallbackResult || result;

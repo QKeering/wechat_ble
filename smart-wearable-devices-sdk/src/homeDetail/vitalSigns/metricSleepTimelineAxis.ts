@@ -17,6 +17,7 @@ export type TimelineAxisTick = {
 
 const DEFAULT_AXIS_POINTS = 24;
 const SLEEP_AXIS_SLOT_MINUTES = 10;
+const DAILY_AXIS_SLOT_MINUTES = 10;
 const DAILY_METRIC_TICK_LABELS = ['00:00', '06:00', '12:00', '18:00', '24:00'];
 
 const parseClockMinutes = (value: unknown): number | null => {
@@ -36,6 +37,25 @@ const formatClockMinutes = (minutes: number) => {
   const hour = Math.floor(normalized / 60);
   const minute = normalized % 60;
   return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+};
+
+const formatDailyClockMinutes = (minutes: number) => {
+  if (Math.round(minutes) >= 1440) return '24:00';
+  return formatClockMinutes(minutes);
+};
+
+const parseDailyAxisEndMinutes = (value?: unknown) => {
+  const text = String(value ?? '').trim();
+  if (text === '24:00') return 1440;
+  const parsed = parseClockMinutes(text);
+  if (parsed == null) return 1440;
+  return Math.max(1, Math.min(1440, parsed));
+};
+
+const parseDailyTickMinutes = (value: unknown) => {
+  const text = String(value ?? '').trim();
+  if (text === '24:00') return 1440;
+  return parseClockMinutes(text) ?? 0;
 };
 
 export const normalizeTimelineLabel = (value: unknown) => {
@@ -60,8 +80,11 @@ const normalizeToRange = (minutes: number, range: { start: number; end: number }
   return minutes;
 };
 
-const getDefaultAxisData = (): TimelineAxisData => {
-  const xData = Array.from({ length: DEFAULT_AXIS_POINTS }, (_, index) => `${index.toString().padStart(2, '0')}:00`);
+const getDefaultAxisData = (dailyAxisEndTime?: string): TimelineAxisData => {
+  const axisEndMinutes = parseDailyAxisEndMinutes(dailyAxisEndTime);
+  const xData = Array.from({ length: DEFAULT_AXIS_POINTS }, (_, index) =>
+    formatDailyClockMinutes((axisEndMinutes * index) / (DEFAULT_AXIS_POINTS - 1))
+  );
   return {
     xData,
     seriesData: [],
@@ -93,10 +116,51 @@ const normalizeMetricPointValue = (value: unknown) => {
   return Number.isFinite(numeric) && numeric !== 0 ? numeric : null;
 };
 
+const buildDailyMetricAxisData = (dataList: Point[], dailyAxisEndTime?: string): TimelineAxisData => {
+  const axisEndMinutes = parseDailyAxisEndMinutes(dailyAxisEndTime);
+  const slotCount = Math.max(2, Math.ceil(axisEndMinutes / DAILY_AXIS_SLOT_MINUTES) + 1);
+  const xData = Array.from({ length: slotCount }, (_, index) =>
+    formatDailyClockMinutes((axisEndMinutes * index) / (slotCount - 1))
+  );
+  const bucketValues: number[][] = Array.from({ length: slotCount }, () => []);
+  let parsedCount = 0;
+
+  dataList.forEach((item) => {
+    const minutes = parseClockMinutes(item.time);
+    if (minutes == null || minutes > axisEndMinutes) return;
+    const value = normalizeMetricPointValue(item.value);
+    if (value == null) return;
+    parsedCount += 1;
+    const index = Math.max(0, Math.min(slotCount - 1, Math.round((minutes / axisEndMinutes) * (slotCount - 1))));
+    bucketValues[index].push(value);
+  });
+
+  if (dataList.length && !parsedCount) {
+    const fallbackXData = dataList.map((item) => normalizeTimelineLabel(item.time));
+    return {
+      xData: fallbackXData,
+      seriesData: dataList.map((item) => normalizeMetricPointValue(item.value)),
+      labelIndexes: getFallbackLabelIndexes(fallbackXData.length),
+      isSleepRangeAxis: false
+    };
+  }
+
+  return {
+    xData,
+    seriesData: bucketValues.map((values) => {
+      if (!values.length) return null;
+      return Math.round(values.reduce((total, value) => total + value, 0) / values.length);
+    }),
+    labelIndexes: getFallbackLabelIndexes(xData.length),
+    isSleepRangeAxis: false
+  };
+};
+
 export const buildMetricSleepTimelineAxis = (
   chartData: Point[] | undefined,
   sleepSegmentObj?: sleepSegment,
-  forceSleepRange = false
+  forceSleepRange = false,
+  dailyAxisEndTime?: string
 ): TimelineAxisData => {
   const dataList = Array.isArray(chartData) ? chartData : [];
   const range = forceSleepRange ? getSleepRange(sleepSegmentObj) : null;
@@ -131,18 +195,9 @@ export const buildMetricSleepTimelineAxis = (
     };
   }
 
-  if (!dataList.length) return getDefaultAxisData();
+  if (!dataList.length) return getDefaultAxisData(dailyAxisEndTime);
 
-  const xData = dataList.map((item) => {
-    const minutes = parseClockMinutes(item.time);
-    return minutes == null ? normalizeTimelineLabel(item.time) : formatClockMinutes(minutes);
-  });
-  return {
-    xData,
-    seriesData: dataList.map((item) => normalizeMetricPointValue(item.value)),
-    labelIndexes: getFallbackLabelIndexes(xData.length),
-    isSleepRangeAxis: false
-  };
+  return buildDailyMetricAxisData(dataList, dailyAxisEndTime);
 };
 
 export const applyMetricSleepRangeAxisStyle = (option: any, _axisData: TimelineAxisData) => {
@@ -178,16 +233,24 @@ const clampPercent = (value: number) => Math.max(0, Math.min(100, value));
 export const getMetricTimelineTicks = (
   chartData: Point[] | undefined,
   sleepSegmentObj?: sleepSegment,
-  forceSleepRange = false
+  forceSleepRange = false,
+  dailyAxisEndTime?: string
 ): TimelineAxisTick[] => {
   if (!forceSleepRange) {
-    const lastIndex = DAILY_METRIC_TICK_LABELS.length - 1;
-    return DAILY_METRIC_TICK_LABELS.map((label, index) => ({
-      key: `daily-${label}`,
-      label,
-      left: lastIndex <= 0 ? 0 : clampPercent((index / lastIndex) * 100),
+    const axisEndMinutes = parseDailyAxisEndMinutes(dailyAxisEndTime);
+    const labels = DAILY_METRIC_TICK_LABELS
+      .map((label) => ({ label, minutes: parseDailyTickMinutes(label) }))
+      .filter((item) => item.minutes <= axisEndMinutes);
+    const endLabel = formatDailyClockMinutes(axisEndMinutes);
+    if (!labels.some((item) => item.label === endLabel)) {
+      labels.push({ label: endLabel, minutes: axisEndMinutes });
+    }
+    return labels.map((item, index, list) => ({
+      key: `daily-${item.label}`,
+      label: item.label,
+      left: clampPercent((item.minutes / axisEndMinutes) * 100),
       isFirst: index === 0,
-      isLast: index === lastIndex
+      isLast: index === list.length - 1
     }));
   }
 

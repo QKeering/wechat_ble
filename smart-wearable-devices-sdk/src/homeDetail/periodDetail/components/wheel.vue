@@ -8,29 +8,27 @@
         disable-scroll
         :style="{ width: layoutSizePx + 'px', height: layoutSizePx + 'px' }"
       />
-      <view class="cycle-overlay" :class="cardPhaseClass">
-        <view class="cycle-center">
-          <view v-if="cycleDay > 0" class="cycle-content">
+      <cover-view class="cycle-overlay" :class="cardPhaseClass">
+        <cover-view class="cycle-center">
+          <cover-view class="cycle-content">
             <template v-if="cycleDay > 0">
-              <view class="cycle-phase">{{ phaseLabel }}</view>
-              <view class="cycle-day">第{{ currentDayNow }}天</view>
+              <cover-view class="cycle-phase">{{ phaseLabel }}</cover-view>
+              <cover-view class="cycle-day">第{{ currentDayNow }}天</cover-view>
             </template>
-            <template v-if="cycleDay <= 0">
-              <view class="cycle-phase">暂无数据</view>
+            <template v-else>
+              <cover-view class="cycle-phase">暂无数据</cover-view>
             </template>
-          </view>
-          <view
+          </cover-view>
+          <cover-view
             v-if="cycleDay > 0"
             class="cycle-edit"
-            role="button"
-            aria-label="编辑"
             hover-class="cycle-edit--hover"
             @tap.stop="onEdit"
           >
-            <uv-icon name="edit-pen" color="#ffffff" size="22" />
-          </view>
-        </view>
-      </view>
+            <cover-view class="cycle-edit-icon">✎</cover-view>
+          </cover-view>
+        </cover-view>
+      </cover-view>
     </view>
 
     <view class="cycle-legend">
@@ -96,7 +94,7 @@ const props = withDefaults(
     phaseLengths?: Partial<Record<PhaseKey, number>>;
   }>(),
   {
-    day: 1,
+    day: 0,
     phaseLengths: () => ({})
   }
 );
@@ -125,12 +123,18 @@ function pathCapPx(): number {
 const canvasCtx = ref<CanvasRenderingContext2D | null>(null);
 const canvasNode = ref<any>(null);
 
-const cycleDay = ref(Math.max(1, props.day));
+function normalizeCycleDay(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  return Math.floor(numeric);
+}
+
+const cycleDay = ref(normalizeCycleDay(props.day));
 
 watch(
   () => props.day,
   (v) => {
-    cycleDay.value = Math.max(1, v);
+    cycleDay.value = normalizeCycleDay(v);
   }
 );
 
@@ -309,6 +313,7 @@ function drawAll() {
 
     drawDroplet(ctx, dotCx, dotCy, dotR * 0.7, accent);
   }
+
 }
 
 function syncFromCycleDay() {
@@ -521,6 +526,13 @@ onUnmounted(() => {
   .phase-luteal & {
     box-shadow: 0 2px 8px rgba(255, 152, 0, 0.35);
   }
+}
+
+.cycle-edit-icon {
+  color: #ffffff;
+  font-size: 38rpx;
+  line-height: 80rpx;
+  text-align: center;
 }
 
 .cycle-edit--hover {

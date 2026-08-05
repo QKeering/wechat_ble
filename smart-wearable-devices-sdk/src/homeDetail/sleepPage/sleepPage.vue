@@ -703,6 +703,14 @@ const selectedDateInfo = ref({
 
 // 当前选中的日期索引（0:前天，1:昨天，2:今天）
 const selectedDayIndex = ref(2);
+const getSelectedSleepPageDate = () => {
+  if (selectedDayIndex.value === 3) {
+    const selected = new Date(`${selectedDateInfo.value.year}-${selectedDateInfo.value.monthDay}`);
+    if (!Number.isNaN(selected.getTime())) return selected;
+  }
+  return dateList.value[selectedDayIndex.value]?.date || new Date();
+};
+const selectedSleepPageDate = computed(() => getSelectedSleepPageDate());
 const getCurrentHistoryDate = (currentDate = new Date()) => formatLocalDate(currentDate);
 const querySleepPage = <T>(endpoint: string, currentDate: Date, query: () => Promise<T>) =>
   ringBleBridge.queryHistoryPage({
@@ -1211,7 +1219,7 @@ defineExpose({
         <DetailInfo id="heart_rate_variability" v-model:isPopupActive="isPopupActive" style="margin-left: 6rpx"></DetailInfo>
       </heartRateVariability>
       <temperature v-else-if="cardId === 'skinTemperature'" :temperatureData="displayTemperatureObj" :isHeartTate="false" />
-      <sleepNap v-else-if="cardId === 'napRecord'" @refresh="getSleepNapList" :sleepNapList="sleepNapList" />
+      <sleepNap v-else-if="cardId === 'napRecord'" @refresh="getSleepNapList" :sleepNapList="sleepNapList" :currentDate="selectedSleepPageDate" />
       <eventSummary v-else-if="cardId === 'activitySummary'" :sleepSummaryObj="sleepSummaryObj" />
     </view>
     <view @tap="jumpEdit" class="bg-white r-50 flex ai-center jc-center p-30">

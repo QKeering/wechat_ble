@@ -165,6 +165,66 @@ const normalizeVitalMetricPoint = (item: any, index: number, valueKeys: string[]
     value: value ?? item.value ?? ''
   };
 };
+const VITAL_DAY_MINUTES = 24 * 60;
+const parseVitalClockMinutes = (value: unknown): number | null => {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const timestamp = value < 1_000_000_000_000 ? value * 1000 : value;
+    const date = new Date(timestamp);
+    if (!Number.isNaN(date.getTime())) return date.getHours() * 60 + date.getMinutes();
+  }
+  const text = String(value).trim();
+  if (/^\d+$/.test(text) && text.length >= 10) {
+    const numeric = Number(text);
+    const timestamp = numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+    const date = new Date(timestamp);
+    if (!Number.isNaN(date.getTime())) return date.getHours() * 60 + date.getMinutes();
+  }
+  const match = text.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const second = Number(match[3] || 0);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return null;
+  }
+  return hour * 60 + minute + Math.floor(second / 60);
+};
+const formatVitalAxisClock = (minutes: number) => {
+  if (minutes >= VITAL_DAY_MINUTES) return '24:00';
+  const normalized = Math.max(0, Math.min(VITAL_DAY_MINUTES - 1, Math.round(minutes)));
+  const hour = Math.floor(normalized / 60);
+  const minute = normalized % 60;
+  return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+};
+const getVitalAxisEndMinutes = (isoDate: string) => {
+  if (isoDate !== formatLocalDate(new Date())) return VITAL_DAY_MINUTES;
+  const now = new Date();
+  return Math.max(1, now.getHours() * 60 + now.getMinutes());
+};
+const applyVitalMetricTimeWindow = (detail: heartRateDetail, isoDate: string) => {
+  const endMinutes = getVitalAxisEndMinutes(isoDate);
+  const chartData = Array.isArray(detail.chartData)
+    ? detail.chartData.filter((point: Point) => {
+        if (endMinutes >= VITAL_DAY_MINUTES) return true;
+        const minutes = parseVitalClockMinutes(point?.time);
+        return minutes == null || minutes <= endMinutes;
+      })
+    : [];
+  return {
+    ...detail,
+    chartData,
+    axisStartTime: '00:00',
+    axisEndTime: '24:00'
+  } as heartRateDetail;
+};
+const withSelectedVitalAxisMeta = (detail: heartRateDetail) => {
+  return {
+    ...detail,
+    axisStartTime: detail.axisStartTime || '00:00',
+    axisEndTime: detail.axisEndTime || '24:00'
+  } as heartRateDetail;
+};
 const normalizeVitalMetricDetail = (response: unknown, valueKeys: string[]) => {
   const payload = getVitalMetricPayloadObject(response) || {};
   const chartData = getVitalMetricChartArray(response).map((item, index) => normalizeVitalMetricPoint(item, index, valueKeys));
@@ -193,10 +253,10 @@ const heartRateDisplayObj = computed(() => {
       userStore.latestMetrics?.heartRate
     )
   );
-  return {
+  return withSelectedVitalAxisMeta({
     ...data,
     avgValue: formatIntegerMetricValue((data as any)?.avgValue)
-  } as heartRateDetail;
+  } as heartRateDetail);
 });
 const oxyGenDisplayObj = computed(() => {
   const data = withMetricFallback(
@@ -211,10 +271,10 @@ const oxyGenDisplayObj = computed(() => {
       avgValueRange: (oxyGenObj.value as any)?.avgValueRange || '95-100'
     }
   );
-  return {
+  return withSelectedVitalAxisMeta({
     ...data,
     avgValue: formatIntegerMetricValue((data as any)?.avgValue)
-  } as heartRateDetail;
+  } as heartRateDetail);
 });
 const hrvDisplayObj = computed(() => {
   const data = withMetricFallback(
@@ -229,10 +289,10 @@ const hrvDisplayObj = computed(() => {
       avgValueRange: (hrvObj.value as any)?.avgValueRange || '--'
     }
   );
-  return {
+  return withSelectedVitalAxisMeta({
     ...data,
     avgValue: formatIntegerMetricValue((data as any)?.avgValue)
-  } as heartRateDetail;
+  } as heartRateDetail);
 });
 const temperatureDisplayObj = computed(() => {
   const metric = getMetricNumber(
@@ -249,15 +309,15 @@ const temperatureDisplayObj = computed(() => {
   const baseSource = getMetricNumber((temperatureObj.value as any)?.baseValue)
     ? (temperatureObj.value as any)?.baseValue
     : metric;
-  if (!avgSource && !baseSource) return temperatureObj.value;
-  return {
+  if (!avgSource && !baseSource) return withSelectedVitalAxisMeta(temperatureObj.value);
+  return withSelectedVitalAxisMeta({
     ...temperatureObj.value,
     avgValue: formatTemperatureValue(avgSource),
     baseValue: formatTemperatureValue(baseSource),
     diffValue: getMetricNumber((temperatureObj.value as any)?.diffValue)
       ? formatTemperatureValue((temperatureObj.value as any)?.diffValue)
       : '0.0°C'
-  } as heartRateDetail;
+  } as heartRateDetail);
 });
 const isSelectedToday = computed(() => selectedHistoryDate.value === formatLocalDate(new Date()));
 const bloodSugarDisplay = computed(() =>
@@ -508,7 +568,10 @@ const getRatDetail = async (currentDate = new Date()) => {
     offset
   }, requestConfig));
   if (res) {
-    const normalized = normalizeVitalMetricDetail(res, ['heartRate', 'heart_rate', 'heartRateValue', 'heart_rate_value', 'bpm']);
+    const normalized = applyVitalMetricTimeWindow(
+      normalizeVitalMetricDetail(res, ['heartRate', 'heart_rate', 'heartRateValue', 'heart_rate_value', 'bpm']),
+      isoDate
+    );
     appendVitalSignsPageLog('vital-signs-query-result', {
       endpoint: 'heart-rate-detail',
       date: isoDate,
@@ -539,7 +602,10 @@ const getHrvData = async (currentDate = new Date()) => {
     offset
   }, requestConfig));
   if (res) {
-    const normalized = normalizeVitalMetricDetail(res, ['hrv', 'hrvValue', 'hrv_value', 'heartRateVariability', 'heart_rate_variability']);
+    const normalized = applyVitalMetricTimeWindow(
+      normalizeVitalMetricDetail(res, ['hrv', 'hrvValue', 'hrv_value', 'heartRateVariability', 'heart_rate_variability']),
+      isoDate
+    );
     appendVitalSignsPageLog('vital-signs-query-result', {
       endpoint: 'hrv-detail',
       date: isoDate,
@@ -570,7 +636,10 @@ const getOxyGenDetail = async (currentDate = new Date()) => {
     offset
   }, requestConfig));
   if (res) {
-    const normalized = normalizeVitalMetricDetail(res, ['bloodOxygen', 'blood_oxygen', 'bloodOxygenValue', 'blood_oxygen_value', 'oxygen', 'spo2', 'SpO2']);
+    const normalized = applyVitalMetricTimeWindow(
+      normalizeVitalMetricDetail(res, ['bloodOxygen', 'blood_oxygen', 'bloodOxygenValue', 'blood_oxygen_value', 'oxygen', 'spo2', 'SpO2']),
+      isoDate
+    );
     appendVitalSignsPageLog('vital-signs-query-result', {
       endpoint: 'blood-oxygen-detail',
       date: isoDate,
@@ -610,7 +679,10 @@ const getTemperatureDetail = async (currentDate = new Date()) => {
     offset
   }, requestConfig));
   if (res) {
-    const normalized = normalizeVitalMetricDetail(res, ['temperature', 'skinTemperature', 'bodyTemperature', 'temperatureValue', 'skin_temperature']);
+    const normalized = applyVitalMetricTimeWindow(
+      normalizeVitalMetricDetail(res, ['temperature', 'skinTemperature', 'bodyTemperature', 'temperatureValue', 'skin_temperature']),
+      isoDate
+    );
     appendVitalSignsPageLog('vital-signs-query-result', {
       endpoint: 'temperature-detail',
       date: isoDate,

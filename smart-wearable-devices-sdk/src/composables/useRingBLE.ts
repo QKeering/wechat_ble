@@ -45,6 +45,7 @@ type CompatRwHistoryDataInput = CompatRwHistoryDataName | CompatRwHistoryDataNam
 interface CompatReadLocalDataOptions {
   timeoutMs?: number;
   silentUploadStatus?: boolean;
+  skipUpload?: boolean;
 }
 const DEFAULT_COMPAT_REFRESH_OPTIONS: CompatRefreshOptions = {
   includeDeviceTime: false,
@@ -251,7 +252,8 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       ...(normalizedDataType ? { dataType: normalizedDataType } : {}),
       ...(normalizedDataTypes?.length ? { dataTypes: normalizedDataTypes } : {}),
       ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
-      ...(readOptions.silentUploadStatus === true ? { silentUploadStatus: true } : {})
+      ...(readOptions.silentUploadStatus === true ? { silentUploadStatus: true } : {}),
+      ...(readOptions.skipUpload === true ? { skipUpload: true } : {})
     };
     return runWithReady(() => {
       const task = () => sdk.syncHistory(historyOptions);
@@ -438,7 +440,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     return sourceDevice;
   };
 
-  const findRwCompatScanCandidate = (deviceId: string, uniMacId = '', deviceName = '') => {
+  const findCompatScanCandidate = (deviceId: string, uniMacId = '', deviceName = '', protocolHint = '') => {
     const identityMatch = findScannedDevice(deviceId, uniMacId);
     if (identityMatch) return identityMatch;
 
@@ -447,13 +449,18 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
 
     const nameMatches = sdk.devices.value.filter((device) => {
       const name = `${device.displayName || device.deviceName || device.name || device.localName || ''}`.trim().toUpperCase();
-      return name === targetName && (device.protocol === 'rw' || resolveRingProtocol(device) === 'rw');
+      if (name !== targetName) return false;
+      if (!protocolHint) return true;
+      return device.protocol === protocolHint || resolveRingProtocol(device) === protocolHint;
     });
     return nameMatches.length === 1 ? nameMatches[0] : undefined;
   };
 
-  const waitForRwCompatScanCandidate = async (deviceId: string, uniMacId = '', deviceName = '') => {
-    const existing = findRwCompatScanCandidate(deviceId, uniMacId, deviceName);
+  const findRwCompatScanCandidate = (deviceId: string, uniMacId = '', deviceName = '') =>
+    findCompatScanCandidate(deviceId, uniMacId, deviceName, 'rw');
+
+  const waitForCompatScanCandidate = async (deviceId: string, uniMacId = '', deviceName = '', protocolHint = '') => {
+    const existing = findCompatScanCandidate(deviceId, uniMacId, deviceName, protocolHint);
     if (existing?.deviceId) return existing;
 
     const scanTimeoutMs = options.rwCompatScanTimeoutMs ?? RW_COMPAT_SCAN_TIMEOUT_MS;
@@ -470,16 +477,20 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     const startedAt = Date.now();
     try {
       while (Date.now() - startedAt < scanTimeoutMs) {
-        const candidate = findRwCompatScanCandidate(deviceId, uniMacId, deviceName);
+        const candidate = findCompatScanCandidate(deviceId, uniMacId, deviceName, protocolHint);
         if (candidate?.deviceId) return candidate;
         await new Promise((resolve) => setTimeout(resolve, 150));
       }
-      return findRwCompatScanCandidate(deviceId, uniMacId, deviceName);
+      return findCompatScanCandidate(deviceId, uniMacId, deviceName, protocolHint);
     } finally {
       if (!wasScanning) {
         await sdk.stopScan().catch(() => undefined);
       }
     }
+  };
+
+  const waitForRwCompatScanCandidate = async (deviceId: string, uniMacId = '', deviceName = '') => {
+    return waitForCompatScanCandidate(deviceId, uniMacId, deviceName, 'rw');
   };
 
   const isLikelyRwStableIdentity = (value = '') => isColonSeparatedBleMac(value);
@@ -508,14 +519,20 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     };
     const protocol = protocolSource.protocol || resolveRingProtocol(protocolSource);
     const shouldResolveRwStableId = protocol === 'rw' && !scannedDevice?.deviceId && isLikelyRwStableIdentity(requestedId);
-    if (protocol === 'rw' && (fromScan || shouldResolveRwStableId) && !scannedDevice?.deviceId) {
-      scannedDevice = await waitForRwCompatScanCandidate(requestedId, preferredLookupId, preferredName);
+    if ((fromScan || shouldResolveRwStableId) && !scannedDevice?.deviceId) {
+      scannedDevice =
+        protocol === 'rw'
+          ? await waitForRwCompatScanCandidate(requestedId, preferredLookupId, preferredName)
+          : await waitForCompatScanCandidate(requestedId, preferredLookupId, preferredName, protocol);
       sourceDevice = scannedDevice || sourceDevice;
     }
     const deviceId = sourceDevice?.deviceId || (typeof input === 'string' ? requestedId : inputDevice?.deviceId || requestedId);
     const connectionMac = getRwStableCompatIdentity(sourceDevice, stableSourceMac || preferredStableMac);
     if (protocol === 'rw' && shouldResolveRwStableId && !scannedDevice?.deviceId) {
       throw new Error('未找到RW设备的蓝牙连接ID，请重新搜索后连接');
+    }
+    if (fromScan && !scannedDevice?.deviceId && isColonSeparatedBleMac(requestedId)) {
+      throw new Error('未找到二维码对应的蓝牙设备，请靠近戒指后重试');
     }
     const connectSourceDevice =
       protocol === 'rw'

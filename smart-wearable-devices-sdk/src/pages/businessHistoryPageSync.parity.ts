@@ -25,9 +25,13 @@ const expectSourceCompact = (label: string, source: string, expected: string) =>
 const bridge = readSource('src/composables/useRingBusinessHistoryPageSync.ts');
 
 expectSource('business history bridge', bridge, 'allowRwDeviceSync?: boolean');
+expectSource('business history bridge', bridge, 'allowBackendUpload?: boolean');
 expectSource('business history bridge', bridge, 'timeoutMs?: number');
 expectSource('business history bridge', bridge, 'RW_BUSINESS_HISTORY_PAGE_TIMEOUT_MS');
 expectSource('business history bridge', bridge, 'HISTORY_PAGE_UPLOAD_TIMEOUT_MS');
+expectSource('business history bridge', bridge, 'HISTORY_PAGE_BACKEND_UPLOAD_ALLOWED_PAGES');
+expectSource('business history bridge', bridge, 'canHistoryPageUploadToBackend(options)');
+expectSource('business history bridge', bridge, 'backend-upload-not-allowed-for-page');
 expectSource('business history bridge', bridge, 'export interface HistoryPageSilentRequestConfig');
 expectSource('business history bridge', bridge, 'query: (requestConfig: HistoryPageSilentRequestConfig) => Promise<T>;');
 expectSource('business history bridge', bridge, 'custom: { toast: false, catch: true }');
@@ -73,7 +77,9 @@ expectSource('business history bridge', bridge, 'writeHistoryPagePendingUpload')
 expectSource('business history bridge', bridge, 'mergeHistoryPageSubmitRecords');
 expectSource('business history bridge', bridge, 'pendingUploadSaved');
 expectSource('business history bridge', bridge, 'currentSubmitRecordCount');
-expectSource('business history bridge', bridge, 'submitData({ deviceMac, dataList: submitPreviewRecords }');
+expectSource('business history bridge', bridge, 'submitData({');
+expectSource('business history bridge', bridge, 'dataList: submitPreviewRecords');
+expectSource('business history bridge', bridge, 'buildUploadSyncMeta(uploadSession)');
 expectSource('business history bridge', bridge, 'timeout: HISTORY_PAGE_UPLOAD_TIMEOUT_MS');
 expectSource('business history bridge', bridge, 'uploadTimeoutMs: HISTORY_PAGE_UPLOAD_TIMEOUT_MS');
 expectSource('business history bridge', bridge, 'rawError: getHistoryPageRawError');
@@ -170,6 +176,7 @@ for (const dataType of ['lastData', 'sleepData', 'activity', 'heartRate', 'blood
   expectSource('awareness page RW home sync', awarenessPage, `'${dataType}'`);
 }
 expectSourceCompact('awareness page RW home sync', awarenessPage, 'allowRwDeviceSync: true');
+expectSourceCompact('awareness page RW home sync', awarenessPage, 'allowBackendUpload: true');
 expectSource('awareness page RW home sync', awarenessPage, 'business-sync-background-start');
 expectSource('awareness page RW home sync', awarenessPage, 'business-sync-background-result');
 expectSource('awareness page RW home sync', awarenessPage, 'business-sync-background-failed');

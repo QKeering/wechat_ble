@@ -97,22 +97,66 @@ type LegacyGirlHealthSubmitParams = Partial<GirlHealthSubmitParams> & {
   periodCycle?: number | string;
   periodRuntime?: number | string;
   lastPeriodTime?: string | string[];
+  lastPeriodTimePoint?: string;
   isRuleType?: string;
   otherUnhealth?: string;
 };
 
-const normalizeGirlHealthSubmitParams = (params: LegacyGirlHealthSubmitParams): GirlHealthSubmitParams => {
+type GirlHealthSubmitCompatParams = GirlHealthSubmitParams & {
+  birthDay: string;
+  periodCycle: number;
+  periodRuntime: number;
+  lastPeriodTime: string[];
+  lastPeriodTimePoint: string;
+  isRuleType: string;
+  otherUnhealth: string;
+};
+
+const normalizeGirlHealthDateList = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  const text = String(value || '').trim();
+  if (!text) return [];
+  if (text.startsWith('[') && text.endsWith(']')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return normalizeGirlHealthDateList(parsed);
+    } catch {
+      // 兼容非标准数组字符串，继续走分隔符解析。
+    }
+  }
+  return text
+    .split(/[,，\s]+/)
+    .map((item) => item.trim().replace(/^['"]|['"]$/g, ''))
+    .filter(Boolean);
+};
+
+const normalizeGirlHealthSubmitParams = (params: LegacyGirlHealthSubmitParams): GirlHealthSubmitCompatParams => {
   const lastPeriodTime = params.lastPeriodTime;
-  const legacyLastDate = Array.isArray(lastPeriodTime)
-    ? String(lastPeriodTime[0] || '')
-    : String(lastPeriodTime || '').split(',').map((item) => item.trim()).filter(Boolean)[0] || '';
+  const legacyDateList = normalizeGirlHealthDateList(lastPeriodTime);
+  const lastMenstruationDate = params.lastMenstruationDate || legacyDateList[0] || '';
+  const periodDateList = legacyDateList.length ? legacyDateList : normalizeGirlHealthDateList(lastMenstruationDate);
+  const birthday = params.birthday || params.birthDay || '';
+  const cycleDay = Number(params.cycleDay ?? params.periodCycle ?? 0);
+  const menstruationDay = Number(params.menstruationDay ?? params.periodRuntime ?? 0);
+  const cycleRegularity = params.cycleRegularity || params.isRuleType || '';
+  const healthConditions = params.healthConditions || params.otherUnhealth || '';
   return {
-    birthday: params.birthday || params.birthDay || '',
-    cycleDay: Number(params.cycleDay ?? params.periodCycle ?? 0),
-    menstruationDay: Number(params.menstruationDay ?? params.periodRuntime ?? 0),
-    lastMenstruationDate: params.lastMenstruationDate || legacyLastDate,
-    cycleRegularity: params.cycleRegularity || params.isRuleType || '',
-    healthConditions: params.healthConditions || params.otherUnhealth || '',
+    birthday,
+    cycleDay,
+    menstruationDay,
+    lastMenstruationDate,
+    cycleRegularity,
+    healthConditions,
+    // 兼容当前 FastAPI/旧 Java 后端表字段：user_girl_health 仍落 birth_day、period_cycle、period_runtime、last_period_time。
+    birthDay: birthday,
+    periodCycle: cycleDay,
+    periodRuntime: menstruationDay,
+    lastPeriodTime: periodDateList,
+    lastPeriodTimePoint: lastMenstruationDate,
+    isRuleType: cycleRegularity,
+    otherUnhealth: healthConditions,
     userId: params.userId,
     id: params.id
   };

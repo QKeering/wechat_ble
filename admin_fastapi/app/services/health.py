@@ -1679,6 +1679,24 @@ def upsert_girl_health(db: Session, user_id: int, payload: dict[str, Any], creat
     ensure_girl_health_table(db)
     table = get_table("user_girl_health")
     payload = dict(payload)
+    # Mini Program has used both frontend-facing field names and legacy DB/API names.
+    # Normalize them here before clean_payload() so current and older app packages
+    # write the same user_girl_health columns.
+    if not payload.get("birthDay") and payload.get("birthday"):
+        payload["birthDay"] = payload.get("birthday")
+    if not payload.get("periodCycle") and payload.get("cycleDay") is not None:
+        payload["periodCycle"] = payload.get("cycleDay")
+    if not payload.get("periodRuntime") and payload.get("menstruationDay") is not None:
+        payload["periodRuntime"] = payload.get("menstruationDay")
+    if not payload.get("isRuleType") and payload.get("cycleRegularity") is not None:
+        payload["isRuleType"] = payload.get("cycleRegularity")
+    if not payload.get("otherUnhealth") and payload.get("healthConditions") is not None:
+        payload["otherUnhealth"] = payload.get("healthConditions")
+    last_menstruation_date = payload.get("lastMenstruationDate")
+    if last_menstruation_date:
+        payload.setdefault("lastPeriodTimePoint", last_menstruation_date)
+        if not payload.get("lastPeriodTime"):
+            payload["lastPeriodTime"] = [last_menstruation_date]
     if isinstance(payload.get("lastPeriodTime"), list):
         payload["lastPeriodTime"] = ",".join(str(item) for item in payload["lastPeriodTime"])
     values = clean_payload(table, payload)

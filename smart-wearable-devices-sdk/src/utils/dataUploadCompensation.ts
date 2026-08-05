@@ -417,6 +417,7 @@ export const buildUploadSyncMeta = (session: PendingUploadSession) => ({
   protocol: session.protocol,
   rawLocalStatus: session.rawLocalStatus,
   rawFrameCount: session.rawFrames.length,
+  ...(session.rawFrames.length > 0 ? { rawFrames: session.rawFrames } : {}),
   deviceBlockRefs: session.deviceBlockRefs,
   uploadStatus: {
     deviceReadDone: true,

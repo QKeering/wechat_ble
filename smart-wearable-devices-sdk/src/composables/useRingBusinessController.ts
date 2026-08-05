@@ -712,34 +712,71 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     });
   };
 
+  const getBoundBusinessDevice = () => (ble.ringStore.boundDevice as RingDeviceInfo | null | undefined) || null;
+
+  const disconnectUnexpectedReadyDevice = async (reason: string, currentDevice: RingDeviceInfo, expectedDevice?: RingDeviceInfo | null) => {
+    appendRingDiagnosticLog('RW FLOW', 'ready-device-identity-mismatch', {
+      reason,
+      current: summarizeBusinessRingDeviceIdentity(currentDevice),
+      expected: summarizeBusinessRingDeviceIdentity(expectedDevice)
+    });
+    await ble.cancelPendingConnection(currentDevice.deviceId || '').catch(() => undefined);
+    await ble.disconnect().catch(() => undefined);
+    return false;
+  };
+
+  const ensureReadyDeviceMatchesBusinessIdentity = async (reason: string, expectedDevice?: RingDeviceInfo | null) => {
+    const currentDevice = ble.deviceInfo.value;
+    if (!hasBusinessCommunicationFields(currentDevice)) return false;
+
+    const boundDevice = getBoundBusinessDevice();
+    const strictExpectedDevice = expectedDevice || boundDevice;
+    if (strictExpectedDevice && !isSameBusinessRingDevice(currentDevice, strictExpectedDevice)) {
+      return disconnectUnexpectedReadyDevice(reason, currentDevice, strictExpectedDevice);
+    }
+
+    if (boundDevice && expectedDevice && !isSameBusinessRingDevice(currentDevice, boundDevice)) {
+      return disconnectUnexpectedReadyDevice(`${reason}-bound`, currentDevice, boundDevice);
+    }
+
+    return true;
+  };
+
   const restoreLastBusinessDevice = async (restoreOptions: RestoreLastBusinessDeviceOptions = {}) => {
     if (restorePromise) return restorePromise;
     const refreshAfterRestore = restoreOptions.refreshAfterRestore ?? true;
 
     if (isReady.value) {
-      const diagnosticLock = getRwDiagnosticCommandLock();
-      if (!diagnosticLock) isAutoRefreshPaused = false;
-      await syncRwDeviceTimeAfterReady('ready', {
-        reason: 'restore-already-ready'
-      });
-      if (refreshAfterRestore && shouldAutoRefresh() && ble.deviceInfo.value.protocol !== 'rw') {
-        await refreshBusinessDataSafely();
-      } else if (!refreshAfterRestore && ble.deviceInfo.value.protocol === 'rw') {
-        schedulePostConnectDeviceInfoRefresh('restore-already-ready-background', {
+      const readyMatchesBound = await ensureReadyDeviceMatchesBusinessIdentity('restore-already-ready');
+      if (!readyMatchesBound) {
+        appendRingDiagnosticLog('RW FLOW', 'restore-ready-mismatch-retry', {
           refreshAfterRestore
         });
-      }
-      if (!diagnosticLock && !isAutoRefreshPaused) {
-        scheduleRwMaintainRefresh();
       } else {
-        appendRingDiagnosticLog('RW FLOW', 'restore-auto-refresh-held', {
-          reason: diagnosticLock ? 'rw-diagnostic-command-lock' : 'auto-refresh-paused',
-          lock: diagnosticLock || undefined,
-          refreshAfterRestore,
-          deviceId: ble.deviceInfo.value.deviceId
+        const diagnosticLock = getRwDiagnosticCommandLock();
+        if (!diagnosticLock) isAutoRefreshPaused = false;
+        await syncRwDeviceTimeAfterReady('ready', {
+          reason: 'restore-already-ready'
         });
+        if (refreshAfterRestore && shouldAutoRefresh() && ble.deviceInfo.value.protocol !== 'rw') {
+          await refreshBusinessDataSafely();
+        } else if (!refreshAfterRestore && ble.deviceInfo.value.protocol === 'rw') {
+          schedulePostConnectDeviceInfoRefresh('restore-already-ready-background', {
+            refreshAfterRestore
+          });
+        }
+        if (!diagnosticLock && !isAutoRefreshPaused) {
+          scheduleRwMaintainRefresh();
+        } else {
+          appendRingDiagnosticLog('RW FLOW', 'restore-auto-refresh-held', {
+            reason: diagnosticLock ? 'rw-diagnostic-command-lock' : 'auto-refresh-paused',
+            lock: diagnosticLock || undefined,
+            refreshAfterRestore,
+            deviceId: ble.deviceInfo.value.deviceId
+          });
+        }
+        return true;
       }
-      return true;
     }
 
     isRestoringDevice.value = true;
@@ -776,6 +813,18 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
           appendRingDiagnosticLog('RW FLOW', 'restore-not-ready', {
             timeoutMs,
             deviceInfo: ble.deviceInfo.value
+          });
+          return false;
+        }
+        const readyMatchesBound = await ensureReadyDeviceMatchesBusinessIdentity('restore-success');
+        if (!readyMatchesBound) {
+          appendRingDiagnosticLog('RW FLOW', 'restore-result', {
+            success: false,
+            reason: 'ready-device-identity-mismatch',
+            timeoutMs,
+            currentDeviceId: ble.deviceInfo.value.deviceId,
+            boundDeviceId: boundDevice?.deviceId,
+            boundIdentity: boundDevice ? getRingDeviceStableIdentity(boundDevice) : ''
           });
           return false;
         }
@@ -1242,22 +1291,29 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     const connectTimeoutMs = getConnectTimeoutMs(protocol);
 
     if (isSameBusinessRingDevice(ble.deviceInfo.value, device) && isReady.value) {
-      isAutoRefreshPaused = false;
-      await syncRwDeviceTimeAfterReady('ready', {
-        reason: 'connect-same-device-ready',
-        stableIdentity,
-        deviceName
-      });
-      if (connectOptions.refreshAfterConnect ?? true) {
-        await refreshBusinessDataSafely(getPostConnectRefreshOptions());
+      const readyMatchesTarget = await ensureReadyDeviceMatchesBusinessIdentity('connect-same-device-ready', device);
+      if (!readyMatchesTarget) {
+        appendRingDiagnosticLog('RW FLOW', 'connect-ready-mismatch-retry', {
+          target: summarizeBusinessRingDeviceIdentity(device)
+        });
       } else {
-        schedulePostConnectDeviceInfoRefresh('connect-same-device-ready-background', {
+        isAutoRefreshPaused = false;
+        await syncRwDeviceTimeAfterReady('ready', {
+          reason: 'connect-same-device-ready',
           stableIdentity,
           deviceName
         });
+        if (connectOptions.refreshAfterConnect ?? true) {
+          await refreshBusinessDataSafely(getPostConnectRefreshOptions());
+        } else {
+          schedulePostConnectDeviceInfoRefresh('connect-same-device-ready-background', {
+            stableIdentity,
+            deviceName
+          });
+        }
+        scheduleRwMaintainRefresh();
+        return metrics.value;
       }
-      scheduleRwMaintainRefresh();
-      return metrics.value;
     }
 
     if (!platformDeviceId) {
@@ -1315,6 +1371,15 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         deviceInfo: ble.deviceInfo.value
       });
       throw new Error('\u8bbe\u5907\u901a\u4fe1\u672a\u5c31\u7eea\uff0c\u8bf7\u91cd\u65b0\u8fde\u63a5');
+    }
+
+    const readyMatchesTarget = await ensureReadyDeviceMatchesBusinessIdentity('connect-ready', device);
+    if (!readyMatchesTarget) {
+      appendRingDiagnosticLog('RW FLOW', 'connect-ready-identity-mismatch', {
+        target: summarizeBusinessRingDeviceIdentity(device),
+        current: summarizeBusinessRingDeviceIdentity(ble.deviceInfo.value)
+      });
+      throw new Error('\u8fde\u63a5\u5230\u975e\u7ed1\u5b9a\u8bbe\u5907\uff0c\u8bf7\u91cd\u65b0\u641c\u7d22');
     }
 
     appendRingDiagnosticLog('RW FLOW', 'connect-ready', {
@@ -1540,7 +1605,16 @@ export function getRingBusinessDeviceKey(device: RingDeviceInfo | Record<string,
 }
 
 export function getRingBusinessPlatformDeviceId(device: RingDeviceInfo | Record<string, any>) {
-  return `${device.deviceId || ''}`.trim();
+  const explicitPlatformDeviceId = `${device.platformDeviceId || device.wxDeviceId || device.bleDeviceId || device.bluetoothDeviceId || ''}`.trim();
+  if (explicitPlatformDeviceId) return explicitPlatformDeviceId;
+
+  const rawDeviceId = `${device.deviceId || ''}`.trim();
+  const protocol = resolveRingProtocol(device as RingDeviceInfo);
+  if (protocol === 'rw' && isColonSeparatedBleMac(rawDeviceId) && typeof device.lastSeenAt !== 'number' && !device.fromScan) {
+    return '';
+  }
+
+  return rawDeviceId;
 }
 
 function isBusinessRingDevice(device: RingDeviceInfo) {
@@ -1556,7 +1630,10 @@ function isBusinessRingDevice(device: RingDeviceInfo) {
 function getRingBusinessFallbackIdentity(device: RingDeviceInfo | Record<string, any>) {
   const protocol = resolveRingProtocol(device as RingDeviceInfo);
   if (protocol === 'rw') {
-    return `${device.deviceId || ''}`.trim();
+    return (
+      getExplicitStableBusinessRingIdentityIds(device)[0] ||
+      `${device.platformDeviceId || ''}`.trim()
+    );
   }
   return `${device.deviceId || device.uniMacId || device.mac || device.advertis?.macInfo || ''}`.trim();
 }
@@ -1573,8 +1650,6 @@ function isSameBusinessRingDevice(left: RingDeviceInfo, right: RingDeviceInfo) {
   const isRwScope = resolveRingProtocol(left) === 'rw' || resolveRingProtocol(right) === 'rw';
   if (!isRwScope) return isSameRingDevice(left, right);
 
-  if (hasSameBusinessPlatformDeviceId(left, right)) return true;
-
   const leftStableIds = getStableBusinessRingIdentityIds(left);
   const rightStableIds = getStableBusinessRingIdentityIds(right);
   if (leftStableIds.length > 0 && rightStableIds.length > 0) {
@@ -1582,25 +1657,41 @@ function isSameBusinessRingDevice(left: RingDeviceInfo, right: RingDeviceInfo) {
   }
   if (leftStableIds.length > 0 || rightStableIds.length > 0) return false;
 
-  return Boolean(left.deviceId && right.deviceId && left.deviceId === right.deviceId);
+  if (hasSameBusinessPlatformDeviceId(left, right)) return true;
+
+  return false;
 }
 
 function hasSameBusinessPlatformDeviceId(left: RingDeviceInfo, right: RingDeviceInfo) {
-  return Boolean(left.deviceId && right.deviceId && left.deviceId === right.deviceId);
+  const leftDeviceId = getRingBusinessPlatformDeviceId(left);
+  const rightDeviceId = getRingBusinessPlatformDeviceId(right);
+  return Boolean(leftDeviceId && rightDeviceId && leftDeviceId === rightDeviceId);
 }
 
 function getStableBusinessRingIdentityIds(device: RingDeviceInfo | Record<string, any>) {
   const protocol = resolveRingProtocol(device as RingDeviceInfo);
   if (protocol === 'rw') {
-    return [
-      device.mac,
-      device.advertis?.macInfo,
-      isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '',
-      isColonSeparatedBleMac(device.deviceId) ? device.deviceId : ''
-    ].filter(Boolean);
+    return getExplicitStableBusinessRingIdentityIds(device);
   }
 
   return [device.deviceId, device.uniMacId, device.mac, device.advertis?.macInfo].filter(Boolean);
+}
+
+function getExplicitStableBusinessRingIdentityIds(device: RingDeviceInfo | Record<string, any>) {
+  return [device.mac, device.advertis?.macInfo, isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : ''].filter(Boolean);
+}
+
+function summarizeBusinessRingDeviceIdentity(device?: RingDeviceInfo | Record<string, any> | null) {
+  if (!device) return null;
+  return {
+    deviceId: device.deviceId,
+    platformDeviceId: device.platformDeviceId,
+    uniMacId: device.uniMacId,
+    mac: device.mac,
+    advertisMac: device.advertis?.macInfo,
+    protocol: device.protocol,
+    stableIds: getStableBusinessRingIdentityIds(device)
+  };
 }
 
 function hasMatchingBusinessRingIdentity(leftIds: unknown[], rightIds: unknown[]) {

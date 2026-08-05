@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, type PropType } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
 import type { sleepNapType } from '@/types/api/homeDetail';
 import { addSleepNap, deleteSleepNap } from '@/common/api/homeDetail';
@@ -22,6 +22,10 @@ const props = defineProps({
   sleepNapList: {
     type: Array as () => sleepNapType[],
     default: () => []
+  },
+  currentDate: {
+    type: [String, Number, Date] as PropType<string | number | Date>,
+    default: () => new Date()
   }
 });
 const formatTime = (isoTime: string = '') => {
@@ -31,15 +35,44 @@ const formatTime = (isoTime: string = '') => {
   const minutes = String(date.getMinutes()).padStart(2, '0');
   return `${hours}:${minutes}`;
 };
-const addNapConfirm = async (currentDate = new Date()) => {
-  const isoDate = formatLocalDate(currentDate);
-  const res = await addSleepNap({ date: isoDate, startTime: startTime.value, endTime: endTime.value });
-  uni.showLoading({ title: '添加中...' });
-  if (res) {
-    (uni as any).$uv.toast('添加成功');
-    emit('refresh');
+
+const getPickerTimeValue = (payload: selectDate | string | any) => String(payload?.value ?? payload ?? '').trim();
+
+const getTimeMinutes = (timeValue: string) => {
+  const [hours, minutes] = timeValue.split(':').map((item) => Number(item));
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return Number.NaN;
+  return hours * 60 + minutes;
+};
+
+const isValidNapRange = (startValue = startTime.value, endValue = endTime.value) => {
+  const start = getTimeMinutes(startValue);
+  const end = getTimeMinutes(endValue);
+  return Number.isFinite(start) && Number.isFinite(end) && start < end;
+};
+
+const getNapDateValue = () => {
+  if (props.currentDate instanceof Date && !Number.isNaN(props.currentDate.getTime())) {
+    return props.currentDate;
   }
-  uni.hideLoading();
+  const date = new Date(props.currentDate);
+  return Number.isNaN(date.getTime()) ? new Date() : date;
+};
+
+const addNapConfirm = async () => {
+  const napDate = getNapDateValue();
+  const isoDate = formatLocalDate(napDate);
+  uni.showLoading({ title: '添加中...' });
+  try {
+    const res = await addSleepNap({ date: isoDate, startTime: startTime.value, endTime: endTime.value });
+    if (res) {
+      (uni as any).$uv.toast('添加成功');
+      emit('refresh', napDate);
+      return true;
+    }
+  } finally {
+    uni.hideLoading();
+  }
+  return false;
 };
 const deleteSleepNapConfirm = async (id?: number) => {
   if (!id) return;
@@ -65,12 +98,11 @@ const getSleepDurationMinutes = (time: number = 0) => {
 };
 // 开始时间最大分钟（仅当小时=10时，分钟上限44；否则59）
 const startMaxMinute = computed(() => {
-  const startHour = parseInt(startTime.value.split(':')[0]);
-  return startHour === 10 ? 44 : 59;
+  return 59;
 });
 // 获取当前日期格式化显示
 const getCurrentDate = () => {
-  const now = new Date();
+  const now = getNapDateValue();
   const month = now.getMonth() + 1; // 月份从0开始，需要+1
   const day = now.getDate();
   return `${month}月${day}日`;
@@ -86,29 +118,30 @@ const openDatetimePicker = (type: 'start' | 'end') => {
 
 // 确认开始时间
 const handleStartConfirm = (time: selectDate) => {
+  const nextStartTime = getPickerTimeValue(time);
   // 如果已经有结束时间，验证开始时间是否早于结束时间
-  if (endTime.value && time.value) {
-    const start = new Date(`2000-01-01 ${time.value}`);
-    const end = new Date(`2000-01-01 ${endTime.value}`);
-    if (start >= end) {
+  if (endTime.value && nextStartTime) {
+    if (!isValidNapRange(nextStartTime, endTime.value)) {
       (uni as any).$uv.toast('开始时间必须早于结束时间');
       return false; // 阻止确认
     }
   }
+  startTime.value = nextStartTime;
+  return true;
 };
 
 // 确认结束时间
 const handleEndConfirm = (time: selectDate) => {
-  if (startTime.value && time.value) {
-    const start = new Date(`2000-01-01 ${startTime.value}`);
-    const end = new Date(`2000-01-01 ${time.value}`);
-    if (end <= start) {
+  const nextEndTime = getPickerTimeValue(time);
+  if (startTime.value && nextEndTime) {
+    if (!isValidNapRange(startTime.value, nextEndTime)) {
       (uni as any).$uv.toast('结束时间必须晚于开始时间');
       return false; // 阻止确认
     }
   }
 
-  // endTime.value = time.value;
+  endTime.value = nextEndTime;
+  return true;
 };
 
 // 取消操作（根据实际需求实现关闭弹窗逻辑）
@@ -120,9 +153,16 @@ const addNap = async () => {
     (uni as any).$uv.toast('请选择开始时间和结束时间');
     return;
   }
-  await addNapConfirm();
-  popup.value.close();
-  // 这里添加接口提交逻辑
+  if (!isValidNapRange()) {
+    (uni as any).$uv.toast('结束时间必须晚于开始时间');
+    return;
+  }
+  const added = await addNapConfirm();
+  if (added) {
+    popup.value.close();
+    startTime.value = '';
+    endTime.value = '';
+  }
 };
 const openPopup = () => {
   popup.value.open();
@@ -155,7 +195,7 @@ onLoad(() => {});
         </view>
       </view>
       <view v-else class="flex jc-center">
-        <image class="nap-empty-icon" src="/static/images/homeDetail/sleepNapEmpty.png" mode="aspectFit" />
+        <image class="nap-empty-icon" src="/static/images/homeDetail/sleepNapEmpty.png" mode="aspectFit" lazy-load />
       </view>
     </view>
     <view class="flex jc-center mt-50" @tap="openPopup">

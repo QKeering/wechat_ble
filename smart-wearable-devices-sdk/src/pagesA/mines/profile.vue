@@ -212,9 +212,9 @@ const confirm = async (e) => {
     <view class="avatar-section flex jc-center ai-center mb-60">
       <button class="uv-reset-button" open-type="chooseAvatar" :disabled="avatarUploading" @chooseavatar="onChooseAvatar">
         <view style="width: 216rpx; height: 216rpx" class="relative">
-          <uv-image :src="avatar" width="216rpx" height="216rpx" radius="50rpx" @error="handleAvatarError"></uv-image>
+          <uv-image :src="avatar" width="216rpx" height="216rpx" radius="50rpx" @error="handleAvatarError" observe-lazy-load></uv-image>
           <view class="camera-overlay absolute bottom-0 right-0">
-            <uv-image src="/static/images/mine/camera.png" width="48rpx" height="48rpx"></uv-image>
+            <uv-image src="/static/images/mine/camera.png" width="48rpx" height="48rpx" observe-lazy-load></uv-image>
           </view>
         </view>
       </button>

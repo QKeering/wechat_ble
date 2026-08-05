@@ -791,16 +791,56 @@ function hasReadyCommunicationFields(device: RingDeviceInfo) {
 
 function normalizeStoreDeviceInfo(device: RingDeviceInfo) {
   const protocol = device.protocol || resolveRingProtocol(device);
+  const explicitStableMac = getStoreExplicitStableDeviceMac({ ...device, protocol });
   const stableMac = getStoreStableDeviceMac({ ...device, protocol });
-  if (!stableMac && device.protocol === protocol) return device;
+  const shouldNormalizeMacLikeDeviceId =
+    explicitStableMac && isDifferentColonSeparatedBleMac(device.deviceId, explicitStableMac);
+  const shouldNormalizeMacLikeUniMacId =
+    explicitStableMac && isDifferentColonSeparatedBleMac(device.uniMacId, explicitStableMac);
+  if (!stableMac && device.protocol === protocol && !shouldNormalizeMacLikeDeviceId && !shouldNormalizeMacLikeUniMacId) {
+    return device;
+  }
   return {
     ...device,
     protocol,
     ...(stableMac && !device.mac ? { mac: stableMac } : {}),
+    ...(shouldNormalizeMacLikeDeviceId
+      ? {
+          platformDeviceId: device.platformDeviceId || device.deviceId,
+          deviceId: explicitStableMac
+        }
+      : {}),
+    ...(shouldNormalizeMacLikeUniMacId
+      ? {
+          platformUniMacId: device.platformUniMacId || device.uniMacId,
+          uniMacId: explicitStableMac
+        }
+      : {}),
     ...(stableMac && !device.advertis?.macInfo
       ? { advertis: { ...(device.advertis || {}), macInfo: stableMac } }
       : {})
   };
+}
+
+function getStoreExplicitStableDeviceMac(device: RingDeviceInfo | Record<string, any> | null | undefined) {
+  if (!device) return '';
+  const source = device as Record<string, any>;
+  const advertis = source.advertis as Record<string, any> | undefined;
+  return String(
+    source.mac ||
+      source.deviceMac ||
+      source.device_mac ||
+      source.bluetoothMac ||
+      source.bleMac ||
+      source.macAddr ||
+      source.mac_addr ||
+      advertis?.macInfo ||
+      advertis?.mac ||
+      advertis?.macAddress ||
+      advertis?.deviceMac ||
+      (isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : '') ||
+      ''
+  ).trim();
 }
 
 function getStoreStableDeviceMac(device: RingDeviceInfo | Record<string, any> | null | undefined) {
@@ -822,6 +862,13 @@ function getStoreStableDeviceMac(device: RingDeviceInfo | Record<string, any> | 
       (isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : '') ||
       (isColonSeparatedBleMac(source.deviceId) ? source.deviceId : '')
   ).trim();
+}
+
+function isDifferentColonSeparatedBleMac(left: unknown, right: unknown) {
+  if (!isColonSeparatedBleMac(left) || !isColonSeparatedBleMac(right)) return false;
+  const leftKey = normalizeMacSnapshotKey(left);
+  const rightKey = normalizeMacSnapshotKey(right);
+  return Boolean(leftKey && rightKey && leftKey !== rightKey);
 }
 
 function getDeviceSnapshotKey(device: RingDeviceInfo) {

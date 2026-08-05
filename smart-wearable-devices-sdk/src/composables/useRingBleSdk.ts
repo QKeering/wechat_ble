@@ -127,7 +127,6 @@ export const getRingDeviceStableIdentity = (device: RingDeviceInfo) => {
 
   if (resolveRingProtocol(device) === 'rw') {
     if (isColonSeparatedBleMac(device.uniMacId)) return device.uniMacId;
-    if (isColonSeparatedBleMac(device.deviceId)) return device.deviceId;
     return '';
   }
 
@@ -151,10 +150,12 @@ const getRwStableConnectionIdentity = (device?: RingDeviceInfo | null, fallback?
   if (device?.mac) return device.mac;
   if (device?.advertis?.macInfo) return device.advertis.macInfo;
   if (isColonSeparatedBleMac(device?.uniMacId)) return device?.uniMacId;
-  if (isColonSeparatedBleMac(device?.deviceId)) return device?.deviceId;
   if (isColonSeparatedBleMac(fallback)) return String(fallback || '').trim();
   return '';
 };
+
+const getExplicitRwStableIdentityIds = (device: RingDeviceInfo) =>
+  [device.mac, device.advertis?.macInfo, isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : ''].filter(Boolean);
 
 const getRingDeviceTailMatchIds = (device: RingDeviceInfo) =>
   [
@@ -194,12 +195,7 @@ const hasConflictingProtocols = (left: RingDeviceInfo, right: RingDeviceInfo) =>
 
 const getStableSwitchingIdentityIds = (device: RingDeviceInfo) => {
   if (resolveRingProtocol(device) === 'rw') {
-    return [
-      device.mac,
-      device.advertis?.macInfo,
-      isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '',
-      isColonSeparatedBleMac(device.deviceId) ? device.deviceId : ''
-    ].filter(Boolean);
+    return getExplicitRwStableIdentityIds(device);
   }
 
   return getRingDeviceMatchIds(device);
@@ -219,22 +215,30 @@ const isSameSwitchingRingDevice = (left: RingDeviceInfo, right: RingDeviceInfo) 
   const isRwSwitchingScope = resolveRingProtocol(left) === 'rw' || resolveRingProtocol(right) === 'rw';
   if (!isRwSwitchingScope) return isSameRingDevice(left, right);
 
-  if (hasSamePlatformDeviceId(left, right)) return true;
-
   const leftStableIds = getStableSwitchingIdentityIds(left);
   const rightStableIds = getStableSwitchingIdentityIds(right);
   if (leftStableIds.length > 0 && rightStableIds.length > 0) {
     return hasMatchingSwitchingIdentity(leftStableIds, rightStableIds);
   }
   if (leftStableIds.length > 0 || rightStableIds.length > 0) return false;
-
-  return Boolean(left.deviceId && right.deviceId && left.deviceId === right.deviceId);
+  return false;
 };
 
 const hasSamePlatformDeviceId = (left: RingDeviceInfo, right: RingDeviceInfo) => Boolean(left.deviceId && right.deviceId && left.deviceId === right.deviceId);
 
 export const isSameRingDevice = (left: RingDeviceInfo, right: RingDeviceInfo) => {
   if (hasConflictingProtocols(left, right)) return false;
+
+  const isRwScope = resolveRingProtocol(left) === 'rw' || resolveRingProtocol(right) === 'rw';
+  if (isRwScope) {
+    const leftStableIds = getStableSwitchingIdentityIds(left);
+    const rightStableIds = getStableSwitchingIdentityIds(right);
+    if (leftStableIds.length > 0 && rightStableIds.length > 0) {
+      return hasMatchingSwitchingIdentity(leftStableIds, rightStableIds);
+    }
+    if (leftStableIds.length > 0 || rightStableIds.length > 0) return false;
+    return false;
+  }
 
   const leftIds = getRingDeviceMatchIds(left);
   const rightIds = getRingDeviceMatchIds(right);
@@ -243,6 +247,18 @@ export const isSameRingDevice = (left: RingDeviceInfo, right: RingDeviceInfo) =>
 
 export const findReconnectScanCandidate = (target: RingDeviceInfo, scannedDevices: RingDeviceInfo[]) => {
   const protocolCandidates = scannedDevices.filter((device) => !target.protocol || !device.protocol || device.protocol === target.protocol);
+  if (resolveRingProtocol(target) === 'rw') {
+    const targetStableIds = getStableSwitchingIdentityIds(target);
+    if (targetStableIds.length > 0) {
+      return (
+        protocolCandidates.find((device) => {
+          const deviceStableIds = getStableSwitchingIdentityIds(device);
+          return deviceStableIds.length > 0 && hasMatchingSwitchingIdentity(targetStableIds, deviceStableIds);
+        }) || null
+      );
+    }
+  }
+
   const identityMatch = protocolCandidates.find((device) => isSameRingDevice(target, device));
   if (identityMatch) return identityMatch;
 
@@ -290,7 +306,7 @@ export const shouldSkipDirectRwReconnect = (target?: RingDeviceInfo | null) => {
 const hasRingReconnectTargetIdentity = (target?: RingDeviceInfo | null) => {
   if (!target) return false;
   if (getRingDeviceStableIdentity(target)) return true;
-  return Boolean(resolveRingProtocol(target) === 'rw' && target.deviceId && target.serviceId && target.cmdCharId && target.dataCharId);
+  return false;
 };
 
 const isSameBoundReconnectDevice = (boundDevice: RingDeviceInfo, currentDevice?: RingDeviceInfo | null) => {

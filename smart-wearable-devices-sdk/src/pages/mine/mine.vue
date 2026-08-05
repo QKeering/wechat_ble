@@ -2871,30 +2871,34 @@ const scanDevice = async () => {
 const handleScanSuccess = async (res: any) => {
   const result = res.result;
 
-  uni.showToast({
-    title: '\u626b\u7801\u6210\u529f',
-    icon: 'success',
-    duration: 1500
-  });
-  const scanRes = await scan({
-    sn: result
-  });
-  if (scanRes) {
-    await handleConnectDevice(scanRes.mac || '', scanRes.name || '', '', true);
-    const { deviceId, serviceId } = userStore.deviceInfo;
-
-    if (deviceId) {
-      const alreadyConnected = await isDeviceConnected(deviceId, serviceId || '');
-
-      if (alreadyConnected) {
-        userStore.updateIsConnected(true);
-        await refreshMineDeviceSnapshot({ force: true });
-        return;
-      }
-      await autoConnectLastDevice();
-      await refreshMineDeviceSnapshot({ force: true });
-    } else {
+  uni.showLoading({ title: '正在连接设备...' });
+  try {
+    const scanRes = await scan({
+      sn: result
+    });
+    const target = scanRes?.mac || scanRes?.deviceId || scanRes?.uniMacId || scanRes?.sn || result;
+    const targetName = scanRes?.deviceName || scanRes?.name || '';
+    if (!target) {
+      uni.hideLoading();
+      uni.showToast({ title: '未识别到设备信息', icon: 'none' });
+      return;
     }
+    await handleConnectDevice(target, targetName, scanRes?.uniMacId || '', true);
+    userStore.updateIsConnected(true);
+    await refreshMineDeviceSnapshot({ force: true });
+    uni.hideLoading();
+    uni.showToast({
+      title: '设备已连接',
+      icon: 'success',
+      duration: 1500
+    });
+  } catch (error) {
+    uni.hideLoading();
+    uni.showToast({
+      title: formatBleErrorMessage(error, '连接设备失败，请重试'),
+      icon: 'none',
+      duration: 2000
+    });
   }
 };
 
@@ -4079,7 +4083,7 @@ const handleMineRwL19Acceptance = async () => {
   <view style="position: relative">
     <uv-navbar placeholder leftIcon="" :title="'\u6211\u7684'" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view style="position: absolute; top: 0; left: 0; width: 100%">
-      <image class="mine-bg-image" src="/static/images/bg05.png" mode="widthFix"></image>
+      <image class="mine-bg-image" src="/static/images/bg05.png" mode="widthFix" lazy-load></image>
     </view>
 
     <view class="p-30 pb-100 relative mine-content" style="z-index: 1; box-sizing: border-box">
@@ -4104,13 +4108,14 @@ const handleMineRwL19Acceptance = async () => {
               class="device-status-icon"
               :src="mineBluetoothStatus.iconPath"
               mode="aspectFit"
+              lazy-load
             ></image>
             <view class="device-text mt-10" :style="{ color: mineBluetoothStatus.textColor }">
               {{ mineBluetoothStatus.text }}
             </view>
           </view>
           <view>
-            <image src="/static/images/mine/logo3.png" mode="widthFix" class="banner-logo"></image>
+            <image src="/static/images/mine/logo3.png" mode="widthFix" class="banner-logo" lazy-load></image>
           </view>
           <view class="device-banner relative flex">
             <view class="banner-actions flex jc-between" style="margin-bottom: 50rpx">
@@ -4252,7 +4257,7 @@ const handleMineRwL19Acceptance = async () => {
             <view v-if="item.iconText" class="menu-icon menu-icon-badge" :class="item.iconClass">
               <text>{{ item.iconText }}</text>
             </view>
-            <image v-else class="menu-icon menu-icon-image" :src="item.icon" mode="aspectFit"></image>
+            <image v-else class="menu-icon menu-icon-image" :src="item.icon" mode="aspectFit" lazy-load></image>
             <view class="menu-title fs-36 ml-30">{{ item.title }}</view>
           </view>
           <view class="mine-arrow"></view>

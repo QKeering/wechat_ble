@@ -65,6 +65,7 @@ export type submitDataType = {
   // rawFrames 已本地留存后再允许后端判断是否可删除设备数据块
   rawLocalStatus?: 'done' | 'none' | 'failed' | string;
   rawFrameCount?: number;
+  rawFrames?: unknown[];
   deviceBlockRefs?: unknown[];
   uploadStatus?: Record<string, unknown>;
   // 设备电量
@@ -135,6 +136,8 @@ export type heartRateDetail = {
   endDate?: string; // 结束日期
   chartData?: Point[]; // 图表数据（数组项为 Point 类型）
   newValue?: string; // 新值
+  axisStartTime?: string; // 图表横轴开始时间
+  axisEndTime?: string; // 图表横轴结束时间
 };
 // 获取睡眠总览信息
 export type sleepOverview = {

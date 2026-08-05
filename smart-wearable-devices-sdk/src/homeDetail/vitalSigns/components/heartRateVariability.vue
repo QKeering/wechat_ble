@@ -71,7 +71,12 @@ const showMeasureWaitingPopup = async () => {
 };
 const metricAxisTicks = computed(() => {
   const chartData = Array.isArray(props.hrvData?.chartData) ? props.hrvData.chartData : [];
-  return getMetricTimelineTicks(chartData, props.sleepSegmentObj, !props.isHeartTate);
+  return getMetricTimelineTicks(
+    chartData,
+    props.sleepSegmentObj,
+    !props.isHeartTate,
+    props.isHeartTate ? props.hrvData?.axisEndTime : undefined
+  );
 });
 const visibleMetricAxisTicks = computed(() => compactMetricTimelineTicks(metricAxisTicks.value, props.isHeartTate ? 5 : 6));
 const metricChartKey = computed(() => {
@@ -94,9 +99,18 @@ const formatIntegerRangeStat = (value: unknown, fallback = '00') => {
 const getProcessedOption = () => {
   const newOption = cloneDeep(baseOption);
   const chartData = Array.isArray(props.hrvData?.chartData) ? props.hrvData.chartData : [];
+  const axisData = buildMetricSleepTimelineAxis(
+    chartData,
+    props.sleepSegmentObj,
+    !props.isHeartTate,
+    props.isHeartTate ? props.hrvData?.axisEndTime : undefined
+  );
   let fullXData: string[] = [];
   let fullSeriesData: (number | null)[] = [];
-  if (chartData.length > 0) {
+  if (props.isHeartTate) {
+    fullXData = axisData.xData;
+    fullSeriesData = axisData.seriesData;
+  } else if (chartData.length > 0) {
     // 有数据时使用实际数据
     fullXData = chartData.map((item: Point) => normalizeTimelineLabel(item.time));
     // fullSeriesData = props.hrvData?.chartData?.map((item: Point) => Number(item.value)) || [];
@@ -115,7 +129,6 @@ const getProcessedOption = () => {
   }
   // 替换xAxis.data和series.data为完整数据
   // 波形仍使用接口原始点位；睡眠区间只用于外置时间轴标签，避免重采样导致折线消失。
-  const axisData = buildMetricSleepTimelineAxis(chartData, props.sleepSegmentObj, false);
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = fullSeriesData as any;
   // 超过100，则y轴最大刻度显示120，6个刻度
@@ -433,6 +446,7 @@ onUnload(() => {
             v-for="tick in visibleMetricAxisTicks"
             :key="tick.key"
             class="metric-time-tick"
+            :style="{ left: `${tick.left}%`, transform: tick.isFirst ? 'translateX(0)' : tick.isLast ? 'translateX(-100%)' : 'translateX(-50%)' }"
           >{{ tick.label }}</text>
         </view>
       </view>
@@ -543,14 +557,15 @@ onUnload(() => {
   left: 28rpx;
   right: 28rpx;
   bottom: 8rpx;
-  display: flex;
-  justify-content: space-between;
+  height: 24rpx;
   color: #9ca3af;
   font-size: 20rpx;
   line-height: 1;
 }
 
 .metric-time-tick {
+  position: absolute;
+  top: 0;
   white-space: nowrap;
 }
 </style>
