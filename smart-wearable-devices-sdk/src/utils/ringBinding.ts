@@ -35,28 +35,10 @@ const getBoundRingMacCandidate = (device: BoundRingIdentity | null | undefined) 
 const getBoundRingUniMacIdCandidate = (device: BoundRingIdentity | null | undefined) =>
   getField(device, 'uniMacId', 'uni_mac_id', 'macId', 'mac_id') || getField(device?.advertis, 'uniMacId', 'uni_mac_id');
 
-const getBoundRingDeviceIdCandidate = (device: BoundRingIdentity | null | undefined) =>
-  getField(
-    device,
-    'deviceId',
-    'device_id',
-    'bleDeviceId',
-    'ble_device_id',
-    'bluetoothDeviceId',
-    'bluetooth_device_id',
-    'platformDeviceId',
-    'platform_device_id',
-    'wxDeviceId',
-    'wx_device_id'
-  );
-
 export const hasBoundRingIdentity = (device: BoundRingIdentity | null | undefined) =>
   Boolean(
-    device?.protocol === 'rw'
-      ? getBoundRingMacCandidate(device) ||
-          isColonSeparatedBleMac(getBoundRingUniMacIdCandidate(device)) ||
-          isColonSeparatedBleMac(getBoundRingDeviceIdCandidate(device))
-      : getBoundRingDeviceIdCandidate(device) || getBoundRingMacCandidate(device) || getBoundRingUniMacIdCandidate(device)
+    getBoundRingMacCandidate(device) ||
+      isColonSeparatedBleMac(getBoundRingUniMacIdCandidate(device))
   );
 
 const isColonSeparatedBleMac = (value?: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){2,5}$/.test(String(value || '').trim());
@@ -66,15 +48,9 @@ export const getBoundRingIdentity = (device: BoundRingIdentity | null | undefine
   const mac = getBoundRingMacCandidate(device);
   if (mac) return mac;
 
-  if (device.protocol === 'rw') {
-    const uniMacId = getBoundRingUniMacIdCandidate(device);
-    const deviceId = getBoundRingDeviceIdCandidate(device);
-    if (isColonSeparatedBleMac(uniMacId)) return uniMacId;
-    if (isColonSeparatedBleMac(deviceId)) return deviceId;
-    return '';
-  }
-
-  return getBoundRingDeviceIdCandidate(device) || getBoundRingUniMacIdCandidate(device);
+  const uniMacId = getBoundRingUniMacIdCandidate(device);
+  if (isColonSeparatedBleMac(uniMacId)) return uniMacId;
+  return '';
 };
 
 export const getBoundRingIdentityTail = (device: BoundRingIdentity | null | undefined) => {

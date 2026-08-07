@@ -199,18 +199,17 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     const currentStableMac = currentDevice.mac || currentDevice.advertis?.macInfo || '';
     return (
       currentStableMac ||
-      (isColonSeparatedBleMac(currentDevice.uniMacId) ? currentDevice.uniMacId : '') ||
-      (isColonSeparatedBleMac(currentDevice.deviceId) ? currentDevice.deviceId : '')
+      (isColonSeparatedBleMac(currentDevice.uniMacId) ? currentDevice.uniMacId : '')
     );
   };
   const normalMac = computed(() => {
     const currentStableMac = sdk.deviceInfo.value.mac || sdk.deviceInfo.value.advertis?.macInfo || '';
-    if (sdk.deviceInfo.value.protocol === 'rw') return getCurrentRwStableMac() || '';
+    if (resolveRingProtocol(sdk.deviceInfo.value) === 'rw') return getCurrentRwStableMac() || '';
     return sdk.ringStore.normalMac || currentStableMac;
   });
   const iosMacId = computed(() => {
     const currentStableMac = sdk.deviceInfo.value.mac || sdk.deviceInfo.value.advertis?.macInfo || '';
-    if (sdk.deviceInfo.value.protocol === 'rw') return getCurrentRwStableMac() || '';
+    if (resolveRingProtocol(sdk.deviceInfo.value) === 'rw') return getCurrentRwStableMac() || '';
     return sdk.ringStore.iosMacId || sdk.deviceInfo.value.uniMacId || currentStableMac;
   });
   const deviceTime = computed(() => sdk.ringStore.deviceTime || 0);
@@ -377,7 +376,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const readRwMetric = (name: CompatRwHealthDataName, legacyFallback?: () => Promise<unknown>) =>
     runWithReady(async () => {
       const normalizedName = normalizeCompatRwHealthDataName(name);
-      if (sdk.deviceInfo.value.protocol === 'rw') {
+      if (resolveRingProtocol(sdk.deviceInfo.value) === 'rw') {
         await sdk.controlRwHealthData(normalizedName, true);
         try {
           await sleep(120);
@@ -396,17 +395,18 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
 
   const normalizeCompatIdentity = (value = '') => value.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
   const isColonSeparatedBleMac = (value?: string) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(`${value || ''}`.trim());
+  const isMacLikeCompatIdentity = (value = '') => normalizeCompatIdentity(value).length === 12;
   const getRwStableCompatIdentity = (device?: RingDeviceInfo | null, fallback = '') => {
-    if (!device) return isColonSeparatedBleMac(fallback) ? fallback : '';
+    if (!device) return isMacLikeCompatIdentity(fallback) ? fallback : '';
     return (
       device.mac ||
       device.advertis?.macInfo ||
       (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '') ||
-      (isColonSeparatedBleMac(fallback) ? fallback : '')
+      (isMacLikeCompatIdentity(fallback) ? fallback : '')
     );
   };
   const getScannedStableIdentities = (device: RingDeviceInfo) => {
-    const protocol = device.protocol || resolveRingProtocol(device);
+    const protocol = resolveRingProtocol(device);
     if (protocol === 'rw') {
       return [device.mac, device.advertis?.macInfo, isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : ''];
     }
@@ -427,14 +427,19 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
 
   const findScannedDevice = (deviceId: string, uniMacId = '') => {
     const sourceDevice = sdk.devices.value.find((device) => {
-      const protocol = device.protocol || resolveRingProtocol(device);
-      const allowUniMacPlatformMatch = protocol !== 'rw';
+      const protocol = resolveRingProtocol(device);
+      if (protocol === 'rw') {
+        const stableTarget = [uniMacId, deviceId].find((item) => isMacLikeCompatIdentity(item)) || '';
+        if (stableTarget) return matchesScannedStableIdentity(device, stableTarget, false);
+        return Boolean(deviceId && device.deviceId === deviceId);
+      }
       return (
         device.deviceId === deviceId ||
         matchesScannedStableIdentity(device, deviceId, false) ||
         device.deviceId === uniMacId ||
         matchesScannedStableIdentity(device, uniMacId, true) ||
-        (allowUniMacPlatformMatch && (device.uniMacId === deviceId || device.uniMacId === uniMacId))
+        device.uniMacId === deviceId ||
+        device.uniMacId === uniMacId
       );
     });
     return sourceDevice;
@@ -444,6 +449,10 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     const identityMatch = findScannedDevice(deviceId, uniMacId);
     if (identityMatch) return identityMatch;
 
+    const hasStableRwTarget =
+      protocolHint === 'rw' && [uniMacId, deviceId].some((item) => isMacLikeCompatIdentity(item));
+    if (hasStableRwTarget) return undefined;
+
     const targetName = `${deviceName || ''}`.trim().toUpperCase();
     if (!targetName) return undefined;
 
@@ -451,7 +460,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       const name = `${device.displayName || device.deviceName || device.name || device.localName || ''}`.trim().toUpperCase();
       if (name !== targetName) return false;
       if (!protocolHint) return true;
-      return device.protocol === protocolHint || resolveRingProtocol(device) === protocolHint;
+      return resolveRingProtocol(device) === protocolHint;
     });
     return nameMatches.length === 1 ? nameMatches[0] : undefined;
   };
@@ -493,7 +502,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     return waitForCompatScanCandidate(deviceId, uniMacId, deviceName, 'rw');
   };
 
-  const isLikelyRwStableIdentity = (value = '') => isColonSeparatedBleMac(value);
+  const isLikelyRwStableIdentity = (value = '') => isMacLikeCompatIdentity(value);
 
   const connectDevice = async (input: CompatConnectInput, deviceName = '', uniMacId = '', fromScan = false) => {
     const inputDevice = typeof input === 'string' ? null : input;
@@ -509,7 +518,11 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       ...sourceDevice,
       ...inputDevice,
       deviceId: sourceDevice?.deviceId || (typeof input === 'string' ? requestedId : inputDevice?.deviceId || requestedId),
-      uniMacId: stableSourceMac || (sourceDevice?.protocol === 'rw' || inputDevice?.protocol === 'rw' ? '' : sourceDevice?.uniMacId || inputDevice?.uniMacId || preferredLookupId),
+      uniMacId:
+        stableSourceMac ||
+        (resolveRingProtocol(sourceDevice || inputDevice || ({} as RingDeviceInfo)) === 'rw'
+          ? ''
+          : sourceDevice?.uniMacId || inputDevice?.uniMacId || preferredLookupId),
       mac: stableSourceMac,
       name: sourceDevice?.name || inputDevice?.name || preferredName,
       deviceName: sourceDevice?.deviceName || inputDevice?.deviceName || preferredName,
@@ -517,7 +530,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       displayName: sourceDevice?.displayName || inputDevice?.displayName || preferredName,
       protocol: sourceDevice?.protocol || inputDevice?.protocol
     };
-    const protocol = protocolSource.protocol || resolveRingProtocol(protocolSource);
+    const protocol = resolveRingProtocol(protocolSource);
     const shouldResolveRwStableId = protocol === 'rw' && !scannedDevice?.deviceId && isLikelyRwStableIdentity(requestedId);
     if ((fromScan || shouldResolveRwStableId) && !scannedDevice?.deviceId) {
       scannedDevice =
@@ -529,7 +542,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     const deviceId = sourceDevice?.deviceId || (typeof input === 'string' ? requestedId : inputDevice?.deviceId || requestedId);
     const connectionMac = getRwStableCompatIdentity(sourceDevice, stableSourceMac || preferredStableMac);
     if (protocol === 'rw' && shouldResolveRwStableId && !scannedDevice?.deviceId) {
-      throw new Error('未找到RW设备的蓝牙连接ID，请重新搜索后连接');
+      throw new Error('未找到 RW 设备的蓝牙连接 ID，请重新搜索后连接');
     }
     if (fromScan && !scannedDevice?.deviceId && isColonSeparatedBleMac(requestedId)) {
       throw new Error('未找到二维码对应的蓝牙设备，请靠近戒指后重试');

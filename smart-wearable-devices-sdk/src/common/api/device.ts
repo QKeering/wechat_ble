@@ -70,30 +70,87 @@ const isSameBindIdentity = (left: DeviceInfo | null | undefined, right: DeviceIn
   return Boolean(leftNorm && rightNorm && (leftNorm === rightNorm || leftNorm.endsWith(rightNorm.slice(-6)) || rightNorm.endsWith(leftNorm.slice(-6))));
 };
 
+const normalizeBindMacText = (value: unknown) => {
+  const raw = String(value || '').trim();
+  if (/^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(raw)) return raw.toUpperCase();
+  const hex = raw.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+  if (hex.length !== 12) return '';
+  return hex.match(/.{2}/g)?.join(':') || '';
+};
+
+const getDeviceBindMac = (device: unknown) => {
+  const normalized = normalizeRingBoundDevice(device as any) as DeviceInfo | null;
+  if (!normalized) return '';
+  return (
+    normalizeBindMacText(normalized.mac) ||
+    normalizeBindMacText(normalized.advertis?.macInfo) ||
+    normalizeBindMacText(normalized.uniMacId)
+  );
+};
+
 const mergeBoundRingDevice = (
   remote: DeviceInfo | null | undefined,
   local?: DeviceInfo | null,
   payload?: RingBindPayload | null
 ): DeviceInfo | null => {
   const normalizedRemote = normalizeRingBoundDevice(remote as any) as DeviceInfo | null;
-  if (!hasBoundRingIdentity(normalizedRemote)) return null;
-
   const normalizedLocal = normalizeRingBoundDevice(local as any) as DeviceInfo | null;
   const normalizedPayload = normalizeRingBoundDevice(payload as any) as DeviceInfo | null;
-  const compatibleLocal = normalizedLocal && isSameBindIdentity(normalizedRemote, normalizedLocal) ? normalizedLocal : null;
-  const compatiblePayload = normalizedPayload && isSameBindIdentity(normalizedRemote, normalizedPayload) ? normalizedPayload : null;
+  const identityBase: DeviceInfo | null =
+    (hasBoundRingIdentity(normalizedRemote) && normalizedRemote) ||
+    (hasBoundRingIdentity(normalizedPayload) && normalizedPayload) ||
+    (hasBoundRingIdentity(normalizedLocal) && normalizedLocal) ||
+    null;
+
+  if (!identityBase) return null;
+
+  const compatibleLocal = normalizedLocal && isSameBindIdentity(identityBase, normalizedLocal) ? normalizedLocal : null;
+  const compatiblePayload = normalizedPayload && isSameBindIdentity(identityBase, normalizedPayload) ? normalizedPayload : null;
+  const stableMac =
+    getDeviceBindMac(normalizedRemote) ||
+    getDeviceBindMac(compatiblePayload) ||
+    getDeviceBindMac(compatibleLocal) ||
+    getDeviceBindMac(normalizedPayload) ||
+    getDeviceBindMac(normalizedLocal);
+  const mergedAdvertis = {
+    ...(compatibleLocal?.advertis || {}),
+    ...(compatiblePayload?.advertis || {}),
+    ...(normalizedRemote?.advertis || {}),
+    ...(stableMac ? { macInfo: stableMac } : {})
+  };
 
   return normalizeRingBoundDevice({
     ...(compatibleLocal || {}),
     ...(compatiblePayload || {}),
     ...(normalizedRemote || {}),
+    mac: stableMac || normalizedRemote?.mac || compatiblePayload?.mac || compatibleLocal?.mac || identityBase.mac,
+    uniMacId: stableMac || normalizedRemote?.uniMacId || compatiblePayload?.uniMacId || compatibleLocal?.uniMacId || identityBase.uniMacId,
+    deviceId: compatiblePayload?.deviceId || compatibleLocal?.deviceId || normalizedRemote?.deviceId || identityBase.deviceId,
+    deviceName:
+      normalizedRemote?.deviceName ||
+      normalizedRemote?.name ||
+      compatiblePayload?.deviceName ||
+      compatiblePayload?.name ||
+      compatibleLocal?.deviceName ||
+      compatibleLocal?.name ||
+      identityBase.deviceName ||
+      identityBase.name,
+    name:
+      normalizedRemote?.name ||
+      normalizedRemote?.deviceName ||
+      compatiblePayload?.name ||
+      compatiblePayload?.deviceName ||
+      compatibleLocal?.name ||
+      compatibleLocal?.deviceName ||
+      identityBase.name ||
+      identityBase.deviceName,
     serviceId: normalizedRemote?.serviceId || compatiblePayload?.serviceId || compatibleLocal?.serviceId,
     cmdCharId: normalizedRemote?.cmdCharId || compatiblePayload?.cmdCharId || compatibleLocal?.cmdCharId,
     dataCharId: normalizedRemote?.dataCharId || compatiblePayload?.dataCharId || compatibleLocal?.dataCharId,
     dataServiceId: normalizedRemote?.dataServiceId || compatiblePayload?.dataServiceId || compatibleLocal?.dataServiceId,
-    protocol: normalizedRemote?.protocol || compatiblePayload?.protocol || compatibleLocal?.protocol,
-    advertis: normalizedRemote?.advertis || compatiblePayload?.advertis || compatibleLocal?.advertis,
-    source: 'remote',
+    protocol: normalizedRemote?.protocol || compatiblePayload?.protocol || compatibleLocal?.protocol || identityBase.protocol,
+    advertis: Object.keys(mergedAdvertis).length > 0 ? mergedAdvertis : undefined,
+    source: normalizedRemote ? 'remote' : 'local',
     syncedAt: Date.now()
   } as any) as DeviceInfo | null;
 };
@@ -256,7 +313,6 @@ const buildScanFallbackDevice = (sn: string): DeviceInfo | null => {
     return {
       sn,
       mac,
-      deviceId: mac,
       uniMacId: mac,
       deviceName: sn,
       name: sn
@@ -266,8 +322,6 @@ const buildScanFallbackDevice = (sn: string): DeviceInfo | null => {
   const name = String(sn || '').trim();
   return {
     sn,
-    deviceId: name,
-    uniMacId: name,
     deviceName: name,
     name
   } as DeviceInfo;

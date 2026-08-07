@@ -3,7 +3,7 @@ import { LegacyRingCommand } from '../legacy/commands';
 import { getTodayZeroTimestamp, type LegacyCommandPayload } from '../legacy/protocol';
 import { RING_PARSED_EMITTED, type RingBleRuntime, type RingBleState, type RingDeviceInfo, type RingParsedData } from '../types';
 import type { RwHealthDataName, RwHistoryDataName, RwMonitoringName } from '../legacy/adapter';
-import { parseQkeerV2AdvertisInfo, parseRwAdvertisInfo, resolveRingProtocol } from '../protocolRegistry';
+import { isRwProtocolDeviceName, parseQkeerV2AdvertisInfo, parseRwAdvertisInfo, resolveRingProtocol } from '../protocolRegistry';
 import {
   RW_NOTIFY_CHAR_UUID,
   RW_SCAN_NAME_PREFIXES,
@@ -53,7 +53,6 @@ import { getRwHistoryDataType } from './history';
 import { enqueueRwDiagnosticUpload } from '@/utils/rwDiagnosticUpload';
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
-const RW_SCAN_ADVERTIS_MARKERS = ['D606', '3E000000'];
 type ParsedWaiter = {
   predicate: (parsed: RingParsedData) => boolean;
   resolve: (parsed: RingParsedData) => void;
@@ -3261,7 +3260,6 @@ function getRwStableMetadataIdentity(device?: RingDeviceInfo) {
   if (device.mac) return device.mac;
   if (device.advertis?.macInfo) return device.advertis.macInfo;
   if (isColonSeparatedBleMac(device.uniMacId)) return device.uniMacId;
-  if (isColonSeparatedBleMac(device.deviceId)) return device.deviceId;
   return '';
 }
 
@@ -3271,7 +3269,7 @@ function isColonSeparatedBleMac(value?: unknown) {
 
 export const getRwScannedDeviceMergeKeys = (device: RingDeviceInfo) => {
   const name = `${device.displayName || device.name || device.localName || device.bleName || ''}`.trim().toUpperCase();
-  const protocol = device.protocol || resolveRingProtocol(device);
+  const protocol = resolveRingProtocol(device);
   const advertisHex = getRwAdvertisHex(device.advertisData);
   const advertisTail = advertisHex.slice(-24);
   const services = [
@@ -3305,25 +3303,13 @@ function isRwScanDevice(device: RingDeviceInfo, prefixes: string[]) {
   const name = `${device.name || device.localName || device.displayName || ''}`.toUpperCase();
   const hasExpectedName = prefixes.some((prefix) => name.startsWith(prefix.toUpperCase()));
 
-  const services = [
-    ...(Array.isArray(device.advertisServiceUUIDs) ? device.advertisServiceUUIDs : []),
-    ...(Array.isArray(device.advertisServiceUUIDsList) ? device.advertisServiceUUIDsList : [])
-  ].map((service) => `${service}`.toUpperCase());
-
-  const advertisData = getRwAdvertisHex(device.advertisData);
-  const hasRwManufacturer = advertisData.includes('F802') || advertisData.includes('F811');
-  const hasRwAdvertis = RW_SCAN_ADVERTIS_MARKERS.some((marker) => advertisData.includes(marker));
-
-  if (hasRwManufacturer) return true;
-  if (hasRwAdvertis) return true;
-
-  return hasExpectedName && services.some((service) => service.includes('180D'));
+  return hasExpectedName && isRwProtocolDeviceName(device);
 }
 
 function isAllowedBusinessScanDevice(device: RingDeviceInfo, options: LegacyScanOptions) {
   if (!options.includeUnknown) return false;
   const name = `${device.name || device.localName || device.displayName || ''}`.toUpperCase();
-  const protocol = device.protocol || resolveRingProtocol(device);
+  const protocol = resolveRingProtocol(device);
   if (protocol === 'rw' || protocol === 'qkeer-v2') return true;
 
   return ['HR', 'IF', 'QK', 'QKEERING', 'PPLUS', 'MUSLEEP_RING', 'QKV2'].some((prefix) => name.startsWith(prefix));

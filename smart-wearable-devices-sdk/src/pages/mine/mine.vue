@@ -14,7 +14,7 @@ import {
 } from '@/composables/useRwForegroundMeasurement';
 import { useUserStore } from '@/stores/user';
 import { useRingStore } from '@/stores';
-import type { RingParsedData } from '@/sdk/ring-ble';
+import { resolveRingProtocol, type RingParsedData } from '@/sdk/ring-ble';
 import {
   RwHealthDataControlKey,
   RwKey,
@@ -59,7 +59,6 @@ import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionC
 import { clearRwDiagnosticCommandLock, setRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
 import { formatBatteryPercentForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
 const {
-  handleConnectDevice,
   deviceInfo: ringDeviceInfo,
   isDeviceConnected,
   autoConnectLastDevice,
@@ -224,25 +223,33 @@ const menuList: MineMenuItem[] = [
     path: '/pagesA/mines/question'
   }
 ];// const pullDownProgress// const pullDownProgress = ref(0);
-const mineMenuNavigating = ref(false);
-const handleMineMenuTap = (item: { path?: string }) => {
-  if (!item?.path || mineMenuNavigating.value) return;
-  mineMenuNavigating.value = true;
-  const path = item.path;
+const MINE_PAGE_NAVIGATION_LOCK_MS = 1500;
+const minePageNavigating = ref(false);
+const navigateMinePage = (path?: string) => {
+  const targetPath = String(path || '').trim();
+  if (!targetPath) return;
+  if (minePageNavigating.value) {
+    appendMineDiagnosticLog('mine-page-navigate-skip', {
+      path: targetPath,
+      reason: 'navigation-lock'
+    });
+    return;
+  }
+  minePageNavigating.value = true;
   const startedAt = Date.now();
-  appendMineDiagnosticLog('mine-menu-navigate-start', { path });
+  appendMineDiagnosticLog('mine-page-navigate-start', { path: targetPath });
   setTimeout(() => {
     uni.navigateTo({
-      url: path,
+      url: targetPath,
       success: () => {
-        appendMineDiagnosticLog('mine-menu-navigate-success', {
-          path,
+        appendMineDiagnosticLog('mine-page-navigate-success', {
+          path: targetPath,
           elapsedMs: Date.now() - startedAt
         });
       },
       fail: (error) => {
-        appendMineDiagnosticLog('mine-menu-navigate-fail', {
-          path,
+        appendMineDiagnosticLog('mine-page-navigate-fail', {
+          path: targetPath,
           elapsedMs: Date.now() - startedAt,
           error: String((error as any)?.errMsg || error || '')
         });
@@ -250,12 +257,13 @@ const handleMineMenuTap = (item: { path?: string }) => {
       },
       complete: () => {
         setTimeout(() => {
-          mineMenuNavigating.value = false;
-        }, 800);
+          minePageNavigating.value = false;
+        }, MINE_PAGE_NAVIGATION_LOCK_MS);
       }
     });
   }, 0);
 };
+const handleMineMenuTap = (item: { path?: string }) => navigateMinePage(item?.path);
 const scrollTop = ref(0);
 // Delay hiding upload progress so success state remains visible briefly.
 const shouldHideProgress = ref(false);
@@ -306,10 +314,65 @@ const isIOS = computed(() => {
   const systemInfo = uni.getSystemInfoSync();
   return systemInfo.platform.toLowerCase().includes('ios');
 });
-const hasMineCommunicationReady = () =>
+const normalizeMineBleMacKey = (value: unknown) =>
+  String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^0-9A-F]/g, '');
+const isMineFullColonMac = (value: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(String(value || '').trim());
+const normalizeMineFullBleMacKey = (value: unknown) => {
+  const normalized = normalizeMineBleMacKey(value);
+  return normalized.length === 12 ? normalized : '';
+};
+const getMineExplicitMac = (device: Record<string, any> | null | undefined) => {
+  const candidates = [
+    device?.advertis?.macInfo,
+    device?.advertis?.mac,
+    device?.advertis?.macAddress,
+    device?.advertis?.deviceMac,
+    device?.mac,
+    device?.macAddress,
+    device?.deviceMac,
+    isMineFullColonMac(device?.uniMacId) ? device?.uniMacId : ''
+  ];
+  for (const candidate of candidates) {
+    const mac = normalizeMineFullBleMacKey(candidate);
+    if (mac) return mac;
+  }
+  return '';
+};
+const getMineBoundMacKey = () => getMineExplicitMac(bindInfo.value as Record<string, any>);
+const hasMineRawCommunicationReady = () =>
   hasAnyRingCommunicationReady(ringDeviceInfo.value, userStore.deviceInfo, ringStore.deviceInfo);
+const isMineReadyDeviceMatchedBoundMac = (device: Record<string, any> | null | undefined, boundMacKey: string) => {
+  if (!device || !boundMacKey) return false;
+  const hasScanEvidence = Boolean(
+    device.advertis ||
+      device.advertisData ||
+      device.advertisHex ||
+      device.advertisServiceUUIDs ||
+      device.advertisServiceUUIDsList ||
+      device.serviceData ||
+      device.fromScan ||
+      device.lastSeenAt
+  );
+  if (!hasScanEvidence) return false;
+  const explicitMacKey = getMineExplicitMac(device);
+  if (explicitMacKey) return explicitMacKey === boundMacKey;
+  const platformMacKey = normalizeMineFullBleMacKey(device.deviceId || device.platformDeviceId);
+  return Boolean(platformMacKey && platformMacKey === boundMacKey);
+};
+const hasMineCommunicationReady = () =>
+  hasMineRawCommunicationReady() &&
+  (() => {
+    const boundMacKey = getMineBoundMacKey();
+    if (!boundMacKey) return true;
+    return [ringDeviceInfo.value, userStore.deviceInfo, ringStore.deviceInfo].some((device) =>
+      isMineReadyDeviceMatchedBoundMac(device as Record<string, any>, boundMacKey)
+    );
+  })();
 const getMineCurrentProtocol = () =>
-  ringDeviceInfo.value?.protocol || ringStore.deviceInfo?.protocol || userStore.deviceInfo?.protocol;
+  resolveRingProtocol((ringDeviceInfo.value || ringStore.deviceInfo || userStore.deviceInfo || {}) as any);
 const isMineRwRing = () => getMineCurrentProtocol() === 'rw';
 const summarizeMineDevice = (device: Record<string, any> | null | undefined) => ({
   deviceId: device?.deviceId,
@@ -2867,6 +2930,28 @@ const scanDevice = async () => {
     }
   }
 };
+const getQrConnectTarget = (scanRes: any, fallback: string) =>
+  String(
+    scanRes?.mac ||
+      scanRes?.advertis?.macInfo ||
+      scanRes?.uniMacId ||
+      scanRes?.deviceId ||
+      scanRes?.sn ||
+      fallback ||
+      ''
+  ).trim();
+
+const openDirectScanConnectPage = (target: string, targetName = '') => {
+  const query = [
+    'directScan=1',
+    `scanTarget=${encodeURIComponent(target)}`,
+    targetName ? `scanName=${encodeURIComponent(targetName)}` : ''
+  ]
+    .filter(Boolean)
+    .join('&');
+  uni.navigateTo({ url: `/pagesA/mines/connectDevice?${query}` });
+};
+
 // Handle scan success.
 const handleScanSuccess = async (res: any) => {
   const result = res.result;
@@ -2876,22 +2961,15 @@ const handleScanSuccess = async (res: any) => {
     const scanRes = await scan({
       sn: result
     });
-    const target = scanRes?.mac || scanRes?.deviceId || scanRes?.uniMacId || scanRes?.sn || result;
+    const target = getQrConnectTarget(scanRes, result);
     const targetName = scanRes?.deviceName || scanRes?.name || '';
     if (!target) {
       uni.hideLoading();
       uni.showToast({ title: '未识别到设备信息', icon: 'none' });
       return;
     }
-    await handleConnectDevice(target, targetName, scanRes?.uniMacId || '', true);
-    userStore.updateIsConnected(true);
-    await refreshMineDeviceSnapshot({ force: true });
     uni.hideLoading();
-    uni.showToast({
-      title: '设备已连接',
-      icon: 'success',
-      duration: 1500
-    });
+    openDirectScanConnectPage(target, targetName);
   } catch (error) {
     uni.hideLoading();
     uni.showToast({
@@ -2928,15 +3006,7 @@ const handleScanError = (err: any) => {
   }
 };
 const jumpDetail = () => {
-  if (isLoading.value) {
-    uni.showToast({
-      title: '\u8fde\u63a5\u4e2d\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5',
-      icon: 'none',
-      duration: 2000
-    });
-    return;
-  }
-  uni.$uv.route('/pagesA/mines/connectDevice');
+  navigateMinePage('/pagesA/mines/connectDevice');
 };const reconnectThrottle = () => {
   uni.$uv.throttle(async () => {
     userStore.updateIsManualReconnecting(true);
@@ -2958,7 +3028,7 @@ async function refreshMineDeviceSnapshot(options: MineSnapshotRefreshOptions = {
   const needsDeviceInfoRefresh = !hasMineBatterySnapshot() || !hasMineFirmwareSnapshot();
   if (!options.force && hasCachedSnapshot && !needsDeviceInfoRefresh) return;
   const isRwRing = getMineCurrentProtocol() === 'rw';
-  const timeoutMs = isRwRing ? 35000 : 3500;
+  const timeoutMs = isRwRing ? 5000 : 3500;
 
   try {
     await ensureCommunicationReady();
@@ -3024,6 +3094,39 @@ const restoreMineDeviceSnapshot = async (options: { refreshAfterRestore?: boolea
     snapshot: getMineConnectionSnapshot()
   });
   try {
+    if (hasMineRawCommunicationReady() && !hasMineCommunicationReady()) {
+      appendMineDiagnosticLog('restore-ready-bound-mismatch-force-scan', {
+        boundMac: getMineBoundMacKey(),
+        snapshot: getMineConnectionSnapshot()
+      });
+      try {
+        await disconnect();
+      } catch (error) {
+        appendMineDiagnosticLog('restore-bound-mismatch-disconnect-failed', {
+          message: error instanceof Error ? error.message : String(error),
+          snapshot: getMineConnectionSnapshot()
+        });
+      }
+    }
+    if (hasMineCommunicationReady()) {
+      userStore.updateIsConnected(true);
+      userStore.updateReconnectingStatus('2');
+      const shouldRefreshAfterRestore = options.refreshAfterRestore === true;
+      appendMineDiagnosticLog('restore-skip-already-ready', {
+        reason: shouldRefreshAfterRestore ? 'manual-refresh-uses-existing-connection' : 'page-restore-only-read-backend',
+        snapshot: getMineConnectionSnapshot()
+      });
+      if (shouldRefreshAfterRestore) {
+        await executeCommandsSequentially({ force: true });
+      }
+      appendMineDiagnosticLog('restore-result', {
+        restored: true,
+        ready: true,
+        reusedExistingConnection: true,
+        snapshot: getMineConnectionSnapshot()
+      });
+      return true;
+    }
     userStore.updateReconnectingStatus('1');
     const restored = await autoConnectLastDevice();
     if (!restored) {
@@ -3049,14 +3152,14 @@ const restoreMineDeviceSnapshot = async (options: { refreshAfterRestore?: boolea
 
     userStore.updateIsConnected(true);
     userStore.updateReconnectingStatus('2');
-    const shouldRefreshAfterRestore = options.refreshAfterRestore ?? !isMineRwRing();
+    const shouldRefreshAfterRestore = options.refreshAfterRestore === true;
     if (shouldRefreshAfterRestore) {
       await executeCommandsSequentially({ force: options.refreshAfterRestore === true });
     } else {
-      appendMineDiagnosticLog('restore-skip-rw-auto-refresh', {
+      appendMineDiagnosticLog('restore-skip-auto-refresh', {
+        reason: 'page-restore-only-connect',
         snapshot: getMineConnectionSnapshot()
       });
-      refreshMineRwDeviceInfoSnapshotInBackground('restore-rw-ready');
     }
     appendMineDiagnosticLog('restore-result', {
       restored: true,
@@ -3096,14 +3199,10 @@ const connectAgain = async () => {
     userStore.updateIsManualReconnecting(false);
     userStore.updateIsConnected(true);
     userStore.updateReconnectingStatus('2');
-    if (!isMineRwRing()) {
-      await executeCommandsSequentially();
-    } else {
-      appendMineDiagnosticLog('manual-reconnect-skip-rw-auto-refresh', {
-        snapshot: getMineConnectionSnapshot()
-      });
-      refreshMineRwDeviceInfoSnapshotInBackground('manual-reconnect-rw-ready');
-    }
+    appendMineDiagnosticLog('manual-reconnect-skip-auto-refresh', {
+      reason: 'manual-reconnect-only-connect',
+      snapshot: getMineConnectionSnapshot()
+    });
     appendMineDiagnosticLog('manual-reconnect-result', {
       success: true,
       snapshot: getMineConnectionSnapshot()
@@ -3181,14 +3280,10 @@ onShow(async () => {
           appendMineDiagnosticLog('page-show-already-connected', {
             snapshot: getMineConnectionSnapshot()
           });
-          if (!isMineRwRing()) {
-            await executeCommandsSequentially();
-          } else {
-            appendMineDiagnosticLog('page-show-skip-rw-auto-refresh', {
-              snapshot: getMineConnectionSnapshot()
-            });
-            refreshMineRwDeviceInfoSnapshotInBackground('page-show-rw-ready');
-          }
+          appendMineDiagnosticLog('page-show-skip-auto-refresh', {
+            reason: 'page-show-only-read-backend',
+            snapshot: getMineConnectionSnapshot()
+          });
         } else {
           await restoreMineDeviceSnapshot();
         }
@@ -4089,14 +4184,14 @@ const handleMineRwL19Acceptance = async () => {
     <view class="p-30 pb-100 relative mine-content" style="z-index: 1; box-sizing: border-box">
       <view class="pl-30 pr-30">
         <view class="user-section mb-50">
-          <view v-if="userStore.userInfo.id" @click="$uv.route('/pagesA/mines/profile')" class="user-card user-card--logged flex ai-center">
+          <view v-if="userStore.userInfo.id" @tap.stop="navigateMinePage('/pagesA/mines/profile')" class="user-card user-card--logged flex ai-center">
             <image class="user-avatar-image" :src="getFullUrl(userStore.userInfo.avatar) || '/static/images/mine/avatar.png' " mode="aspectFill"></image>
             <view class="user-info flex-1 flex ai-center jc-between ml-30">
               <view class="user-nickname fs-48">{{ userStore.userInfo.nickName }}</view>
               <view class="mine-arrow"></view>
             </view>
           </view>
-          <view v-else class="user-card user-card--guest flex ai-center" @click="$uv.route('/pages/login/login')">
+          <view v-else class="user-card user-card--guest flex ai-center" @tap.stop="navigateMinePage('/pages/login/login')">
             <image class="user-avatar-image" src="/static/images/mine/avatar.png" mode="aspectFill"></image>
             <view class="user-login-prompt ml-30 fs-48">{{ '\u767b\u5f55/\u6ce8\u518c' }}</view>
           </view>

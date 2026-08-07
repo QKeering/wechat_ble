@@ -24,6 +24,7 @@ import {
   requestMetricRefresh
 } from '@/composables/useRingMetricReadings';
 import { useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
+import { resolveRingProtocol } from '@/sdk/ring-ble';
 import {
   getRemainingVitalMeasurementMs,
   MIN_VITAL_MEASUREMENT_DURATION_MS,
@@ -294,7 +295,7 @@ let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
 let measureStartedAt = 0;
 const measureChange = (e: any) => {};
-const isRwDevice = () => userStore.deviceInfo?.protocol === 'rw';
+const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
 const clearMeasureCompleteTimer = () => {
   if (!measureCompleteTimer) return;
   clearTimeout(measureCompleteTimer);

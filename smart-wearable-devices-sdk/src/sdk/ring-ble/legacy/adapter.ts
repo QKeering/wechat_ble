@@ -3,6 +3,7 @@ import type { RwHealthMonitoringConfig, RwUserProfile } from '../rw/protocol';
 import { parseQkeerV2AdvertisInfo, parseRwAdvertisInfo, resolveRingProtocol } from '../protocolRegistry';
 import { LegacyRingCommand } from './commands';
 import { parseLegacyRingData } from './parser';
+import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import {
   buildLegacyCommandByName,
   buildLegacyCommandBytes,
@@ -149,6 +150,9 @@ export interface LegacyScanOptions {
   allowDuplicatesKey?: boolean;
   includeUnknown?: boolean;
   preserveDevices?: boolean;
+  diagnosticBoundMac?: string;
+  diagnosticSessionId?: string;
+  diagnosticLogAllDevices?: boolean;
 }
 
 export interface LegacyConnectionStateOptions {
@@ -216,9 +220,93 @@ const getAdvertisHex = (value?: ArrayBuffer | string | number[]) => {
   return Array.from(new Uint8Array(value), (byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase();
 };
 
+const SCAN_DEVICE_RECORD_LOG_THROTTLE_MS = 5000;
+const scanDeviceRecordLogTimes = new Map<string, number>();
+
+const sanitizeScanLogValue = (value: unknown, depth = 0, seen = new WeakSet<object>()): unknown => {
+  if (value == null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'undefined') return undefined;
+  if (value instanceof ArrayBuffer) {
+    return {
+      byteLength: value.byteLength,
+      hex: getAdvertisHex(value)
+    };
+  }
+  if (ArrayBuffer.isView(value)) {
+    const view = value as ArrayBufferView;
+    const bytes = Array.from(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+    return {
+      byteLength: view.byteLength,
+      hex: getAdvertisHex(bytes)
+    };
+  }
+  if (Array.isArray(value)) {
+    if (depth >= 2) return `[array:${value.length}]`;
+    return value.slice(0, 80).map((item) => sanitizeScanLogValue(item, depth + 1, seen));
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) return '[circular]';
+    seen.add(value);
+    if (depth >= 2) return '[object]';
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .slice(0, 80)
+        .map(([key, item]) => [key, sanitizeScanLogValue(item, depth + 1, seen)])
+        .filter(([, item]) => typeof item !== 'undefined')
+    );
+  }
+  return String(value);
+};
+
+const appendScanDeviceRecordLog = (
+  rawDevice: unknown,
+  matchedDevice: RingDeviceInfo,
+  parsedMac: string,
+  advertisHex: string,
+  matchedKeys: string[]
+) => {
+  const logKey = `${matchedDevice.deviceId || ''}|${parsedMac || matchedDevice.uniMacId || ''}|${matchedDevice.mac || ''}|${advertisHex}`;
+  const now = Date.now();
+  const lastLoggedAt = scanDeviceRecordLogTimes.get(logKey) || 0;
+  if (now - lastLoggedAt < SCAN_DEVICE_RECORD_LOG_THROTTLE_MS) return;
+  scanDeviceRecordLogTimes.set(logKey, now);
+
+  appendRingDiagnosticLog('BLE SCAN', 'scan-device-record', {
+    deviceId: matchedDevice.deviceId || '',
+    name: matchedDevice.name || '',
+    localName: matchedDevice.localName || '',
+    displayName: matchedDevice.displayName || '',
+    protocol: matchedDevice.protocol || '',
+    parsedMac,
+    uniMacId: matchedDevice.uniMacId || '',
+    mac: matchedDevice.mac || '',
+    advertisMacInfo: matchedDevice.advertis?.macInfo || '',
+    advertisHex,
+    advertisDataByteLength:
+      matchedDevice.advertisData instanceof ArrayBuffer
+        ? matchedDevice.advertisData.byteLength
+        : Array.isArray(matchedDevice.advertisData)
+          ? matchedDevice.advertisData.length
+          : typeof matchedDevice.advertisData === 'string'
+            ? Math.floor(matchedDevice.advertisData.replace(/\s+/g, '').length / 2)
+            : 0,
+    advertis: sanitizeScanLogValue(matchedDevice.advertis),
+    matchedKeys,
+    rawDevice: sanitizeScanLogValue(rawDevice)
+  });
+};
+
+type RawScanDiagnosticContext = {
+  boundMac: string;
+  sessionId: string;
+  startedAt: number;
+};
+
 export const getScannedDeviceMergeKeys = (device: RingDeviceInfo) => {
   const name = `${device.displayName || device.name || device.localName || device.bleName || ''}`.trim().toUpperCase();
-  const protocol = device.protocol || resolveRingProtocol(device);
+  const protocol = resolveRingProtocol(device);
   const advertisHex = getAdvertisHex(device.advertisData);
   const advertisTail = advertisHex.slice(-24);
   const serviceIds = [
@@ -250,6 +338,9 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   let scanPollTimer: ReturnType<typeof setInterval> | null = null;
   let scanPrefixes = DEFAULT_SCAN_PREFIXES;
   let includeUnknownScanDevices = false;
+  let rawScanDiagnostic: RawScanDiagnosticContext | null = null;
+  const rawScanDiagnosticLoggedKeys = new Set<string>();
+  const rawScanDiagnosticDevices = new Map<string, Record<string, unknown>>();
   const parsedWaiters: Array<{
     predicate: (parsed: RingParsedData) => boolean;
     resolve: (parsed: RingParsedData) => void;
@@ -312,8 +403,71 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     });
   };
 
-  const mergeScannedDevices = (devices: any[]) => {
+  const appendRawScanDiagnosticLogs = (devices: any[], source: string) => {
+    const diagnostic = rawScanDiagnostic;
+    if (!diagnostic || !Array.isArray(devices)) return;
+
+    devices.forEach((device: any) => {
+      const advertisHex = getAdvertisHex(device?.advertisData);
+      const parsedMac = getMacFromAdvertisData(device?.advertisData);
+      const deviceId = `${device?.deviceId || ''}`;
+      const name = `${device?.name || ''}`;
+      const localName = `${device?.localName || ''}`;
+      const recordKey = [diagnostic.sessionId, deviceId, advertisHex, name, localName].join('|');
+      if (rawScanDiagnosticLoggedKeys.has(recordKey)) return;
+
+      rawScanDiagnosticLoggedKeys.add(recordKey);
+      const record = {
+        boundMac: diagnostic.boundMac,
+        sessionId: diagnostic.sessionId,
+        source,
+        deviceId,
+        name,
+        localName,
+        RSSI: device?.RSSI,
+        protocol: resolveRingProtocol(device),
+        parsedMac,
+        mac: device?.mac || '',
+        uniMacId: device?.uniMacId || '',
+        advertisHex,
+        advertisDataByteLength:
+          device?.advertisData instanceof ArrayBuffer
+            ? device.advertisData.byteLength
+            : Array.isArray(device?.advertisData)
+              ? device.advertisData.length
+              : typeof device?.advertisData === 'string'
+                ? Math.floor(device.advertisData.replace(/\s+/g, '').length / 2)
+                : 0,
+        advertisServiceUUIDs: sanitizeScanLogValue(device?.advertisServiceUUIDs),
+        advertisServiceUUIDsList: sanitizeScanLogValue(device?.advertisServiceUUIDsList),
+        serviceData: sanitizeScanLogValue(device?.serviceData),
+        rawDevice: sanitizeScanLogValue(device)
+      };
+
+      rawScanDiagnosticDevices.set(recordKey, record);
+      appendRingDiagnosticLog('BLE SCAN', 'scan-device-raw-record', record);
+    });
+  };
+
+  const finishRawScanDiagnostic = (reason: string) => {
+    if (!rawScanDiagnostic) return;
+
+    appendRingDiagnosticLog('BLE SCAN', 'scan-device-raw-summary', {
+      boundMac: rawScanDiagnostic.boundMac,
+      sessionId: rawScanDiagnostic.sessionId,
+      reason,
+      elapsedMs: Date.now() - rawScanDiagnostic.startedAt,
+      rawDeviceCount: rawScanDiagnosticDevices.size,
+      devices: Array.from(rawScanDiagnosticDevices.values()).slice(0, 80)
+    });
+    rawScanDiagnostic = null;
+    rawScanDiagnosticLoggedKeys.clear();
+    rawScanDiagnosticDevices.clear();
+  };
+
+  const mergeScannedDevices = (devices: any[], source = 'unknown') => {
     if (!state.isScanning.value || !Array.isArray(devices)) return;
+    appendRawScanDiagnosticLogs(devices, source);
     const platform = uni.getSystemInfoSync().platform?.toLowerCase?.() || '';
 
     devices.forEach((device: any) => {
@@ -335,10 +489,11 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         protocol,
         advertis,
         uniMacId,
-        mac: device.mac || advertis?.macInfo,
+        mac: parsedMac || advertis?.macInfo || device.mac,
         lastSeenAt: Date.now()
       };
       const matchedKeys = getScannedDeviceMergeKeys(matchedDevice);
+      appendScanDeviceRecordLog(device, matchedDevice, parsedMac, getAdvertisHex(device.advertisData), matchedKeys);
       const existingIndex = state.devices.value.findIndex((item) => {
         const itemKeys = getScannedDeviceMergeKeys(item);
         return itemKeys.some((key) => matchedKeys.includes(key));
@@ -363,7 +518,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   };
 
   const handleDeviceFound = (result: any) => {
-    mergeScannedDevices(result?.devices);
+    mergeScannedDevices(result?.devices, 'onBluetoothDeviceFound');
   };
 
   const stopScan = () => {
@@ -380,6 +535,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       offBluetoothDeviceFound(handleDeviceFound);
 
       if (!state.isScanning.value) {
+        finishRawScanDiagnostic('already-stopped');
         resolve(undefined);
         return;
       }
@@ -387,10 +543,12 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       uni.stopBluetoothDevicesDiscovery({
         success: (result) => {
           state.isScanning.value = false;
+          finishRawScanDiagnostic('stop-success');
           resolve(result);
         },
         fail: (error) => {
           state.isScanning.value = false;
+          finishRawScanDiagnostic('stop-fail');
           resolve(error);
         }
       });
@@ -402,6 +560,24 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
     scanPrefixes = options.prefixes?.length ? options.prefixes : DEFAULT_SCAN_PREFIXES;
     includeUnknownScanDevices = Boolean(options.includeUnknown);
+    rawScanDiagnostic = options.diagnosticLogAllDevices || options.diagnosticBoundMac
+      ? {
+          boundMac: options.diagnosticBoundMac || '',
+          sessionId: options.diagnosticSessionId || `scan-${Date.now()}`,
+          startedAt: Date.now()
+        }
+      : null;
+    rawScanDiagnosticLoggedKeys.clear();
+    rawScanDiagnosticDevices.clear();
+    if (rawScanDiagnostic) {
+      appendRingDiagnosticLog('BLE SCAN', 'scan-device-raw-start', {
+        boundMac: rawScanDiagnostic.boundMac,
+        sessionId: rawScanDiagnostic.sessionId,
+        prefixes: scanPrefixes,
+        includeUnknown: includeUnknownScanDevices,
+        timeoutMs: options.timeoutMs ?? 20000
+      });
+    }
     if (!options.preserveDevices) state.devices.value = [];
     state.isScanning.value = true;
     offBluetoothDeviceFound(handleDeviceFound);
@@ -421,7 +597,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
           uni.onBluetoothDeviceFound(handleDeviceFound);
           scanPollTimer = setInterval(() => {
             uni.getBluetoothDevices({
-              success: (devicesResult) => mergeScannedDevices(devicesResult.devices),
+              success: (devicesResult) => mergeScannedDevices(devicesResult.devices, 'getBluetoothDevices'),
               fail: () => undefined
             });
           }, 1500);
@@ -429,6 +605,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         },
         fail: (error) => {
           state.isScanning.value = false;
+          finishRawScanDiagnostic('start-fail');
           offBluetoothDeviceFound(handleDeviceFound);
           if (scanTimeout) {
             clearTimeout(scanTimeout);
@@ -504,28 +681,28 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     });
   };
 
-  const connectDevice = async (deviceId: string, deviceName = '') => {
+  const connectDevice = async (deviceId: string, deviceName = '', sourceDevice?: RingDeviceInfo) => {
     try {
-      return await createBleConnectionOnce(deviceId, deviceName);
+      return { ...sourceDevice, ...(await createBleConnectionOnce(deviceId, deviceName)) };
     } catch (error) {
       if (!isAlreadyConnectedError(error)) throw error;
 
       const connectedDeviceIds = await getConnectedLegacyDeviceIds();
       if (connectedDeviceIds.includes(deviceId)) {
-        return { deviceId, name: deviceName, protocol: 'legacy' as const };
+        return { ...sourceDevice, deviceId, name: deviceName, protocol: 'legacy' as const };
       }
 
       await closeConnectedLegacyDevicesQuietly();
       await closeBleConnectionQuietly(deviceId);
       await sleep(350);
-      return createBleConnectionOnce(deviceId, deviceName);
+      return { ...sourceDevice, ...(await createBleConnectionOnce(deviceId, deviceName)) };
     }
   };
 
-  const connectAndDiscover = async (deviceId: string, deviceName = '') => {
-    await connectDevice(deviceId, deviceName);
+  const connectAndDiscover = async (deviceId: string, deviceName = '', sourceDevice?: RingDeviceInfo) => {
+    await connectDevice(deviceId, deviceName, sourceDevice);
     await setMTU(deviceId);
-    return discoverServicesAndChars(deviceId, deviceName);
+    return discoverServicesAndChars(deviceId, deviceName, sourceDevice);
   };
 
   const enableNotify = (deviceId: string, serviceId: string, characteristicId: string) => {
@@ -554,7 +731,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     return cache[mac] || '';
   };
 
-  const discoverServicesAndChars = async (deviceId: string, deviceName = '') => {
+  const discoverServicesAndChars = async (deviceId: string, deviceName = '', sourceDevice?: RingDeviceInfo) => {
     const serviceResult: any = await withTimeout(
       new Promise((resolve, reject) => uni.getBLEDeviceServices({ deviceId, success: resolve, fail: reject })),
       10000,
@@ -609,6 +786,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     await enableNotify(deviceId, serviceId, dataCharId);
 
     const deviceInfo = {
+      ...(sourceDevice || {}),
       deviceId,
       name: deviceName,
       serviceId,

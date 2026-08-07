@@ -329,7 +329,7 @@ const getTypicalPointGap = (points: Array<{ time: number; type: string }>) => {
 const processTimeSegments = (): SleepTimelineSegment[] => {
   const chartData = getSleepTimelineSourceData();
   if (!Array.isArray(chartData) || chartData.length === 0) {
-    return getFallbackSegmentsFromSummary();
+    return [];
   }
   const allowValueStageFallback = shouldUseValueAsStageCode(chartData);
 
@@ -367,11 +367,11 @@ const processTimeSegments = (): SleepTimelineSegment[] => {
     .sort((a: any, b: any) => a.time - b.time) as Array<{ time: number; type: string }>;
 
   if (!detailPoints.length) {
-    return getFallbackSegmentsFromSummary();
+    return [];
   }
 
   if (isLikelySummaryOnlyTimeline(detailPoints)) {
-    return getFallbackSegmentsFromSummary();
+    return [];
   }
 
   const typicalGap = getTypicalPointGap(detailPoints);

@@ -68,10 +68,10 @@ const getIsIOS = () => {
   }
 };
 
-const RW_BUSINESS_HISTORY_PAGE_TIMEOUT_MS = 18000;
+const RW_BUSINESS_HISTORY_PAGE_TIMEOUT_MS = 5000;
 const SLEEP_HISTORY_LOOKBACK_DAYS = 1;
-const EMPTY_HISTORY_FALLBACK_TIMEOUT_MS = 30000;
-const MISSING_VITAL_HISTORY_FALLBACK_TIMEOUT_MS = 30000;
+const EMPTY_HISTORY_FALLBACK_TIMEOUT_MS = 5000;
+const MISSING_VITAL_HISTORY_FALLBACK_TIMEOUT_MS = 5000;
 const HISTORY_PAGE_LOCAL_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const HISTORY_PAGE_UPLOAD_ENDPOINT = '/app/data/sync';
 const HISTORY_PAGE_UPLOAD_TIMEOUT_MS = 90000;
@@ -82,6 +82,7 @@ const HISTORY_PAGE_UPLOADED_RECORD_KEYS_MAX_COUNT = 2000;
 const HISTORY_PAGE_SLEEP_BACKFILL_SECONDS = 24 * 60 * 60;
 const HISTORY_PAGE_VITAL_BACKFILL_SECONDS = 24 * 60 * 60;
 const HISTORY_PAGE_BACKEND_UPLOAD_ALLOWED_PAGES = new Set(['awareness', 'home']);
+const HISTORY_PAGE_UPLOAD_SIGNATURE_TTL_MS = 5 * 60 * 1000;
 const HISTORY_PAGE_SUBMIT_FAILED_MESSAGE = '历史数据提交失败';
 const HISTORY_PAGE_FALLBACK_READ_FAILED_MESSAGE = '历史数据兜底读取失败';
 const HISTORY_PAGE_EMPTY_FALLBACK_EVENTS = {
@@ -112,6 +113,9 @@ const HISTORY_PAGE_VITAL_METRIC_DATA_TYPES: Record<HistoryPageVitalMetric, RwHis
   bloodSugar: ['bloodSugar'],
   bloodPressure: ['bloodPressure']
 };
+const runningHistoryPageUploadSignatures = new Map<string, number>();
+const completedHistoryPageUploadSignatures = new Map<string, number>();
+
 const getHistoryPageSilentRequestConfig = (): HistoryPageSilentRequestConfig => ({
   timeout: HISTORY_PAGE_UPLOAD_TIMEOUT_MS,
   custom: { toast: false, catch: true }
@@ -119,6 +123,12 @@ const getHistoryPageSilentRequestConfig = (): HistoryPageSilentRequestConfig => 
 
 const canHistoryPageUploadToBackend = (options: SyncRingBusinessHistoryPageOptions) =>
   options.allowBackendUpload === true && HISTORY_PAGE_BACKEND_UPLOAD_ALLOWED_PAGES.has(String(options.page || '').trim());
+
+const clampHistoryPageForegroundTimeout = (timeoutMs: number, maxTimeoutMs = RW_BUSINESS_HISTORY_PAGE_TIMEOUT_MS) => {
+  const normalized = Number(timeoutMs);
+  if (!Number.isFinite(normalized) || normalized <= 0) return maxTimeoutMs;
+  return Math.min(Math.max(normalized, 1000), maxTimeoutMs);
+};
 
 const getHistoryPageRawError = (error: unknown) => {
   if (typeof error === 'string') return error;
@@ -433,6 +443,72 @@ const getHistoryPageSubmitRecordKey = (record: RingHistorySubmitRecord) =>
     end: record.endTime,
     dateRef: record.dateRef
   });
+
+const normalizeHistoryPageSignatureMac = (deviceMac: string) =>
+  `${deviceMac || ''}`.trim().toUpperCase().replace(/[^0-9A-F]/g, '');
+
+const pruneHistoryPageUploadSignatures = (now = Date.now()) => {
+  runningHistoryPageUploadSignatures.forEach((startedAt, signature) => {
+    if (!startedAt || now - startedAt > HISTORY_PAGE_UPLOAD_SIGNATURE_TTL_MS) {
+      runningHistoryPageUploadSignatures.delete(signature);
+    }
+  });
+  completedHistoryPageUploadSignatures.forEach((completedAt, signature) => {
+    if (!completedAt || now - completedAt > HISTORY_PAGE_UPLOAD_SIGNATURE_TTL_MS) {
+      completedHistoryPageUploadSignatures.delete(signature);
+    }
+  });
+};
+
+const getHistoryPageUploadSignature = (
+  deviceMac: string,
+  protocol: string,
+  submitRecords: RingHistorySubmitRecord[],
+  rawFrames: RingRawHistoryFrame[]
+) => {
+  const submitKeys = submitRecords
+    .filter((record) => Boolean(record?.recordTime))
+    .map((record) => getHistoryPageSubmitRecordKey(record))
+    .sort();
+  const rawKeys = rawFrames
+    .map((frame) => frame?.rawHash)
+    .filter((hash): hash is string => Boolean(hash))
+    .map((hash) => String(hash))
+    .sort();
+  if (submitKeys.length === 0 && rawKeys.length === 0) return '';
+  return [
+    normalizeHistoryPageSignatureMac(deviceMac),
+    `${protocol || 'legacy'}`.toLowerCase(),
+    submitKeys.join('|'),
+    rawKeys.join('|')
+  ].join('::');
+};
+
+const claimHistoryPageUploadSignature = (signature: string) => {
+  if (!signature) return { ok: true as const };
+  const now = Date.now();
+  pruneHistoryPageUploadSignatures(now);
+  if (runningHistoryPageUploadSignatures.has(signature)) {
+    return { ok: false as const, reason: 'same-signature-running' };
+  }
+  if (completedHistoryPageUploadSignatures.has(signature)) {
+    return { ok: false as const, reason: 'same-signature-uploaded' };
+  }
+  runningHistoryPageUploadSignatures.set(signature, now);
+  return { ok: true as const };
+};
+
+const releaseHistoryPageUploadSignature = (signature: string) => {
+  if (!signature) return;
+  runningHistoryPageUploadSignatures.delete(signature);
+};
+
+const completeHistoryPageUploadSignature = (signature: string) => {
+  if (!signature) return;
+  runningHistoryPageUploadSignatures.delete(signature);
+  completedHistoryPageUploadSignatures.set(signature, Date.now());
+  pruneHistoryPageUploadSignatures();
+};
 
 const mergeHistoryPageSubmitRecords = (...groups: RingHistorySubmitRecord[][]) => {
   const merged = new Map<string, RingHistorySubmitRecord>();
@@ -750,8 +826,16 @@ export const useRingBusinessHistoryPageSync = () => {
   const isCurrentRwRing = () => getCurrentProtocol() === 'rw';
   const hasCurrentCommunicationReady = () => hasAnyRingCommunicationReady(ringBle.deviceInfo.value, ringStore.deviceInfo, userStore.deviceInfo);
 
-  const ensureHistoryPageReady = async (details: Record<string, unknown>) => {
+  const ensureHistoryPageReady = async (details: Record<string, unknown>, allowRestore = false) => {
     if (hasCurrentCommunicationReady()) return true;
+
+    if (!allowRestore) {
+      appendRingDiagnosticLog('RW PAGE', 'history-page-restore-skip', {
+        ...details,
+        reason: 'restore-disabled-for-readonly-page'
+      });
+      return false;
+    }
 
     appendRingDiagnosticLog('RW PAGE', 'history-page-restore-start', details);
     try {
@@ -812,26 +896,6 @@ export const useRingBusinessHistoryPageSync = () => {
       return null;
     }
     const uploadProtocol = getCurrentProtocol() || 'legacy';
-
-    const backendBinding = await assertBackendUploadBinding(deviceMac, getHistoryPageSilentRequestConfig() as any);
-    if (!backendBinding.ok) {
-      appendRingDiagnosticLog('RW PAGE', 'history-page-upload-skip', {
-        ...details,
-        reason: 'backend-current-binding-invalid',
-        reasonCode: backendBinding.reasonCode,
-        message: backendBinding.reason,
-        deviceMac,
-        backendDeviceMac: backendBinding.deviceMac,
-        backendDevice: backendBinding.device,
-        rawRecordCount: records.length,
-        rawRecordSample: records.slice(0, 2).map(summarizeHistoryPageRecord)
-      });
-      if (backendBinding.reasonCode === 'NO_ACTIVE_BINDING') {
-        await clearFrontendRingBindingState(userStore, ringStore);
-      }
-      return null;
-    }
-
     const rawFrames = getHistoryPageRawUploadFrames(rawResults, deviceMac);
     let rawSubmitResponse: unknown = rawFrames.length > 0
       ? { rawStatus: 'pending', rawFrameCount: rawFrames.length }
@@ -892,6 +956,56 @@ export const useRingBusinessHistoryPageSync = () => {
     const pendingDroppedForOtherDevice = Boolean(pendingUpload && pendingUpload.deviceMac !== deviceMac);
     if (pendingDroppedForOtherDevice) clearHistoryPagePendingUpload(pendingUpload?.deviceMac || '');
     const submitPreviewRecords = mergeHistoryPageSubmitRecords(pendingRecords, currentUploadSplit.submitRecords);
+    const uploadSignature = getHistoryPageUploadSignature(deviceMac, uploadProtocol, submitPreviewRecords, rawFrames);
+    const uploadSignatureClaim = claimHistoryPageUploadSignature(uploadSignature);
+    if (!uploadSignatureClaim.ok) {
+      appendRingDiagnosticLog('RW PAGE', 'history-page-upload-skip', {
+        ...details,
+        reason: uploadSignatureClaim.reason,
+        deviceMac,
+        uploadProtocol,
+        uploadSignatureLength: uploadSignature.length,
+        rawFrameCount: rawFrames.length,
+        rawRecordCount: records.length,
+        submitRecordCount: submitPreviewRecords.length,
+        currentSubmitRecordCount: currentSubmitRecords.length,
+        currentCandidateRecordCount: currentCandidateRecords.length,
+        newSubmitRecordCount: currentUploadSplit.submitRecords.length,
+        alreadyUploadedCount: currentUploadSplit.alreadyUploadedRecords.length,
+        uploadedRecordKeyCount: uploadedRecordKeys.size,
+        pendingUploadCount: pendingRecords.length,
+        pendingDroppedForOtherDevice,
+        rawMetricCounts: countHistoryPageRecordMetrics(records),
+        submitMetricCounts: countHistoryPageRecordMetrics(submitPreviewRecords as any),
+        rawRecordSample: records.slice(0, 2).map(summarizeHistoryPageRecord),
+        submitRecordSample: submitPreviewRecords.slice(0, 2)
+      });
+      return null;
+    }
+
+    const backendBinding = await assertBackendUploadBinding(deviceMac, getHistoryPageSilentRequestConfig() as any);
+    if (!backendBinding.ok) {
+      releaseHistoryPageUploadSignature(uploadSignature);
+      appendRingDiagnosticLog('RW PAGE', 'history-page-upload-skip', {
+        ...details,
+        reason: 'backend-current-binding-invalid',
+        reasonCode: backendBinding.reasonCode,
+        message: backendBinding.reason,
+        deviceMac,
+        backendDeviceMac: backendBinding.deviceMac,
+        backendDevice: backendBinding.device,
+        uploadProtocol,
+        uploadSignatureLength: uploadSignature.length,
+        rawFrameCount: rawFrames.length,
+        rawRecordCount: records.length,
+        submitRecordCount: submitPreviewRecords.length,
+        rawRecordSample: records.slice(0, 2).map(summarizeHistoryPageRecord)
+      });
+      if (backendBinding.reasonCode === 'NO_ACTIVE_BINDING') {
+        await clearFrontendRingBindingState(userStore, ringStore);
+      }
+      return null;
+    }
 
     if (submitPreviewRecords.length === 0) {
       appendRingDiagnosticLog('RW PAGE', 'history-page-upload-skip', {
@@ -942,6 +1056,7 @@ export const useRingBusinessHistoryPageSync = () => {
           submitRingHistoryRawFrames(params, getHistoryPageSilentRequestConfig())
         )
           .then((rawResponse) => {
+            completeHistoryPageUploadSignature(uploadSignature);
             appendRingDiagnosticLog('RW PAGE', 'upload-result', {
               ...details,
               stage: 'history-page-raw-upload',
@@ -953,6 +1068,7 @@ export const useRingBusinessHistoryPageSync = () => {
             });
           })
           .catch((rawUploadError) => {
+            releaseHistoryPageUploadSignature(uploadSignature);
             appendRingDiagnosticLog('RW PAGE', 'history-page-raw-upload-failed', {
               ...details,
               reason: 'no-submittable-records',
@@ -973,6 +1089,9 @@ export const useRingBusinessHistoryPageSync = () => {
               rawError: getHistoryPageRawError(rawUploadError)
             });
           });
+      }
+      if (rawFrames.length === 0) {
+        releaseHistoryPageUploadSignature(uploadSignature);
       }
       return null;
     }
@@ -1034,6 +1153,7 @@ export const useRingBusinessHistoryPageSync = () => {
         markPendingUploadRawDone(uploadSession.uploadSessionId, submitResponse);
       }
     } catch (uploadError) {
+      releaseHistoryPageUploadSignature(uploadSignature);
       markPendingUploadDataFailed(uploadSession.uploadSessionId, uploadError);
       const savedPending = writeHistoryPagePendingUpload(
         deviceMac,
@@ -1116,6 +1236,7 @@ export const useRingBusinessHistoryPageSync = () => {
     const maxTimestamp = submitPreviewRecords.reduce((latest, record) => {
       return Math.max(latest, getRingHistoryRecordSyncUnixTime(record) || 0);
     }, 0);
+    completeHistoryPageUploadSignature(uploadSignature);
     const previousLastReadTimestamp = getDeviceHistoryCheckpoint(deviceMac, uploadCheckpointProtocol);
     if (maxTimestamp > 0 && maxTimestamp > previousLastReadTimestamp) {
       setDeviceHistoryCheckpoint(deviceMac, uploadCheckpointProtocol, maxTimestamp);
@@ -1218,19 +1339,18 @@ export const useRingBusinessHistoryPageSync = () => {
     }
 
     const readAll = Boolean(options.readAll);
+    const allowBackendUpload = canHistoryPageUploadToBackend(options);
     const historyStartDate = getHistoryPageStartDate(options.date, dataTypes, readAll);
     const sinceTimestamp = getHistoryPageSinceTimestamp(historyStartDate, readAll);
     const configuredTimeoutMs = Number(options.timeoutMs);
-    const timeoutMs = Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
-      ? configuredTimeoutMs
-      : RW_BUSINESS_HISTORY_PAGE_TIMEOUT_MS;
+    const timeoutMs = clampHistoryPageForegroundTimeout(configuredTimeoutMs);
     const logDetails = {
       page: options.page,
       date: options.date,
       historyStartDate,
       dataTypes,
       readAll,
-      allowBackendUpload: options.allowBackendUpload === true,
+      allowBackendUpload,
       sinceTimestamp,
       timeoutMs
     };
@@ -1253,7 +1373,15 @@ export const useRingBusinessHistoryPageSync = () => {
       return null;
     }
 
-    const ready = await ensureHistoryPageReady(logDetails);
+    if (!allowBackendUpload) {
+      appendRingDiagnosticLog('RW PAGE', 'history-page-sync-skip', {
+        ...logDetails,
+        reason: 'readonly-page-no-device-sync'
+      });
+      return null;
+    }
+
+    const ready = await ensureHistoryPageReady(logDetails, allowBackendUpload);
     if (!ready) {
       appendRingDiagnosticLog('RW PAGE', 'history-page-sync-skip', {
         ...logDetails,
@@ -1301,7 +1429,7 @@ export const useRingBusinessHistoryPageSync = () => {
             missingMetrics: missingStepSleepMetrics
           });
         } else {
-          const fallbackTimeoutMs = Math.max(timeoutMs, EMPTY_HISTORY_FALLBACK_TIMEOUT_MS);
+          const fallbackTimeoutMs = clampHistoryPageForegroundTimeout(timeoutMs, EMPTY_HISTORY_FALLBACK_TIMEOUT_MS);
           const fallbackEvents = records.length === 0
             ? HISTORY_PAGE_EMPTY_FALLBACK_EVENTS
             : HISTORY_PAGE_MISSING_STEP_SLEEP_FALLBACK_EVENTS;
@@ -1366,7 +1494,7 @@ export const useRingBusinessHistoryPageSync = () => {
       if (!readAll && missingVitalMetrics.length > 0) {
         const fallbackDataTypes = getVitalFallbackDataTypes(missingVitalMetrics);
         if (fallbackDataTypes.length > 0) {
-          const fallbackTimeoutMs = Math.max(timeoutMs, MISSING_VITAL_HISTORY_FALLBACK_TIMEOUT_MS);
+          const fallbackTimeoutMs = clampHistoryPageForegroundTimeout(timeoutMs, MISSING_VITAL_HISTORY_FALLBACK_TIMEOUT_MS);
           const fallbackDetails = {
             ...logDetails,
             dataTypes: fallbackDataTypes,
@@ -1434,7 +1562,7 @@ export const useRingBusinessHistoryPageSync = () => {
         combinedRawRecordCount: combinedUploadRecords.length,
         combinedSubmitRecordCount: combinedSubmitRecords.length
       };
-      if (canHistoryPageUploadToBackend(options)) {
+      if (allowBackendUpload) {
         try {
           await uploadHistoryPageRecords(combinedUploadRecords, uploadDetails, sinceTimestamp, uploadRawResults);
         } catch (uploadError) {

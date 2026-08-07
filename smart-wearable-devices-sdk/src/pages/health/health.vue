@@ -14,6 +14,7 @@ import AiLab from '../awareness/aiLab.vue';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthLevel, normalizeHealthText } from '@/utils/healthText';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
+import { resolveRingProtocol } from '@/sdk/ring-ble';
 
 const echarts = require('../../static/echarts.min.js');
 const userStore = useUserStore();
@@ -138,7 +139,7 @@ const hasRuntimeRingDevice = () =>
       userStore.iosMacId
   );
 const getCurrentRingProtocol = () =>
-  ringDeviceInfo.value?.protocol || ringStore.deviceInfo?.protocol || userStore.deviceInfo?.protocol;
+  resolveRingProtocol((ringDeviceInfo.value || ringStore.deviceInfo || userStore.deviceInfo || {}) as any);
 const isCurrentRwRing = () => getCurrentRingProtocol() === 'rw';
 const getRingRefreshTimeoutMs = () => (isCurrentRwRing() ? 35000 : 3500);
 const refreshBoundRingBusinessData = async () => {

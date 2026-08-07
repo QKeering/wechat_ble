@@ -11,7 +11,6 @@ import {
   resolveRingProtocol,
   resetRingRuntimeState,
   refreshLegacyBusinessMetrics,
-  RW_SERVICE_UUIDS,
   syncLegacyHistory,
   unbindLegacyRing,
   type LegacyRingAdapter,
@@ -63,6 +62,8 @@ const RW_RECONNECT_SCAN_ROUND_GAP_MS = 300;
 const RW_DIRECT_RECONNECT_MAX_DEVICE_AGE_MS = 30000;
 const RW_UPLOAD_DISCONNECT_RECOVERY_DELAY_MS = 250;
 const RW_UPLOAD_SUCCESS_DISCONNECT_GRACE_MS = 5000;
+const BOUND_SCAN_RAW_DIAGNOSTIC_PAUSE = false;
+const BOUND_SCAN_RAW_DIAGNOSTIC_TIMEOUT_MS = 8000;
 
 export interface UseRingBleSdkOptions {
   getBoundDevice?: RingBleRuntime['getBoundDevice'];
@@ -79,6 +80,7 @@ export interface ConnectRingDeviceOptions {
   uniMacId?: string;
   fromScan?: boolean;
   bindAfterConnected?: boolean;
+  replaceBinding?: boolean;
   protocol?: RingProtocolKind;
   sourceDevice?: RingDeviceInfo;
 }
@@ -122,7 +124,10 @@ const normalizeRwHistoryDataName = (name: CompatRwHistoryDataName): string => {
 };
 
 export const getRingDeviceStableIdentity = (device: RingDeviceInfo) => {
-  const stableMac = device.mac || device.advertis?.macInfo;
+  const deviceIdKey = normalizeRingIdentity(device.deviceId || device.platformDeviceId);
+  const preferredMac = device.advertis?.macInfo || (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '');
+  const macKey = normalizeRingIdentity(device.mac);
+  const stableMac = preferredMac || (macKey && (!deviceIdKey || macKey !== deviceIdKey) ? device.mac : '');
   if (stableMac) return stableMac;
 
   if (resolveRingProtocol(device) === 'rw') {
@@ -133,7 +138,8 @@ export const getRingDeviceStableIdentity = (device: RingDeviceInfo) => {
   return device.uniMacId || device.deviceId || '';
 };
 
-export const getRingDeviceMatchIds = (device: RingDeviceInfo) => [device.deviceId, device.uniMacId, device.mac, device.advertis?.macInfo].filter(Boolean);
+export const getRingDeviceMatchIds = (device: RingDeviceInfo) =>
+  [device.deviceId, device.platformDeviceId, device.uniMacId, device.platformUniMacId, device.mac, device.advertis?.macInfo].filter(Boolean);
 
 const normalizeRingIdentity = (value?: unknown) =>
   String(value || '')
@@ -141,6 +147,19 @@ const normalizeRingIdentity = (value?: unknown) =>
     .toUpperCase();
 
 const isColonSeparatedBleMac = (value?: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){2,5}$/.test(String(value || '').trim());
+
+const isFullColonBleMac = (value?: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(String(value || '').trim());
+
+const normalizeFullBleMacKey = (value?: unknown) => {
+  if (!isFullColonBleMac(value)) return '';
+  const normalized = normalizeRingIdentity(value);
+  return normalized.length === 12 ? normalized : '';
+};
+
+const normalizeFullBleMacText = (value?: unknown) => {
+  if (!isFullColonBleMac(value)) return '';
+  return String(value || '').trim().toUpperCase();
+};
 
 const hasRwNotifyDiscoverySnapshot = (device: RingDeviceInfo) => Array.isArray(device.notifyCandidates) && device.notifyCandidates.length > 0;
 
@@ -154,6 +173,92 @@ const getRwStableConnectionIdentity = (device?: RingDeviceInfo | null, fallback?
   return '';
 };
 
+const getLegacyStableConnectionIdentity = (device?: RingDeviceInfo | null, fallback?: unknown) => {
+  if (!device) return isColonSeparatedBleMac(fallback) ? String(fallback || '').trim() : '';
+  const deviceIdKey = normalizeRingIdentity(device.deviceId || device.platformDeviceId);
+  const preferred =
+    device.advertis?.macInfo ||
+    device.advertis?.mac ||
+    device.advertis?.macAddress ||
+    device.advertis?.deviceMac ||
+    (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '') ||
+    (isColonSeparatedBleMac(fallback) ? String(fallback || '').trim() : '');
+  if (preferred) return String(preferred || '').trim();
+
+  const macKey = normalizeRingIdentity(device.mac);
+  if (macKey && (!deviceIdKey || macKey !== deviceIdKey)) return String(device.mac || '').trim();
+  return '';
+};
+
+const getExplicitMacFromDevice = (device?: RingDeviceInfo | null, fallback?: unknown) => {
+  const candidates = [
+    device?.advertis?.macInfo,
+    device?.advertis?.mac,
+    device?.advertis?.macAddress,
+    device?.advertis?.deviceMac,
+    device?.mac,
+    (device as Record<string, unknown> | undefined)?.macAddress,
+    (device as Record<string, unknown> | undefined)?.deviceMac,
+    (device as Record<string, unknown> | undefined)?.device_mac,
+    device?.uniMacId,
+    fallback
+  ];
+
+  for (const candidate of candidates) {
+    const mac = normalizeFullBleMacText(candidate);
+    if (mac) return mac;
+  }
+  return '';
+};
+
+const getBoundReconnectMac = (device?: RingDeviceInfo | null) => getExplicitMacFromDevice(device);
+
+const hasRawScanAdvertisEvidence = (device?: RingDeviceInfo | null) =>
+  Boolean(
+    device?.advertisData ||
+      device?.advertisHex ||
+      device?.advertisServiceUUIDs ||
+      device?.advertisServiceUUIDsList ||
+      device?.serviceData
+  );
+
+const hasScanDeviceEvidence = (device?: RingDeviceInfo | null) =>
+  Boolean(hasRawScanAdvertisEvidence(device) || (device as Record<string, unknown> | undefined)?.fromScan || device?.lastSeenAt);
+
+const getScannedAdvertisedMac = (device?: RingDeviceInfo | null) => {
+  // A cached object may contain `lastSeenAt/fromScan` plus an injected `advertis.macInfo`.
+  // That is not enough to prove the current platform `deviceId` belongs to the bound MAC.
+  // For strict reconnect/binding we only trust a fresh scan record that contains raw
+  // broadcast evidence, then use the MAC parsed from that record.
+  if (!hasRawScanAdvertisEvidence(device)) return '';
+  return getExplicitMacFromDevice(device);
+};
+
+const isStrictBoundScanCandidate = (target: RingDeviceInfo, candidate?: RingDeviceInfo | null) => {
+  if (!candidate?.deviceId) return false;
+  if (hasConflictingProtocols(target, candidate)) return false;
+
+  const targetMacKey = normalizeFullBleMacKey(getBoundReconnectMac(target));
+  const candidateMacKey = normalizeFullBleMacKey(getScannedAdvertisedMac(candidate));
+  return Boolean(targetMacKey && candidateMacKey && targetMacKey === candidateMacKey);
+};
+
+const findStrictBoundReconnectScanCandidate = (target: RingDeviceInfo, scannedDevices: RingDeviceInfo[]) =>
+  scannedDevices.find((device) => isStrictBoundScanCandidate(target, device)) || null;
+
+const getStrictConnectTargetMac = (payload: ConnectRingDeviceOptions, sourceDevice?: RingDeviceInfo | null, stableIdentity?: string) =>
+  normalizeFullBleMacText(stableIdentity) || normalizeFullBleMacText(payload.uniMacId) || getScannedAdvertisedMac(sourceDevice) || normalizeFullBleMacText(payload.deviceId);
+
+const getRingCommunicationDeviceId = (device?: RingDeviceInfo | null, fallback?: unknown) => {
+  const deviceId = String(device?.deviceId || '').trim();
+  if (deviceId) return deviceId;
+
+  const platformDeviceId = String(device?.platformDeviceId || '').trim();
+  if (platformDeviceId) return platformDeviceId;
+
+  return String(fallback || '').trim();
+};
+
 const getExplicitRwStableIdentityIds = (device: RingDeviceInfo) =>
   [device.mac, device.advertis?.macInfo, isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : ''].filter(Boolean);
 
@@ -162,7 +267,7 @@ const getRingDeviceTailMatchIds = (device: RingDeviceInfo) =>
     resolveRingProtocol(device) !== 'rw' || isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '',
     device.mac,
     device.advertis?.macInfo,
-    isColonSeparatedBleMac(device.deviceId) ? device.deviceId : ''
+    resolveRingProtocol(device) !== 'rw' && isColonSeparatedBleMac(device.deviceId) ? device.deviceId : ''
   ].filter(Boolean);
 
 const normalizeRingName = (device: RingDeviceInfo) =>
@@ -174,11 +279,6 @@ const normalizeRingUuid = (value?: unknown) =>
   String(value || '')
     .trim()
     .toLowerCase();
-
-const isRwServiceUuid = (value?: unknown) => {
-  const serviceId = normalizeRingUuid(value);
-  return Boolean(serviceId && RW_SERVICE_UUIDS.some((candidate) => normalizeRingUuid(candidate) === serviceId));
-};
 
 const hasMatchingIdentityTail = (left: RingDeviceInfo, right: RingDeviceInfo) => {
   const leftIds = getRingDeviceTailMatchIds(left)
@@ -247,6 +347,10 @@ export const isSameRingDevice = (left: RingDeviceInfo, right: RingDeviceInfo) =>
 
 export const findReconnectScanCandidate = (target: RingDeviceInfo, scannedDevices: RingDeviceInfo[]) => {
   const protocolCandidates = scannedDevices.filter((device) => !target.protocol || !device.protocol || device.protocol === target.protocol);
+  if (getBoundReconnectMac(target)) {
+    return findStrictBoundReconnectScanCandidate(target, protocolCandidates);
+  }
+
   if (resolveRingProtocol(target) === 'rw') {
     const targetStableIds = getStableSwitchingIdentityIds(target);
     if (targetStableIds.length > 0) {
@@ -311,12 +415,40 @@ const hasRingReconnectTargetIdentity = (target?: RingDeviceInfo | null) => {
 
 const isSameBoundReconnectDevice = (boundDevice: RingDeviceInfo, currentDevice?: RingDeviceInfo | null) => {
   if (!currentDevice?.deviceId) return false;
-  const protocol = boundDevice.protocol || resolveRingProtocol(boundDevice);
+  const protocol = resolveRingProtocol(boundDevice);
+  const boundMacKey = normalizeFullBleMacKey(getBoundReconnectMac(boundDevice));
+  if (boundMacKey) {
+    const currentMacKey = normalizeFullBleMacKey(getScannedAdvertisedMac(currentDevice));
+    return Boolean(currentMacKey && currentMacKey === boundMacKey && !hasConflictingProtocols({ ...boundDevice, protocol }, currentDevice));
+  }
   return isSameRingDevice({ ...boundDevice, protocol }, currentDevice);
 };
 
 const buildReconnectTargetFromBoundDevice = (boundDevice: RingDeviceInfo, currentDevice?: RingDeviceInfo | null): RingDeviceInfo => {
-  const protocol = boundDevice.protocol || resolveRingProtocol(boundDevice);
+  const protocol = resolveRingProtocol(boundDevice);
+  const boundMac = getBoundReconnectMac(boundDevice);
+  if (boundMac) {
+    return {
+      ...boundDevice,
+      deviceId: '',
+      platformDeviceId: '',
+      serviceId: '',
+      cmdCharId: '',
+      dataServiceId: '',
+      dataCharId: '',
+      notifyCandidates: undefined,
+      notifyEnabled: undefined,
+      mac: boundDevice.mac || boundMac,
+      uniMacId: isFullColonBleMac(boundDevice.uniMacId) ? boundDevice.uniMacId : boundMac,
+      advertis: {
+        ...(boundDevice.advertis || {}),
+        macInfo: boundMac
+      },
+      lastSeenAt: undefined,
+      protocol
+    };
+  }
+
   if (!isSameBoundReconnectDevice(boundDevice, currentDevice)) {
     return { ...boundDevice, protocol };
   }
@@ -352,6 +484,11 @@ export const isExpectedRingDevice = (expected: RingDeviceInfo | null, payload: R
   const expectedIds = getRingDeviceMatchIds(expected);
   const payloadIds = getRingDeviceMatchIds(payload);
   if (expected.protocol && payload.protocol && expected.protocol !== payload.protocol) return false;
+  const expectedMacKey = normalizeFullBleMacKey(getExplicitMacFromDevice(expected));
+  if (expectedMacKey) {
+    const payloadMacKey = normalizeFullBleMacKey(getExplicitMacFromDevice(payload));
+    if (payloadMacKey && payloadMacKey !== expectedMacKey) return false;
+  }
   if (expectedIds.length === 0 || payloadIds.length === 0) return true;
   return isSameRingDevice(expected, payload);
 };
@@ -359,13 +496,12 @@ export const isExpectedRingDevice = (expected: RingDeviceInfo | null, payload: R
 const getRawParsedRingIdentityIds = (device: RingDeviceInfo) => getRingDeviceMatchIds(device);
 
 const getStableParsedRingIdentityIds = (device: RingDeviceInfo, protocolHint?: RingProtocolKind) => {
-  const protocol = device.protocol || protocolHint;
+  const protocol = protocolHint || resolveRingProtocol(device);
   if (protocol === 'rw') {
     return [
       device.mac,
       device.advertis?.macInfo,
-      isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '',
-      isColonSeparatedBleMac(device.deviceId) ? device.deviceId : ''
+      isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : ''
     ].filter(Boolean);
   }
   return getRawParsedRingIdentityIds(device);
@@ -391,7 +527,8 @@ const hasMatchingParsedRingIdentity = (leftIds: unknown[], rightIds: unknown[]) 
 };
 
 export const isParsedDataForCurrentRing = (currentDevice: RingDeviceInfo, parsed: RingParsedData) => {
-  if (parsed.protocol && currentDevice.protocol && parsed.protocol !== currentDevice.protocol) return false;
+  const currentProtocol = resolveRingProtocol(currentDevice);
+  if (parsed.protocol && currentProtocol && parsed.protocol !== currentProtocol) return false;
 
   const parsedIdentity: RingDeviceInfo = {
     deviceId: parsed.deviceId,
@@ -401,11 +538,11 @@ export const isParsedDataForCurrentRing = (currentDevice: RingDeviceInfo, parsed
     protocol: parsed.protocol
   };
   const currentScope = getParsedRingIdentityScope(currentDevice, parsed.protocol);
-  const parsedScope = getParsedRingIdentityScope(parsedIdentity, currentDevice.protocol);
+  const parsedScope = getParsedRingIdentityScope(parsedIdentity, currentProtocol);
   if (!currentScope.hadIdentity) return false;
   if (!parsedScope.hadIdentity) return true;
 
-  const isRwScope = parsed.protocol === 'rw' || currentDevice.protocol === 'rw';
+  const isRwScope = parsed.protocol === 'rw' || currentProtocol === 'rw';
   if (isRwScope) {
     if (parsedScope.ids.length === 0 || currentScope.ids.length === 0) {
       return parsedScope.ids.length === 0 && currentScope.ids.length === 0 && hasSameRawDeviceId(currentDevice, parsedIdentity) && hasOnlyRawDeviceIdIdentity(parsedIdentity);
@@ -418,10 +555,14 @@ export const isParsedDataForCurrentRing = (currentDevice: RingDeviceInfo, parsed
 
 export const enrichParsedDataWithCurrentRing = (currentDevice: RingDeviceInfo, parsed: RingParsedData): RingParsedData => ({
   ...parsed,
-  protocol: parsed.protocol || currentDevice.protocol,
+  protocol: parsed.protocol || resolveRingProtocol(currentDevice),
   deviceId: parsed.deviceId || currentDevice.deviceId,
   uniMacId: parsed.uniMacId || currentDevice.uniMacId,
-  mac: parsed.mac || currentDevice.mac || currentDevice.advertis?.macInfo,
+  mac:
+    (parsed.protocol || resolveRingProtocol(currentDevice)) === 'rw'
+      ? parsed.mac || currentDevice.mac || currentDevice.advertis?.macInfo
+      : getLegacyStableConnectionIdentity(parsed as RingDeviceInfo, currentDevice.mac || currentDevice.advertis?.macInfo || currentDevice.uniMacId) ||
+        getLegacyStableConnectionIdentity(currentDevice),
   deviceName: parsed.deviceName || currentDevice.deviceName || currentDevice.name,
   advertis: parsed.advertis || currentDevice.advertis
 });
@@ -429,9 +570,10 @@ export const enrichParsedDataWithCurrentRing = (currentDevice: RingDeviceInfo, p
 const isRuntimeBlePacketFromCurrentRing = (currentDevice: RingDeviceInfo, parsed: RingParsedData) => {
   const currentDeviceId = `${currentDevice.deviceId || ''}`.trim();
   const parsedDeviceId = `${parsed.deviceId || ''}`.trim();
+  const currentProtocol = resolveRingProtocol(currentDevice);
   if (!currentDeviceId || !parsedDeviceId || currentDeviceId !== parsedDeviceId) return false;
-  if (parsed.protocol && currentDevice.protocol && parsed.protocol !== currentDevice.protocol) return false;
-  if (parsed.protocol !== 'rw' && currentDevice.protocol !== 'rw') return false;
+  if (parsed.protocol && currentProtocol && parsed.protocol !== currentProtocol) return false;
+  if (parsed.protocol !== 'rw' && currentProtocol !== 'rw') return false;
 
   return Boolean(parsed.serviceId || parsed.characteristicId || parsed.receivedAt || parsed.parsedAt);
 };
@@ -614,9 +756,10 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     getDeviceInfo: () => deviceInfo.value,
     onParsedData: (parsed) => {
       const currentDevice = deviceInfo.value;
+      const currentProtocol = resolveRingProtocol(currentDevice);
       const isForCurrentRing = isParsedDataForCurrentRing(currentDevice, parsed) || isRuntimeBlePacketFromCurrentRing(currentDevice, parsed);
       if (!isForCurrentRing) {
-        if (parsed.protocol === 'rw' || currentDevice.protocol === 'rw') {
+        if (parsed.protocol === 'rw' || currentProtocol === 'rw') {
           writeRwStoreLog('parsed-rejected', {
             currentDeviceId: currentDevice.deviceId,
             currentUniMacId: currentDevice.uniMacId,
@@ -630,7 +773,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       const receivedCountBefore = receivedData.value.length;
       const normalizedCountBefore = normalizedData.value.length;
       handleRingParsedData(bridgeTarget, parsedForCurrentRing);
-      if (parsedForCurrentRing.protocol === 'rw' || currentDevice.protocol === 'rw') {
+      if (parsedForCurrentRing.protocol === 'rw' || currentProtocol === 'rw') {
         writeRwStoreLog('parsed-accepted', {
           parsed: summarizeParsedForStoreLog(parsedForCurrentRing),
           receivedCountBefore,
@@ -645,7 +788,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     },
     onDeviceReady: (payload) => {
       if (!isExpectedRingDevice(expectedConnectionDevice, payload)) return;
-      if (payload.protocol === 'rw' || expectedConnectionDevice?.protocol === 'rw') {
+      if (resolveRingProtocol(payload) === 'rw' || resolveRingProtocol(expectedConnectionDevice || {}) === 'rw') {
         clearRwUploadDisconnectRecovery();
       }
       deviceInfo.value = payload;
@@ -653,7 +796,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     onDisconnected: (reason) => {
       const disconnectedDeviceId = (reason as Record<string, any> | undefined)?.deviceId;
       if (disconnectedDeviceId && deviceInfo.value.deviceId && disconnectedDeviceId !== deviceInfo.value.deviceId) {
-        if (deviceInfo.value.protocol === 'rw' || expectedConnectionDevice?.protocol === 'rw') {
+        if (resolveRingProtocol(deviceInfo.value) === 'rw' || resolveRingProtocol(expectedConnectionDevice || {}) === 'rw') {
           writeRwStoreLog('disconnected-ignored', {
             reason,
             current: summarizeRingDeviceIdentityForStoreLog(deviceInfo.value),
@@ -674,12 +817,26 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         });
         return;
       }
-      if (deviceInfo.value.protocol === 'rw' || expectedConnectionDevice?.protocol === 'rw') {
+      if (resolveRingProtocol(deviceInfo.value) === 'rw' || resolveRingProtocol(expectedConnectionDevice || {}) === 'rw') {
         const isManualDisconnect = expectedConnectionDevice?.deviceId === '__cancelled_connection__';
         const uploadStatusAgeMs = lastUploadingStatusChangedAt ? Date.now() - lastUploadingStatusChangedAt : Number.POSITIVE_INFINITY;
         const isDuringOrJustAfterUpload =
           uploadingStatus.value === 'uploading' || (uploadingStatus.value === 'success' && uploadStatusAgeMs <= RW_UPLOAD_SUCCESS_DISCONNECT_GRACE_MS);
-        if (!isManualDisconnect && isDuringOrJustAfterUpload) {
+        const hasRecoverableTarget = Boolean(
+          deviceInfo.value.deviceId ||
+          deviceInfo.value.mac ||
+          deviceInfo.value.uniMacId ||
+          expectedConnectionDevice?.deviceId ||
+          expectedConnectionDevice?.mac ||
+          expectedConnectionDevice?.uniMacId
+        );
+        const isConnectedRuntime =
+          reconnectStatus.value === 'success' ||
+          reconnectResult.value === true ||
+          isCommunicationReadyDevice(deviceInfo.value) ||
+          Boolean(lastCommunicationReadyAt && Date.now() - lastCommunicationReadyAt <= 30000);
+        const shouldRecoverRwDisconnect = !isManualDisconnect && hasRecoverableTarget && (isDuringOrJustAfterUpload || isConnectedRuntime);
+        if (shouldRecoverRwDisconnect) {
           const targetDevice: RingDeviceInfo = {
             ...expectedConnectionDevice,
             ...deviceInfo.value,
@@ -693,8 +850,11 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           reconnectResult.value = null;
           writeRwStoreLog('upload-disconnect-recovery-start', {
             reason,
+            recoveryReason: isDuringOrJustAfterUpload ? 'uploading' : 'connected-runtime',
             uploadingStatus: uploadingStatus.value,
             uploadStatusAgeMs,
+            reconnectStatus: reconnectStatus.value,
+            reconnectResult: reconnectResult.value,
             target: summarizeRingDeviceForStoreLog(targetDevice),
             elapsedMs: lastCommunicationReadyAt ? Date.now() - lastCommunicationReadyAt : null
           });
@@ -708,6 +868,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
                 if (recoveryToken !== rwUploadDisconnectRecoveryToken) return;
                 writeRwStoreLog('upload-disconnect-recovery-result', {
                   success,
+                  recoveryReason: isDuringOrJustAfterUpload ? 'uploading' : 'connected-runtime',
                   target: summarizeRingDeviceForStoreLog(targetDevice),
                   current: summarizeRingDeviceForStoreLog(deviceInfo.value)
                 });
@@ -718,6 +879,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
               .catch((error) => {
                 if (recoveryToken !== rwUploadDisconnectRecoveryToken) return;
                 writeRwStoreLog('upload-disconnect-recovery-failed', {
+                  recoveryReason: isDuringOrJustAfterUpload ? 'uploading' : 'connected-runtime',
                   target: summarizeRingDeviceForStoreLog(targetDevice),
                   message: error instanceof Error ? error.message : String(error)
                 });
@@ -780,7 +942,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
   const initBluetooth = async () => {
     const currentDevice = deviceInfo.value as RingDeviceInfo;
-    const protocol = currentDevice.protocol || resolveRingProtocol(currentDevice);
+    const protocol = resolveRingProtocol(currentDevice);
     return initBluetoothForProtocol(protocol);
   };
 
@@ -795,7 +957,28 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     return (
       devices.value.find((device) => {
         const deviceIds = getRingDeviceMatchIds(device);
-        return targets.some((id) => deviceIds.includes(id) || isSameRingDevice(device, { deviceId: id } as RingDeviceInfo));
+        const stableIds = getStableSwitchingIdentityIds(device)
+          .map(normalizeRingIdentity)
+          .filter((value) => value.length >= 6);
+        return targets.some((id) => {
+          if (deviceIds.includes(id)) return true;
+
+          const normalizedTarget = normalizeRingIdentity(id);
+          if (
+            normalizedTarget.length >= 6 &&
+            stableIds.some((stableId) => stableId === normalizedTarget || stableId.endsWith(normalizedTarget.slice(-6)) || normalizedTarget.endsWith(stableId.slice(-6)))
+          ) {
+            return true;
+          }
+
+          return isSameRingDevice(
+            device,
+            {
+              deviceId: id,
+              ...(isColonSeparatedBleMac(id) ? { mac: id, uniMacId: id } : {})
+            } as RingDeviceInfo
+          );
+        });
       }) || null
     );
   };
@@ -817,14 +1000,69 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
   const connectDevice = async (payload: ConnectRingDeviceOptions) => {
     const sourceDevice = payload.sourceDevice || findKnownDevice(payload.deviceId, payload.uniMacId);
-    const protocol = payload.protocol || resolveRingProtocol(sourceDevice || payload);
+    const protocol = resolveRingProtocol(sourceDevice || payload);
     const currentDevice = deviceInfo.value;
-    const sourceStableIdentity = protocol === 'rw' ? getRwStableConnectionIdentity(sourceDevice, payload.uniMacId) : sourceDevice?.mac || sourceDevice?.advertis?.macInfo;
+    const sourceStableIdentity =
+      protocol === 'rw' ? getRwStableConnectionIdentity(sourceDevice, payload.uniMacId) : getLegacyStableConnectionIdentity(sourceDevice, payload.uniMacId);
+    const strictTargetMac = getStrictConnectTargetMac(payload, sourceDevice, sourceStableIdentity);
+    if (strictTargetMac) {
+      const strictTarget = {
+        ...payload,
+        mac: strictTargetMac,
+        uniMacId: strictTargetMac,
+        protocol
+      } as RingDeviceInfo;
+      const sourceScanMac = getScannedAdvertisedMac(sourceDevice);
+      const sourceIsStrictScanMatch = isStrictBoundScanCandidate(strictTarget, sourceDevice);
+      if (!sourceIsStrictScanMatch) {
+        writeRwStoreLog('connect-block-no-scan-mac-match', {
+          targetMac: strictTargetMac,
+          sourceScanMac,
+          payload: {
+            deviceId: payload.deviceId,
+            deviceName: payload.deviceName,
+            uniMacId: payload.uniMacId,
+            fromScan: payload.fromScan,
+            bindAfterConnected: payload.bindAfterConnected
+          },
+          sourceDevice: summarizeRingDeviceForStoreLog(sourceDevice),
+          knownDeviceCount: devices.value.length,
+          scanCandidates: devices.value.slice(0, 12).map((device) => ({
+            deviceId: device.deviceId,
+            name: device.name || device.deviceName,
+            mac: device.mac,
+            uniMacId: device.uniMacId,
+            scanMac: getScannedAdvertisedMac(device),
+            fromScan: (device as Record<string, unknown>).fromScan,
+            lastSeenAt: device.lastSeenAt
+          }))
+        });
+        throw new Error('未扫描到绑定设备，请靠近戒指后重新搜索');
+      }
+    }
+    const stableBusinessMac =
+      strictTargetMac ||
+      normalizeFullBleMacText(sourceStableIdentity) ||
+      normalizeFullBleMacText(sourceDevice?.mac) ||
+      normalizeFullBleMacText(sourceDevice?.advertis?.macInfo) ||
+      normalizeFullBleMacText(payload.uniMacId);
+    const communicationDeviceId = protocol === 'rw' ? getRingCommunicationDeviceId(sourceDevice, payload.deviceId) : payload.deviceId || sourceDevice?.deviceId;
     const targetDevice: RingDeviceInfo = {
       ...sourceDevice,
-      deviceId: payload.deviceId || sourceDevice?.deviceId,
-      uniMacId: protocol === 'rw' ? sourceStableIdentity : payload.uniMacId || sourceDevice?.uniMacId || sourceStableIdentity,
-      mac: sourceStableIdentity,
+      deviceId: communicationDeviceId,
+      platformDeviceId: communicationDeviceId || sourceDevice?.platformDeviceId || sourceDevice?.deviceId,
+      uniMacId:
+        stableBusinessMac ||
+        (protocol === 'rw'
+          ? sourceDevice?.uniMacId || sourceStableIdentity || payload.uniMacId
+          : payload.uniMacId || sourceDevice?.uniMacId || sourceStableIdentity),
+      mac: stableBusinessMac || sourceStableIdentity || sourceDevice?.mac,
+      advertis: stableBusinessMac
+        ? {
+            ...(sourceDevice?.advertis || {}),
+            macInfo: stableBusinessMac
+          }
+        : sourceDevice?.advertis,
       protocol
     };
     const connectKey = [protocol, targetDevice.deviceId || payload.deviceId || '', sourceStableIdentity || targetDevice.uniMacId || targetDevice.mac || ''].join('|');
@@ -948,12 +1186,31 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     try {
       return await connectInFlight;
     } catch (error) {
+      const runtimeDevice = deviceInfo.value;
+      const hasRuntimeDevice = Boolean(runtimeDevice.deviceId);
+      const runtimeIsTarget = hasRuntimeDevice && isSameRingDevice(runtimeDevice, targetDevice);
+      const cleanupDeviceId = runtimeIsTarget
+        ? runtimeDevice.deviceId
+        : targetDevice.deviceId || payload.deviceId || '';
+      const shouldCleanupPartialConnection = Boolean(cleanupDeviceId) && (!hasRuntimeDevice || runtimeIsTarget);
       if (protocol === 'rw') {
         writeRwStoreLog('connect-attempt-error', {
           connectKey,
           elapsedMs: connectInFlightStartedAt ? Date.now() - connectInFlightStartedAt : 0,
+          cleanupDeviceId,
+          cleanupPartialConnection: shouldCleanupPartialConnection,
           message: error instanceof Error ? error.message : String(error)
         });
+      }
+      if (shouldCleanupPartialConnection) {
+        expirePendingConnectionAttempt();
+        await adapter.disconnect(cleanupDeviceId).catch(() => undefined);
+        resetRingRuntimeState(bridgeTarget);
+        expectedConnectionDevice = null;
+        uploadingStatus.value = 'idle';
+        reconnectStatus.value = 'failed';
+        reconnectResult.value = false;
+        lastCommunicationReadyAt = 0;
       }
       throw error;
     } finally {
@@ -1007,7 +1264,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     const lifecycleToken = connectionLifecycleToken;
     await initBluetooth();
     const currentDevice = deviceInfo.value as RingDeviceInfo;
-    const protocol = currentDevice.protocol || resolveRingProtocol(currentDevice);
+    const protocol = resolveRingProtocol(currentDevice);
     const targetAdapter = await switchAdapter(protocol);
     if (protocol === 'rw') {
       writeRwStoreLog('ensure-ready-start', {
@@ -1167,7 +1424,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   const setExpectedReconnectTarget = (target: RingDeviceInfo) => {
     expectedConnectionDevice = {
       ...target,
-      protocol: target.protocol || resolveRingProtocol(target)
+      protocol: resolveRingProtocol(target)
     };
   };
 
@@ -1188,7 +1445,14 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     });
   };
 
-  const findFreshReconnectScanCandidate = (target: RingDeviceInfo, minLastSeenAt?: number) => findReconnectScanCandidate(target, getFreshReconnectScanDevices(minLastSeenAt));
+  const findFreshReconnectScanCandidate = (target: RingDeviceInfo, minLastSeenAt?: number) => {
+    const freshDevices = getFreshReconnectScanDevices(minLastSeenAt);
+    const boundMac = getBoundReconnectMac(target);
+    if (boundMac) {
+      return findStrictBoundReconnectScanCandidate(target, freshDevices);
+    }
+    return findReconnectScanCandidate(target, freshDevices);
+  };
 
   const waitForReconnectScanCandidate = async (target: RingDeviceInfo, timeoutMs = getRwReconnectCandidateTimeoutMs(target), minLastSeenAt?: number) => {
     const startedAt = Date.now();
@@ -1207,18 +1471,69 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     let scanStarted = false;
 
     try {
-      const scanProtocol = target.protocol || resolveRingProtocol(target);
+      const scanProtocol = resolveRingProtocol(target);
       const scanTimeoutMs = getRwReconnectScanTimeoutMs();
       const candidateTimeoutMs = getRwReconnectCandidateTimeoutMs(target);
       const scanStartedAt = Date.now();
+      const strictBoundMac = getBoundReconnectMac(target);
+      const scanDiagnosticSessionId = strictBoundMac ? `bound-scan-${Date.now()}` : undefined;
       writeRwStoreLog('reconnect-scan-start', {
         target: summarizeRingDeviceForStoreLog(target),
         targetIdentity: summarizeRingDeviceIdentityForStoreLog(target),
+        strictBoundMac,
+        strictScanMatch: Boolean(strictBoundMac),
         scanProtocol,
         knownDeviceCount: devices.value.length,
         scanTimeoutMs,
         candidateTimeoutMs
       });
+      if (BOUND_SCAN_RAW_DIAGNOSTIC_PAUSE) {
+        const diagnosticBoundMac =
+          target.advertis?.macInfo ||
+          (isColonSeparatedBleMac(target.uniMacId) ? target.uniMacId : '') ||
+          target.mac ||
+          getRingDeviceStableIdentity(target);
+        const diagnosticSessionId = `bound-scan-${Date.now()}`;
+        const diagnosticTimeoutMs = Math.min(BOUND_SCAN_RAW_DIAGNOSTIC_TIMEOUT_MS, Math.max(3000, scanTimeoutMs));
+
+        await stopScan().catch(() => undefined);
+        scanStarted = false;
+        writeRwStoreLog('reconnect-scan-diagnostic-pause-start', {
+          target: summarizeRingDeviceForStoreLog(target),
+          targetIdentity: summarizeRingDeviceIdentityForStoreLog(target),
+          boundMac: diagnosticBoundMac,
+          scanProtocol,
+          sessionId: diagnosticSessionId,
+          timeoutMs: diagnosticTimeoutMs
+        });
+        await startScanWithProtocol(scanProtocol, {
+          includeUnknown: true,
+          allowDuplicatesKey: true,
+          preserveDevices: true,
+          timeoutMs: diagnosticTimeoutMs,
+          diagnosticBoundMac,
+          diagnosticSessionId,
+          diagnosticLogAllDevices: true
+        });
+        scanStarted = true;
+        await new Promise((resolve) => setTimeout(resolve, diagnosticTimeoutMs));
+        await stopScan().catch(() => undefined);
+        scanStarted = false;
+        writeRwStoreLog('reconnect-scan-diagnostic-pause-result', {
+          target: summarizeRingDeviceForStoreLog(target),
+          targetIdentity: summarizeRingDeviceIdentityForStoreLog(target),
+          boundMac: diagnosticBoundMac,
+          scanProtocol,
+          sessionId: diagnosticSessionId,
+          elapsedMs: Date.now() - scanStartedAt,
+          scannedDeviceCount: devices.value.length,
+          scannedTail: devices.value.slice(-20).map(summarizeRingDeviceForStoreLog),
+          scannedIdentityTail: devices.value.slice(-20).map(summarizeRingDeviceIdentityForStoreLog)
+        });
+        reconnectStatus.value = 'failed';
+        reconnectResult.value = false;
+        return false;
+      }
       let scanRound = 0;
       let candidate: RingDeviceInfo | null = null;
       while (!candidate && Date.now() - scanStartedAt < candidateTimeoutMs) {
@@ -1229,6 +1544,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           round: scanRound,
           target: summarizeRingDeviceForStoreLog(target),
           targetIdentity: summarizeRingDeviceIdentityForStoreLog(target),
+          strictBoundMac,
+          strictScanMatch: Boolean(strictBoundMac),
           timeoutMs: roundTimeoutMs,
           elapsedMs: Date.now() - scanStartedAt,
           scannedDeviceCount: devices.value.length
@@ -1237,11 +1554,15 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           includeUnknown: true,
           allowDuplicatesKey: true,
           preserveDevices: true,
-          timeoutMs: roundTimeoutMs
+          timeoutMs: roundTimeoutMs,
+          diagnosticBoundMac: strictBoundMac,
+          diagnosticSessionId: scanDiagnosticSessionId,
+          diagnosticLogAllDevices: Boolean(strictBoundMac)
         });
         writeRwStoreLog('reconnect-scan-started', {
           round: scanRound,
           target: summarizeRingDeviceForStoreLog(target),
+          strictBoundMac,
           scannedDeviceCount: devices.value.length
         });
         scanStarted = true;
@@ -1253,6 +1574,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         writeRwStoreLog('reconnect-candidate-wait-start', {
           round: scanRound,
           target: summarizeRingDeviceForStoreLog(target),
+          strictBoundMac,
+          strictScanMatch: Boolean(strictBoundMac),
           candidateTimeoutMs: roundTimeoutMs,
           scannedDeviceCount: devices.value.length,
           freshScannedDeviceCount: getFreshReconnectScanDevices(scanStartedAt).length
@@ -1263,6 +1586,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           found: Boolean(candidate?.deviceId),
           target: summarizeRingDeviceForStoreLog(target),
           candidate: summarizeRingDeviceForStoreLog(candidate),
+          strictBoundMac,
+          strictScanMatch: Boolean(strictBoundMac),
           elapsedMs: Date.now() - scanStartedAt,
           scannedDeviceCount: devices.value.length,
           freshScannedDeviceCount: getFreshReconnectScanDevices(scanStartedAt).length,
@@ -1285,6 +1610,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         targetIdentity: summarizeRingDeviceIdentityForStoreLog(target),
         candidate: summarizeRingDeviceForStoreLog(candidate),
         candidateIdentity: summarizeRingDeviceIdentityForStoreLog(candidate),
+        strictBoundMac,
+        strictScanMatch: Boolean(strictBoundMac),
         elapsedMs: Date.now() - scanStartedAt,
         scanRounds: scanRound,
         scannedDeviceCount: devices.value.length,
@@ -1304,32 +1631,48 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
       await stopScan();
       scanStarted = false;
-      const protocol = candidate.protocol || target.protocol || resolveRingProtocol(candidate);
-      expectedConnectionDevice = { ...candidate, protocol };
+      const protocol = resolveRingProtocol(candidate);
+      const candidateStableMac = getScannedAdvertisedMac(candidate) || strictBoundMac;
+      const candidateSourceDevice = {
+        ...candidate,
+        mac: candidateStableMac || candidate.mac,
+        uniMacId: candidateStableMac || candidate.uniMacId,
+        advertis: {
+          ...(candidate.advertis || {}),
+          macInfo: candidateStableMac || candidate.advertis?.macInfo
+        },
+        protocol
+      };
+      expectedConnectionDevice = candidateSourceDevice;
       writeRwStoreLog('reconnect-connect-start', {
         protocol,
+        strictBoundMac,
         target: summarizeRingDeviceForStoreLog(target),
-        candidate: summarizeRingDeviceForStoreLog(candidate)
+        candidate: summarizeRingDeviceForStoreLog(candidateSourceDevice)
       });
       await connectDevice({
         deviceId: candidate.deviceId,
         deviceName: candidate.deviceName || candidate.name || target.deviceName || target.name || '',
-        uniMacId: candidate.uniMacId || candidate.mac || candidate.advertis?.macInfo || target.uniMacId || target.mac || target.advertis?.macInfo,
+        uniMacId: candidateStableMac || candidate.uniMacId || candidate.mac || target.uniMacId || target.mac || target.advertis?.macInfo,
         fromScan: true,
-        bindAfterConnected: true,
+        bindAfterConnected: false,
         protocol,
-        sourceDevice: { ...candidate, protocol }
+        sourceDevice: candidateSourceDevice
       });
       if (!isConnectionLifecycleCurrent(lifecycleToken)) {
         clearExpiredConnectionLifecycle();
         return false;
       }
-      if (!isSameRingDevice({ ...target, protocol }, { ...candidate, ...deviceInfo.value, protocol: deviceInfo.value.protocol || protocol })) {
+      const connectedIsExpected = strictBoundMac
+        ? isStrictBoundScanCandidate({ ...target, protocol }, candidateSourceDevice)
+        : isSameRingDevice({ ...target, protocol }, { ...candidate, ...deviceInfo.value, protocol: resolveRingProtocol({ ...candidate, ...deviceInfo.value } as RingDeviceInfo) || protocol });
+      if (!connectedIsExpected) {
         writeRwStoreLog('reconnect-connect-result', {
           success: false,
           reason: 'unexpected-device',
+          strictBoundMac,
           target: summarizeRingDeviceForStoreLog({ ...target, protocol }),
-          candidate: summarizeRingDeviceForStoreLog(candidate),
+          candidate: summarizeRingDeviceForStoreLog(candidateSourceDevice),
           deviceInfo: summarizeRingDeviceForStoreLog(deviceInfo.value)
         });
         await disconnect().catch(() => undefined);
@@ -1389,13 +1732,14 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
               uniMacId: currentDevice.uniMacId || boundDevice?.uniMacId,
               name: currentDevice.name || boundDevice?.name,
               deviceName: currentDevice.deviceName || currentDevice.name || boundDevice?.deviceName || boundDevice?.name,
-              protocol: currentDevice.protocol || boundDevice?.protocol
+              protocol: resolveRingProtocol({ ...boundDevice, ...currentDevice } as RingDeviceInfo)
             }
           : boundDevice
     ) as RingDeviceInfo | undefined;
     writeRwStoreLog('reconnect-start', {
       lifecycleToken,
       boundTargetLocked: hasBoundReconnectTarget,
+      boundTargetMac: getBoundReconnectMac(boundDevice as RingDeviceInfo),
       currentMatchesBound,
       current: summarizeRingDeviceForStoreLog(currentDevice),
       bound: summarizeRingDeviceForStoreLog(boundDevice),
@@ -1429,16 +1773,14 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         return false;
       }
       if (scannedConnected) return true;
-      if (shouldSkipDirectRwReconnect(targetWithProtocol)) {
-        writeRwStoreLog('reconnect-skip-direct', {
-          reason: 'rw-no-fresh-scan-candidate',
-          targetAgeMs: getRwReconnectTargetAgeMs(targetWithProtocol),
-          maxFreshAgeMs: RW_DIRECT_RECONNECT_MAX_DEVICE_AGE_MS,
-          target: summarizeRingDeviceForStoreLog(targetWithProtocol)
-        });
-        clearDisconnectedRuntimeState();
-        return false;
-      }
+      writeRwStoreLog('reconnect-skip-direct', {
+        reason: shouldSkipDirectRwReconnect(targetWithProtocol) ? 'rw-no-fresh-scan-candidate' : 'no-fresh-scan-candidate',
+        targetAgeMs: getRwReconnectTargetAgeMs(targetWithProtocol),
+        maxFreshAgeMs: RW_DIRECT_RECONNECT_MAX_DEVICE_AGE_MS,
+        target: summarizeRingDeviceForStoreLog(targetWithProtocol)
+      });
+      clearDisconnectedRuntimeState();
+      return false;
     }
     writeRwStoreLog('reconnect-direct-start', {
       target: summarizeRingDeviceForStoreLog({ ...targetDevice, protocol })
@@ -1495,7 +1837,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   const autoConnectLastDevice = reconnect;
   const registerGlobalListeners = async () => {
     const currentDevice = deviceInfo.value as RingDeviceInfo;
-    const protocol = currentDevice.protocol || resolveRingProtocol(currentDevice);
+    const protocol = resolveRingProtocol(currentDevice);
     const targetAdapter = await switchAdapter(protocol);
     targetAdapter.registerConnectionStateListener();
   };
@@ -1520,11 +1862,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     const currentMatchesDevice = Boolean(deviceId) && getRingDeviceMatchIds(currentDevice).length > 0 && isSameRingDevice(currentDevice, { deviceId });
     const currentMatchesService =
       Boolean(serviceId) && [currentDevice.serviceId, currentDevice.dataServiceId].filter(Boolean).some((id) => normalizeRingUuid(id) === normalizeRingUuid(serviceId));
-    const protocol =
-      (isRwServiceUuid(serviceId) ? 'rw' : undefined) ||
-      matchedDevice?.protocol ||
-      (currentMatchesDevice || currentMatchesService ? currentDevice.protocol : undefined) ||
-      resolveRingProtocol(matchedDevice || currentDevice);
+    const protocol = resolveRingProtocol(matchedDevice || (currentMatchesDevice || currentMatchesService ? currentDevice : currentDevice));
     return switchAdapter(protocol);
   };
 
@@ -1535,6 +1873,18 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     if (matchedDevice?.deviceId) return matchedDevice.deviceId;
 
     const currentDevice = deviceInfo.value;
+    const normalizedDeviceId = normalizeRingIdentity(deviceId);
+    const currentStableIds = getStableSwitchingIdentityIds(currentDevice)
+      .map(normalizeRingIdentity)
+      .filter((value) => value.length >= 6);
+    if (
+      currentDevice.deviceId &&
+      normalizedDeviceId.length >= 6 &&
+      currentStableIds.some((stableId) => stableId === normalizedDeviceId || stableId.endsWith(normalizedDeviceId.slice(-6)) || normalizedDeviceId.endsWith(stableId.slice(-6)))
+    ) {
+      return currentDevice.deviceId;
+    }
+
     if (currentDevice.deviceId && getRingDeviceMatchIds(currentDevice).length > 0 && isSameRingDevice(currentDevice, { deviceId })) {
       return currentDevice.deviceId;
     }
@@ -1575,7 +1925,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       displayName: matchedDevice?.displayName || deviceNameOrId,
       protocol: matchedDevice?.protocol
     };
-    const protocol = protocolSource.protocol || resolveRingProtocol(protocolSource);
+    const protocol = resolveRingProtocol(protocolSource);
     const startToken = connectionAttemptToken;
     const targetAdapter = await switchAdapter(protocol);
     if (startToken !== connectionAttemptToken) {

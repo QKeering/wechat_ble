@@ -12,9 +12,35 @@ export const QKEER_V2_RING_DETECTOR: RingProtocolDetector = {
   serviceMarkers: ['F618']
 };
 
-const RW_MANUFACTURER_MARKERS = ['F802', 'F811'];
-const RW_ADVERTIS_MARKERS = ['3E000000', 'D606'];
-const RW_NAME_PREFIXES = ['SY', 'BH', 'RW'];
+const RW_NAME_PREFIXES = ['SY', 'BH3'];
+
+const getProtocolNameCandidates = (device?: RingDeviceInfo) =>
+  [
+    device?.name,
+    device?.localName,
+    device?.bleName,
+    device?.displayName,
+    device?.deviceName,
+    device?.model,
+    device?.modelName,
+    device?.deviceModel,
+    device?.productName
+  ]
+    .filter(Boolean)
+    .map((value) => `${value}`.trim())
+    .filter(Boolean);
+
+const hasProtocolNameCandidate = (device?: RingDeviceInfo) => getProtocolNameCandidates(device).length > 0;
+
+export const isRwProtocolDeviceName = (device?: RingDeviceInfo) =>
+  getProtocolNameCandidates(device).some((rawName) => {
+    const name = rawName.toUpperCase();
+    return (
+      RW_NAME_PREFIXES.some((prefix) => name.startsWith(prefix)) ||
+      /(^|[^A-Z0-9])SY[0-9A-Z_-]*/.test(name) ||
+      /(^|[^A-Z0-9])BH3([_-]?[0-9A-Z]+)?([^A-Z0-9]|$)/.test(name)
+    );
+  });
 
 export const RW_RING_DETECTOR: RingProtocolDetector = {
   protocol: 'rw',
@@ -22,22 +48,17 @@ export const RW_RING_DETECTOR: RingProtocolDetector = {
   productIds: [],
   serviceMarkers: [],
   match: (device) => {
-    const name = `${device.name || device.localName || device.bleName || device.displayName || ''}`.toUpperCase();
-    const advertisData = normalizeAdvertisData(device);
-    const services = normalizeAdvertisedServices(device);
-    const hasRwManufacturer = RW_MANUFACTURER_MARKERS.some((marker) => advertisData.includes(marker));
-    const hasRwAdvertis = RW_ADVERTIS_MARKERS.some((marker) => advertisData.includes(marker));
-    const hasRwName = RW_NAME_PREFIXES.some((prefix) => name.startsWith(prefix));
+    // Current product rule: only SY / BH3 devices use RW. L19 devices may share
+    // manufacturer/service markers, so advertis/service fields must not select RW.
+    if (isRwProtocolDeviceName(device)) return true;
 
-    if (hasRwManufacturer) return true;
-    if (hasRwAdvertis) return true;
-    if (hasRwName) return true;
-
-    return /^HR\d+N/.test(name) && services.some((serviceId) => serviceId.includes('180D'));
+    return false;
   }
 };
 
-const protocolDetectors: RingProtocolDetector[] = [RW_RING_DETECTOR, QKEER_V2_RING_DETECTOR, LEGACY_RING_DETECTOR];
+const LEGACY_PROTOCOL_DETECTORS: RingProtocolDetector[] = [RW_RING_DETECTOR, LEGACY_RING_DETECTOR];
+
+const protocolDetectors: RingProtocolDetector[] = [...LEGACY_PROTOCOL_DETECTORS];
 
 export const registerRingProtocolDetector = (detector: RingProtocolDetector) => {
   const existingIndex = protocolDetectors.findIndex((item) => item.protocol === detector.protocol);
@@ -51,8 +72,15 @@ export const registerRingProtocolDetector = (detector: RingProtocolDetector) => 
 export const getRingProtocolDetectors = () => [...protocolDetectors];
 
 export const resolveRingProtocol = (device?: RingDeviceInfo): RingProtocolKind => {
-  if (device?.protocol) return device.protocol;
   if (!device) return 'legacy';
+
+  if (isRwProtocolDeviceName(device)) return 'rw';
+
+  if (device.protocol === 'rw') {
+    return hasProtocolNameCandidate(device) ? 'legacy' : 'rw';
+  }
+
+  if (device.protocol === 'legacy') return 'legacy';
 
   const name = `${device.name || device.localName || device.bleName || device.displayName || ''}`.toUpperCase();
   const productId = `${device.productId || ''}`.toUpperCase();
@@ -116,22 +144,6 @@ function normalizeAdvertisedServices(device: RingDeviceInfo): string[] {
   ];
 
   return candidates.filter(Boolean).map((value) => `${value}`.toUpperCase());
-}
-
-function normalizeAdvertisData(device: RingDeviceInfo): string {
-  const value = device.advertisData;
-  if (!value) return '';
-  if (typeof value === 'string') return value.toUpperCase();
-  if (Array.isArray(value)) {
-    return value.map((byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase();
-  }
-  if (value instanceof ArrayBuffer) {
-    return Array.from(new Uint8Array(value))
-      .map((byte) => byte.toString(16).padStart(2, '0'))
-      .join('')
-      .toUpperCase();
-  }
-  return '';
 }
 
 function getAdvertisBytes(device?: RingDeviceInfo): Uint8Array | null {

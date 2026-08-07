@@ -545,7 +545,7 @@ export const useRingStore = defineStore('ring', () => {
     const shouldSync = (storedIdentity: string) =>
       !storedIdentity || !hasMatchingStableDeviceIdentity([storedIdentity], [stableMac]);
     if (shouldSync(normalMac.value)) setNormalMac(stableMac);
-    if (device.protocol === 'rw' && shouldSync(iosMacId.value)) setIosMacId(stableMac);
+    if (resolveRingProtocol(device) === 'rw' && shouldSync(iosMacId.value)) setIosMacId(stableMac);
   };
 
   const markReadyConnection = () => {
@@ -790,7 +790,7 @@ function hasReadyCommunicationFields(device: RingDeviceInfo) {
 }
 
 function normalizeStoreDeviceInfo(device: RingDeviceInfo) {
-  const protocol = device.protocol || resolveRingProtocol(device);
+  const protocol = resolveRingProtocol(device);
   const explicitStableMac = getStoreExplicitStableDeviceMac({ ...device, protocol });
   const stableMac = getStoreStableDeviceMac({ ...device, protocol });
   const shouldNormalizeMacLikeDeviceId =
@@ -803,20 +803,18 @@ function normalizeStoreDeviceInfo(device: RingDeviceInfo) {
   return {
     ...device,
     protocol,
-    ...(stableMac && !device.mac ? { mac: stableMac } : {}),
+    ...(stableMac && (!device.mac || shouldNormalizeMacLikeDeviceId) ? { mac: stableMac } : {}),
     ...(shouldNormalizeMacLikeDeviceId
       ? {
-          platformDeviceId: device.platformDeviceId || device.deviceId,
-          deviceId: explicitStableMac
+          platformDeviceId: device.platformDeviceId || device.deviceId
         }
       : {}),
     ...(shouldNormalizeMacLikeUniMacId
       ? {
-          platformUniMacId: device.platformUniMacId || device.uniMacId,
-          uniMacId: explicitStableMac
+          platformUniMacId: device.platformUniMacId || device.uniMacId
         }
       : {}),
-    ...(stableMac && !device.advertis?.macInfo
+    ...(stableMac && (!device.advertis?.macInfo || shouldNormalizeMacLikeDeviceId)
       ? { advertis: { ...(device.advertis || {}), macInfo: stableMac } }
       : {})
   };
@@ -826,30 +824,37 @@ function getStoreExplicitStableDeviceMac(device: RingDeviceInfo | Record<string,
   if (!device) return '';
   const source = device as Record<string, any>;
   const advertis = source.advertis as Record<string, any> | undefined;
-  return String(
-    source.mac ||
-      source.deviceMac ||
-      source.device_mac ||
-      source.bluetoothMac ||
-      source.bleMac ||
-      source.macAddr ||
-      source.mac_addr ||
-      advertis?.macInfo ||
-      advertis?.mac ||
-      advertis?.macAddress ||
-      advertis?.deviceMac ||
-      (isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : '') ||
-      ''
-  ).trim();
+  const deviceIdKey = normalizeMacSnapshotKey(source.deviceId || source.platformDeviceId);
+  const preferredCandidates = [
+    source.deviceMac,
+    source.device_mac,
+    source.bluetoothMac,
+    source.bleMac,
+    source.macAddr,
+    source.mac_addr,
+    advertis?.macInfo,
+    advertis?.mac,
+    advertis?.macAddress,
+    advertis?.deviceMac,
+    isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : ''
+  ];
+  const preferred = preferredCandidates.find((value) => normalizeMacSnapshotKey(value));
+  if (preferred) return String(preferred || '').trim();
+
+  const macKey = normalizeMacSnapshotKey(source.mac);
+  if (macKey && (!deviceIdKey || macKey !== deviceIdKey)) return String(source.mac || '').trim();
+  return '';
 }
 
 function getStoreStableDeviceMac(device: RingDeviceInfo | Record<string, any> | null | undefined) {
   if (!device) return '';
   const source = device as Record<string, any>;
   const advertis = source.advertis as Record<string, any> | undefined;
+  const explicitStableMac = getStoreExplicitStableDeviceMac(source);
+  if (explicitStableMac) return explicitStableMac;
+
   return String(
-    source.mac ||
-      source.deviceMac ||
+    source.deviceMac ||
       source.device_mac ||
       source.bluetoothMac ||
       source.bleMac ||
@@ -859,8 +864,7 @@ function getStoreStableDeviceMac(device: RingDeviceInfo | Record<string, any> | 
       advertis?.mac ||
       advertis?.macAddress ||
       advertis?.deviceMac ||
-      (isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : '') ||
-      (isColonSeparatedBleMac(source.deviceId) ? source.deviceId : '')
+      (isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : '')
   ).trim();
 }
 
@@ -872,18 +876,16 @@ function isDifferentColonSeparatedBleMac(left: unknown, right: unknown) {
 }
 
 function getDeviceSnapshotKey(device: RingDeviceInfo) {
-  if (device.protocol === 'rw') {
+  if (resolveRingProtocol(device) === 'rw') {
     const stableIdentity = device.mac || device.advertis?.macInfo;
     if (stableIdentity) return normalizeMacSnapshotKey(stableIdentity) || String(stableIdentity).trim();
 
     const legacyStableIdentity = isColonSeparatedBleMac(device.uniMacId)
       ? device.uniMacId
-      : isColonSeparatedBleMac(device.deviceId)
-        ? device.deviceId
-        : '';
+      : '';
     if (legacyStableIdentity) return normalizeMacSnapshotKey(legacyStableIdentity) || String(legacyStableIdentity).trim();
 
-    return String(device.deviceId || device.uniMacId || '').trim();
+    return '';
   }
 
   return (
@@ -895,7 +897,7 @@ function getDeviceSnapshotKey(device: RingDeviceInfo) {
 }
 
 function getRawDeviceIdentityIds(source: Record<string, any> = {}) {
-  return [source.deviceId, source.uniMacId, source.mac, source.advertis?.macInfo].filter(Boolean);
+  return [source.deviceId, source.platformDeviceId, source.uniMacId, source.platformUniMacId, source.mac, source.advertis?.macInfo].filter(Boolean);
 }
 
 function getStableDeviceIdentityIds(source: Record<string, any> = {}, protocolHint = '') {
@@ -904,8 +906,7 @@ function getStableDeviceIdentityIds(source: Record<string, any> = {}, protocolHi
     return [
       source.mac,
       source.advertis?.macInfo,
-      isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : '',
-      isColonSeparatedBleMac(source.deviceId) ? source.deviceId : ''
+      isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : ''
     ].filter(Boolean);
   }
   return getRawDeviceIdentityIds(source);
@@ -942,13 +943,14 @@ function isParsedDataForCurrentDevice(currentDevice: RingDeviceInfo, parsed: Rin
   const currentScope = getDeviceIdentityScope(currentDevice, parsed.protocol);
   if (!currentScope.hadIdentity) return true;
 
-  const parsedScope = getDeviceIdentityScope(parsed, currentDevice.protocol);
-  if (parsed.protocol && currentDevice.protocol && parsed.protocol !== currentDevice.protocol && parsedScope.hadIdentity) {
+  const currentProtocol = resolveRingProtocol(currentDevice);
+  const parsedScope = getDeviceIdentityScope(parsed, currentProtocol);
+  if (parsed.protocol && currentProtocol && parsed.protocol !== currentProtocol && parsedScope.hadIdentity) {
     return false;
   }
   if (!parsedScope.hadIdentity) return true;
 
-  const isRwScope = parsed.protocol === 'rw' || currentDevice.protocol === 'rw';
+  const isRwScope = parsed.protocol === 'rw' || currentProtocol === 'rw';
   if (isRwScope) {
     if (parsedScope.ids.length === 0 || currentScope.ids.length === 0) {
       return (
@@ -1032,14 +1034,12 @@ function getHistoryRecordDeviceKey(record: RingHistoricalRecord) {
   const stableIdentity = source.mac || source.advertis?.macInfo;
   if (stableIdentity) return normalizeMacSnapshotKey(stableIdentity) || String(stableIdentity).trim();
 
-  if (source.protocol === 'rw') {
+  if (resolveRingProtocol(source as RingDeviceInfo) === 'rw') {
     const legacyStableIdentity = isColonSeparatedBleMac(source.uniMacId)
       ? source.uniMacId
-      : isColonSeparatedBleMac(source.deviceId)
-        ? source.deviceId
-        : '';
+      : '';
     if (legacyStableIdentity) return normalizeMacSnapshotKey(legacyStableIdentity) || String(legacyStableIdentity).trim();
-    return String(source.deviceId || source.uniMacId || '').trim();
+    return '';
   }
 
   const fallbackIdentity = source.uniMacId || source.deviceId || '';

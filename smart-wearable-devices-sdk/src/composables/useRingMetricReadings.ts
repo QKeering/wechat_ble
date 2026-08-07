@@ -1,3 +1,5 @@
+import { resolveRingProtocol, type RingDeviceInfo } from '@/sdk/ring-ble';
+
 type RingStoreLike = {
   receivedData?: any[];
   healthData?: Record<string, any>;
@@ -213,10 +215,9 @@ export const getSubmitDeviceMac = (store: RingStoreLike, isIOS: boolean) => {
   const currentStableMac = store.deviceInfo?.mac || store.deviceInfo?.advertis?.macInfo;
   const rwStableMac =
     currentStableMac ||
-    (isColonSeparatedBleMac(store.deviceInfo?.uniMacId) ? store.deviceInfo?.uniMacId : '') ||
-    (isColonSeparatedBleMac(store.deviceInfo?.deviceId) ? store.deviceInfo?.deviceId : '');
+    (isColonSeparatedBleMac(store.deviceInfo?.uniMacId) ? store.deviceInfo?.uniMacId : '');
   const stableMac = currentStableMac || store.normalMac;
-  if (store.deviceInfo?.protocol === 'rw') return rwStableMac || '';
+  if (resolveRingProtocol(store.deviceInfo as RingDeviceInfo) === 'rw') return rwStableMac || '';
   if (isIOS) return stableMac || store.iosMacId || store.deviceInfo?.uniMacId || '';
   return store.deviceInfo?.deviceId || stableMac || store.iosMacId || '';
 };
@@ -286,8 +287,7 @@ const getMetricDeviceIds = (record: Record<string, any> = {}, protocolHint = '')
     return [
       record.mac,
       record.advertis?.macInfo,
-      isColonSeparatedBleMac(record.uniMacId) ? record.uniMacId : '',
-      isColonSeparatedBleMac(record.deviceId) ? record.deviceId : ''
+      isColonSeparatedBleMac(record.uniMacId) ? record.uniMacId : ''
     ]
       .filter(Boolean)
       .map((value) => String(value).trim());
@@ -315,11 +315,12 @@ const hasMatchingMetricIdentityTail = (leftIds: string[], rightIds: string[]) =>
 
 const isMetricRecordForCurrentDevice = (store: RingStoreLike, record: Record<string, any>) => {
   const currentDevice = store.deviceInfo || {};
-  if (record.protocol && currentDevice.protocol && record.protocol !== currentDevice.protocol) return false;
+  const currentProtocol = currentDevice.protocol ? resolveRingProtocol(currentDevice as RingDeviceInfo) : '';
+  if (record.protocol && currentProtocol && record.protocol !== currentProtocol) return false;
 
-  const recordScope = getMetricIdentityScope(record, currentDevice.protocol);
+  const recordScope = getMetricIdentityScope(record, currentProtocol);
   const currentScope = getMetricIdentityScope(currentDevice, record.protocol);
-  const isRwScope = record.protocol === 'rw' || currentDevice.protocol === 'rw';
+  const isRwScope = record.protocol === 'rw' || currentProtocol === 'rw';
   if (isRwScope) {
     if (recordScope.hadIdentity && recordScope.ids.length === 0) return false;
     if (currentScope.hadIdentity && currentScope.ids.length === 0 && recordScope.ids.length > 0) return false;
@@ -493,7 +494,7 @@ const getHealthDataValue = (store: RingStoreLike, keys: string[]) => {
 
 const shouldUseCachedMetricFallback = (store: RingStoreLike, since = 0) => {
   if (since <= 0) return true;
-  return store.deviceInfo?.protocol !== 'rw';
+  return resolveRingProtocol(store.deviceInfo as RingDeviceInfo) !== 'rw';
 };
 
 const getFallbackMetricTime = (store: RingStoreLike) => store.healthData?.lastMetricUpdateAt || store.lastMetricUpdateAt || 0;

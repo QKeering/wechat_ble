@@ -14,8 +14,7 @@ const getCurrentBusinessDataIdentity = (device: RingDeviceInfo) => {
 
   if (resolveRingProtocol(device) === 'rw') {
     if (isColonSeparatedBleMac(device.uniMacId)) return device.uniMacId;
-    if (isColonSeparatedBleMac(device.deviceId)) return device.deviceId;
-    return `${device.deviceId || ''}`.trim();
+    return '';
   }
 
   return `${device.uniMacId || device.deviceId || ''}`.trim();

@@ -237,6 +237,8 @@ export const createQkeerV2RingAdapter = (state: RingBleState, runtime?: RingBleR
       name: deviceName || device.name || device.localName,
       deviceId,
       mac: advertis.macInfo || device.mac,
+      uniMacId: advertis.macInfo || sourceRawDevice?.uniMacId || scanned?.device?.uniMacId,
+      advertis,
       serviceId: bleConfig.UUID_SERVICE_TARGET,
       cmdCharId: bleConfig.UUID_TARGET_CHARACTERISTIC,
       dataCharId: bleConfig.UUID_TARGET_NOTIFY,
@@ -393,7 +395,7 @@ function normalizeBusinessScanDevice(device: RingDeviceInfo): RingDeviceInfo {
 
 function isAllowedBusinessScanDevice(device: RingDeviceInfo, options: LegacyScanOptions) {
   if (!options.includeUnknown) return false;
-  const protocol = device.protocol || resolveRingProtocol(device);
+  const protocol = resolveRingProtocol(device);
   if (protocol === 'rw' || protocol === 'qkeer-v2') return true;
 
   const name = `${device.name || device.localName || device.displayName || ''}`.toUpperCase();

@@ -19,6 +19,7 @@ import Action from '@/components/action.vue';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { formatMetricRecordTime, getLatestSpo2Reading, getSubmitDeviceMac, requestMetricRefresh } from '@/composables/useRingMetricReadings';
 import { useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
+import { resolveRingProtocol } from '@/sdk/ring-ble';
 import {
   getRemainingVitalMeasurementMs,
   MIN_VITAL_MEASUREMENT_DURATION_MS,
@@ -215,7 +216,7 @@ let measureTimeout: any = null;
 let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
 let measureStartedAt = 0;
-const isRwDevice = () => userStore.deviceInfo?.protocol === 'rw';
+const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
 const getLatestSpo2ReadingFromStores = () => getLatestSpo2Reading(userStore, measureStartedAt) || getLatestSpo2Reading(ringStore, measureStartedAt);
 const clearMeasureCompleteTimer = () => {
   if (!measureCompleteTimer) return;

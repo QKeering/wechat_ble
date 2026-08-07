@@ -38,16 +38,36 @@ const formatTime = (isoTime: string = '') => {
 
 const getPickerTimeValue = (payload: selectDate | string | any) => String(payload?.value ?? payload ?? '').trim();
 
+const NAP_MIN_HOUR = 11;
+const NAP_MAX_HOUR = 20;
+const NAP_WINDOW_START_MINUTE = NAP_MIN_HOUR * 60;
+const NAP_WINDOW_END_MINUTE = NAP_MAX_HOUR * 60;
+const NAP_TIME_RANGE_TEXT = '11:00-20:00';
+
 const getTimeMinutes = (timeValue: string) => {
   const [hours, minutes] = timeValue.split(':').map((item) => Number(item));
   if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return Number.NaN;
   return hours * 60 + minutes;
 };
 
-const isValidNapRange = (startValue = startTime.value, endValue = endTime.value) => {
+const isChronologicalNapRange = (startValue = startTime.value, endValue = endTime.value) => {
   const start = getTimeMinutes(startValue);
   const end = getTimeMinutes(endValue);
   return Number.isFinite(start) && Number.isFinite(end) && start < end;
+};
+
+const isNapRangeInWindow = (startValue = startTime.value, endValue = endTime.value) => {
+  const start = getTimeMinutes(startValue);
+  const end = getTimeMinutes(endValue);
+  return Number.isFinite(start) && Number.isFinite(end) && start >= NAP_WINDOW_START_MINUTE && end <= NAP_WINDOW_END_MINUTE;
+};
+
+const isValidNapRange = (startValue = startTime.value, endValue = endTime.value) => {
+  return isChronologicalNapRange(startValue, endValue) && isNapRangeInWindow(startValue, endValue);
+};
+
+const showNapWindowToast = () => {
+  (uni as any).$uv.toast(`小睡时间需在 ${NAP_TIME_RANGE_TEXT} 之间`);
 };
 
 const getNapDateValue = () => {
@@ -61,14 +81,27 @@ const getNapDateValue = () => {
 const addNapConfirm = async () => {
   const napDate = getNapDateValue();
   const isoDate = formatLocalDate(napDate);
+  const sleepTime = Math.max(1, getTimeMinutes(endTime.value) - getTimeMinutes(startTime.value));
   uni.showLoading({ title: '添加中...' });
   try {
-    const res = await addSleepNap({ date: isoDate, startTime: startTime.value, endTime: endTime.value });
+    const res = await addSleepNap({
+      date: isoDate,
+      dateRef: isoDate,
+      type: 'NAP',
+      startTime: startTime.value,
+      endTime: endTime.value,
+      sleepTime
+    });
     if (res) {
       (uni as any).$uv.toast('添加成功');
       emit('refresh', napDate);
       return true;
     }
+  } catch (error) {
+    const err = error as any;
+    const message = err?.data?.msg || err?.msg || err?.message || '新增小睡失败，请稍后重试';
+    (uni as any).$uv.toast(message);
+    return false;
   } finally {
     uni.hideLoading();
   }
@@ -96,7 +129,7 @@ const getSleepDurationMinutes = (time: number = 0) => {
   const minutes = time % 60;
   return minutes.toString().padStart(2, '0');
 };
-// 开始时间最大分钟（仅当小时=10时，分钟上限44；否则59）
+// 开始时间分钟上限；小时范围由 11:00-20:00 统一限制
 const startMaxMinute = computed(() => {
   return 59;
 });
@@ -121,9 +154,13 @@ const handleStartConfirm = (time: selectDate) => {
   const nextStartTime = getPickerTimeValue(time);
   // 如果已经有结束时间，验证开始时间是否早于结束时间
   if (endTime.value && nextStartTime) {
-    if (!isValidNapRange(nextStartTime, endTime.value)) {
+    if (!isChronologicalNapRange(nextStartTime, endTime.value)) {
       (uni as any).$uv.toast('开始时间必须早于结束时间');
       return false; // 阻止确认
+    }
+    if (!isNapRangeInWindow(nextStartTime, endTime.value)) {
+      showNapWindowToast();
+      return false;
     }
   }
   startTime.value = nextStartTime;
@@ -134,9 +171,13 @@ const handleStartConfirm = (time: selectDate) => {
 const handleEndConfirm = (time: selectDate) => {
   const nextEndTime = getPickerTimeValue(time);
   if (startTime.value && nextEndTime) {
-    if (!isValidNapRange(startTime.value, nextEndTime)) {
+    if (!isChronologicalNapRange(startTime.value, nextEndTime)) {
       (uni as any).$uv.toast('结束时间必须晚于开始时间');
       return false; // 阻止确认
+    }
+    if (!isNapRangeInWindow(startTime.value, nextEndTime)) {
+      showNapWindowToast();
+      return false;
     }
   }
 
@@ -154,7 +195,11 @@ const addNap = async () => {
     return;
   }
   if (!isValidNapRange()) {
-    (uni as any).$uv.toast('结束时间必须晚于开始时间');
+    if (!isChronologicalNapRange()) {
+      (uni as any).$uv.toast('结束时间必须晚于开始时间');
+      return;
+    }
+    showNapWindowToast();
     return;
   }
   const added = await addNapConfirm();
@@ -210,16 +255,16 @@ onLoad(() => {});
         <view class="ta-c fs-28 t-979797 mt-20">可编辑时间区间</view>
         <view class="ta-c fs-28 mt-10">
           <text>{{ getCurrentDate() }}</text>
-          <text class="ml-10">00:00-23:59</text>
+          <text class="ml-10">{{ NAP_TIME_RANGE_TEXT }}</text>
         </view>
         <view class="flex jc-between mt-50">
           <view @tap="openDatetimePicker('start')" class="r-50 pt-40 pb-40 w-full mr-30 flex jc-center ai-center t-979797" style="background-color: #f7f7f7">
             {{ startTime ? startTime : '开始时间' }}
-            <uv-datetime-picker ref="datetimePicker" mode="time" v-model="startTime" :maxMinute="startMaxMinute" @confirm="handleStartConfirm" @change="handleStartChange" />
+            <uv-datetime-picker ref="datetimePicker" mode="time" v-model="startTime" :minHour="NAP_MIN_HOUR" :maxHour="NAP_MAX_HOUR" :maxMinute="startMaxMinute" @confirm="handleStartConfirm" @change="handleStartChange" />
           </view>
           <view @tap="openDatetimePicker('end')" class="r-50 pt-40 pb-40 w-full flex jc-center ai-center t-979797" style="background-color: #f7f7f7">
             {{ endTime ? endTime : '结束时间' }}
-            <uv-datetime-picker ref="datetimePickerS" mode="time" v-model="endTime" @confirm="handleEndConfirm" />
+            <uv-datetime-picker ref="datetimePickerS" mode="time" v-model="endTime" :minHour="NAP_MIN_HOUR" :maxHour="NAP_MAX_HOUR" @confirm="handleEndConfirm" />
           </view>
         </view>
         <view class="flex jc-between mt-100">

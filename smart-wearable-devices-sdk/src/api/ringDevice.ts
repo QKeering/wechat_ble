@@ -107,7 +107,7 @@ export const normalizeRingBoundDevice = <T extends AnyRecord | null | undefined>
   return {
     ...source,
     mac: mac || source.mac,
-    deviceId: deviceId || source.deviceId || mac || '',
+    deviceId: deviceId || source.deviceId || '',
     deviceName: deviceName || source.deviceName || source.name,
     name: source.name || deviceName || source.deviceName,
     serviceId: getStringField(source, 'serviceId', 'service_id') || source.serviceId,
@@ -139,7 +139,7 @@ export const bindRingDevice = async (payload: RingBindPayload): Promise<RingBoun
   const boundDevice: RingBoundDevice = {
     ...normalizedPayload,
     mac: stableMac || normalizedPayload.mac || '',
-    deviceId: normalizedPayload.deviceId || stableMac || '',
+    deviceId: normalizedPayload.deviceId || '',
     deviceName: normalizedPayload.deviceName || normalizedPayload.name,
     name: normalizedPayload.name || normalizedPayload.deviceName,
     serviceId: normalizedPayload.serviceId,
@@ -156,15 +156,11 @@ export const bindRingDevice = async (payload: RingBindPayload): Promise<RingBoun
 };
 
 const getBindPayloadStableMac = (payload: RingBindPayload) => {
-  if (payload.protocol === 'rw') {
-    return (
-      payload.mac ||
-      payload.advertis?.macInfo ||
-      (isColonSeparatedBleMac(payload.uniMacId) ? payload.uniMacId : '') ||
-      (isColonSeparatedBleMac(payload.deviceId) ? payload.deviceId : '')
-    );
-  }
-  return payload.mac;
+  return (
+    payload.mac ||
+    payload.advertis?.macInfo ||
+    (isColonSeparatedBleMac(payload.uniMacId) ? payload.uniMacId : '')
+  );
 };
 
 export const unbindRingDevice = async (payload: RingUnbindPayload): Promise<void> => {
@@ -220,11 +216,19 @@ export const buildRingRawHistoryFrames = (
 
   const parsedIdentity = getParsedHistoryIdentity(parsed as RingParsedData);
   const firstRecord = records[0] as RingHistoricalRecord | undefined;
+  const parsedProtocol = String(parsed.protocol || '').toLowerCase();
+  const parsedStableDeviceKey = normalizeRingIdentity(parsedIdentity.mac || parsedIdentity.uniMacId);
+  const parsedDeviceIdKey = parsedProtocol === 'rw' ? '' : normalizeRingIdentity(parsedIdentity.deviceId);
+  const rawFallbackIdentity =
+    parsedProtocol === 'rw'
+      ? String(forcedDeviceKey || parsedIdentity.mac || parsedIdentity.uniMacId || '').trim()
+      : String(forcedDeviceKey || parsedIdentity.mac || parsedIdentity.uniMacId || parsedIdentity.deviceId || '').trim();
   const deviceKey =
     normalizeRingIdentity(forcedDeviceKey) ||
-    normalizeRingIdentity(parsedIdentity.mac || parsedIdentity.uniMacId || parsedIdentity.deviceId) ||
+    parsedStableDeviceKey ||
+    parsedDeviceIdKey ||
     (firstRecord ? getHistoryRecordDeviceKey(firstRecord) : '') ||
-    String(forcedDeviceKey || parsedIdentity.mac || parsedIdentity.uniMacId || parsedIdentity.deviceId || '').trim();
+    rawFallbackIdentity;
   const recordTimes = (records as RingHistoricalRecord[])
     .map(getHistoryRecordTime)
     .filter((time) => time > 0)
@@ -457,10 +461,9 @@ const isSameStoredRingIdentity = (device: RingBoundDevice, identity: string) => 
       ? [
           device.mac,
           device.advertis?.macInfo,
-          isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '',
-          isColonSeparatedBleMac(device.deviceId) ? device.deviceId : ''
+          isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : ''
         ]
-      : [device.mac, device.deviceId, device.uniMacId, device.advertis?.macInfo];
+      : [device.mac, device.uniMacId, device.advertis?.macInfo];
   return candidates.some((candidate) => {
     const rawCandidate = String(candidate || '').trim();
     if (!rawCandidate) return false;
@@ -487,11 +490,9 @@ const getHistoryRecordDeviceKey = (record: RingHistoricalRecord) => {
   if (record.protocol === 'rw') {
     const legacyStableIdentity = isColonSeparatedBleMac(record.uniMacId)
       ? record.uniMacId
-      : isColonSeparatedBleMac(record.deviceId)
-        ? record.deviceId
-        : '';
+      : '';
     if (legacyStableIdentity) return normalizeRingIdentity(legacyStableIdentity) || String(legacyStableIdentity).trim();
-    return String(record.deviceId || record.uniMacId || '').trim();
+    return '';
   }
 
   const fallbackIdentity = record.uniMacId || record.deviceId || '';

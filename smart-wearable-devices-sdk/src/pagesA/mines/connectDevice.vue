@@ -95,16 +95,39 @@ const normalizeScanTargetText = (value: unknown) =>
     .trim()
     .toLowerCase()
     .replace(/[^0-9a-z]/g, '');
-const getScanTargetCandidates = (device: ScanDeviceInfo) =>
-  [
-    device.deviceId,
-    device.uniMacId,
-    device.mac,
+const isMacLikeScanTarget = (value: unknown) => normalizeScanTargetText(value).length === 12;
+const isColonSeparatedMac = (value: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(String(value || '').trim());
+const hasScanAdvertisEvidence = (device: ScanDeviceInfo) =>
+  Boolean(
+    device.advertisData ||
+      device.advertisHex ||
+      device.advertisServiceUUIDs ||
+      device.advertisServiceUUIDsList ||
+      device.serviceData
+  );
+const getScanAdvertisMacCandidates = (device: ScanDeviceInfo) => {
+  if (!hasScanAdvertisEvidence(device)) return [];
+  return [
     device.advertis?.macInfo,
-    device.displayName,
-    device.deviceName,
-    device.name,
-    device.localName,
+    device.advertis?.mac,
+    device.advertis?.macAddress,
+    device.advertis?.deviceMac,
+    device.mac,
+    isColonSeparatedMac(device.uniMacId) ? device.uniMacId : ''
+  ]
+    .map(normalizeScanTargetText)
+    .filter(Boolean);
+};
+const getScanTargetStableCandidates = (device: ScanDeviceInfo) =>
+  [
+    ...getScanAdvertisMacCandidates(device),
+    getRingDeviceStableIdentity(device as any)
+  ]
+    .map(normalizeScanTargetText)
+    .filter(Boolean);
+const getScanTargetExactCandidates = (device: ScanDeviceInfo) =>
+  [
+    ...getScanTargetStableCandidates(device),
     device.sn
   ]
     .map(normalizeScanTargetText)
@@ -112,14 +135,10 @@ const getScanTargetCandidates = (device: ScanDeviceInfo) =>
 const isScanTargetDevice = (device: ScanDeviceInfo) => {
   const target = normalizeScanTargetText(scanTarget.value);
   if (!target) return false;
-  return getScanTargetCandidates(device).some(
-    (candidate) =>
-      candidate === target ||
-      candidate.endsWith(target) ||
-      target.endsWith(candidate) ||
-      (target.length >= 6 && candidate.includes(target)) ||
-      (candidate.length >= 6 && target.includes(candidate))
-  );
+  const candidates = isMacLikeScanTarget(scanTarget.value)
+    ? getScanAdvertisMacCandidates(device)
+    : getScanTargetExactCandidates(device);
+  return candidates.some((candidate) => candidate === target);
 };
 const findScanTargetDevice = () => devices.value.find((device) => isScanTargetDevice(device as ScanDeviceInfo));
 
@@ -155,7 +174,8 @@ const getConnectPageSnapshot = () => ({
 
 const isReadyCurrentDevice = () => ring.isConnected.value && ring.isReady.value && Boolean(ring.deviceInfo.value.deviceId);
 const hasBoundDevice = computed(() => boundInfoLoaded.value && hasBoundRingIdentity(boundInfo.value));
-const isDirectScanMode = computed(() => boundInfoLoaded.value && directScan.value && Boolean(scanTarget.value) && !hasBoundDevice.value);
+const isDirectScanMode = computed(() => boundInfoLoaded.value && directScan.value && Boolean(scanTarget.value));
+const showBoundReconnect = computed(() => hasBoundDevice.value && !isDirectScanMode.value);
 const showScanArea = computed(() => boundInfoLoaded.value && !hasBoundDevice.value && !isDirectScanMode.value);
 const directScanStatusClass = computed(() => {
   if (autoReconnectStatus.value === 'success' || autoReconnectStatus.value === 'failed') return autoReconnectStatus.value;
@@ -190,7 +210,11 @@ const devices = computed(() => {
   const filters = type.value.filter(Boolean);
   const businessDevices = [...ring.businessDevices.value];
   const currentDevice = ring.deviceInfo.value as ScanDeviceInfo;
-  if (isReadyCurrentDevice() && !businessDevices.some((device) => isSameRingDevice(device as any, currentDevice as any))) {
+  if (
+    !isDirectScanMode.value &&
+    isReadyCurrentDevice() &&
+    !businessDevices.some((device) => isSameRingDevice(device as any, currentDevice as any))
+  ) {
     businessDevices.unshift(currentDevice as any);
   }
   if (filters.length === 0) return businessDevices;
@@ -203,7 +227,7 @@ const devices = computed(() => {
 });
 
 const scanBusinessDevices = (options: { force?: boolean; reason?: string } = {}) => {
-  if (hasBoundDevice.value) {
+  if (hasBoundDevice.value && !isDirectScanMode.value) {
     appendConnectPageDiagnosticLog('connect-page-scan-hidden-bound-device', {
       reason: options.reason || 'bound-device',
       snapshot: getConnectPageSnapshot()
@@ -335,6 +359,10 @@ const refreshDeviceInfoAfterConnect = () => {
     });
 };
 const findLatestSelectableDevice = () => {
+  if (isDirectScanMode.value && isMacLikeScanTarget(scanTarget.value)) {
+    return findScanTargetDevice() || null;
+  }
+
   const selected = selectedDevice.value;
   const identityHint = {
     deviceId: deviceId.value,
@@ -361,7 +389,10 @@ const confirmConnect = async () => {
       snapshot: getConnectPageSnapshot()
     });
     if (targetDevice) {
-      await ring.connectBusinessDevice(targetDevice as any, { refreshAfterConnect: false });
+      await ring.connectBusinessDevice(targetDevice as any, {
+        refreshAfterConnect: false,
+        replaceBinding: isDirectScanMode.value
+      });
     } else {
       throw new Error('未找到可连接的戒指设备');
     }
@@ -395,7 +426,7 @@ const confirmConnect = async () => {
 };
 
 const tryAutoConnectScanTarget = async () => {
-  if (!scanTarget.value || scanTargetAutoConnectDone.value || connecting.value || hasBoundDevice.value) return;
+  if (!scanTarget.value || scanTargetAutoConnectDone.value || connecting.value) return;
   const targetDevice = findScanTargetDevice();
   if (!targetDevice) return;
   scanTargetAutoConnectDone.value = true;
@@ -456,7 +487,9 @@ onLoad(async (query = {}) => {
     autoReconnectMessage.value = '';
   }
   await loadBoundInfo();
-  if (hasBoundDevice.value) {
+  if (isDirectScanMode.value) {
+    scanBusinessDevices({ force: true, reason: 'page-load-direct-scan-target' });
+  } else if (hasBoundDevice.value) {
     void retryBoundReconnect();
   } else {
     scanBusinessDevices({ reason: scanTarget.value ? 'page-load-scan-target' : 'page-load-no-bound-device' });
@@ -470,7 +503,7 @@ onUnload(() => {
 
 <template>
   <view class="p-30 bg-white min-h-screen">
-    <view v-if="hasBoundDevice" class="bound-reconnect-card r-50 p-40">
+    <view v-if="showBoundReconnect" class="bound-reconnect-card r-50 p-40">
       <view class="bound-status-icon" :class="autoReconnectStatus"></view>
       <view class="bound-title fs-40 mt-30">{{ autoReconnectTitle }}</view>
       <view class="bound-desc fs-30 mt-20">{{ autoReconnectDesc }}</view>

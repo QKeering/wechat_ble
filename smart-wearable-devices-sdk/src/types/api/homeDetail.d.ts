@@ -177,8 +177,11 @@ export type sleepNapType = {
 // 添加小睡参数
 export type addSleepNapType = {
   date?: string; // 归属日期
+  dateRef?: string; // 归属日期（后端字段）
   startTime?: string; // 开始时间
   endTime?: string; // 结束时间
+  sleepTime?: number; // 小睡时长，单位：分钟
+  type?: string; // 睡眠类型
 };
 // 睡眠活动总结
 export type sleepSummaryData = {

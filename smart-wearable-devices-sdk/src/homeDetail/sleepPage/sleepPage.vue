@@ -33,6 +33,7 @@ import {
 
 import DetailInfo from '@/components/DetailInfo.vue';
 import { usePopupFixer } from '@/hooks/usePopupFixer';
+import { resolveRingProtocol } from '@/sdk/ring-ble';
 
 const { isPopupActive, fixedPageStyle } = usePopupFixer();
 const ringBleBridge = useRingBusinessHistoryPageSync();
@@ -52,7 +53,7 @@ const listData = ref<string[]>([
   'napRecord',
   'activitySummary'
 ]);
-const getCurrentRingProtocol = () => ringStore.deviceInfo?.protocol || userStore.deviceInfo?.protocol;
+const getCurrentRingProtocol = () => resolveRingProtocol((ringStore.deviceInfo || userStore.deviceInfo || {}) as any);
 const isCurrentRwRing = () => getCurrentRingProtocol() === 'rw';
 const visibleListData = computed(() =>
   isCurrentRwRing() ? listData.value.filter((cardId) => cardId !== 'skinTemperature') : listData.value

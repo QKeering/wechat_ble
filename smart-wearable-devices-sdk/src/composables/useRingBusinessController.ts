@@ -34,6 +34,7 @@ export interface UseRingBusinessControllerOptions extends UseRingBleSdkOptions {
 export interface ConnectBusinessRingOptions {
   forceProtocol?: RingProtocolKind;
   refreshAfterConnect?: boolean;
+  replaceBinding?: boolean;
 }
 
 interface RefreshBusinessDataOptions {
@@ -337,13 +338,31 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     return false;
   };
 
+  const hasCurrentDeviceIdentity = () => {
+    const currentDevice = ble.deviceInfo.value;
+    return Boolean(
+      currentDevice.deviceId ||
+        currentDevice.uniMacId ||
+        currentDevice.mac ||
+        currentDevice.advertis?.macInfo ||
+        currentDevice.name ||
+        currentDevice.deviceName ||
+        currentDevice.localName ||
+        currentDevice.displayName ||
+        currentDevice.protocol
+    );
+  };
+
+  const getResolvedCurrentProtocol = () => resolveRingProtocol(ble.deviceInfo.value);
+
   const isRwBusinessReady = () => {
-    return ble.deviceInfo.value.protocol === 'rw' && hasBusinessCommunicationFields(ble.deviceInfo.value);
+    return getResolvedCurrentProtocol() === 'rw' && hasBusinessCommunicationFields(ble.deviceInfo.value);
   };
 
   const getCurrentOrBoundProtocol = () => {
     const boundDevice = ble.ringStore.boundDevice as RingDeviceInfo | null | undefined;
-    return ble.deviceInfo.value.protocol || boundDevice?.protocol || (boundDevice ? resolveRingProtocol(boundDevice) : undefined);
+    if (hasCurrentDeviceIdentity()) return getResolvedCurrentProtocol();
+    return boundDevice ? resolveRingProtocol(boundDevice) : undefined;
   };
 
   const isCurrentOrBoundRw = () => getCurrentOrBoundProtocol() === 'rw';
@@ -672,7 +691,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
   };
 
   const getPostConnectRefreshOptions = (): RefreshBusinessDataOptions =>
-    ble.deviceInfo.value.protocol === 'rw'
+    getResolvedCurrentProtocol() === 'rw'
       ? {
           silent: true,
           forceDeviceInfo: true,
@@ -682,7 +701,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       : { silent: true };
 
   const schedulePostConnectDeviceInfoRefresh = (reason: string, details: Record<string, unknown>) => {
-    if (ble.deviceInfo.value.protocol !== 'rw') return;
+    if (getResolvedCurrentProtocol() !== 'rw') return;
     const diagnosticLock = getRwDiagnosticCommandLock();
     if (diagnosticLock || isAutoRefreshPaused) {
       appendRingDiagnosticLog('RW FLOW', 'post-connect-device-info-refresh-skip', {
@@ -731,8 +750,16 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 
     const boundDevice = getBoundBusinessDevice();
     const strictExpectedDevice = expectedDevice || boundDevice;
+    if (strictExpectedDevice && !isReadyBusinessDeviceMatchedBoundMac(currentDevice, strictExpectedDevice)) {
+      return disconnectUnexpectedReadyDevice(`${reason}-scan-mac`, currentDevice, strictExpectedDevice);
+    }
+
     if (strictExpectedDevice && !isSameBusinessRingDevice(currentDevice, strictExpectedDevice)) {
       return disconnectUnexpectedReadyDevice(reason, currentDevice, strictExpectedDevice);
+    }
+
+    if (boundDevice && expectedDevice && !isReadyBusinessDeviceMatchedBoundMac(currentDevice, boundDevice)) {
+      return disconnectUnexpectedReadyDevice(`${reason}-bound-scan-mac`, currentDevice, boundDevice);
     }
 
     if (boundDevice && expectedDevice && !isSameBusinessRingDevice(currentDevice, boundDevice)) {
@@ -758,9 +785,9 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         await syncRwDeviceTimeAfterReady('ready', {
           reason: 'restore-already-ready'
         });
-        if (refreshAfterRestore && shouldAutoRefresh() && ble.deviceInfo.value.protocol !== 'rw') {
+        if (refreshAfterRestore && shouldAutoRefresh() && getResolvedCurrentProtocol() !== 'rw') {
           await refreshBusinessDataSafely();
-        } else if (!refreshAfterRestore && ble.deviceInfo.value.protocol === 'rw') {
+        } else if (!refreshAfterRestore && getResolvedCurrentProtocol() === 'rw') {
           schedulePostConnectDeviceInfoRefresh('restore-already-ready-background', {
             refreshAfterRestore
           });
@@ -785,8 +812,8 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       const boundDevice = ble.ringStore.boundDevice as RingDeviceInfo | null | undefined;
       appendRingDiagnosticLog('RW FLOW', 'restore-start', {
         timeoutMs,
-        currentProtocol: ble.deviceInfo.value.protocol,
-        boundProtocol: boundDevice?.protocol,
+        currentProtocol: getResolvedCurrentProtocol(),
+        boundProtocol: boundDevice ? resolveRingProtocol(boundDevice) : undefined,
         currentDeviceId: ble.deviceInfo.value.deviceId,
         boundDeviceId: boundDevice?.deviceId,
         boundIdentity: boundDevice ? getRingDeviceStableIdentity(boundDevice) : '',
@@ -834,9 +861,9 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
           reason: 'restore-success',
           timeoutMs
         });
-        if (refreshAfterRestore && ble.deviceInfo.value.protocol !== 'rw') {
+        if (refreshAfterRestore && getResolvedCurrentProtocol() !== 'rw') {
           await refreshBusinessDataSafely();
-        } else if (!refreshAfterRestore && ble.deviceInfo.value.protocol === 'rw') {
+        } else if (!refreshAfterRestore && getResolvedCurrentProtocol() === 'rw') {
           schedulePostConnectDeviceInfoRefresh('restore-success-background', {
             refreshAfterRestore,
             timeoutMs
@@ -944,7 +971,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     appendRingDiagnosticLog('RW FLOW', 'refresh-start', {
       silent,
       timeoutMs,
-      protocol: ble.deviceInfo.value.protocol,
+      protocol: getResolvedCurrentProtocol(),
       effectiveProtocol: getCurrentOrBoundProtocol(),
       includeDeviceInfo,
       includeRealtimeMetrics,
@@ -1062,7 +1089,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         deviceId: ble.deviceInfo.value.deviceId
       });
       await refreshPromise.catch(() => undefined);
-      if (ble.deviceInfo.value.protocol === 'rw' && hasRwDeviceInfoCoreSnapshot()) {
+      if (getResolvedCurrentProtocol() === 'rw' && hasRwDeviceInfoCoreSnapshot()) {
         const cachedResult = createDeviceInfoVisibleRefreshResult(
           lastRefreshResult.value || {
             status: 'success',
@@ -1123,7 +1150,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 
   const syncRwDeviceTimeAfterReady = async (phase: 'ready' | 'history', details: Record<string, unknown>) => {
     if (isNodeRuntime()) return;
-    if (ble.deviceInfo.value.protocol !== 'rw' || !isReady.value) return;
+    if (getResolvedCurrentProtocol() !== 'rw' || !isReady.value) return;
 
     const diagnosticLock = getRwDiagnosticCommandLock();
     if (diagnosticLock) {
@@ -1219,7 +1246,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 
       await syncRwDeviceTimeBeforeHistory(requestedHistoryDetails);
 
-      if (ble.deviceInfo.value.protocol === 'rw') {
+      if (getResolvedCurrentProtocol() === 'rw') {
         appendRingDiagnosticLog('RW FLOW', 'history-sync-start', {
           ...requestedHistoryDetails,
           lastReadTimestamp: ble.ringStore.lastReadTimestamp,
@@ -1242,7 +1269,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       );
       if (requestId === historyRequestId) {
         lastHistoryResult.value = result;
-        if (ble.deviceInfo.value.protocol === 'rw') {
+        if (getResolvedCurrentProtocol() === 'rw') {
           const summary = summarizeHistorySyncResult(result);
           appendRingDiagnosticLog('RW FLOW', 'history-sync-result', {
             ...summary,
@@ -1255,7 +1282,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     } catch (error) {
       if (requestId === historyRequestId) {
         lastHistoryResult.value = createHistoryFailureResult(error);
-        if (ble.deviceInfo.value.protocol === 'rw') {
+        if (getResolvedCurrentProtocol() === 'rw') {
           appendRingDiagnosticLog('RW FLOW', 'history-sync-failed', {
             ...requestedHistoryDetails,
             error: formatBleErrorMessage(error, '\u5386\u53f2\u540c\u6b65\u5931\u8d25')
@@ -1287,7 +1314,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     const platformDeviceId = getRingBusinessPlatformDeviceId(device);
     const stableIdentity = getRingDeviceStableIdentity(device);
     const deviceName = getRingBusinessDeviceName(device);
-    const protocol = connectOptions.forceProtocol || device.protocol || resolveRingProtocol(device);
+    const protocol = resolveRingProtocol({ ...device, protocol: connectOptions.forceProtocol || device.protocol });
     const connectTimeoutMs = getConnectTimeoutMs(protocol);
 
     if (isSameBusinessRingDevice(ble.deviceInfo.value, device) && isReady.value) {
@@ -1334,7 +1361,10 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       protocol,
       timeoutMs: connectTimeoutMs,
       forceProtocol: connectOptions.forceProtocol,
-      refreshAfterConnect: connectOptions.refreshAfterConnect
+      refreshAfterConnect: connectOptions.refreshAfterConnect,
+      replaceBinding: connectOptions.replaceBinding === true,
+      target: summarizeBusinessRingDeviceIdentity(device),
+      current: summarizeBusinessRingDeviceIdentity(ble.deviceInfo.value)
     });
     lastRefreshResult.value = null;
     lastHistoryResult.value = null;
@@ -1348,6 +1378,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         uniMacId: device.mac || device.advertis?.macInfo || device.uniMacId || stableIdentity,
         fromScan: true,
         bindAfterConnected: true,
+        replaceBinding: connectOptions.replaceBinding === true,
         protocol,
         sourceDevice: device
       }).then(() => ({ success: true })),
@@ -1384,6 +1415,9 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 
     appendRingDiagnosticLog('RW FLOW', 'connect-ready', {
       deviceId: ble.deviceInfo.value.deviceId,
+      stableIdentity: getRingDeviceStableIdentity(ble.deviceInfo.value),
+      targetStableIdentity: stableIdentity,
+      replaceBinding: connectOptions.replaceBinding === true,
       serviceId: ble.deviceInfo.value.serviceId,
       cmdCharId: ble.deviceInfo.value.cmdCharId,
       dataServiceId: ble.deviceInfo.value.dataServiceId,
@@ -1419,7 +1453,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     isRefreshingBusinessData.value = true;
     const baseTimeoutMs = getRefreshTimeoutMs();
     const timeoutMs =
-      ble.deviceInfo.value.protocol === 'rw'
+      getResolvedCurrentProtocol() === 'rw'
         ? Math.max(baseTimeoutMs, Math.min(35000, Math.max(1000, seconds * 1000) + 5000))
         : baseTimeoutMs;
     const monitoringTask = (async () => {
@@ -1630,16 +1664,16 @@ function isBusinessRingDevice(device: RingDeviceInfo) {
 function getRingBusinessFallbackIdentity(device: RingDeviceInfo | Record<string, any>) {
   const protocol = resolveRingProtocol(device as RingDeviceInfo);
   if (protocol === 'rw') {
-    return (
-      getExplicitStableBusinessRingIdentityIds(device)[0] ||
-      `${device.platformDeviceId || ''}`.trim()
-    );
+    return getExplicitStableBusinessRingIdentityIds(device)[0] || '';
   }
   return `${device.deviceId || device.uniMacId || device.mac || device.advertis?.macInfo || ''}`.trim();
 }
 
 function isFreshBusinessDevice(device: RingDeviceInfo, currentDevice: RingDeviceInfo, now = Date.now(), staleMs = SCAN_DEVICE_STALE_MS) {
-  if (isSameBusinessRingDevice(device, currentDevice)) return true;
+  const expectedMacKey = normalizeBusinessFullBleMacKey(getExplicitBusinessMac(device));
+  if (isSameBusinessRingDevice(device, currentDevice)) {
+    return expectedMacKey ? isReadyBusinessDeviceMatchedBoundMac(currentDevice, device) : true;
+  }
   if (typeof device.lastSeenAt !== 'number') return true;
   return now - device.lastSeenAt <= staleMs;
 }
@@ -1690,6 +1724,8 @@ function summarizeBusinessRingDeviceIdentity(device?: RingDeviceInfo | Record<st
     mac: device.mac,
     advertisMac: device.advertis?.macInfo,
     protocol: device.protocol,
+    scanMac: getScannedBusinessMac(device),
+    explicitMac: getExplicitBusinessMac(device),
     stableIds: getStableBusinessRingIdentityIds(device)
   };
 }
@@ -1712,18 +1748,92 @@ function normalizeBusinessRingIdentity(value: unknown) {
     .toUpperCase();
 }
 
+function normalizeBusinessFullBleMacKey(value?: unknown) {
+  const normalized = normalizeBusinessRingIdentity(value);
+  return normalized.length === 12 ? normalized : '';
+}
+
 function isColonSeparatedBleMac(value?: unknown) {
   return /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){2,5}$/.test(String(value || '').trim());
+}
+
+function isFullColonSeparatedBleMac(value?: unknown) {
+  return /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(String(value || '').trim());
+}
+
+function getExplicitBusinessMac(device?: RingDeviceInfo | Record<string, any> | null) {
+  if (!device) return '';
+  const candidates = [
+    device.advertis?.macInfo,
+    device.advertis?.mac,
+    device.advertis?.macAddress,
+    device.advertis?.deviceMac,
+    device.mac,
+    device.macAddress,
+    device.deviceMac,
+    device.device_mac,
+    isFullColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : ''
+  ];
+  for (const candidate of candidates) {
+    const mac = normalizeBusinessFullBleMacKey(candidate);
+    if (mac) return mac;
+  }
+  return '';
+}
+
+function hasBusinessRawScanAdvertisEvidence(device?: RingDeviceInfo | Record<string, any> | null) {
+  return Boolean(
+    device?.advertisData ||
+      device?.advertisHex ||
+      device?.advertisServiceUUIDs ||
+      device?.advertisServiceUUIDsList ||
+      device?.serviceData
+  );
+}
+
+function hasBusinessScanEvidence(device?: RingDeviceInfo | Record<string, any> | null) {
+  return Boolean(hasBusinessRawScanAdvertisEvidence(device));
+}
+
+function getScannedBusinessMac(device?: RingDeviceInfo | Record<string, any> | null) {
+  if (!hasBusinessScanEvidence(device)) return '';
+  return getExplicitBusinessMac(device);
+}
+
+function isReadyBusinessDeviceMatchedBoundMac(
+  currentDevice: RingDeviceInfo,
+  expectedDevice?: RingDeviceInfo | Record<string, any> | null
+) {
+  const expectedMacKey = normalizeBusinessFullBleMacKey(getExplicitBusinessMac(expectedDevice));
+  if (!expectedMacKey) return true;
+  const currentMacKey = normalizeBusinessFullBleMacKey(getExplicitBusinessMac(currentDevice));
+  if (!currentMacKey || currentMacKey !== expectedMacKey) return false;
+
+  if (hasBusinessScanEvidence(expectedDevice)) {
+    const expectedCommunicationId = getBusinessCommunicationDeviceId(expectedDevice);
+    const currentCommunicationId = getBusinessCommunicationDeviceId(currentDevice);
+    if (expectedCommunicationId && currentCommunicationId && expectedCommunicationId !== currentCommunicationId) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function hasBusinessCommunicationFields(device: RingDeviceInfo) {
   return Boolean(device.deviceId && device.serviceId && device.cmdCharId && device.dataCharId);
 }
 
+function getBusinessCommunicationDeviceId(device?: RingDeviceInfo | Record<string, any> | null) {
+  return String(device?.deviceId || device?.platformDeviceId || '').trim();
+}
+
 function getCurrentBusinessDeviceKey(device: RingDeviceInfo) {
   if (!hasBusinessCommunicationFields(device)) return '';
   const protocol = device.protocol || '';
-  return `${protocol}:${getRingDeviceStableIdentity(device) || device.deviceId || ''}`;
+  const stableIdentity = getRingDeviceStableIdentity(device);
+  if (resolveRingProtocol(device) === 'rw' && !stableIdentity) return '';
+  return `${protocol}:${stableIdentity || device.deviceId || ''}`;
 }
 
 function getBusinessFailureText(step: string, message: string) {

@@ -18,6 +18,7 @@ import { isRwForegroundMetric, useRwForegroundMeasurement } from '@/composables/
 import { formatBleErrorMessage, isExpectedBleRuntimeError } from '@/utils/bleError';
 import { getRemainingVitalMeasurementMs } from '@/utils/measurementDuration';
 import { submitData } from '@/common/api/homeDetail';
+import { resolveRingProtocol } from '@/sdk/ring-ble';
 import type { submitDataType } from '@/types/api/homeDetail';
 
 const {
@@ -108,7 +109,7 @@ const isIOS = computed(() => {
   const systemInfo = uni.getSystemInfoSync();
   return systemInfo.platform.toLowerCase().includes('ios');
 });
-const isRwDevice = () => userStore.deviceInfo?.protocol === 'rw';
+const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
 const getSubmitMac = () => getSubmitDeviceMac(userStore, isIOS.value);
 
 const normalizeIntegerMetric = (value: unknown) => {

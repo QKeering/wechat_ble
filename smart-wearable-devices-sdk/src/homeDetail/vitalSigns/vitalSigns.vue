@@ -15,6 +15,7 @@ import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingBusinessHistoryPageSync, type HistoryPageSilentRequestConfig } from '@/composables/useRingBusinessHistoryPageSync';
 import { formatBleErrorMessage, isExpectedBleRuntimeError } from '@/utils/bleError';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
+import { resolveRingProtocol } from '@/sdk/ring-ble';
 
 import DetailInfo from '@/components/DetailInfo.vue';
 import {usePopupFixer} from '@/hooks/usePopupFixer'
@@ -411,7 +412,7 @@ const bloodPressureDisplay = computed(() => {
   return systolic && diastolic ? `${Math.round(systolic)}/${Math.round(diastolic)}` : '';
 });
 const getCurrentRingProtocol = () =>
-  ringDeviceInfo.value?.protocol || ringStore.deviceInfo?.protocol || userStore.deviceInfo?.protocol;
+  resolveRingProtocol((ringDeviceInfo.value || ringStore.deviceInfo || userStore.deviceInfo || {}) as any);
 const isCurrentRwRing = () => getCurrentRingProtocol() === 'rw';
 const showRwExtendedVitals = computed(() => Boolean(isCurrentRwRing() && (bloodSugarDisplay.value || bloodPressureDisplay.value)));
 

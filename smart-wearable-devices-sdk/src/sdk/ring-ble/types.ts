@@ -92,6 +92,7 @@ export interface RingBindPayload {
   deviceName?: string;
   protocol?: RingProtocolKind;
   advertis?: Record<string, any>;
+  replace?: boolean;
 }
 
 export interface RingUnbindPayload {

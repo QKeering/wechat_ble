@@ -2776,6 +2776,14 @@ def normalize_device_mac_norm(value: str | None) -> str:
     return re.sub(r"[^0-9a-fA-F]", "", str(value or "")).lower()
 
 
+def parse_positive_int(value) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 DEVICE_MAC_NORM_SQL = "lower(replace(replace(coalesce(mac,''), ':', ''), '-', ''))"
 FAMILY_DEVICE_MAC_NORM_SQL = "lower(replace(replace(coalesce(device_mac,''), ':', ''), '-', ''))"
 DEVICE_BIND_LOG_TABLE_AVAILABLE: bool | None = None
@@ -3171,13 +3179,17 @@ def bind_device_authoritatively(payload: dict, user: dict, db: Session, redis: R
 
     current_mac_norm = normalize_device_mac_norm(current_device_data.get("mac"))
     target_device_id = device_data.get("id")
-    target_bound_user_id = device_data.get("user_id")
+    target_bound_user_id = parse_positive_int(device_data.get("user_id"))
 
     bound_by_other_device = db.execute(
         text(
             f"""
             select id, user_id from device
-            where {DEVICE_MAC_NORM_SQL}=:mac_norm and del_flag=0 and user_id is not null and user_id<>:user_id
+            where {DEVICE_MAC_NORM_SQL}=:mac_norm
+              and del_flag=0
+              and user_id is not null
+              and cast(user_id as signed) > 0
+              and user_id<>:user_id
             order by id desc limit 1
             """
         ),
@@ -3194,7 +3206,7 @@ def bind_device_authoritatively(payload: dict, user: dict, db: Session, redis: R
         )
 
     if device_row:
-        if target_bound_user_id and int(target_bound_user_id) != current_user_id:
+        if target_bound_user_id and target_bound_user_id != current_user_id:
             return binding_conflict("该设备已被其他用户绑定，请先解除原绑定", "DEVICE_BOUND_BY_OTHER")
     family_binding = db.execute(
         text(
@@ -3208,8 +3220,8 @@ def bind_device_authoritatively(payload: dict, user: dict, db: Session, redis: R
         {"mac_norm": mac_norm},
     ).first()
     if family_binding:
-        family_data_user_id = family_binding._mapping.get("data_user_id")
-        if family_data_user_id and int(family_data_user_id) != current_user_id:
+        family_data_user_id = parse_positive_int(family_binding._mapping.get("data_user_id"))
+        if family_data_user_id and family_data_user_id != current_user_id:
             return binding_conflict("该设备已被其他用户绑定，请先解除原绑定", "DEVICE_BOUND_BY_OTHER")
 
     if current_device_data and current_mac_norm and current_mac_norm != mac_norm and replace:
@@ -5986,10 +5998,62 @@ def nap_list(request: Request, user: dict = Depends(app_user), db: Session = Dep
 @router.post("/data/sleep/addNap")
 async def add_nap(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
     payload = await request.json()
+    payload = payload if isinstance(payload, dict) else {}
     table = get_table("sleep_record")
-    values = clean_payload(table, payload)
+    normalized_payload = dict(payload)
+    if normalized_payload.get("date") and not normalized_payload.get("dateRef"):
+        normalized_payload["dateRef"] = normalized_payload.get("date")
+    values = clean_payload(table, normalized_payload)
     values["user_id"] = user["id"]
-    values["type"] = values.get("type") or "NAP"
+    if "type" in table.c:
+        values["type"] = sleep_type_value("NAP")
+
+    date_ref = values.get("date_ref") or normalized_payload.get("dateRef") or normalized_payload.get("date") or date.today().isoformat()
+    date_text = str(date_ref)[:10]
+    if "date_ref" in table.c:
+        values["date_ref"] = date_text
+
+    def normalize_nap_datetime(value):
+        text_value = str(value or "").strip()
+        if not text_value:
+            return None
+        if re.match(r"^\d{1,2}:\d{2}$", text_value):
+            return f"{date_text} {text_value.zfill(5)}:00"
+        if re.match(r"^\d{1,2}:\d{2}:\d{2}$", text_value):
+            return f"{date_text} {text_value.zfill(8)}"
+        return text_value
+
+    start_value = normalize_nap_datetime(normalized_payload.get("startTime") or normalized_payload.get("start_time") or values.get("start_time"))
+    end_value = normalize_nap_datetime(normalized_payload.get("endTime") or normalized_payload.get("end_time") or values.get("end_time"))
+    if "start_time" in table.c and start_value:
+        values["start_time"] = start_value
+    if "end_time" in table.c and end_value:
+        values["end_time"] = end_value
+
+    start_dt = coerce_datetime(start_value)
+    end_dt = coerce_datetime(end_value)
+    if not start_dt or not end_dt:
+        return error("小睡开始和结束时间不能为空")
+    if end_dt <= start_dt:
+        return error("小睡结束时间必须晚于开始时间")
+
+    nap_window_start_minute = 11 * 60
+    nap_window_end_minute = 20 * 60
+    start_minute = start_dt.hour * 60 + start_dt.minute
+    end_minute = end_dt.hour * 60 + end_dt.minute
+    if start_minute < nap_window_start_minute or end_minute > nap_window_end_minute:
+        return error("小睡时间需在 11:00-20:00 之间")
+
+    duration_minutes = max(1, int(round((end_dt - start_dt).total_seconds() / 60)))
+    if "sleep_time" in table.c:
+        values["sleep_time"] = duration_minutes
+
+    now = datetime.now()
+    if "create_time" in table.c and not values.get("create_time"):
+        values["create_time"] = now
+    if "update_time" in table.c and not values.get("update_time"):
+        values["update_time"] = now
+
     db.execute(table.insert().values(**values))
     db.commit()
     return success(True)

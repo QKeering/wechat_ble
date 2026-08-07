@@ -783,7 +783,7 @@ if (
   !compatSource.includes('const latestMetrics = computed(() => sdk.ringStore.latestMetrics)') ||
   !compatSource.includes('const lastMetricUpdateAt = computed(() => sdk.ringStore.lastMetricUpdateAt') ||
   !compatSource.includes('const getCurrentRwStableMac =') ||
-  !compatSource.includes("sdk.deviceInfo.value.protocol === 'rw'") ||
+  !compatSource.includes("resolveRingProtocol(sdk.deviceInfo.value) === 'rw'") ||
   !compatSource.includes('return getCurrentRwStableMac() ||') ||
   !compatSource.includes('sdk.deviceInfo.value.advertis?.macInfo') ||
   !compatSource.includes('const getRwStableCompatIdentity =') ||
@@ -793,7 +793,7 @@ if (
   !compatSource.includes('resolveRingProtocol') ||
   !compatSource.includes('const protocolSource: RingDeviceInfo') ||
   !compatSource.includes('deviceName: sourceDevice?.deviceName || inputDevice?.deviceName || preferredName') ||
-  !compatSource.includes('const protocol = protocolSource.protocol || resolveRingProtocol(protocolSource)') ||
+  !compatSource.includes('const protocol = resolveRingProtocol(protocolSource)') ||
   !compatSource.includes('const shouldResolveRwStableId =') ||
   !compatSource.includes("uniMacId: protocol === 'rw' ? connectionMac : sourceDevice?.uniMacId || connectionMac") ||
   !compatSource.includes('fromScan: fromScan || Boolean(sourceDevice)') ||

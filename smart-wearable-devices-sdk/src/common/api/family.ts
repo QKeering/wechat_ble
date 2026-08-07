@@ -358,8 +358,7 @@ const normalizeFamilyDeviceBindPayload = (params: FamilyDeviceBindPayload): Fami
   const stableMac =
     params.mac ||
     params.advertis?.macInfo ||
-    (isColonSeparatedBleMac(params.uniMacId) ? params.uniMacId : '') ||
-    (isColonSeparatedBleMac(params.deviceId) ? params.deviceId : '');
+    (isColonSeparatedBleMac(params.uniMacId) ? params.uniMacId : '');
   if (!stableMac || stableMac === params.mac) return params;
   return {
     ...params,

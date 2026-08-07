@@ -17,7 +17,6 @@ export type TimelineAxisTick = {
 
 const DEFAULT_AXIS_POINTS = 24;
 const SLEEP_AXIS_SLOT_MINUTES = 10;
-const DAILY_AXIS_SLOT_MINUTES = 10;
 const DAILY_METRIC_TICK_LABELS = ['00:00', '06:00', '12:00', '18:00', '24:00'];
 
 const parseClockMinutes = (value: unknown): number | null => {
@@ -118,40 +117,31 @@ const normalizeMetricPointValue = (value: unknown) => {
 
 const buildDailyMetricAxisData = (dataList: Point[], dailyAxisEndTime?: string): TimelineAxisData => {
   const axisEndMinutes = parseDailyAxisEndMinutes(dailyAxisEndTime);
-  const slotCount = Math.max(2, Math.ceil(axisEndMinutes / DAILY_AXIS_SLOT_MINUTES) + 1);
-  const xData = Array.from({ length: slotCount }, (_, index) =>
-    formatDailyClockMinutes((axisEndMinutes * index) / (slotCount - 1))
-  );
-  const bucketValues: number[][] = Array.from({ length: slotCount }, () => []);
-  let parsedCount = 0;
+  const points = dataList
+    .map((item, originalIndex) => {
+      const minutes = parseClockMinutes(item.time);
+      const value = normalizeMetricPointValue(item.value);
+      return {
+        label: minutes == null ? normalizeTimelineLabel(item.time) || String(originalIndex) : formatDailyClockMinutes(minutes),
+        minutes,
+        originalIndex,
+        value
+      };
+    })
+    .filter((item) => item.value != null && (item.minutes == null || item.minutes <= axisEndMinutes))
+    .sort((a, b) => {
+      if (a.minutes != null && b.minutes != null) {
+        return a.minutes - b.minutes || a.originalIndex - b.originalIndex;
+      }
+      return a.originalIndex - b.originalIndex;
+    });
 
-  dataList.forEach((item) => {
-    const minutes = parseClockMinutes(item.time);
-    if (minutes == null || minutes > axisEndMinutes) return;
-    const value = normalizeMetricPointValue(item.value);
-    if (value == null) return;
-    parsedCount += 1;
-    const index = Math.max(0, Math.min(slotCount - 1, Math.round((minutes / axisEndMinutes) * (slotCount - 1))));
-    bucketValues[index].push(value);
-  });
-
-  if (dataList.length && !parsedCount) {
-    const fallbackXData = dataList.map((item) => normalizeTimelineLabel(item.time));
-    return {
-      xData: fallbackXData,
-      seriesData: dataList.map((item) => normalizeMetricPointValue(item.value)),
-      labelIndexes: getFallbackLabelIndexes(fallbackXData.length),
-      isSleepRangeAxis: false
-    };
-  }
+  if (!points.length) return getDefaultAxisData(dailyAxisEndTime);
 
   return {
-    xData,
-    seriesData: bucketValues.map((values) => {
-      if (!values.length) return null;
-      return Math.round(values.reduce((total, value) => total + value, 0) / values.length);
-    }),
-    labelIndexes: getFallbackLabelIndexes(xData.length),
+    xData: points.map((item) => item.label),
+    seriesData: points.map((item) => item.value),
+    labelIndexes: getFallbackLabelIndexes(points.length),
     isSleepRangeAxis: false
   };
 };

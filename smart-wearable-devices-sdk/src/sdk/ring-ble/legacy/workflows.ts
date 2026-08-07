@@ -13,6 +13,7 @@ export interface ConnectLegacyRingOptions {
   uniMacId?: string;
   fromScan?: boolean;
   bindAfterConnected?: boolean;
+  replaceBinding?: boolean;
   sourceDevice?: RingDeviceInfo;
 }
 
@@ -68,9 +69,28 @@ const getRwStableMacCandidate = (device?: RingDeviceInfo | null) => {
   return (
     device.mac ||
     device.advertis?.macInfo ||
-    (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '') ||
-    (isColonSeparatedBleMac(device.deviceId) ? device.deviceId : '')
+    (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '')
   );
+};
+
+const getLegacyStableMacCandidate = (device?: RingDeviceInfo | null, fallback?: unknown) => {
+  if (!device) return isColonSeparatedBleMac(fallback) ? String(fallback || '').trim() : '';
+  const normalizedDeviceId = String(device.deviceId || device.platformDeviceId || '')
+    .replace(/[^0-9a-fA-F]/g, '')
+    .toUpperCase();
+  const preferred =
+    device.advertis?.macInfo ||
+    device.advertis?.mac ||
+    device.advertis?.macAddress ||
+    device.advertis?.deviceMac ||
+    (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '') ||
+    (isColonSeparatedBleMac(fallback) ? String(fallback || '').trim() : '');
+  if (preferred) return String(preferred || '').trim();
+
+  const mac = String(device.mac || '').trim();
+  const normalizedMac = mac.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+  if (normalizedMac && (!normalizedDeviceId || normalizedMac !== normalizedDeviceId)) return mac;
+  return '';
 };
 
 const getMacFromAdvertisData = (buffer?: ArrayBuffer | number[] | any[]) => {
@@ -217,9 +237,8 @@ export const connectLegacyRing = async (
   let bindMac =
     adapter.protocol === 'rw'
       ? getRwStableMacCandidate(options.sourceDevice) ||
-        (isColonSeparatedBleMac(options.uniMacId) ? options.uniMacId || '' : '') ||
-        (isColonSeparatedBleMac(options.deviceId) ? options.deviceId : '')
-      : options.sourceDevice?.mac || options.sourceDevice?.advertis?.macInfo || options.uniMacId || options.deviceId;
+        (isColonSeparatedBleMac(options.uniMacId) ? options.uniMacId || '' : '')
+      : getLegacyStableMacCandidate(options.sourceDevice, options.uniMacId || options.deviceId);
 
   if (adapter.protocol === 'legacy' && isIOS() && options.fromScan) {
     deviceId = await transformLegacyMacToUuid(options.deviceId);
@@ -231,32 +250,51 @@ export const connectLegacyRing = async (
   bindMac =
     connectedProtocol === 'rw'
       ? getRwStableMacCandidate(deviceInfo) || getRwStableMacCandidate(options.sourceDevice) || bindMac
-      : deviceInfo.mac || deviceInfo.advertis?.macInfo || bindMac;
-  const bindUniMacId = connectedProtocol === 'rw' ? bindMac : options.uniMacId;
+      : getLegacyStableMacCandidate(deviceInfo, bindMac) || bindMac;
+  const bindUniMacId = isColonSeparatedBleMac(bindMac)
+    ? bindMac
+    : connectedProtocol === 'rw'
+      ? bindMac
+      : options.uniMacId;
 
   const boundDevice = {
     ...deviceInfo,
     mac: bindMac,
-    uniMacId: connectedProtocol === 'rw' ? bindUniMacId : deviceInfo.uniMacId,
-    name: options.deviceName
+    uniMacId: bindUniMacId || deviceInfo.uniMacId,
+    name: options.deviceName,
+    advertis: bindMac
+      ? {
+          ...(deviceInfo.advertis || options.sourceDevice?.advertis || {}),
+          macInfo: bindMac
+        }
+      : deviceInfo.advertis || options.sourceDevice?.advertis
   };
 
-  if ((options.bindAfterConnected ?? true) && (connectedProtocol !== 'rw' || bindMac)) {
-    await runtime?.bindDevice?.({
-      mac: bindMac,
-      deviceId,
-      serviceId: deviceInfo.serviceId,
-      cmdCharId: deviceInfo.cmdCharId,
-      dataCharId: deviceInfo.dataCharId,
-      dataServiceId: deviceInfo.dataServiceId,
-      uniMacId: bindUniMacId,
-      deviceName: options.deviceName,
-      protocol: connectedProtocol,
-      advertis: deviceInfo.advertis || options.sourceDevice?.advertis
-    });
+  const shouldBindAfterConnected = (options.bindAfterConnected ?? true) && (connectedProtocol !== 'rw' || bindMac);
+
+  try {
+    if (shouldBindAfterConnected) {
+      await runtime?.bindDevice?.({
+        mac: bindMac,
+        deviceId,
+        serviceId: deviceInfo.serviceId,
+        cmdCharId: deviceInfo.cmdCharId,
+        dataCharId: deviceInfo.dataCharId,
+        dataServiceId: deviceInfo.dataServiceId,
+        uniMacId: bindUniMacId,
+        deviceName: options.deviceName,
+        protocol: connectedProtocol,
+        advertis: boundDevice.advertis,
+        replace: options.replaceBinding === true
+      });
+    }
+  } catch (error) {
+    await adapter.disconnect(deviceId).catch(() => undefined);
+    throw error;
   }
 
   runtime?.onDeviceReady?.(boundDevice);
+
   return boundDevice;
 };
 
@@ -281,7 +319,7 @@ export const autoReconnectLegacyRing = async (
       ? {
           ...boundDevice,
           ...currentDevice,
-          mac: currentDevice.mac || boundDevice?.mac,
+          mac: getLegacyStableMacCandidate(currentDevice, boundDevice?.mac) || boundDevice?.mac,
           uniMacId: currentDevice.uniMacId || boundDevice?.uniMacId,
           name: currentDevice.name || boundDevice?.name,
           deviceName: currentDevice.deviceName || currentDevice.name || boundDevice?.deviceName || boundDevice?.name,
@@ -314,24 +352,39 @@ export const autoReconnectLegacyRing = async (
               protocol: readyProtocol
             })
           : '';
+      const legacyReadyStableIdentity =
+        readyProtocol === 'rw'
+          ? ''
+          : getLegacyStableMacCandidate(connected, reconnectDevice?.mac) || reconnectDevice?.mac || reconnectDevice?.advertis?.macInfo || '';
+      const readyStableIdentity = readyProtocol === 'rw' ? rwReadyStableIdentity : legacyReadyStableIdentity;
       const readyDevice: RingDeviceInfo = {
         ...connected,
-        mac: readyProtocol === 'rw' ? rwReadyStableIdentity : reconnectDevice?.mac || connected.mac || deviceId,
-        uniMacId: readyProtocol === 'rw' ? rwReadyStableIdentity : connected.uniMacId || reconnectDevice?.uniMacId,
+        mac: readyStableIdentity || connected.mac || deviceId,
+        uniMacId: isColonSeparatedBleMac(readyStableIdentity)
+          ? readyStableIdentity
+          : readyProtocol === 'rw'
+            ? rwReadyStableIdentity
+            : connected.uniMacId || reconnectDevice?.uniMacId,
         name: connected.name || deviceName,
         deviceName: connected.deviceName || connected.name || deviceName,
         protocol: readyProtocol,
-        advertis: connected.advertis || reconnectDevice?.advertis
+        advertis: readyStableIdentity
+          ? {
+              ...(connected.advertis || reconnectDevice?.advertis || {}),
+              macInfo: readyStableIdentity
+            }
+          : connected.advertis || reconnectDevice?.advertis
       };
-      if (readyProtocol !== 'rw' || rwReadyStableIdentity) {
+      const readyBindMac = readyProtocol === 'rw' ? rwReadyStableIdentity : readyDevice.mac || deviceId;
+      if (readyProtocol !== 'rw' || readyBindMac) {
         await runtime?.bindDevice?.({
-          mac: readyDevice.mac || deviceId,
+          mac: readyBindMac,
           deviceId: readyDevice.deviceId || deviceId,
           serviceId: readyDevice.serviceId,
           cmdCharId: readyDevice.cmdCharId,
           dataCharId: readyDevice.dataCharId,
           dataServiceId: readyDevice.dataServiceId,
-          uniMacId: readyDevice.uniMacId,
+          uniMacId: readyProtocol === 'rw' ? readyBindMac : readyDevice.uniMacId,
           deviceName: readyDevice.deviceName,
           protocol: readyDevice.protocol,
           advertis: readyDevice.advertis
@@ -1363,28 +1416,38 @@ const sendRwDirectReadFallbacks = async (adapter: LegacyRingAdapter, names?: rea
 
 const getDeviceIdentityPayload = (device?: RingDeviceInfo) => {
   if (!device) return {};
-  const stableIdentity = getRingDeviceStableIdentity(device);
   const isRwDevice = resolveRingProtocol(device) === 'rw';
+  const stableIdentity = isRwDevice ? getRingDeviceStableIdentity(device) : getLegacyStableMacCandidate(device);
   return {
     deviceId: device.deviceId,
-    uniMacId: isRwDevice ? stableIdentity : device.uniMacId,
-    mac: device.mac || device.advertis?.macInfo || (isRwDevice ? stableIdentity : ''),
+    uniMacId: isRwDevice ? stableIdentity : stableIdentity || device.uniMacId,
+    mac: stableIdentity,
     deviceName: device.deviceName || device.name,
     advertis: device.advertis
   };
 };
 
 const getRingDeviceStableIdentity = (device?: RingDeviceInfo) => {
-  const stableMac = device?.mac || device?.advertis?.macInfo;
+  const stableMac =
+    resolveRingProtocol(device || {}) === 'rw'
+      ? getRwStableMacCandidate(device)
+      : getLegacyStableMacCandidate(device);
   if (stableMac) return stableMac;
 
   if (device && resolveRingProtocol(device) === 'rw') {
     if (isColonSeparatedBleMac(device.uniMacId)) return device.uniMacId;
-    if (isColonSeparatedBleMac(device.deviceId)) return device.deviceId;
     return '';
   }
 
   return device?.uniMacId || device?.deviceId || '';
+};
+
+const normalizeLegacyIdentity = (value?: unknown) => String(value || '').replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+
+const isMacSameAsDeviceId = (mac?: unknown, deviceId?: unknown) => {
+  const macKey = normalizeLegacyIdentity(mac);
+  const deviceIdKey = normalizeLegacyIdentity(deviceId);
+  return Boolean(macKey && deviceIdKey && macKey === deviceIdKey);
 };
 
 const attachDeviceIdentityToParsed = (parsed: RingParsedData, device?: RingDeviceInfo): RingParsedData => {
@@ -1393,7 +1456,7 @@ const attachDeviceIdentityToParsed = (parsed: RingParsedData, device?: RingDevic
     ...parsed,
     deviceId: parsed.deviceId || identity.deviceId,
     uniMacId: parsed.uniMacId || identity.uniMacId,
-    mac: parsed.mac || identity.mac,
+    mac: identity.mac && (!parsed.mac || isMacSameAsDeviceId(parsed.mac, parsed.deviceId || identity.deviceId)) ? identity.mac : parsed.mac || identity.mac,
     deviceName: parsed.deviceName || identity.deviceName,
     advertis: parsed.advertis || identity.advertis
   };
@@ -1405,7 +1468,7 @@ const attachDeviceIdentityToRecord = (record: Record<string, any>, device?: Ring
     ...record,
     deviceId: record.deviceId || identity.deviceId,
     uniMacId: record.uniMacId || identity.uniMacId,
-    mac: record.mac || identity.mac,
+    mac: identity.mac && (!record.mac || isMacSameAsDeviceId(record.mac, record.deviceId || identity.deviceId)) ? identity.mac : record.mac || identity.mac,
     deviceName: record.deviceName || identity.deviceName,
     advertis: record.advertis || identity.advertis
   };

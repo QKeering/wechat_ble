@@ -1,6 +1,8 @@
 ﻿type RingHistoryRecord = Record<string, any>;
 export type RingHistorySubmitRecord = RingHistoryRecord & { recordTime: string };
 
+import { resolveRingProtocol } from '@/sdk/ring-ble';
+
 export interface RingHistorySyncResultLike {
   records?: RingHistoryRecord[];
 }
@@ -1275,7 +1277,7 @@ const formatRrIntervals = (value: unknown) => {
 export const getRingSubmitDeviceMac = (userStore: any, isIOS: boolean, ...deviceSources: any[]) => {
   const info = userStore.deviceInfo || {};
   const allDeviceSources = [info, ...deviceSources].filter(Boolean);
-  const hasRwSource = allDeviceSources.some((source) => source?.protocol === 'rw');
+  const hasRwSource = allDeviceSources.some((source) => isRwSubmitDeviceSource(source));
 
   if (info.protocol === 'rw' || hasRwSource) {
     for (const source of allDeviceSources) {
@@ -1298,13 +1300,14 @@ export const getRingSubmitDeviceMac = (userStore: any, isIOS: boolean, ...device
 const getLegacyStableSubmitMac = (sources: Array<Record<string, any>>, userStore: any) => {
   const candidates: unknown[] = [];
   for (const source of sources) {
+    const isRwSource = isRwSubmitDeviceSource(source);
     candidates.push(
       source?.mac,
       source?.deviceMac,
       source?.normalMac,
       source?.advertis?.macInfo,
       isColonSeparatedBleMac(source?.uniMacId) ? source?.uniMacId : '',
-      isColonSeparatedBleMac(source?.deviceId) ? source?.deviceId : ''
+      !isRwSource && isColonSeparatedBleMac(source?.deviceId) ? source?.deviceId : ''
     );
   }
   candidates.push(userStore?.normalMac, isColonSeparatedBleMac(userStore?.iosMacId) ? userStore?.iosMacId : '');
@@ -1316,9 +1319,13 @@ const getRwStableSubmitMac = (device?: Record<string, any> | null) => {
   return (
     device.mac ||
     device.advertis?.macInfo ||
-    (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '') ||
-    (isColonSeparatedBleMac(device.deviceId) ? device.deviceId : '')
+    (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '')
   );
 };
 
 const isColonSeparatedBleMac = (value?: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){2,5}$/.test(String(value || '').trim());
+
+const isRwSubmitDeviceSource = (source?: Record<string, any> | null) => {
+  if (!source) return false;
+  return resolveRingProtocol(source as any) === 'rw';
+};

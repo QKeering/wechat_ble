@@ -10,7 +10,7 @@ import {
 } from '@/utils/dataUploadCompensation';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import { isSameRingDevice, useRingBleSdk, type UseRingBleSdkOptions } from './useRingBleSdk';
-import type { RingDeviceInfo, RingParsedData } from '@/sdk/ring-ble';
+import { resolveRingProtocol, type RingDeviceInfo, type RingParsedData } from '@/sdk/ring-ble';
 import { getRwHistoryDataType, parseRwFileTimestamp } from '@/sdk/ring-ble/rw';
 
 const hasCustomOptions = (options: UseRingBleSdkOptions) => Object.keys(options).length > 0;
@@ -22,11 +22,15 @@ const enrichLocalDataRecord = (
   device: RingDeviceInfo,
   extra: Record<string, any> = {}
 ) => {
-  const protocol = record.protocol || parsed.protocol || device.protocol;
+  const protocol = record.protocol || parsed.protocol || resolveRingProtocol(device);
+  const stableMac =
+    getStableDeviceMacFromSource(device as Record<string, any>) ||
+    getStableDeviceMacFromSource(parsed as Record<string, any>) ||
+    getStableDeviceMacFromSource(record);
   const stableIdentity =
     protocol === 'rw'
       ? getRwStableRecordIdentity(record, parsed, device)
-      : record.uniMacId || parsed.uniMacId || device.uniMacId;
+      : stableMac || record.uniMacId || parsed.uniMacId || device.uniMacId;
   return {
     ...record,
     ...extra,
@@ -35,7 +39,7 @@ const enrichLocalDataRecord = (
     deviceId: record.deviceId || parsed.deviceId || device.deviceId,
     deviceName: record.deviceName || parsed.deviceName || device.name,
     uniMacId: stableIdentity,
-    mac: record.mac || parsed.mac || device.mac || device.advertis?.macInfo || (protocol === 'rw' ? stableIdentity : ''),
+    mac: stableMac || (protocol === 'rw' ? stableIdentity : ''),
     advertis: record.advertis || parsed.advertis || device.advertis
   };
 };
@@ -57,15 +61,26 @@ const getRwStableRecordIdentity = (
 
 const getStableDeviceMacFromSource = (source?: Record<string, any> | null) => {
   if (!source) return '';
-  return String(
-    source.mac ||
-      source.deviceMac ||
-      source.device_mac ||
-      source.advertis?.macInfo ||
-      source.advertis?.mac ||
-      (isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : '') ||
-      (isColonSeparatedBleMac(source.deviceId) ? source.deviceId : '')
-  ).trim();
+  const deviceIdKey = normalizeRecordIdentity(source.deviceId || source.platformDeviceId);
+  const preferredCandidates = [
+    source.deviceMac,
+    source.device_mac,
+    source.bluetoothMac,
+    source.bleMac,
+    source.macAddr,
+    source.mac_addr,
+    source.advertis?.macInfo,
+    source.advertis?.mac,
+    source.advertis?.macAddress,
+    source.advertis?.deviceMac,
+    isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : ''
+  ];
+  const preferred = preferredCandidates.find((value) => normalizeRecordIdentity(value));
+  if (preferred) return String(preferred || '').trim();
+
+  const macKey = normalizeRecordIdentity(source.mac);
+  if (macKey && (!deviceIdKey || macKey !== deviceIdKey)) return String(source.mac || '').trim();
+  return '';
 };
 
 const getHistoryUploadStableDeviceMac = (
@@ -83,9 +98,9 @@ const getStableRecordDeviceKey = (record: Record<string, any>) => {
   if (stableIdentity) return normalizeRecordIdentity(stableIdentity) || String(stableIdentity).trim();
 
   if (record.protocol === 'rw') {
-    const legacyStableIdentity = isColonSeparatedBleMac(record.uniMacId) ? record.uniMacId : isColonSeparatedBleMac(record.deviceId) ? record.deviceId : '';
+    const legacyStableIdentity = isColonSeparatedBleMac(record.uniMacId) ? record.uniMacId : '';
     if (legacyStableIdentity) return normalizeRecordIdentity(legacyStableIdentity) || String(legacyStableIdentity).trim();
-    return String(record.deviceId || record.uniMacId || '').trim();
+    return '';
   }
 
   const fallbackIdentity = record.uniMacId || record.deviceId || '';
@@ -143,7 +158,7 @@ const getLocalDataFileKey = (record: Record<string, any>) => {
 };
 
 const getRawRecordDeviceIdentityValues = (record: Record<string, any>) =>
-  [record.deviceId, record.uniMacId, record.mac, record.advertis?.macInfo].filter(Boolean);
+  [record.deviceId, record.platformDeviceId, record.uniMacId, record.platformUniMacId, record.mac, record.advertis?.macInfo].filter(Boolean);
 
 const getStableRecordDeviceIdentityValues = (record: Record<string, any>, protocolHint = '') => {
   const protocol = record.protocol || protocolHint;
@@ -151,11 +166,27 @@ const getStableRecordDeviceIdentityValues = (record: Record<string, any>, protoc
     return [
       record.mac,
       record.advertis?.macInfo,
-      isColonSeparatedBleMac(record.uniMacId) ? record.uniMacId : '',
-      isColonSeparatedBleMac(record.deviceId) ? record.deviceId : ''
+      isColonSeparatedBleMac(record.uniMacId) ? record.uniMacId : ''
     ].filter(Boolean);
   }
   return getRawRecordDeviceIdentityValues(record);
+};
+
+const isSdkDeviceInfoAllowedForBoundDevice = (
+  device: RingDeviceInfo,
+  boundDevice?: RingDeviceInfo | null
+) => {
+  if (!device?.deviceId) return true;
+  const boundStableMac = getStableDeviceMacFromSource(boundDevice as Record<string, any> | null);
+  if (!boundStableMac) return true;
+
+  const boundDeviceId = String(boundDevice?.deviceId || boundDevice?.platformDeviceId || '').trim();
+  if (boundDeviceId && boundDeviceId === String(device.deviceId || device.platformDeviceId || '').trim()) return true;
+
+  const deviceStableMac = getStableDeviceMacFromSource(device as Record<string, any>);
+  if (!deviceStableMac) return false;
+
+  return hasMatchingStableRecordIdentity([boundStableMac], [deviceStableMac]);
 };
 
 const getRecordDeviceIdentityScope = (record: Record<string, any>, protocolHint = '') => ({
@@ -178,15 +209,16 @@ const hasMatchingStableRecordIdentity = (leftIds: unknown[], rightIds: unknown[]
 const hasRecordDeviceIdentity = (record: Record<string, any>) => getRawRecordDeviceIdentityValues(record).length > 0;
 
 const isRecordForCurrentDevice = (record: Record<string, any>, currentDevice: RingDeviceInfo) => {
-  if (record.protocol && currentDevice.protocol && record.protocol !== currentDevice.protocol && hasRecordDeviceIdentity(record)) {
+  const currentProtocol = currentDevice.protocol ? resolveRingProtocol(currentDevice) : '';
+  if (record.protocol && currentProtocol && record.protocol !== currentProtocol && hasRecordDeviceIdentity(record)) {
     return false;
   }
   if (!hasRecordDeviceIdentity(record)) return true;
   if (!hasRecordDeviceIdentity(currentDevice)) return true;
 
-  const recordScope = getRecordDeviceIdentityScope(record, currentDevice.protocol);
+  const recordScope = getRecordDeviceIdentityScope(record, currentProtocol);
   const currentScope = getRecordDeviceIdentityScope(currentDevice, record.protocol);
-  const isRwScope = record.protocol === 'rw' || currentDevice.protocol === 'rw';
+  const isRwScope = record.protocol === 'rw' || currentProtocol === 'rw';
   if (isRwScope) {
     if (recordScope.hadIdentity && recordScope.ids.length === 0) return false;
     if (currentScope.hadIdentity && currentScope.ids.length === 0 && recordScope.ids.length > 0) return false;
@@ -522,18 +554,33 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
   watch(
     sdk.deviceInfo,
     (value) => {
+      const boundDevice = ringStore.boundDevice as RingDeviceInfo | null;
+      if (!isSdkDeviceInfoAllowedForBoundDevice(value, boundDevice)) {
+        appendRingDiagnosticLog('RW SDK', 'device-info-skipped', {
+          stage: 'sdk-device-info-sync',
+          reason: 'bound-mac-mismatch',
+          boundDeviceMac: getStableDeviceMacFromSource(boundDevice as Record<string, any> | null),
+          sdkDeviceMac: getStableDeviceMacFromSource(value as Record<string, any>),
+          sdkDeviceId: value.deviceId,
+          sdkUniMacId: value.uniMacId,
+          sdkName: value.name || value.deviceName,
+          sdkProtocol: value.protocol
+        });
+        ringStore.setDeviceInfo(boundDevice ? ({ ...(boundDevice as RingDeviceInfo) } as RingDeviceInfo) : {});
+        return;
+      }
       ringStore.setDeviceInfo(value);
-      const stableMac = value.mac || value.advertis?.macInfo;
+      const stableMac = getStableDeviceMacFromSource(value as Record<string, any>);
       const shouldSyncStoredIdentity = (storedIdentity?: string) =>
         Boolean(
           stableMac &&
-            (!storedIdentity || !isSameRingDevice({ mac: storedIdentity, protocol: value.protocol }, { ...value, mac: stableMac }))
+            (!storedIdentity || !isSameRingDevice({ mac: storedIdentity, protocol: resolveRingProtocol(value) }, { ...value, mac: stableMac }))
         );
 
       if (shouldSyncStoredIdentity(ringStore.normalMac)) {
         ringStore.setNormalMac(stableMac);
       }
-      if (value.protocol === 'rw' && shouldSyncStoredIdentity(ringStore.iosMacId)) {
+      if (resolveRingProtocol(value) === 'rw' && shouldSyncStoredIdentity(ringStore.iosMacId)) {
         ringStore.setIosMacId(stableMac);
       }
     },
@@ -629,6 +676,21 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
 
   const syncCurrentDeviceInfoBeforeRefresh = () => {
     const currentDevice = sdk.deviceInfo.value;
+    const boundDevice = ringStore.boundDevice as RingDeviceInfo | null;
+    if (!isSdkDeviceInfoAllowedForBoundDevice(currentDevice, boundDevice)) {
+      appendRingDiagnosticLog('RW SDK', 'device-info-skipped', {
+        stage: 'sdk-device-info-before-refresh',
+        reason: 'bound-mac-mismatch',
+        boundDeviceMac: getStableDeviceMacFromSource(boundDevice as Record<string, any> | null),
+        sdkDeviceMac: getStableDeviceMacFromSource(currentDevice as Record<string, any>),
+        sdkDeviceId: currentDevice.deviceId,
+        sdkUniMacId: currentDevice.uniMacId,
+        sdkName: currentDevice.name || currentDevice.deviceName,
+        sdkProtocol: currentDevice.protocol
+      });
+      ringStore.setDeviceInfo(boundDevice ? ({ ...(boundDevice as RingDeviceInfo) } as RingDeviceInfo) : {});
+      return;
+    }
     if (currentDevice.deviceId && !isSameRingDevice(ringStore.deviceInfo, currentDevice)) {
       ringStore.clearBusinessRuntimeData();
     }
