@@ -14,7 +14,6 @@ import AiLab from '../awareness/aiLab.vue';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthLevel, normalizeHealthText } from '@/utils/healthText';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
-import { resolveRingProtocol } from '@/sdk/ring-ble';
 
 const echarts = require('../../static/echarts.min.js');
 const userStore = useUserStore();
@@ -24,9 +23,7 @@ const {
   deviceInfo: ringDeviceInfo,
   normalMac,
   iosMacId,
-  autoConnectLastDevice,
-  ensureCommunicationReady,
-  refreshHealthData
+  autoConnectLastDevice
 } = useRingBLE();
 const scrollTop = ref(0);
 const healthSummary = ref<HabitAnalysisData>();
@@ -138,10 +135,6 @@ const hasRuntimeRingDevice = () =>
       userStore.normalMac ||
       userStore.iosMacId
   );
-const getCurrentRingProtocol = () =>
-  resolveRingProtocol((ringDeviceInfo.value || ringStore.deviceInfo || userStore.deviceInfo || {}) as any);
-const isCurrentRwRing = () => getCurrentRingProtocol() === 'rw';
-const getRingRefreshTimeoutMs = () => (isCurrentRwRing() ? 35000 : 3500);
 const refreshBoundRingBusinessData = async () => {
   let boundDevice: any = null;
   try {
@@ -154,17 +147,8 @@ const refreshBoundRingBusinessData = async () => {
 
   try {
     if (!hasRuntimeRingDevice()) {
-      const restored = await autoConnectLastDevice();
-      if (!restored) return;
+      void autoConnectLastDevice().catch(() => {});
     }
-    await ensureCommunicationReady();
-    await refreshHealthData({
-      includeDeviceTime: false,
-      includeCollectPeriod: false,
-      includeRealtimeMetrics: isCurrentRwRing() ? false : undefined,
-      includeHistorySnapshot: isCurrentRwRing() ? false : undefined,
-      timeoutMs: getRingRefreshTimeoutMs()
-    });
   } catch {
   }
 };

@@ -14,7 +14,7 @@ import {
 } from '@/composables/useRwForegroundMeasurement';
 import { useUserStore } from '@/stores/user';
 import { useRingStore } from '@/stores';
-import { resolveRingProtocol, type RingParsedData } from '@/sdk/ring-ble';
+import { getLegacyBleHistoryExclusiveSnapshot, resolveRingProtocol, type RingParsedData } from '@/sdk/ring-ble';
 import {
   RwHealthDataControlKey,
   RwKey,
@@ -3027,6 +3027,15 @@ async function refreshMineDeviceSnapshot(options: MineSnapshotRefreshOptions = {
   const hasCachedSnapshot = hasMineCachedSnapshot();
   const needsDeviceInfoRefresh = !hasMineBatterySnapshot() || !hasMineFirmwareSnapshot();
   if (!options.force && hasCachedSnapshot && !needsDeviceInfoRefresh) return;
+  const historyExclusive = getLegacyBleHistoryExclusiveSnapshot();
+  if (historyExclusive.active) {
+    appendMineDiagnosticLog('device-snapshot-skip-history-exclusive', {
+      options,
+      exclusive: historyExclusive,
+      snapshot: getMineConnectionSnapshot()
+    });
+    return;
+  }
   const isRwRing = getMineCurrentProtocol() === 'rw';
   const timeoutMs = isRwRing ? 5000 : 3500;
 
@@ -3036,8 +3045,8 @@ async function refreshMineDeviceSnapshot(options: MineSnapshotRefreshOptions = {
       includeDeviceTime: false,
       includeCollectPeriod: false,
       includeDeviceInfo: needsDeviceInfoRefresh,
-      includeRealtimeMetrics: isRwRing ? false : undefined,
-      includeHistorySnapshot: isRwRing ? false : undefined,
+      includeRealtimeMetrics: false,
+      includeHistorySnapshot: false,
       timeoutMs
     });
   } catch (error) {
@@ -3047,6 +3056,16 @@ async function refreshMineDeviceSnapshot(options: MineSnapshotRefreshOptions = {
 
 const refreshMineRwDeviceInfoSnapshotInBackground = (reason: string) => {
   if (!isMineRwRing()) return;
+  const historyExclusive = getLegacyBleHistoryExclusiveSnapshot();
+  if (historyExclusive.active) {
+    appendMineDiagnosticLog('rw-device-info-background-refresh-skip', {
+      reason,
+      skipReason: 'history-exclusive',
+      exclusive: historyExclusive,
+      snapshot: getMineConnectionSnapshot()
+    });
+    return;
+  }
   if (
     mineDeviceInfoSnapshotBusy.value ||
     historySyncBusy.value ||

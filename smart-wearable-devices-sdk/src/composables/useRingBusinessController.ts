@@ -1,5 +1,6 @@
 import { computed, ref, watch } from 'vue';
 import {
+  getLegacyBleHistoryExclusiveSnapshot,
   isRingHistoryInProgress,
   resolveRingProtocol,
   type RefreshLegacyBusinessMetricsResult,
@@ -698,7 +699,13 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
           includeRealtimeMetrics: false,
           includeHistorySnapshot: false
         }
-      : { silent: true };
+      : {
+          silent: true,
+          forceDeviceInfo: true,
+          includeDeviceInfo: true,
+          includeRealtimeMetrics: false,
+          includeHistorySnapshot: false
+        };
 
   const schedulePostConnectDeviceInfoRefresh = (reason: string, details: Record<string, unknown>) => {
     if (getResolvedCurrentProtocol() !== 'rw') return;
@@ -954,6 +961,23 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       return refreshPromise;
     }
 
+    const historyExclusive = getLegacyBleHistoryExclusiveSnapshot();
+    if (historyExclusive.active) {
+      const skippedResult = createHistoryExclusiveRefreshResult(lastRefreshResult.value);
+      lastRefreshResult.value = silent
+        ? createSilentVisibleRefreshResult(skippedResult, lastRefreshResult.value)
+        : skippedResult;
+      appendRingDiagnosticLog('RW FLOW', 'refresh-skip-history-exclusive', {
+        silent,
+        protocol: getResolvedCurrentProtocol(),
+        effectiveProtocol: getCurrentOrBoundProtocol(),
+        deviceId: ble.deviceInfo.value.deviceId,
+        stableIdentity: getRingDeviceStableIdentity(ble.deviceInfo.value),
+        exclusive: historyExclusive
+      });
+      return lastRefreshResult.value;
+    }
+
     const requestId = (refreshRequestId += 1);
     if (!silent) {
       isRefreshingBusinessData.value = true;
@@ -966,8 +990,9 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     const includeRealtimeMetrics =
       refreshOptions.includeRealtimeMetrics ??
       (isCurrentOrBoundRw() ? Boolean(refreshOptions.realtimeMetricNames?.length) : true);
-    const includeHistorySnapshot =
-      refreshOptions.includeHistorySnapshot ?? (isCurrentOrBoundRw() ? false : true);
+    // 历史数据读取/上传只能由首页全局同步 session 负责。
+    // 业务页调用 refreshHealthData 时默认只刷新设备信息/实时指标，避免 page-show、详情页、我的页重复抢 BLE 通道。
+    const includeHistorySnapshot = refreshOptions.includeHistorySnapshot ?? false;
     appendRingDiagnosticLog('RW FLOW', 'refresh-start', {
       silent,
       timeoutMs,
@@ -1077,6 +1102,21 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       ready: isReady.value,
       deviceId: ble.deviceInfo.value.deviceId
     });
+    const historyExclusive = getLegacyBleHistoryExclusiveSnapshot();
+    if (historyExclusive.active) {
+      const skippedResult = createDeviceInfoVisibleRefreshResult(
+        createHistoryExclusiveRefreshResult(lastRefreshResult.value),
+        lastRefreshResult.value
+      );
+      lastRefreshResult.value = skippedResult;
+      appendRingDiagnosticLog('RW FLOW', 'device-info-refresh-skip-history-exclusive', {
+        ready: isReady.value,
+        deviceId: ble.deviceInfo.value.deviceId,
+        stableIdentity: getRingDeviceStableIdentity(ble.deviceInfo.value),
+        exclusive: historyExclusive
+      });
+      return skippedResult;
+    }
     if (!isReady.value) {
       const restored = await restoreLastBusinessDevice({ refreshAfterRestore: false });
       if (!restored) {
@@ -1559,7 +1599,12 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       return;
     }
     if (isReady.value && shouldAutoRefresh()) {
-      void refreshBusinessDataSafely({ silent: true });
+      void refreshBusinessDataSafely({
+        silent: true,
+        forceDeviceInfo: true,
+        includeRealtimeMetrics: false,
+        includeHistorySnapshot: false
+      });
       return;
     }
     scheduleRwMaintainRefresh();
@@ -1753,6 +1798,68 @@ function normalizeBusinessFullBleMacKey(value?: unknown) {
   return normalized.length === 12 ? normalized : '';
 }
 
+function reverseBusinessHexMacBytes(hex: string) {
+  const cleanHex = normalizeBusinessRingIdentity(hex);
+  if (cleanHex.length !== 12) return '';
+  return cleanHex
+    .match(/.{2}/g)!
+    .reverse()
+    .join(':');
+}
+
+function hexFromBusinessBinaryLike(value?: unknown) {
+  if (!value) return '';
+  if (typeof value === 'string') return normalizeBusinessRingIdentity(value);
+  if (value instanceof ArrayBuffer) {
+    return Array.from(new Uint8Array(value))
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
+  }
+  if (ArrayBuffer.isView(value as ArrayBufferView)) {
+    const view = value as ArrayBufferView;
+    return Array.from(new Uint8Array(view.buffer, view.byteOffset, view.byteLength))
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
+  }
+  return '';
+}
+
+function parseBusinessMacFromAdvertisHex(value?: unknown) {
+  const normalizedHex = hexFromBusinessBinaryLike(value);
+  if (!normalizedHex) return '';
+
+  let manufacturerIndex = normalizedHex.indexOf('FF');
+  while (manufacturerIndex >= 0) {
+    const macHex = normalizedHex.slice(manufacturerIndex + 2, manufacturerIndex + 14);
+    if (macHex.length === 12) {
+      const mac = reverseBusinessHexMacBytes(macHex);
+      if (mac) return mac;
+    }
+    manufacturerIndex = normalizedHex.indexOf('FF', manufacturerIndex + 2);
+  }
+
+  return '';
+}
+
+function getBusinessRawScannedAdvertisedMac(device?: RingDeviceInfo | Record<string, any> | null) {
+  const rawCandidates = [
+    device?.advertisHex,
+    device?.advertisData,
+    device?.advertis_data,
+    device?.advertisServiceData,
+    device?.manufacturerData,
+    device?.serviceData
+  ];
+
+  for (const candidate of rawCandidates) {
+    const mac = normalizeBusinessFullBleMacKey(parseBusinessMacFromAdvertisHex(candidate));
+    if (mac) return mac;
+  }
+  return '';
+}
+
 function isColonSeparatedBleMac(value?: unknown) {
   return /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){2,5}$/.test(String(value || '').trim());
 }
@@ -1808,6 +1915,19 @@ function isReadyBusinessDeviceMatchedBoundMac(
   if (!expectedMacKey) return true;
   const currentMacKey = normalizeBusinessFullBleMacKey(getExplicitBusinessMac(currentDevice));
   if (!currentMacKey || currentMacKey !== expectedMacKey) return false;
+
+  // A stale restored object can be polluted as `deviceId=D7 + mac=6E`.
+  // Communication must use the fresh scan record for the bound MAC. If the
+  // platform communication id itself looks like another full MAC, reject it
+  // even when the business mac field was overwritten to the bound MAC.
+  const currentCommunicationMacKey = normalizeBusinessFullBleMacKey(getBusinessCommunicationDeviceId(currentDevice));
+  if (currentCommunicationMacKey && currentCommunicationMacKey !== expectedMacKey) return false;
+
+  const rawScanMacKey = normalizeBusinessFullBleMacKey(getBusinessRawScannedAdvertisedMac(currentDevice));
+  if (rawScanMacKey && rawScanMacKey !== expectedMacKey) return false;
+
+  const runtimeScanMacKey = normalizeBusinessFullBleMacKey((currentDevice as Record<string, any>).__scanMatchedMac);
+  if (runtimeScanMacKey && runtimeScanMacKey !== expectedMacKey) return false;
 
   if (hasBusinessScanEvidence(expectedDevice)) {
     const expectedCommunicationId = getBusinessCommunicationDeviceId(expectedDevice);
@@ -1919,6 +2039,14 @@ function createRefreshTimeoutResult(): RefreshLegacyBusinessMetricsResult {
     status: 'partial',
     ok: [],
     failed: [{ step: 'refresh', message: 'business refresh timeout' }]
+  };
+}
+
+function createHistoryExclusiveRefreshResult(previous: RefreshLegacyBusinessMetricsResult | null): RefreshLegacyBusinessMetricsResult {
+  return {
+    status: previous?.status === 'success' ? 'partial' : previous?.status || 'partial',
+    ok: previous?.ok || [],
+    failed: [{ step: 'history-exclusive', message: 'history read in progress' }]
   };
 }
 

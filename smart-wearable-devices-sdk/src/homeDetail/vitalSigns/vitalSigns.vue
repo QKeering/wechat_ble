@@ -13,14 +13,14 @@ import { useUserStore } from '@/stores/user';
 import { useRingStore } from '@/stores';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingBusinessHistoryPageSync, type HistoryPageSilentRequestConfig } from '@/composables/useRingBusinessHistoryPageSync';
-import { formatBleErrorMessage, isExpectedBleRuntimeError } from '@/utils/bleError';
+import { formatBleErrorMessage } from '@/utils/bleError';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
 
 import DetailInfo from '@/components/DetailInfo.vue';
 import {usePopupFixer} from '@/hooks/usePopupFixer'
 
-const { isDeviceConnected, autoConnectLastDevice, deviceInfo: ringDeviceInfo, refreshHealthData } = useRingBLE();
+const { isDeviceConnected, autoConnectLastDevice, deviceInfo: ringDeviceInfo } = useRingBLE();
 const userStore = useUserStore();
 const ringStore = useRingStore();
 const ringBleBridge = useRingBusinessHistoryPageSync();
@@ -416,36 +416,16 @@ const getCurrentRingProtocol = () =>
 const isCurrentRwRing = () => getCurrentRingProtocol() === 'rw';
 const showRwExtendedVitals = computed(() => Boolean(isCurrentRwRing() && (bloodSugarDisplay.value || bloodPressureDisplay.value)));
 
-const refreshBleMetricsSafely = async () => {
-  try {
-    await refreshHealthData({
-      includeDeviceTime: false,
-      includeCollectPeriod: false,
-      includeRealtimeMetrics: isCurrentRwRing() ? false : undefined,
-      includeHistorySnapshot: isCurrentRwRing() ? false : undefined,
-      timeoutMs: isCurrentRwRing() ? 35000 : 3500
-    });
-  } catch (error) {
-    if (!isExpectedBleRuntimeError(error)) {
-      formatBleErrorMessage(error);
-    }
-  }
-};
-
 const refreshBleMetricsAfterRestore = async () => {
   const { deviceId, serviceId } = userStore.deviceInfo;
   if (deviceId) {
     const alreadyConnected = await isDeviceConnected(deviceId, serviceId || '');
     if (alreadyConnected) {
-      await refreshBleMetricsSafely();
       return;
     }
   }
 
-  const restored = await autoConnectLastDevice();
-  if (restored || userStore.deviceInfo.deviceId) {
-    await refreshBleMetricsSafely();
-  }
+  await autoConnectLastDevice();
 };
 
 // 日期列表数据
@@ -786,7 +766,7 @@ onShow(async () => {
   // await getTemperatureDetail();
   // await getHrvData();
   if (!isCurrentRwRing()) {
-    await refreshBleMetricsAfterRestore();
+    void refreshBleMetricsAfterRestore();
   }
   // await new Promise((resolve) => setTimeout(resolve, 1000));
 });
@@ -796,7 +776,7 @@ onPullDownRefresh(async () => {
     selectedDayIndex.value = 2;
     updateSelectedHistoryDateFromIndex(2);
     if (!isCurrentRwRing()) {
-      await refreshBleMetricsAfterRestore();
+      void refreshBleMetricsAfterRestore();
     }
     await loadVitalSignsData(new Date(), 'pull-down-refresh');
   } catch (error) {

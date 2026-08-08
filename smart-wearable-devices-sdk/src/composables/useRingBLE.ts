@@ -428,11 +428,12 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const findScannedDevice = (deviceId: string, uniMacId = '') => {
     const sourceDevice = sdk.devices.value.find((device) => {
       const protocol = resolveRingProtocol(device);
+      const stableTarget = [uniMacId, deviceId].find((item) => isMacLikeCompatIdentity(item)) || '';
       if (protocol === 'rw') {
-        const stableTarget = [uniMacId, deviceId].find((item) => isMacLikeCompatIdentity(item)) || '';
         if (stableTarget) return matchesScannedStableIdentity(device, stableTarget, false);
         return Boolean(deviceId && device.deviceId === deviceId);
       }
+      if (stableTarget) return matchesScannedStableIdentity(device, stableTarget, false);
       return (
         device.deviceId === deviceId ||
         matchesScannedStableIdentity(device, deviceId, false) ||
@@ -449,9 +450,8 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     const identityMatch = findScannedDevice(deviceId, uniMacId);
     if (identityMatch) return identityMatch;
 
-    const hasStableRwTarget =
-      protocolHint === 'rw' && [uniMacId, deviceId].some((item) => isMacLikeCompatIdentity(item));
-    if (hasStableRwTarget) return undefined;
+    const hasStableMacTarget = [uniMacId, deviceId].some((item) => isMacLikeCompatIdentity(item));
+    if (hasStableMacTarget) return undefined;
 
     const targetName = `${deviceName || ''}`.trim().toUpperCase();
     if (!targetName) return undefined;

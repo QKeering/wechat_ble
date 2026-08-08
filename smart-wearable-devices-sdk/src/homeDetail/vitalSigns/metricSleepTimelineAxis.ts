@@ -15,8 +15,9 @@ export type TimelineAxisTick = {
   isLast: boolean;
 };
 
-const DEFAULT_AXIS_POINTS = 24;
+const DEFAULT_AXIS_POINTS = 97;
 const SLEEP_AXIS_SLOT_MINUTES = 10;
+const DAILY_AXIS_END_MINUTES = 24 * 60;
 const DAILY_METRIC_TICK_LABELS = ['00:00', '06:00', '12:00', '18:00', '24:00'];
 
 const parseClockMinutes = (value: unknown): number | null => {
@@ -87,10 +88,17 @@ const getDefaultAxisData = (dailyAxisEndTime?: string): TimelineAxisData => {
   return {
     xData,
     seriesData: [],
-    labelIndexes: new Set([0, 6, 12, 18, DEFAULT_AXIS_POINTS - 1]),
+    labelIndexes: getDailyMetricLabelIndexes(DEFAULT_AXIS_POINTS),
     isSleepRangeAxis: false
   };
 };
+
+const getDailyMetricLabelIndexes = (length: number) =>
+  new Set(
+    DAILY_METRIC_TICK_LABELS.map((label) =>
+      Math.round((parseDailyTickMinutes(label) / DAILY_AXIS_END_MINUTES) * Math.max(0, length - 1))
+    )
+  );
 
 const getFallbackLabelIndexes = (length: number) => {
   if (length <= 0) return new Set<number>();
@@ -116,7 +124,11 @@ const normalizeMetricPointValue = (value: unknown) => {
 };
 
 const buildDailyMetricAxisData = (dataList: Point[], dailyAxisEndTime?: string): TimelineAxisData => {
-  const axisEndMinutes = parseDailyAxisEndMinutes(dailyAxisEndTime);
+  const clipEndMinutes = parseDailyAxisEndMinutes(dailyAxisEndTime);
+  const xData = Array.from({ length: DEFAULT_AXIS_POINTS }, (_, index) =>
+    formatDailyClockMinutes((DAILY_AXIS_END_MINUTES * index) / (DEFAULT_AXIS_POINTS - 1))
+  );
+  const bucketValues: number[][] = Array.from({ length: DEFAULT_AXIS_POINTS }, () => []);
   const points = dataList
     .map((item, originalIndex) => {
       const minutes = parseClockMinutes(item.time);
@@ -128,7 +140,7 @@ const buildDailyMetricAxisData = (dataList: Point[], dailyAxisEndTime?: string):
         value
       };
     })
-    .filter((item) => item.value != null && (item.minutes == null || item.minutes <= axisEndMinutes))
+    .filter((item) => item.value != null && item.minutes != null && item.minutes <= clipEndMinutes && item.minutes <= DAILY_AXIS_END_MINUTES)
     .sort((a, b) => {
       if (a.minutes != null && b.minutes != null) {
         return a.minutes - b.minutes || a.originalIndex - b.originalIndex;
@@ -136,12 +148,22 @@ const buildDailyMetricAxisData = (dataList: Point[], dailyAxisEndTime?: string):
       return a.originalIndex - b.originalIndex;
     });
 
-  if (!points.length) return getDefaultAxisData(dailyAxisEndTime);
+  points.forEach((item) => {
+    if (item.minutes == null || item.value == null) return;
+    const index = Math.max(
+      0,
+      Math.min(DEFAULT_AXIS_POINTS - 1, Math.round((item.minutes / DAILY_AXIS_END_MINUTES) * (DEFAULT_AXIS_POINTS - 1)))
+    );
+    bucketValues[index].push(item.value);
+  });
 
   return {
-    xData: points.map((item) => item.label),
-    seriesData: points.map((item) => item.value),
-    labelIndexes: getFallbackLabelIndexes(points.length),
+    xData,
+    seriesData: bucketValues.map((values) => {
+      if (!values.length) return null;
+      return Math.round(values.reduce((total, value) => total + value, 0) / values.length);
+    }),
+    labelIndexes: getDailyMetricLabelIndexes(DEFAULT_AXIS_POINTS),
     isSleepRangeAxis: false
   };
 };

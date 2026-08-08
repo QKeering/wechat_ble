@@ -42,6 +42,7 @@ import {
   buildRwSetUserProfileCommand,
   buildRwSyncTimeCommand,
   bytesToHex,
+  parseRwFrame,
   readUint32LE,
   type RwHealthMonitoringConfig,
   type RwUserProfile,
@@ -281,6 +282,32 @@ const rwBleLog = (event: string, details: Record<string, unknown>) => {
   if (typeof logger === 'function') {
     logger.call(globalThis.console, `[RW BLE] ${event}`, details);
   }
+};
+
+const formatRwFrameByte = (value: number | undefined) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return `0x${value.toString(16).padStart(2, '0')}`;
+};
+
+const summarizeRwBleFrameForLog = (bytes: Uint8Array, label?: string, probeLabel?: string) => {
+  const frame = parseRwFrame(bytes);
+  const rawHex = bytesToHex(bytes);
+  return {
+    ...(label ? { label } : {}),
+    ...(probeLabel ? { probe: probeLabel } : {}),
+    hex: rawHex,
+    rawHex,
+    length: bytes.length,
+    frameType: formatRwFrameByte(frame?.frameType),
+    frameTypeValue: frame?.frameType,
+    frameId: formatRwFrameByte(frame?.frameId),
+    frameIdValue: frame?.frameId,
+    cmd: formatRwFrameByte(frame?.cmd),
+    cmdValue: frame?.cmd,
+    subcmd: formatRwFrameByte(frame?.subcmd),
+    subcmdValue: frame?.subcmd,
+    payloadHex: frame ? bytesToHex(frame.data) : ''
+  };
 };
 
 const summarizeParsedForRwBleLog = (parsed: RingParsedData) => {
@@ -1170,15 +1197,16 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       throw new Error('RW ring device is not ready for command writes.');
     }
 
-    const hex = bytesToHex(bytes);
+    const frameLog = summarizeRwBleFrameForLog(bytes, label, probeLabel);
+    const writeBuffer =
+      bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+        ? bytes.buffer
+        : bytes.slice().buffer;
     rwBleLog('tx', {
-      hex,
-      length: bytes.length,
+      ...frameLog,
       deviceId: device.deviceId,
       serviceId: candidate.serviceId,
-      characteristicId: candidate.characteristicId,
-      ...(label ? { label } : {}),
-      ...(probeLabel ? { probe: probeLabel } : {})
+      characteristicId: candidate.characteristicId
     });
 
     const writeValue = (writeType: 'write' | 'writeNoResponse') => new Promise((resolve, reject) => {
@@ -1186,28 +1214,24 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         deviceId: device.deviceId!,
         serviceId: candidate.serviceId,
         characteristicId: candidate.characteristicId,
-        value: bytes.buffer as unknown as any[],
+        value: writeBuffer as unknown as any[],
         writeType,
         success: (result) => {
           rwBleLog('tx-ok', {
-            hex,
+            ...frameLog,
             writeType,
             serviceId: candidate.serviceId,
-            characteristicId: candidate.characteristicId,
-            ...(label ? { label } : {}),
-            ...(probeLabel ? { probe: probeLabel } : {})
+            characteristicId: candidate.characteristicId
           });
           resolve(result);
         },
         fail: (error) => {
           rwBleLog('tx-fail', {
-            hex,
+            ...frameLog,
             writeType,
             serviceId: candidate.serviceId,
             characteristicId: candidate.characteristicId,
-            error: formatError(error),
-            ...(label ? { label } : {}),
-            ...(probeLabel ? { probe: probeLabel } : {})
+            error: formatError(error)
           });
           reject(error);
         }
@@ -2517,6 +2541,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
 
       const rawBytes = new Uint8Array(res.value as unknown as ArrayBuffer);
       const rawHex = bytesToHex(rawBytes);
+      const frameLog = summarizeRwBleFrameForLog(rawBytes);
       const receivedAt = Date.now();
       const stableIdentity = getRwStableMetadataIdentity(device as RingDeviceInfo);
       const standardParsedResult = [
@@ -2542,8 +2567,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         const parsedVariants = [parsedWithDevice, ...takeL19CompatAliases(parsedWithDevice)];
         parsedVariants.forEach((item) => runtime?.onParsedData?.(item));
         rwBleLog(standardParsedResult.event, {
-          rawHex,
-          length: rawBytes.length,
+          ...frameLog,
           deviceId: res.deviceId,
           serviceId: res.serviceId,
           characteristicId: res.characteristicId,
@@ -2558,8 +2582,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         (!device.dataCharId || sameUuid(res.characteristicId, device.dataCharId));
       if (!isExpectedNotifyChannel && !parsed) {
         rwBleLog('rx-ignored-channel', {
-          rawHex,
-          length: rawBytes.length,
+          ...frameLog,
           deviceId: res.deviceId,
           serviceId: res.serviceId,
           characteristicId: res.characteristicId,
@@ -2570,8 +2593,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       }
       if (!parsed) {
         rwBleLog('rx-unparsed', {
-          rawHex,
-          length: rawBytes.length,
+          ...frameLog,
           deviceId: res.deviceId,
           serviceId: res.serviceId,
           characteristicId: res.characteristicId
@@ -2596,8 +2618,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       }
       if (!isExpectedNotifyChannel) {
         rwBleLog('rx-alt-channel', {
-          rawHex,
-          length: rawBytes.length,
+          ...frameLog,
           deviceId: res.deviceId,
           serviceId: res.serviceId,
           characteristicId: res.characteristicId,
@@ -2629,8 +2650,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       });
       parsedVariants.forEach((item) => runtime?.onParsedData?.(item));
       rwBleLog('rx-parsed', {
-        rawHex,
-        length: rawBytes.length,
+        ...frameLog,
         deviceId: res.deviceId,
         serviceId: res.serviceId,
         characteristicId: res.characteristicId,

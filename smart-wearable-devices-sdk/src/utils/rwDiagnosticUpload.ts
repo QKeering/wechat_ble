@@ -15,9 +15,9 @@ export interface RwDiagnosticUploadEntry {
 const QUEUE_STORAGE_KEY = 'qkeer:rw-diagnostic-upload-queue';
 const SESSION_STORAGE_KEY = 'qkeer:rw-diagnostic-session-id';
 const MAX_QUEUE_COUNT = 600;
-const BATCH_SIZE = 80;
-const FLUSH_DELAY_MS = 1200;
-const REQUEST_TIMEOUT_MS = 5000;
+const BATCH_SIZE = 120;
+const FLUSH_DELAY_MS = 2500;
+const REQUEST_TIMEOUT_MS = 3000;
 
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let flushing = false;

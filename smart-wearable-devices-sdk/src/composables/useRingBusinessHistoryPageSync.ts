@@ -9,7 +9,7 @@ import { getRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
 import { clearFrontendRingBindingState } from '@/utils/ringBinding';
 import {
   assertBackendUploadBinding,
-  buildUploadSyncMeta,
+  buildParsedUploadSyncMeta,
   createUploadSessionId,
   markPendingUploadDataDone,
   markPendingUploadDataFailed,
@@ -1142,7 +1142,7 @@ export const useRingBusinessHistoryPageSync = () => {
       submitResponse = await submitData({
         deviceMac,
         dataList: submitPreviewRecords,
-        ...buildUploadSyncMeta(uploadSession)
+        ...buildParsedUploadSyncMeta(uploadSession)
       }, getHistoryPageSilentRequestConfig());
       if (!isHistoryPageSubmitResponseSuccessful(submitResponse)) {
         throw createHistoryPageSubmitResponseError(submitResponse);

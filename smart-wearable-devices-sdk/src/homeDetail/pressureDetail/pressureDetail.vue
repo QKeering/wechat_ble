@@ -9,6 +9,7 @@ import type { stressDetail, Point } from '@/types/api/homeDetail';
 import { baseOption } from '@/homeDetail/pressureDetail/echartOptions';
 import { cloneDeep } from 'lodash-es';
 const echarts = require('../../static/echarts.min.js');
+const PRESSURE_DETAIL_REQUEST_SOFT_TIMEOUT_MS = 3500;
 
 // 滑动日期相关
 const list = ref<string[]>(['日', '周', '月']);
@@ -28,6 +29,38 @@ const currentDate = ref(new Date());
 const stressDetailObj = ref<stressDetail>();
 const maxNumber = ref(0);
 const minNumber = ref(0);
+let stressDetailRequestSeq = 0;
+
+const getPressureDetailSilentRequestConfig = () => ({
+  custom: {
+    toast: false,
+    catch: true
+  }
+});
+
+const withPressureDetailSoftTimeout = <T>(task: () => Promise<T>): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`pressure detail request soft timeout: ${PRESSURE_DETAIL_REQUEST_SOFT_TIMEOUT_MS}ms`));
+    }, PRESSURE_DETAIL_REQUEST_SOFT_TIMEOUT_MS);
+
+    task()
+      .then((result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      })
+      .catch((error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
 
 const pressureIcon = computed(() => {
   const pressireLevel = pressureScore.value;
@@ -78,10 +111,7 @@ const change = async (index: number) => {
   currentName.value = currentList.value[index];
   currentDate.value = new Date();
   offset.value = 0;
-  await getStressDetail();
-  if (chartRef.value) {
-    chartInstance.value.setOption(getProcessedOption());
-  }
+  void refreshPressureDetailChart();
 };
 const formatDateLocal = (date: Date, timeString: string) => {
   return formatDate(date, timeString);
@@ -94,20 +124,14 @@ const calculateOffsetLocal = () => {
 const prevDay = async () => {
   currentDate.value = getPrevDate(currentDate.value, current.value);
   calculateOffsetLocal();
-  await getStressDetail();
-  if (chartRef.value) {
-    chartInstance.value.setOption(getProcessedOption());
-  }
+  void refreshPressureDetailChart();
 };
 const nextDay = async () => {
   const nextDate = getNextDate(currentDate.value, current.value);
   if (nextDate) {
     currentDate.value = nextDate;
     calculateOffsetLocal();
-    await getStressDetail();
-    if (chartRef.value) {
-      chartInstance.value.setOption(getProcessedOption());
-    }
+    void refreshPressureDetailChart();
   } else {
     (uni as any).$uv.toast('不能导航到未来的日期');
   }
@@ -187,17 +211,40 @@ const getProcessedOption = () => {
   };
   return newOption;
 };
-const getStressDetail = async () => {
-  const currentDate = new Date();
-  const isoDate = formatLocalDate(currentDate);
-  const res = await getStressData({
-    date: isoDate,
-    type: currentName.value,
-    offset: offset.value
-  });
-  if (res) {
-    stressDetailObj.value = res;
+const updatePressureChart = () => {
+  if (chartInstance.value) {
+    chartInstance.value.setOption(getProcessedOption());
   }
+};
+const getStressDetail = async () => {
+  const requestSeq = ++stressDetailRequestSeq;
+  const isoDate = formatLocalDate(currentDate.value);
+  try {
+    const res = await withPressureDetailSoftTimeout(() =>
+      getStressData(
+        {
+          date: isoDate,
+          type: currentName.value,
+          offset: offset.value
+        },
+        getPressureDetailSilentRequestConfig()
+      )
+    );
+    if (requestSeq !== stressDetailRequestSeq) return false;
+    if (res) {
+      stressDetailObj.value = res;
+      return true;
+    }
+  } catch (error) {
+    if (requestSeq === stressDetailRequestSeq) {
+      console.warn('[pressureDetail] getStressDetail failed', error);
+    }
+  }
+  return false;
+};
+const refreshPressureDetailChart = async () => {
+  const changed = await getStressDetail();
+  if (changed) updatePressureChart();
 };
 const initChart = async () => {
   if (!chartRef) return;
@@ -212,10 +259,10 @@ const initChart = async () => {
 const leftClick = () => {
   uni.navigateBack();
 };
-onLoad(async (options) => {
+onLoad((options) => {
   currentName.value = currentList.value[current.value];
   pressureScore.value = options?.pressure || 0;
-  await getStressDetail();
+  void refreshPressureDetailChart();
 });
 onPageScroll((e) => {
   scrollTop.value = e.scrollTop;

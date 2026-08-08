@@ -7,7 +7,7 @@ import { useRingBusinessController } from '@/composables/useRingBusinessControll
 import { useRingBusinessData } from '@/composables/useRingBusinessData';
 import { useRingStore } from '@/stores';
 import { useUserStore } from '@/stores/user';
-import { resolveRingProtocol, type RingDeviceInfo } from '@/sdk/ring-ble';
+import { getLegacyBleHistoryExclusiveSnapshot, resolveRingProtocol, type RingDeviceInfo } from '@/sdk/ring-ble';
 import { clearFrontendRingBindingState, getBoundRingIdentity, getBoundRingIdentityTail, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
@@ -218,6 +218,15 @@ const ensureDeviceReady = async () => {
 
 const refreshDeviceInfo = async () => {
   if (isBusy.value) return;
+  const activeHistoryExclusive = getLegacyBleHistoryExclusiveSnapshot();
+  if (activeHistoryExclusive.active) {
+    lastActionText.value = '同步中，设备信息稍后刷新';
+    appendDeviceDiagnosticLog('device-info-refresh-skip-history-exclusive', {
+      exclusive: activeHistoryExclusive,
+      snapshot: getDevicePageSnapshot()
+    });
+    return;
+  }
   busyText.value = '读取设备信息中';
   lastActionText.value = '';
   const startedAt = Date.now();
@@ -231,7 +240,18 @@ const refreshDeviceInfo = async () => {
       snapshot: getDevicePageSnapshot()
     });
     if (!ready) throw new Error('设备未连接，请重新连接后再试');
-    await controller.refreshDeviceInfoData();
+    const refreshResult = await controller.refreshDeviceInfoData();
+    const skippedByHistoryExclusive = refreshResult.failed.some((item) => item.step === 'history-exclusive');
+    if (skippedByHistoryExclusive) {
+      lastActionText.value = '同步中，设备信息稍后刷新';
+      appendDeviceDiagnosticLog('device-info-refresh-result', {
+        skippedByHistoryExclusive,
+        lastActionText: lastActionText.value,
+        lastRefreshResult: controller.lastRefreshResult.value,
+        snapshot: getDevicePageSnapshot()
+      });
+      return;
+    }
     await waitForDeviceInfoSnapshot(startedAt, DEVICE_INFO_SNAPSHOT_WAIT_MS);
     lastActionText.value = batteryValue.value != null || firmwareText.value !== '-' ? '电量/版本已更新' : '暂未获取到设备信息，请稍后刷新';
     appendDeviceDiagnosticLog('device-info-refresh-result', {

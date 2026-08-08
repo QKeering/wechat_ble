@@ -2,6 +2,7 @@ import { RING_PARSED_EMITTED, type RingBleRuntime, type RingDeviceInfo, type Rin
 import type { LegacyRingAdapter } from './adapter';
 import { syncRwHistoryFiles } from '../rw/history';
 import { resolveRingProtocol } from '../protocolRegistry';
+import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 
 export interface EnsureBluetoothOptions {
   showToastOnFail?: boolean;
@@ -57,6 +58,14 @@ export interface RefreshLegacyBusinessMetricsResult {
   failed: Array<{ step: string; message: string }>;
 }
 
+const recoverableBindConflictPattern = /已被其他用户绑定|其他用户绑定|解除原绑定|already\s*bound|bound\s*by\s*other|device[_-]?already[_-]?bound|occupied/i;
+
+const isRecoverableBindConflictAfterBleConnect = (error: unknown, options: ConnectLegacyRingOptions) => {
+  if (options.replaceBinding !== true) return false;
+  const message = error instanceof Error ? error.message : String(error || '');
+  return recoverableBindConflictPattern.test(message);
+};
+
 const getPlatform = () => {
   return `${uni.getSystemInfoSync().platform || ''}`.toLowerCase();
 };
@@ -64,6 +73,7 @@ const getPlatform = () => {
 const isIOS = () => getPlatform().includes('ios');
 
 const isColonSeparatedBleMac = (value?: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){2,5}$/.test(String(value || '').trim());
+const isFullColonSeparatedBleMac = (value?: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(String(value || '').trim());
 const getRwStableMacCandidate = (device?: RingDeviceInfo | null) => {
   if (!device) return '';
   return (
@@ -93,6 +103,11 @@ const getLegacyStableMacCandidate = (device?: RingDeviceInfo | null, fallback?: 
   return '';
 };
 
+const normalizeFullBleMacText = (value?: unknown) => {
+  if (!isFullColonSeparatedBleMac(value)) return '';
+  return String(value || '').trim().toUpperCase();
+};
+
 const getMacFromAdvertisData = (buffer?: ArrayBuffer | number[] | any[]) => {
   if (!buffer) return '';
 
@@ -118,6 +133,51 @@ const withTaskTimeout = async <T>(task: Promise<T>, timeoutMs: number, message: 
   } finally {
     if (timer) clearTimeout(timer);
   }
+};
+
+let legacyBleHistoryExclusiveUntil = 0;
+let legacyBleHistoryExclusiveSeq = 0;
+let legacyBleHistoryExclusiveContext: Record<string, unknown> | null = null;
+
+export const getLegacyBleHistoryExclusiveSnapshot = () => {
+  const remainingMs = Math.max(0, legacyBleHistoryExclusiveUntil - Date.now());
+  const hasActiveContext = legacyBleHistoryExclusiveContext != null;
+  return {
+    active: hasActiveContext || remainingMs > 0,
+    seq: legacyBleHistoryExclusiveSeq,
+    exclusiveUntil: legacyBleHistoryExclusiveUntil,
+    remainingMs,
+    context: legacyBleHistoryExclusiveContext || undefined
+  };
+};
+
+export const isLegacyBleHistoryExclusiveActive = () => getLegacyBleHistoryExclusiveSnapshot().active;
+
+const claimLegacyBleHistoryExclusive = (timeoutMs: number, context: Record<string, unknown> = {}) => {
+  const seq = ++legacyBleHistoryExclusiveSeq;
+  const startedAt = Date.now();
+  legacyBleHistoryExclusiveUntil = Math.max(legacyBleHistoryExclusiveUntil, startedAt + timeoutMs + 1000);
+  legacyBleHistoryExclusiveContext = context;
+  appendRingDiagnosticLog('L19 BLE', 'legacy-history-exclusive-start', {
+    seq,
+    timeoutMs,
+    exclusiveUntil: legacyBleHistoryExclusiveUntil,
+    ...context
+  });
+
+  return () => {
+    if (legacyBleHistoryExclusiveSeq === seq) {
+      legacyBleHistoryExclusiveUntil = 0;
+      legacyBleHistoryExclusiveContext = null;
+    }
+    appendRingDiagnosticLog('L19 BLE', 'legacy-history-exclusive-end', {
+      seq,
+      elapsedMs: Date.now() - startedAt,
+      activeSeq: legacyBleHistoryExclusiveSeq,
+      exclusiveUntil: legacyBleHistoryExclusiveUntil,
+      ...context
+    });
+  };
 };
 
 const showToast = (title: string) => {
@@ -241,9 +301,31 @@ export const connectLegacyRing = async (
       : getLegacyStableMacCandidate(options.sourceDevice, options.uniMacId || options.deviceId);
 
   if (adapter.protocol === 'legacy' && isIOS() && options.fromScan) {
-    deviceId = await transformLegacyMacToUuid(options.deviceId);
-    bindMac = options.deviceId;
+    const sourceDeviceId = String(options.sourceDevice?.deviceId || '').trim();
+    const sourceStableMac = normalizeFullBleMacText(getLegacyStableMacCandidate(options.sourceDevice, options.uniMacId));
+    const inputStableMac = normalizeFullBleMacText(options.deviceId);
+
+    if (sourceDeviceId && (!inputStableMac || sourceDeviceId !== options.deviceId)) {
+      // The caller already found a scan record. On iOS the scan record deviceId is the
+      // platform BLE id used for communication, while the MAC must remain the business id.
+      deviceId = sourceDeviceId;
+      bindMac = sourceStableMac || bindMac;
+    } else if (inputStableMac) {
+      // Compatibility path for old callers that pass the MAC directly instead of a scan record.
+      deviceId = await transformLegacyMacToUuid(inputStableMac);
+      bindMac = inputStableMac;
+    }
   }
+
+  appendRingDiagnosticLog('L19 BLE', 'legacy-connect-target-resolved', {
+    protocol: adapter.protocol,
+    fromScan: options.fromScan === true,
+    inputDeviceId: options.deviceId,
+    sourceDeviceId: options.sourceDevice?.deviceId,
+    communicationDeviceId: deviceId,
+    bindMac,
+    sourceMac: getLegacyStableMacCandidate(options.sourceDevice, options.uniMacId)
+  });
 
   const deviceInfo = await adapter.connectAndDiscover(deviceId, options.deviceName, options.sourceDevice);
   const connectedProtocol = deviceInfo.protocol || adapter.protocol;
@@ -289,8 +371,31 @@ export const connectLegacyRing = async (
       });
     }
   } catch (error) {
-    await adapter.disconnect(deviceId).catch(() => undefined);
-    throw error;
+    if (isRecoverableBindConflictAfterBleConnect(error, options)) {
+      appendRingDiagnosticLog('RW SDK', 'bind-conflict-suppressed-after-connect', {
+        protocol: connectedProtocol,
+        deviceId,
+        bindMac,
+        deviceName: options.deviceName,
+        replaceBinding: options.replaceBinding === true,
+        message: error instanceof Error ? error.message : String(error || ''),
+        sourceDevice: {
+          deviceId: options.sourceDevice?.deviceId,
+          mac: options.sourceDevice?.mac || options.sourceDevice?.advertis?.macInfo,
+          uniMacId: options.sourceDevice?.uniMacId,
+          name: options.sourceDevice?.name || options.sourceDevice?.deviceName
+        },
+        connectedDevice: {
+          deviceId: deviceInfo.deviceId,
+          mac: boundDevice.mac || boundDevice.advertis?.macInfo,
+          uniMacId: boundDevice.uniMacId,
+          name: boundDevice.name
+        }
+      });
+    } else {
+      await adapter.disconnect(deviceId).catch(() => undefined);
+      throw error;
+    }
   }
 
   runtime?.onDeviceReady?.(boundDevice);
@@ -540,18 +645,34 @@ export const syncLegacyHistory = async (
     if (status === 'uploading') uploadStatusStarted = true;
     runtime?.onUploadingStatusChange?.(status);
   };
+  let releaseHistoryExclusive: (() => void) | null = null;
+  const releaseClaimedHistoryExclusive = () => {
+    if (!releaseHistoryExclusive) return;
+    const release = releaseHistoryExclusive;
+    releaseHistoryExclusive = null;
+    release();
+  };
 
   try {
     if (adapter.protocol === 'rw') {
+      const currentDevice = runtime?.getDeviceInfo?.() as RingDeviceInfo | undefined;
+      releaseHistoryExclusive = claimLegacyBleHistoryExclusive(timeoutMs, {
+        protocol: adapter.protocol,
+        deviceId: currentDevice?.deviceId,
+        mac: currentDevice?.mac || currentDevice?.uniMacId,
+        sinceTimestamp,
+        readAll: options.readAll,
+        dataType: options.dataType,
+        dataTypes: options.dataTypes
+      });
       try {
         const { parsed, records } = await syncRwHistoryFiles(adapter, {
-          sinceTimestamp,
-          readAll: options.readAll,
-          dataType: options.dataType,
-          dataTypes: options.dataTypes,
-          timeoutMs
-        });
-        const currentDevice = runtime?.getDeviceInfo?.() as RingDeviceInfo | undefined;
+            sinceTimestamp,
+            readAll: options.readAll,
+            dataType: options.dataType,
+            dataTypes: options.dataTypes,
+            timeoutMs
+          });
         const recordsWithDevice = records.map((record) => attachDeviceIdentityToRecord(record, currentDevice));
         const parsedWithDevice = attachDeviceIdentityToParsed(
           {
@@ -583,6 +704,7 @@ export const syncLegacyHistory = async (
           deleted = deleteParsed.status !== 'failed' && deleteParsed.success !== false;
         }
 
+        releaseClaimedHistoryExclusive();
         return {
           status: parsedWithDevice.status || (recordsWithDevice.length > 0 ? 'success' : 'empty'),
           records: recordsWithDevice,
@@ -607,7 +729,15 @@ export const syncLegacyHistory = async (
     }
 
     const currentDevice = runtime?.getDeviceInfo?.() as RingDeviceInfo | undefined;
-    const parsedLocalData = await readLegacyLocalDataUntilComplete(adapter, {
+    releaseHistoryExclusive = claimLegacyBleHistoryExclusive(timeoutMs, {
+      protocol: adapter.protocol,
+      deviceId: currentDevice?.deviceId,
+      mac: currentDevice?.mac || currentDevice?.uniMacId,
+      sinceTimestamp,
+      readAll: options.readAll
+    });
+    let parsedLocalData: RingParsedData;
+    parsedLocalData = await readLegacyLocalDataUntilComplete(adapter, {
       sinceTimestamp,
       readAll: options.readAll
     }, timeoutMs);
@@ -625,6 +755,7 @@ export const syncLegacyHistory = async (
     const records = recordsWithDevice;
 
     if (records.length === 0) {
+      releaseClaimedHistoryExclusive();
       return {
         status: parsed.status || 'empty',
         records,
@@ -649,6 +780,7 @@ export const syncLegacyHistory = async (
     }
 
     if (options.skipUpload !== true) notifyUploadStatus('success');
+    releaseClaimedHistoryExclusive();
     return {
       status: parsed.status || 'success',
       records,
@@ -659,6 +791,8 @@ export const syncLegacyHistory = async (
   } catch (error) {
     if (uploadStatusStarted) notifyUploadStatus('failed');
     throw error;
+  } finally {
+    releaseClaimedHistoryExclusive();
   }
 };
 
@@ -667,6 +801,23 @@ export const refreshLegacyBusinessMetrics = async (
   runtime?: RingBleRuntime,
   options: RefreshLegacyBusinessMetricsOptions = {}
 ): Promise<RefreshLegacyBusinessMetricsResult> => {
+  if (isLegacyBleHistoryExclusiveActive()) {
+    const currentDevice = runtime?.getDeviceInfo?.() as RingDeviceInfo | undefined;
+    appendRingDiagnosticLog('L19 BLE', 'legacy-business-refresh-skip-history-exclusive', {
+      protocol: adapter.protocol,
+      deviceId: currentDevice?.deviceId,
+      mac: currentDevice?.mac || currentDevice?.uniMacId,
+      exclusiveUntil: legacyBleHistoryExclusiveUntil,
+      remainingMs: Math.max(0, legacyBleHistoryExclusiveUntil - Date.now()),
+      options
+    });
+    return {
+      status: 'partial',
+      ok: [],
+      failed: [{ step: 'history-exclusive', message: 'history read in progress' }]
+    };
+  }
+
   if (adapter.protocol === 'rw') {
     return refreshRwBusinessMetrics(adapter, runtime, options);
   }
@@ -787,7 +938,7 @@ const refreshQkeerV2BusinessMetrics = async (
   const historyWaitTimeoutMs = Math.min(timeoutMs, 5000);
   const includeDeviceInfo = options.includeDeviceInfo ?? true;
   const includeRealtimeMetrics = options.includeRealtimeMetrics ?? true;
-  const includeHistorySnapshot = options.includeHistorySnapshot ?? true;
+  const includeHistorySnapshot = options.includeHistorySnapshot ?? false;
   const todayZeroMs = new Date(new Date().toDateString()).getTime();
   const ok: string[] = [];
   const failed: Array<{ step: string; message: string }> = [];
@@ -926,7 +1077,7 @@ const refreshRwBusinessMetrics = async (
   const includeDeviceInfo = options.includeDeviceInfo ?? true;
   const includeDeviceTime = options.includeDeviceTime ?? true;
   const includeRealtimeMetrics = options.includeRealtimeMetrics ?? true;
-  const includeHistorySnapshot = options.includeHistorySnapshot ?? true;
+  const includeHistorySnapshot = options.includeHistorySnapshot ?? false;
   const monitoringNames = ['heart_rate', 'spo2', 'hrv', 'stress', 'blood_sugar', 'blood_pressure', 'temperature'];
   const allRealtimeNames = ['heart_rate', 'blood_oxygen', 'temperature', 'blood_sugar', 'hrv', 'stress', 'blood_pressure'] as const;
   const requestedRealtimeNames = new Set(

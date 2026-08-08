@@ -245,6 +245,17 @@ const isNapStagePoint = (point: any, allowValueStageFallback = false) => {
   return value === '5' || value === '小睡';
 };
 
+const getSleepSectionTotalTimelineMinutes = (section?: Point[]) => {
+  if (!Array.isArray(section)) return 0;
+  return Math.round(
+    section.reduce((total, item: any) => {
+      const stage = normalizeSleepStageText(item?.time ?? item?.name ?? item?.type);
+      if (!stage || stage === SLEEP_STAGE_NAMES['5']) return total;
+      return total + toPositiveNumber(item?.value);
+    }, 0)
+  );
+};
+
 const getMainSleepAnalysis = (detail?: sleepDetail, segment?: sleepSegment) => {
   const chartData = Array.isArray(detail?.chartData) ? detail.chartData : [];
   if (!chartData.length) {
@@ -257,6 +268,14 @@ const getMainSleepAnalysis = (detail?: sleepDetail, segment?: sleepSegment) => {
   if (segmentStart != null && segmentEnd != null && segmentEnd < segmentStart) {
     segmentEnd += 1440;
   }
+  const sectionTotalMinutes = getSleepSectionTotalTimelineMinutes(segment?.chartDataSection);
+  const sectionEnd =
+    segmentStart != null && sectionTotalMinutes > 0 && sectionTotalMinutes <= MAX_MAIN_SLEEP_MINUTES
+      ? segmentStart + sectionTotalMinutes
+      : null;
+  const shouldCapToSectionEnd =
+    sectionEnd != null &&
+    (segmentEnd == null || (segmentStart != null && segmentEnd - segmentStart > sectionTotalMinutes + MAIN_SLEEP_OVERVIEW_TOLERANCE_MINUTES));
 
   const points = chartData
     .map((item: any) => ({ item, minute: normalizeTimelineMinutes(item?.time, segmentStart) }))
@@ -290,6 +309,7 @@ const getMainSleepAnalysis = (detail?: sleepDetail, segment?: sleepSegment) => {
     }
   }
   if (segmentEnd != null) mainEnd = Math.min(mainEnd, segmentEnd);
+  if (shouldCapToSectionEnd && sectionEnd != null) mainEnd = Math.min(mainEnd, sectionEnd);
 
   const mainPoints = points.slice(0, cutoffIndex).filter((entry: any) => !isNapStagePoint(entry.item, allowValueStageFallback));
   const mainStagePoints = mainPoints.filter((entry: any) => Boolean(getSleepStageName(entry.item, allowValueStageFallback)));
@@ -426,12 +446,26 @@ const displaySleepSegmentObj = computed(() => {
   const segmentSection = Array.isArray(segment.chartDataSection) ? segment.chartDataSection : [];
   const analysisSection = Array.isArray(analysis.chartDataSection) ? analysis.chartDataSection : [];
   const hasBackendSection = hasSleepSectionData(segmentSection);
+  const hasAnalysisSection = hasSleepSectionData(analysisSection) && Boolean(analysis.endTime);
   const fallbackSection = hasSleepSectionData(analysisSection) ? analysisSection : segment.chartDataSection;
   return {
     ...segment,
-    endTime: hasBackendSection ? segment.endTime : analysis.endTime || segment.endTime,
+    endTime: analysis.endTime || segment.endTime,
     chartData: hasBackendSection ? segment.chartData : fallbackSection || segment.chartData,
-    chartDataSection: hasBackendSection ? segment.chartDataSection : fallbackSection
+    chartDataSection: hasAnalysisSection ? analysisSection : hasBackendSection ? segment.chartDataSection : fallbackSection
+  };
+});
+
+const displaySleepTimelineSegmentObj = computed(() => {
+  const segment = displaySleepSegmentObj.value || {};
+  const analysis = mainSleepAnalysis.value;
+  return {
+    ...segment,
+    chartData: Array.isArray(analysis.chartData) && analysis.chartData.length ? analysis.chartData : (segment as any).chartData,
+    chartDataSection:
+      Array.isArray(analysis.chartDataSection) && hasSleepSectionData(analysis.chartDataSection)
+        ? analysis.chartDataSection
+        : (segment as any).chartDataSection
   };
 });
 
@@ -1201,7 +1235,7 @@ defineExpose({
     </view>
     <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
     <view v-for="cardId in visibleListData" :key="cardId">
-      <sleepTime v-if="cardId === 'subjectiveSleepScore'" :sleepDetailObj="displaySleepDetailObj" :sleepSegmentObj="displaySleepSegmentObj">
+      <sleepTime v-if="cardId === 'subjectiveSleepScore'" :sleepDetailObj="displaySleepDetailObj" :sleepSegmentObj="displaySleepTimelineSegmentObj">
         <DetailInfo id="sleep_duration" v-model:isPopupActive="isPopupActive" size="small" style="margin-left: 6rpx"></DetailInfo>
       </sleepTime>
       <sleepRage v-else-if="cardId === 'sleepInterval'" :sleepSegmentObj="displaySleepSegmentObj">

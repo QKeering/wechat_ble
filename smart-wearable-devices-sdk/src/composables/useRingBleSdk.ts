@@ -161,6 +161,97 @@ const normalizeFullBleMacText = (value?: unknown) => {
   return String(value || '').trim().toUpperCase();
 };
 
+const SCAN_MATCH_CONTEXT_TTL_MS = 2 * 60 * 1000;
+
+const normalizeHexText = (value?: unknown) =>
+  String(value || '')
+    .replace(/[^a-fA-F0-9]/g, '')
+    .toUpperCase();
+
+const bytesToColonMac = (bytes: string[]) => {
+  if (bytes.length !== 6) return '';
+  const normalizedBytes = bytes.map((byte) => byte.toUpperCase());
+  if (normalizedBytes.every((byte) => byte === '00')) return '';
+  return normalizedBytes.join(':');
+};
+
+const reverseHexMacBytes = (macHex: string) => {
+  const bytes = macHex.match(/[0-9A-F]{2}/g) || [];
+  return bytesToColonMac(bytes.reverse());
+};
+
+const hexFromBinaryLike = (value?: unknown) => {
+  if (!value) return '';
+  if (typeof value === 'string') return normalizeHexText(value);
+  if (value instanceof ArrayBuffer) {
+    return Array.from(new Uint8Array(value))
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
+  }
+  if (ArrayBuffer.isView(value as ArrayBufferView)) {
+    const view = value as ArrayBufferView;
+    return Array.from(new Uint8Array(view.buffer, view.byteOffset, view.byteLength))
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
+  }
+  return '';
+};
+
+const parseLegacyMacFromAdvertisHex = (hex?: unknown) => {
+  const normalizedHex = hexFromBinaryLike(hex);
+  if (!normalizedHex) return '';
+
+  let manufacturerIndex = normalizedHex.indexOf('FF');
+  while (manufacturerIndex >= 0) {
+    const macHex = normalizedHex.slice(manufacturerIndex + 2, manufacturerIndex + 14);
+    if (macHex.length === 12) {
+      const mac = reverseHexMacBytes(macHex);
+      if (mac) return mac;
+    }
+    manufacturerIndex = normalizedHex.indexOf('FF', manufacturerIndex + 2);
+  }
+
+  if (normalizedHex.length >= 12) {
+    const mac = reverseHexMacBytes(normalizedHex.slice(-12));
+    if (mac) return mac;
+  }
+
+  return '';
+};
+
+const getRawScannedAdvertisedMac = (device?: RingDeviceInfo | null) => {
+  const rawCandidates = [
+    device?.advertisHex,
+    device?.advertisData,
+    (device as Record<string, unknown> | undefined)?.advertis_data,
+    (device as Record<string, unknown> | undefined)?.advertisServiceData,
+    (device as Record<string, unknown> | undefined)?.manufacturerData,
+    device?.serviceData
+  ];
+
+  for (const candidate of rawCandidates) {
+    const mac = normalizeFullBleMacText(parseLegacyMacFromAdvertisHex(candidate));
+    if (mac) return mac;
+  }
+  return '';
+};
+
+const markRuntimeScanMatchedDevice = (device: RingDeviceInfo, stableMac?: string) => {
+  const runtimeDevice = device as RingDeviceInfo & Record<string, unknown>;
+  const mac = normalizeFullBleMacText(stableMac);
+  if (mac) runtimeDevice.__scanMatchedMac = mac;
+  runtimeDevice.__scanMatchedAt = Date.now();
+  return device;
+};
+
+const getFreshRuntimeScanMatchedMac = (device?: RingDeviceInfo | null) => {
+  const scanMatchedAt = Number((device as Record<string, unknown> | undefined)?.__scanMatchedAt || 0);
+  if (!scanMatchedAt || Date.now() - scanMatchedAt > SCAN_MATCH_CONTEXT_TTL_MS) return '';
+  return normalizeFullBleMacText((device as Record<string, unknown> | undefined)?.__scanMatchedMac);
+};
+
 const hasRwNotifyDiscoverySnapshot = (device: RingDeviceInfo) => Array.isArray(device.notifyCandidates) && device.notifyCandidates.length > 0;
 
 const isCommunicationReadyDevice = (device: RingDeviceInfo) => Boolean(device.deviceId && device.serviceId && device.cmdCharId && device.dataCharId);
@@ -231,7 +322,17 @@ const getScannedAdvertisedMac = (device?: RingDeviceInfo | null) => {
   // For strict reconnect/binding we only trust a fresh scan record that contains raw
   // broadcast evidence, then use the MAC parsed from that record.
   if (!hasRawScanAdvertisEvidence(device)) return '';
+  const rawMac = getRawScannedAdvertisedMac(device);
+  if (rawMac) return rawMac;
+  const runtimeMatchedMac = getFreshRuntimeScanMatchedMac(device);
+  if (runtimeMatchedMac) return runtimeMatchedMac;
   return getExplicitMacFromDevice(device);
+};
+
+const getTrustedScannedAdvertisedMac = (device?: RingDeviceInfo | null) => {
+  const rawMac = getRawScannedAdvertisedMac(device);
+  if (rawMac) return rawMac;
+  return getFreshRuntimeScanMatchedMac(device);
 };
 
 const isStrictBoundScanCandidate = (target: RingDeviceInfo, candidate?: RingDeviceInfo | null) => {
@@ -239,8 +340,24 @@ const isStrictBoundScanCandidate = (target: RingDeviceInfo, candidate?: RingDevi
   if (hasConflictingProtocols(target, candidate)) return false;
 
   const targetMacKey = normalizeFullBleMacKey(getBoundReconnectMac(target));
-  const candidateMacKey = normalizeFullBleMacKey(getScannedAdvertisedMac(candidate));
+  const candidateMacKey = normalizeFullBleMacKey(getTrustedScannedAdvertisedMac(candidate));
   return Boolean(targetMacKey && candidateMacKey && targetMacKey === candidateMacKey);
+};
+
+const isFreshStrictBoundRuntimeScanDevice = (target: RingDeviceInfo, candidate?: RingDeviceInfo | null) => {
+  if (!candidate?.deviceId) return false;
+  if (hasConflictingProtocols(target, candidate)) return false;
+
+  const targetMacKey = normalizeFullBleMacKey(getBoundReconnectMac(target));
+  if (!targetMacKey) return false;
+
+  const runtimeMatchedKey = normalizeFullBleMacKey(getFreshRuntimeScanMatchedMac(candidate));
+  if (runtimeMatchedKey) return runtimeMatchedKey === targetMacKey;
+
+  const rawMacKey = normalizeFullBleMacKey(getRawScannedAdvertisedMac(candidate));
+  const lastSeenAt = Number(candidate.lastSeenAt || 0);
+  const rawScanIsFresh = Boolean(lastSeenAt && Date.now() - lastSeenAt <= SCAN_MATCH_CONTEXT_TTL_MS);
+  return Boolean(rawScanIsFresh && rawMacKey && rawMacKey === targetMacKey);
 };
 
 const findStrictBoundReconnectScanCandidate = (target: RingDeviceInfo, scannedDevices: RingDeviceInfo[]) =>
@@ -471,6 +588,37 @@ const buildReconnectTargetFromBoundDevice = (boundDevice: RingDeviceInfo, curren
     lastSeenAt: currentDevice?.lastSeenAt || boundDevice.lastSeenAt,
     protocol
   };
+};
+
+const buildRuntimeDeviceFromScanCandidate = (
+  candidate: RingDeviceInfo,
+  target: RingDeviceInfo,
+  protocol: RingProtocolKind,
+  stableMac?: string
+): RingDeviceInfo => {
+  const resolvedMac = stableMac || getScannedAdvertisedMac(candidate) || target.mac || target.advertis?.macInfo || candidate.mac || candidate.uniMacId || '';
+  const resolvedName = candidate.deviceName || candidate.name || candidate.localName || candidate.displayName || target.deviceName || target.name || '';
+
+  const runtimeDevice: RingDeviceInfo = {
+    ...target,
+    ...candidate,
+    deviceId: candidate.deviceId,
+    platformDeviceId: candidate.platformDeviceId || candidate.deviceId,
+    name: candidate.name || resolvedName,
+    deviceName: candidate.deviceName || resolvedName,
+    localName: candidate.localName || resolvedName,
+    displayName: candidate.displayName || resolvedName,
+    mac: resolvedMac || candidate.mac || target.mac,
+    uniMacId: resolvedMac || candidate.uniMacId || target.uniMacId,
+    advertis: {
+      ...(target.advertis || {}),
+      ...(candidate.advertis || {}),
+      macInfo: resolvedMac || candidate.advertis?.macInfo || target.advertis?.macInfo
+    },
+    protocol,
+    lastSeenAt: candidate.lastSeenAt || Date.now()
+  };
+  return markRuntimeScanMatchedDevice(runtimeDevice, resolvedMac);
 };
 
 export const isSwitchingRingDevice = (currentDevice: RingDeviceInfo, targetDevice: RingDeviceInfo) => {
@@ -954,8 +1102,13 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   const findKnownDevice = (...ids: Array<string | undefined>) => {
     const targets = ids.filter(Boolean) as string[];
     if (targets.length === 0) return null;
+    const fullMacTargetKeys = targets.map(normalizeFullBleMacKey).filter(Boolean);
     return (
       devices.value.find((device) => {
+        if (fullMacTargetKeys.length > 0) {
+          const trustedScanMacKey = normalizeFullBleMacKey(getTrustedScannedAdvertisedMac(device));
+          return Boolean(trustedScanMacKey && fullMacTargetKeys.includes(trustedScanMacKey));
+        }
         const deviceIds = getRingDeviceMatchIds(device);
         const stableIds = getStableSwitchingIdentityIds(device)
           .map(normalizeRingIdentity)
@@ -1013,11 +1166,14 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         protocol
       } as RingDeviceInfo;
       const sourceScanMac = getScannedAdvertisedMac(sourceDevice);
-      const sourceIsStrictScanMatch = isStrictBoundScanCandidate(strictTarget, sourceDevice);
+      const sourceIsStrictScanMatch = payload.fromScan
+        ? isStrictBoundScanCandidate(strictTarget, sourceDevice)
+        : isFreshStrictBoundRuntimeScanDevice(strictTarget, sourceDevice);
       if (!sourceIsStrictScanMatch) {
         writeRwStoreLog('connect-block-no-scan-mac-match', {
           targetMac: strictTargetMac,
           sourceScanMac,
+          sourceRuntimeScanMac: getFreshRuntimeScanMatchedMac(sourceDevice),
           payload: {
             deviceId: payload.deviceId,
             deviceName: payload.deviceName,
@@ -1033,6 +1189,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
             mac: device.mac,
             uniMacId: device.uniMacId,
             scanMac: getScannedAdvertisedMac(device),
+            rawScanMac: getRawScannedAdvertisedMac(device),
+            runtimeScanMac: getFreshRuntimeScanMatchedMac(device),
             fromScan: (device as Record<string, unknown>).fromScan,
             lastSeenAt: device.lastSeenAt
           }))
@@ -1633,17 +1791,18 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       scanStarted = false;
       const protocol = resolveRingProtocol(candidate);
       const candidateStableMac = getScannedAdvertisedMac(candidate) || strictBoundMac;
-      const candidateSourceDevice = {
-        ...candidate,
-        mac: candidateStableMac || candidate.mac,
-        uniMacId: candidateStableMac || candidate.uniMacId,
-        advertis: {
-          ...(candidate.advertis || {}),
-          macInfo: candidateStableMac || candidate.advertis?.macInfo
-        },
-        protocol
-      };
+      const candidateSourceDevice = buildRuntimeDeviceFromScanCandidate(candidate, target, protocol, candidateStableMac);
       expectedConnectionDevice = candidateSourceDevice;
+      deviceInfo.value = candidateSourceDevice;
+      writeRwStoreLog('reconnect-scan-candidate-cache-updated', {
+        protocol,
+        strictBoundMac,
+        parsedMac: candidateStableMac,
+        deviceId: candidate.deviceId,
+        target: summarizeRingDeviceForStoreLog(target),
+        candidate: summarizeRingDeviceForStoreLog(candidateSourceDevice),
+        candidateIdentity: summarizeRingDeviceIdentityForStoreLog(candidateSourceDevice)
+      });
       writeRwStoreLog('reconnect-connect-start', {
         protocol,
         strictBoundMac,
@@ -1759,7 +1918,41 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       return false;
     }
     const protocol = resolveRingProtocol(targetDevice as RingDeviceInfo);
-    const targetWithProtocol = { ...targetDevice, protocol };
+    let targetWithProtocol: RingDeviceInfo = { ...(targetDevice as RingDeviceInfo), protocol };
+    const boundTargetMac = getBoundReconnectMac(targetWithProtocol);
+    if (boundTargetMac && !isFreshStrictBoundRuntimeScanDevice(targetWithProtocol, currentDevice)) {
+      targetWithProtocol = {
+        ...targetWithProtocol,
+        deviceId: '',
+        platformDeviceId: '',
+        serviceId: '',
+        cmdCharId: '',
+        dataServiceId: '',
+        dataCharId: '',
+        notifyCandidates: undefined,
+        notifyEnabled: undefined,
+        mac: targetWithProtocol.mac || boundTargetMac,
+        uniMacId: isFullColonBleMac(targetWithProtocol.uniMacId) ? targetWithProtocol.uniMacId : boundTargetMac,
+        advertis: {
+          ...(targetWithProtocol.advertis || {}),
+          macInfo: boundTargetMac
+        },
+        lastSeenAt: undefined,
+        protocol
+      };
+      expectedConnectionDevice = targetWithProtocol;
+      deviceInfo.value = targetWithProtocol;
+      lastCommunicationReadyAt = 0;
+      writeRwStoreLog('reconnect-clear-stale-device-context-before-scan', {
+        boundMac: boundTargetMac,
+        current: summarizeRingDeviceForStoreLog(currentDevice),
+        currentIdentity: summarizeRingDeviceIdentityForStoreLog(currentDevice),
+        currentRawScanMac: getRawScannedAdvertisedMac(currentDevice),
+        currentRuntimeScanMac: getFreshRuntimeScanMatchedMac(currentDevice),
+        target: summarizeRingDeviceForStoreLog(targetWithProtocol),
+        targetIdentity: summarizeRingDeviceIdentityForStoreLog(targetWithProtocol)
+      });
+    }
     setExpectedReconnectTarget(targetWithProtocol);
     const targetAdapter = await switchAdapter(protocol);
     if (!isConnectionLifecycleCurrent(lifecycleToken)) {

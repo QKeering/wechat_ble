@@ -141,6 +141,59 @@ const parseTemperature = (bytes: Uint8Array, frameId: number): RingParsedData =>
   };
 };
 
+const getAckCode = (bytes: Uint8Array) => (bytes.length > 4 ? bytes[4] : undefined);
+
+const parseDeviceTimeUpdateAck = (bytes: Uint8Array, frameId: number): RingParsedData => {
+  const ackCode = getAckCode(bytes);
+  return {
+    type: 'device_time_update_ack',
+    frameId,
+    status: ackCode === undefined || ackCode === 0 ? 'success' : 'failed',
+    ackCode,
+    timestamp: Date.now(),
+    raw: Array.from(bytes)
+  };
+};
+
+const parseActiveMeasureProgress = (bytes: Uint8Array, frameId: number): RingParsedData => {
+  const progress = getAckCode(bytes);
+  return {
+    type: 'active_measure_progress',
+    frameId,
+    status: 'progress',
+    progress,
+    timestamp: Date.now(),
+    raw: Array.from(bytes)
+  };
+};
+
+const parseActiveMeasureControlAck = (bytes: Uint8Array, frameId: number): RingParsedData => {
+  const ackCode = getAckCode(bytes);
+  return {
+    type: 'active_measure_control_ack',
+    frameId,
+    status: ackCode === undefined || ackCode === 0 ? 'success' : 'failed',
+    ackCode,
+    timestamp: Date.now(),
+    raw: Array.from(bytes)
+  };
+};
+
+const parseLocalDataErrorAck = (bytes: Uint8Array, frameId: number): RingParsedData => {
+  const ackCode = getAckCode(bytes);
+  return {
+    type: 'local_data',
+    frameId,
+    status: 'failed',
+    ackStatus: 'command_rejected',
+    ackCode,
+    totalNum: 0,
+    records: [],
+    timestamp: Date.now(),
+    raw: Array.from(bytes)
+  };
+};
+
 const parseLocalData = (bytes: Uint8Array, frameId: number): RingParsedData => {
   const totalNum = readUint32LE(bytes, 4);
 
@@ -243,9 +296,13 @@ export const parseLegacyRingData = (bytes: Uint8Array): RingParsedData | null =>
   if (cmd === 0x11 && (subcmd === 0x00 || subcmd === 0x01)) return parseVersion(bytes, frameId, subcmd);
   if (cmd === 0x12 && subcmd === 0x00) return parseBattery(bytes, frameId);
   if (cmd === 0x31 && subcmd === 0x00) return parseActiveMeasure(bytes, frameId);
+  if (cmd === 0x31 && subcmd === 0xff) return parseActiveMeasureProgress(bytes, frameId);
+  if (cmd === 0x31 && subcmd === 0x02) return parseActiveMeasureControlAck(bytes, frameId);
   if (cmd === 0x32 && subcmd === 0x00) return parseBloodOxygen(bytes, frameId);
   if (cmd === 0x34 && subcmd === 0x00) return parseTemperature(bytes, frameId);
+  if (cmd === 0x36 && subcmd === 0xff) return parseLocalDataErrorAck(bytes, frameId);
   if (cmd === 0x36 && (subcmd === 0x00 || subcmd === 0x01)) return parseLocalData(bytes, frameId);
+  if (cmd === 0x10 && subcmd === 0x00) return parseDeviceTimeUpdateAck(bytes, frameId);
   if (cmd === 0x10 && subcmd === 0x01) return parseDeviceTime(bytes, frameId);
   if (cmd === 0x36 && subcmd === 0x03) return { type: 'delete_all_local_data', raw: Array.from(bytes) };
 

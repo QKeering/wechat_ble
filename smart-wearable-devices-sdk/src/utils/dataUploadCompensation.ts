@@ -52,6 +52,7 @@ const PENDING_UPLOAD_QUEUE_STORAGE_KEY = 'qkeer:pending_upload_queue:v1';
 const PENDING_UPLOAD_QUEUE_MAX_COUNT = 80;
 const PENDING_UPLOAD_QUEUE_STORAGE_MAX_COUNT = 40;
 const PENDING_UPLOAD_QUEUE_RAW_HASH_MAX_COUNT = 20;
+const BACKEND_UPLOAD_BINDING_TIMEOUT_MS = 8000;
 
 export const normalizeUploadDeviceMac = (value: unknown) => String(value || '').replace(/[^0-9a-fA-F]/g, '').toLowerCase();
 
@@ -83,6 +84,23 @@ const pickDeviceObject = (payload: unknown): Record<string, any> | null => {
   return null;
 };
 
+const withManualTimeout = <T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    task
+      .then((result) => {
+        clearTimeout(timer);
+        resolve(result);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+
 export const isSameUploadDeviceMac = (left: unknown, right: unknown) => {
   const leftNorm = normalizeUploadDeviceMac(left);
   const rightNorm = normalizeUploadDeviceMac(right);
@@ -101,21 +119,27 @@ export const assertBackendUploadBinding = async (
     deviceMac,
     requestedDeviceMacNorm,
     endpoint: '/app/device/current',
-    timeoutMs: 8000
+    timeoutMs: BACKEND_UPLOAD_BINDING_TIMEOUT_MS
   });
   let response: unknown;
   try {
     const custom = safeObject(config.custom) || {};
-    response = await (uni as any).$uv.http.get('/app/device/current', {
-      ...config,
-      timeout: 8000,
-      custom: { ...custom, toast: false, catch: true }
-    });
+    response = await withManualTimeout(
+      (uni as any).$uv.http.get('/app/device/current', {
+        ...config,
+        timeout: BACKEND_UPLOAD_BINDING_TIMEOUT_MS,
+        custom: { ...custom, toast: false, catch: true }
+      }),
+      BACKEND_UPLOAD_BINDING_TIMEOUT_MS,
+      'backend upload binding request timeout'
+    );
   } catch (error) {
+    const reason = error instanceof Error ? error.message : String((error as any)?.errMsg || error || 'request failed');
+    const isTimeout = /timeout|time\s*out|超时/i.test(reason);
     const result = {
       ok: false,
-      reasonCode: 'CURRENT_BINDING_REQUEST_FAILED',
-      reason: error instanceof Error ? error.message : String((error as any)?.errMsg || error || 'request failed')
+      reasonCode: isTimeout ? 'CURRENT_BINDING_REQUEST_TIMEOUT' : 'CURRENT_BINDING_REQUEST_FAILED',
+      reason
     };
     appendRingDiagnosticLog('UPLOAD', 'binding-check-failed', {
       deviceMac,
@@ -426,6 +450,14 @@ export const buildUploadSyncMeta = (session: PendingUploadSession) => ({
     rawStatus: session.rawStatus
   }
 });
+
+export const buildParsedUploadSyncMeta = (session: PendingUploadSession) => {
+  const meta = { ...buildUploadSyncMeta(session) } as Record<string, unknown>;
+  // 解析后的 /app/data/sync 只提交 dataList。
+  // 原始帧由 rawHistory/enqueue 独立补偿入库，避免同一请求体重复携带 rawFrames 导致等待过长。
+  delete meta.rawFrames;
+  return meta;
+};
 
 const RAW_BACKGROUND_UPLOAD_DEDUP_MS = 10 * 60 * 1000;
 const rawUploadInflightByDevice = new Map<string, Promise<unknown>>();
