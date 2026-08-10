@@ -20,7 +20,11 @@ if parsed_url.drivername.startswith("mysql"):
 else:
     database_url = parsed_url
 
-engine = create_engine(database_url, pool_pre_ping=True, future=True)
+engine_kwargs = {"pool_pre_ping": True, "future": True}
+if parsed_url.drivername.startswith("mysql"):
+    engine_kwargs.update({"pool_size": 20, "max_overflow": 20, "pool_recycle": 1800})
+
+engine = create_engine(database_url, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 metadata = MetaData()
 

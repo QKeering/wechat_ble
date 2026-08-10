@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * 增强睡眠设置（CMD_SYNC_ENHANCE_SLEEP_SETTING, 0x72）
  *
@@ -14,7 +15,7 @@ export default function to_syncEnhanceSleepSetting(mapData = {}) {
     const dv = new DataView(db);
     dv.setUint8(0, value);
 
-    console.log('to_syncEnhanceSleepSetting', mapData, db);
+    qkeerV2VendorConsole.log('to_syncEnhanceSleepSetting', mapData, db);
 
     return db;
 }

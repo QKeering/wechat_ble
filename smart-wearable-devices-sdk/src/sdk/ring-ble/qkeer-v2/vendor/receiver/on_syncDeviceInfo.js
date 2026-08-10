@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 import device_info from '../utils/util_device_info.js';
 
 // 处理获取设备信息的响应
@@ -5,7 +6,7 @@ import device_info from '../utils/util_device_info.js';
  * @param {ArrayBuffer} arrayBuffer
  */
 export default function on_syncDeviceInfo(arrayBuffer, packet_sum, packet_index) {
-    console.log('syncDeviceInfo', arrayBuffer, packet_sum, packet_index);
+    qkeerV2VendorConsole.log('syncDeviceInfo', arrayBuffer, packet_sum, packet_index);
 
     let db_vi = new DataView(arrayBuffer);
     if (db_vi.byteLength < 13)
@@ -36,7 +37,7 @@ export default function on_syncDeviceInfo(arrayBuffer, packet_sum, packet_index)
     let macArrayBuffer = arrayBuffer.slice(7, 13);
     map.mac = device_info.parseMacInfo(macArrayBuffer);
 
-    console.log('syncDeviceInfo', map);
+    qkeerV2VendorConsole.log('syncDeviceInfo', map);
 
     return map;
 }

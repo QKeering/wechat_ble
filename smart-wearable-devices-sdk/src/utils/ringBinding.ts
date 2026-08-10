@@ -1,4 +1,5 @@
 import { clearBoundRingDevice } from '@/api/ringDevice';
+import { removeDeviceIdentityCache } from '@/utils/deviceIdentityCache';
 
 type BoundRingIdentity = {
   deviceId?: string;
@@ -60,6 +61,14 @@ export const getBoundRingIdentityTail = (device: BoundRingIdentity | null | unde
 };
 
 export const clearFrontendRingBindingState = async (store: Record<string, any>, businessStore?: Record<string, any>) => {
+  const boundMac =
+    getBoundRingIdentity(businessStore?.boundDevice) ||
+    getBoundRingIdentity(store.deviceInfo) ||
+    getBoundRingIdentity(store.boundDevice) ||
+    getBoundRingIdentity(store.currentDevice);
+  if (boundMac) {
+    removeDeviceIdentityCache({ mac: boundMac });
+  }
   await clearBoundRingDevice();
   store.clearRuntime?.();
   store.updateDeviceInfo?.({});

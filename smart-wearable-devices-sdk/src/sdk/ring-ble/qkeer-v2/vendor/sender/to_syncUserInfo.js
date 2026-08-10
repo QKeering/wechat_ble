@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * 同步用户信息
  *
@@ -36,7 +37,7 @@ export default function to_syncUserInfo(mapData) {
     // 时区：1 字节
     db_vi.setUint8(8, mapData.timezone & 0xFF);
 
-    console.log('to_syncUserInfo', mapData, db);
+    qkeerV2VendorConsole.log('to_syncUserInfo', mapData, db);
 
     return db;
 }

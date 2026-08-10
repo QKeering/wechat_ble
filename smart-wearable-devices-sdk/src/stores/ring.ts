@@ -10,6 +10,7 @@ import type {
   RingUploadingStatus
 } from '@/sdk/ring-ble';
 import { buildRingBusinessMetrics, mergeRingBusinessMetricSnapshot, normalizeRingData, resolveRingProtocol } from '@/sdk/ring-ble';
+import { applyDeviceIdentityCacheToDevice, getDeviceIdentityCacheMacFromDevice } from '@/utils/deviceIdentityCache';
 
 const LAST_READ_TIMESTAMP_KEY = 'qkeer:ring-last-read-timestamp';
 const NORMAL_MAC_KEY = 'qkeer:ring-normal-mac';
@@ -424,7 +425,7 @@ export const useRingStore = defineStore('ring', () => {
       metricSnapshotDeviceKey.value = deviceKey;
       metricSnapshot.value = mergeRingBusinessMetricSnapshot(currentMetrics, metricSnapshot.value);
     },
-    { deep: true, immediate: true }
+    { immediate: true }
   );
 
   const setDevices = (payload: RingDeviceInfo[]) => {
@@ -464,10 +465,10 @@ export const useRingStore = defineStore('ring', () => {
       return;
     }
     if (!currentReady && boundKey) {
-      deviceInfo.value = normalizeStoreDeviceInfo({
-        ...(normalizedPayload as RingDeviceInfo),
-        ...(deviceInfo.value || {})
-      });
+      // 绑定设备是后端 MAC 的唯一事实源。当前运行态未 ready 时，不能把旧 deviceInfo
+      // 的 deviceId/service/char 合并回来，否则会形成 “mac=当前绑定设备 + deviceId=旧设备”
+      // 的混合对象，后续重连/同步就可能串到别的戒指。
+      setDeviceInfo(normalizedPayload as RingDeviceInfo);
     }
   };
 
@@ -581,12 +582,7 @@ export const useRingStore = defineStore('ring', () => {
           : [];
       } else if (Array.isArray(parsed.records)) {
         const records = parsed.records.map((record) => withHistoryRecordContext(record, parsed));
-        const newRecords = records.filter(
-          (record) => !localData.value.some((existing) => getHistoryRecordKey(existing) === getHistoryRecordKey(record))
-        );
-        localData.value = [...localData.value, ...newRecords].sort(
-          (left, right) => getHistoryRecordSortTime(right) - getHistoryRecordSortTime(left)
-        );
+        localData.value = mergeHistoryRecords(localData.value, records);
       }
     }
 
@@ -797,10 +793,14 @@ function normalizeStoreDeviceInfo(device: RingDeviceInfo) {
     explicitStableMac && isDifferentColonSeparatedBleMac(device.deviceId, explicitStableMac);
   const shouldNormalizeMacLikeUniMacId =
     explicitStableMac && isDifferentColonSeparatedBleMac(device.uniMacId, explicitStableMac);
+  const applyCachedDeviceId = (payload: RingDeviceInfo) => {
+    const cacheMac = stableMac || explicitStableMac || getDeviceIdentityCacheMacFromDevice(payload as Record<string, any>);
+    return applyDeviceIdentityCacheToDevice(payload as Record<string, any>, { mac: cacheMac }) as RingDeviceInfo;
+  };
   if (!stableMac && device.protocol === protocol && !shouldNormalizeMacLikeDeviceId && !shouldNormalizeMacLikeUniMacId) {
-    return device;
+    return applyCachedDeviceId(device);
   }
-  return {
+  return applyCachedDeviceId({
     ...device,
     protocol,
     ...(stableMac && (!device.mac || shouldNormalizeMacLikeDeviceId) ? { mac: stableMac } : {}),
@@ -817,7 +817,7 @@ function normalizeStoreDeviceInfo(device: RingDeviceInfo) {
     ...(stableMac && (!device.advertis?.macInfo || shouldNormalizeMacLikeDeviceId)
       ? { advertis: { ...(device.advertis || {}), macInfo: stableMac } }
       : {})
-  };
+  });
 }
 
 function getStoreExplicitStableDeviceMac(device: RingDeviceInfo | Record<string, any> | null | undefined) {
@@ -1074,9 +1074,27 @@ function mergeHistoryRecords(existing: RingHistoricalRecord[], incoming: RingHis
     const key = getHistoryRecordKey(record);
     if (seen.has(key)) return;
     seen.add(key);
-    next.push(record);
+    insertHistoryRecordSortedDescending(next, record);
   });
-  return next.sort((left, right) => getHistoryRecordSortTime(right) - getHistoryRecordSortTime(left));
+  return next;
+}
+
+function insertHistoryRecordSortedDescending(records: RingHistoricalRecord[], record: RingHistoricalRecord) {
+  const sortTime = getHistoryRecordSortTime(record);
+  let low = 0;
+  let high = records.length;
+
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    const midSortTime = getHistoryRecordSortTime(records[mid]);
+    if (midSortTime >= sortTime) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  records.splice(low, 0, record);
 }
 
 function getHistoryResetDataType(source: Record<string, any>) {

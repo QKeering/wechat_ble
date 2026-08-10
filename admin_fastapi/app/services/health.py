@@ -66,6 +66,10 @@ HEALTH_RAW_FIELD_RANGES = {
     "diastolic": (30, 180),
 }
 
+
+_RING_HISTORY_RAW_FRAME_SCHEMA_READY = False
+_RING_HISTORY_RAW_UPLOAD_JOB_SCHEMA_READY = False
+
 HEALTH_RECORD_FUTURE_TOLERANCE = timedelta(minutes=10)
 HEALTH_TIMEZONE = timezone(timedelta(hours=8))
 L19_SLEEP_WINDOW_START_HOUR = 21
@@ -84,6 +88,9 @@ def max_visible_record_time() -> datetime:
 
 def ensure_ring_history_raw_frame_schema(db: Session) -> None:
     """Persist device raw history frames before parsed records are cleaned or repaired."""
+    global _RING_HISTORY_RAW_FRAME_SCHEMA_READY
+    if _RING_HISTORY_RAW_FRAME_SCHEMA_READY:
+        return
     db.execute(
         text(
             """
@@ -142,10 +149,14 @@ def ensure_ring_history_raw_frame_schema(db: Session) -> None:
             if column_name not in refreshed:
                 raise
             existing = refreshed
+    _RING_HISTORY_RAW_FRAME_SCHEMA_READY = True
 
 
 def ensure_ring_history_raw_upload_job_schema(db: Session) -> None:
     """Queue raw history payloads so request handlers can return before per-frame writes."""
+    global _RING_HISTORY_RAW_UPLOAD_JOB_SCHEMA_READY
+    if _RING_HISTORY_RAW_UPLOAD_JOB_SCHEMA_READY:
+        return
     db.execute(
         text(
             """
@@ -181,6 +192,7 @@ def ensure_ring_history_raw_upload_job_schema(db: Session) -> None:
         )
     )
     db.commit()
+    _RING_HISTORY_RAW_UPLOAD_JOB_SCHEMA_READY = True
 
 
 def raw_history_repair_date(value: Any = None) -> date:
@@ -1654,10 +1666,16 @@ def calculate_daily_summary(db: Session, user_id: int, record_date: str | date) 
         values["create_time"] = datetime.now()
         db.execute(table.insert().values(**{k: v for k, v in values.items() if k in table.c}))
     db.commit()
-    return daily_summary(db, user_id, record_date) or {}
+    return daily_summary(db, user_id, record_date, calculate_if_missing=False) or {}
 
 
-def daily_summary(db: Session, user_id: int, record_date: str | date | None = None) -> dict[str, Any] | None:
+def daily_summary(
+    db: Session,
+    user_id: int,
+    record_date: str | date | None = None,
+    *,
+    calculate_if_missing: bool = True,
+) -> dict[str, Any] | None:
     if isinstance(record_date, date):
         record_date = record_date.isoformat()
     if record_date:
@@ -1666,7 +1684,9 @@ def daily_summary(db: Session, user_id: int, record_date: str | date | None = No
             {"user_id": user_id, "record_date": record_date},
         ).first()
         if not row:
-            return calculate_daily_summary(db, user_id, record_date)
+            if calculate_if_missing:
+                return calculate_daily_summary(db, user_id, record_date)
+            return None
     else:
         row = db.execute(
             text("select * from health_daily_summary where user_id=:user_id order by record_date desc limit 1"),

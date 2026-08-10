@@ -1,10 +1,11 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 import util_device_info from "../utils/util_device_info";
 
 /**
  * @param {ArrayBuffer} arrayBuffer
  */
 export default function on_syncHealthInfo(arrayBuffer, packet_sum, packet_index) {
-    console.log('on_syncHealthInfo', arrayBuffer, packet_sum, packet_index);
+    qkeerV2VendorConsole.log('on_syncHealthInfo', arrayBuffer, packet_sum, packet_index);
 
     const dv = new DataView(arrayBuffer);
     if (dv.byteLength < 8)
@@ -20,7 +21,7 @@ export default function on_syncHealthInfo(arrayBuffer, packet_sum, packet_index)
     const ot = dv.getUint16(offset + 6, true);
     map.temperature = util_device_info.parseTemperatureInfo(ot);
 
-    console.log('on_syncHealthInfo', map);
+    qkeerV2VendorConsole.log('on_syncHealthInfo', map);
 
     return map;
 }

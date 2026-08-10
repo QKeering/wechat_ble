@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from './debug_console.js';
 import ble_config from './ble_config.js';
 import ble_events from './ble_events.js';
 import ble_receive_data from './ble_receive_data.js';
@@ -50,7 +51,7 @@ class BleManager {
         },
         fail: (err) => {
           this.isBluetoothAvailable = false;
-          console.error(err);
+          qkeerV2VendorConsole.error(err);
           reject(new Error('蓝牙适配器初始化失败'));
         }
       });
@@ -69,7 +70,7 @@ class BleManager {
           resolve(res);
         },
         fail: (err) => {
-          console.error(err);
+          qkeerV2VendorConsole.error(err);
           reject(new Error('关闭蓝牙模块'));
         }
       });
@@ -89,7 +90,7 @@ class BleManager {
           resolve(res);
         },
         fail: (err) => {
-          console.error(err);
+          qkeerV2VendorConsole.error(err);
           reject(new Error('搜索设备失败'));
         }
       });
@@ -106,7 +107,7 @@ class BleManager {
           resolve(res);
         },
         fail: (err) => {
-          console.error(err);
+          qkeerV2VendorConsole.error(err);
           reject(new Error('停止搜索失败'));
         }
       });
@@ -120,13 +121,13 @@ class BleManager {
         deviceId: this.connectedDeviceId,
         mtu: ble_config.BLE_MTU_SIZE,
         success: (res) => {
-          console.log('setBLEMTU', res);
+          qkeerV2VendorConsole.log('setBLEMTU', res);
           this.mtuSize = res.mtu;
           device_state.mtuSize = res.mtu;
           resolve(res);
         },
         fail: (err) => {
-          console.error(err);
+          qkeerV2VendorConsole.error(err);
           reject(new Error('停止搜索失败'));
         }
       });
@@ -150,7 +151,7 @@ class BleManager {
           break;
         }
       } catch (error) {
-        console.log(`第 ${retryCount + 1} 次尝试获取服务失败:`, error);
+        qkeerV2VendorConsole.log(`第 ${retryCount + 1} 次尝试获取服务失败:`, error);
         if (++retryCount < 3) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
         }
@@ -161,7 +162,7 @@ class BleManager {
 
   // 连接设备
   async createBLEConnection(deviceInfo) {
-    console.log('createBLEConnection', deviceInfo);
+    qkeerV2VendorConsole.log('createBLEConnection', deviceInfo);
     let device = deviceInfo.device;
     let advertis = deviceInfo.advertis;
 
@@ -200,7 +201,7 @@ class BleManager {
           }
         },
         fail: (err) => {
-          console.error(err);
+          qkeerV2VendorConsole.error(err);
           reject(new Error('连接失败'));
         }
       });
@@ -218,7 +219,7 @@ class BleManager {
           resolve(res);
         },
         fail: (err) => {
-          console.error(err);
+          qkeerV2VendorConsole.error(err);
           reject(new Error('断开连接失败'));
         }
       });
@@ -234,28 +235,28 @@ class BleManager {
         deviceId: deviceId,
         success: (res) => {
           if (!res.services || res.services.length === 0) {
-            console.error('服务列表为空');
+            qkeerV2VendorConsole.error('服务列表为空');
             reject(new Error('服务列表为空'));
             return;
           }
 
           for (let i = 0; i < res.services.length; i++) {
-            console.log('获取到的服务列表: ' + res.services[i].uuid);
+            qkeerV2VendorConsole.log('获取到的服务列表: ' + res.services[i].uuid);
           }
 
           // 直接查找目标服务UUID
           let targetService = res.services.find((service) => service.uuid === ble_config.UUID_SERVICE_TARGET);
 
           if (targetService) {
-            console.log('找到目标服务:', targetService.uuid);
+            qkeerV2VendorConsole.log('找到目标服务:', targetService.uuid);
             resolve(targetService);
           } else {
-            console.error('未找到目标服务');
+            qkeerV2VendorConsole.error('未找到目标服务');
             reject(new Error('未找到目标服务'));
           }
         },
         fail: (err) => {
-          console.error(err);
+          qkeerV2VendorConsole.error(err);
           reject(new Error('未找到目标服务'));
         }
       });
@@ -275,21 +276,21 @@ class BleManager {
             return;
           }
           if (!res.characteristics || res.characteristics.length === 0) {
-            console.error('特征值列表为空');
+            qkeerV2VendorConsole.error('特征值列表为空');
             reject(new Error('特征值列表为空'));
             return;
           }
           // 查找特定的特征值
           if (res.characteristics[0].uuid == ble_config.UUID_TARGET_NOTIFY) {
-            console.log('找到目标特征值:', res.characteristics[0].uuid);
+            qkeerV2VendorConsole.log('找到目标特征值:', res.characteristics[0].uuid);
             resolve(res.characteristics[0]);
           } else {
-            console.error('未找到目标特征值:', res.characteristics[0].uuid);
+            qkeerV2VendorConsole.error('未找到目标特征值:', res.characteristics[0].uuid);
             reject(new Error('未找到目标特征值'));
           }
         },
         fail: (err) => {
-          console.error(err);
+          qkeerV2VendorConsole.error(err);
           reject(new Error('未找到目标特征值'));
         }
       });
@@ -300,7 +301,7 @@ class BleManager {
 
   // 解析广播设备信息
   parseAdvertisDeviceInfo(advertisData) {
-    console.log('parseAdvertisDeviceInfo', advertisData);
+    qkeerV2VendorConsole.log('parseAdvertisDeviceInfo', advertisData);
 
     let map = {};
 
@@ -317,7 +318,7 @@ class BleManager {
     let arrayBuffer = advertisData.slice(offset + 3, offset + 9);
     map.macInfo = device_info.parseMacInfo(arrayBuffer);
 
-    console.log(
+    qkeerV2VendorConsole.log(
       '解析到的广播设备信息 ',
       '设备类型:',
       map.deviceType,
@@ -367,7 +368,7 @@ class BleManager {
           if (device.advertisServiceUUIDs && device.advertisServiceUUIDs.length >= 0) {
             const advertisServiceUUID = device.advertisServiceUUIDs[0];
             if (advertisServiceUUID.toUpperCase() == ble_config.UUID_SERVICE_ADVERTIS) {
-              console.log('onBluetoothDeviceFound', device);
+              qkeerV2VendorConsole.log('onBluetoothDeviceFound', device);
               if (this.checkExistsDevice(device)) {
                 return;
               }
@@ -385,7 +386,7 @@ class BleManager {
   // 初始化蓝牙监听
   onBleConnectionStateChange() {
     uni.onBLEConnectionStateChange((res) => {
-      console.log('设备连接状态变化：' + res.deviceId + ', connected: ' + res.connected);
+      qkeerV2VendorConsole.log('设备连接状态变化：' + res.deviceId + ', connected: ' + res.connected);
       // 设备断开连接
       if (res.deviceId === this.connectedDeviceId) {
         if (!res.connected) {
@@ -425,13 +426,13 @@ class BleManager {
     try {
       const funSender = sender_map[cmd];
       if (!funSender) {
-        console.warn('BleManager 发送 内部发送-未知的CMD:', cmd);
+        qkeerV2VendorConsole.warn('BleManager 发送 内部发送-未知的CMD:', cmd);
         return;
       }
       const db = funSender(mapData);
       await ble_send_data(cmd, db);
     } catch (error) {
-      console.warn('BleManager sendData', error);
+      qkeerV2VendorConsole.warn('BleManager sendData', error);
     }
   }
 }

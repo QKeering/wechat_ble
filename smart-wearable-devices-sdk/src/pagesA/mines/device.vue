@@ -13,6 +13,12 @@ import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import { formatBatteryPercentForDisplay, formatBatteryStatusForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
+import {
+  applyDeviceIdentityCacheToDevice,
+  getDeviceIdentityCacheMacFromDevice,
+  markDeviceIdentityCacheConnected,
+  normalizeDeviceIdentityMac
+} from '@/utils/deviceIdentityCache';
 
 const userStore = useUserStore();
 const ringStore = useRingStore();
@@ -195,12 +201,14 @@ const loadBoundInfo = async () => {
   if (!userStore.token) return;
   try {
     const info = await getBindInfo();
-    boundInfo.value = info || null;
+    const normalizedInfo = normalizeBoundInfoCommunicationDevice(info || null);
+    boundInfo.value = normalizedInfo;
     appendDeviceDiagnosticLog('bound-info-loaded', {
-      hasBoundIdentity: hasBoundRingIdentity(info),
-      boundDevice: summarizeDevice(info || null)
+      hasBoundIdentity: hasBoundRingIdentity(normalizedInfo),
+      rawBoundDevice: summarizeDevice(info || null),
+      boundDevice: summarizeDevice(normalizedInfo)
     });
-    if (!hasBoundRingIdentity(info) && !ring.isConnected.value) {
+    if (!hasBoundRingIdentity(normalizedInfo) && !ring.isConnected.value) {
       await clearFrontendRingBindingState(userStore, ringStore);
     }
   } catch (error) {
@@ -253,6 +261,7 @@ const refreshDeviceInfo = async () => {
       return;
     }
     await waitForDeviceInfoSnapshot(startedAt, DEVICE_INFO_SNAPSHOT_WAIT_MS);
+    persistDeviceIdentityCacheFromRefresh();
     lastActionText.value = batteryValue.value != null || firmwareText.value !== '-' ? '电量/版本已更新' : '暂未获取到设备信息，请稍后刷新';
     appendDeviceDiagnosticLog('device-info-refresh-result', {
       lastActionText: lastActionText.value,
@@ -603,8 +612,6 @@ const copyDeviceId = () => {
   });
 };
 
-const isIOS = () => uni.getSystemInfoSync().platform === 'ios';
-
 const openConfirmBind = () => {
   modalPopup.value?.open?.();
 };
@@ -614,7 +621,13 @@ const confirmBind = async () => {
   try {
     userStore.updateIsUnbinding(true);
     await controller.disconnect().catch(() => undefined);
-    const mac = isIOS() ? userStore.normalMac || boundInfo.value?.mac || '' : userStore.deviceInfo?.deviceId || boundInfo.value?.mac || '';
+    const mac =
+      getBoundRingIdentity(boundInfo.value) ||
+      getDeviceIdentityCacheMacFromDevice(boundInfo.value) ||
+      deviceMacText.value ||
+      userStore.normalMac ||
+      userStore.iosMacId ||
+      '';
     if (mac) {
       await unbind({ mac }).catch(() => undefined);
     }
@@ -678,6 +691,79 @@ const getDeviceMacFromInfo = (device: Record<string, any> | null | undefined) =>
     getSeparatedBleMacValue(device?.uniMacId),
     getSeparatedBleMacValue(device?.deviceId)
   );
+
+const getDevicePageUserId = () => String(userStore.userInfo?.id ?? userStore.userInfo?.userId ?? userStore.userInfo?.user_id ?? '').trim();
+
+const getDeviceIdFromInfo = (device: Record<string, any> | null | undefined) =>
+  getFirstDeviceInfoValue(device?.deviceId, device?.platformDeviceId, device?.wxDeviceId, device?.bleDeviceId, device?.bluetoothDeviceId);
+
+const clearCommunicationDeviceIdFields = <T extends Record<string, any>>(device: T): T =>
+  ({
+    ...device,
+    deviceId: '',
+    platformDeviceId: '',
+    wxDeviceId: '',
+    bleDeviceId: '',
+    bluetoothDeviceId: ''
+  }) as T;
+
+const normalizeBoundInfoCommunicationDevice = (device: Record<string, any> | null | undefined) => {
+  if (!device) return null;
+  const mac = getBoundRingIdentity(device) || getDeviceIdentityCacheMacFromDevice(device);
+  const cachedDevice = applyDeviceIdentityCacheToDevice(device, { userId: getDevicePageUserId(), mac });
+  const communicationDeviceId = getDeviceIdFromInfo(cachedDevice);
+  const macKey = normalizeDeviceIdentityMac(mac);
+  const communicationMacKey = normalizeDeviceIdentityMac(communicationDeviceId);
+  if (macKey && communicationMacKey && communicationMacKey !== macKey) {
+    appendDeviceDiagnosticLog('bound-info-device-id-conflict-cleared', {
+      mac: macKey,
+      communicationDeviceId,
+      rawBoundDevice: summarizeDevice(device),
+      cachedBoundDevice: summarizeDevice(cachedDevice)
+    });
+    return clearCommunicationDeviceIdFields(cachedDevice);
+  }
+  return cachedDevice;
+};
+
+const persistDeviceIdentityCacheFromRefresh = () => {
+  const currentDevice = ring.deviceInfo.value as Record<string, any> | null | undefined;
+  const storeDevice = ringStore.deviceInfo as Record<string, any> | null | undefined;
+  const userDevice = userStore.deviceInfo as Record<string, any> | null | undefined;
+  const mac =
+    getBoundRingIdentity(boundInfo.value) ||
+    getDeviceIdentityCacheMacFromDevice(boundInfo.value) ||
+    deviceMacText.value ||
+    getDeviceIdentityCacheMacFromDevice(currentDevice) ||
+    getDeviceIdentityCacheMacFromDevice(storeDevice) ||
+    getDeviceIdentityCacheMacFromDevice(userDevice);
+  const deviceId = getFirstDeviceInfoValue(getDeviceIdFromInfo(currentDevice), getDeviceIdFromInfo(storeDevice), getDeviceIdFromInfo(userDevice));
+
+  if (!mac || normalizeDeviceInfoDisplayText(mac) === DEVICE_INFO_EMPTY_TEXT || !deviceId || deviceId === DEVICE_INFO_EMPTY_TEXT) {
+    appendDeviceDiagnosticLog('device-identity-cache-refresh-skip', {
+      reason: 'missing-mac-or-device-id',
+      mac,
+      deviceId,
+      snapshot: getDevicePageSnapshot()
+    });
+    return;
+  }
+
+  const record = markDeviceIdentityCacheConnected({
+    userId: getDevicePageUserId(),
+    mac,
+    deviceId,
+    name: deviceNameText.value,
+    source: 'device-info-refresh'
+  });
+  appendDeviceDiagnosticLog('device-identity-cache-refresh-result', {
+    mac: record?.mac,
+    deviceId: record?.deviceId,
+    platform: record?.platform,
+    userId: record?.userId,
+    source: record?.source
+  });
+};
 
 const isBatteryChargedLike = (value: unknown) => {
   if (value == null || value === '') return false;

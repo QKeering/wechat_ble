@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from './debug_console.js';
 import device_state from './ble_device_state.js';
 import ble_config from './ble_config.js';
 import receive_map from '../receiver/ble_receiver_map.js';
@@ -77,7 +78,7 @@ function parseBlePacket(arrayBuffer, littleEndian = true) {
 	const checksumBytes = new Uint8Array(arrayBuffer, 1, bytes.length - 2);
 	const calc = common.checksum(checksumBytes);
 	const checksumOk = calc === checksumByte;
-	console.log('checksumOk', checksumOk, 'recv=', checksumByte, 'calc=', calc);
+	qkeerV2VendorConsole.log('checksumOk', checksumOk, 'recv=', checksumByte, 'calc=', calc);
 	if (!checksumOk) {
 		throw new Error(`校验和错误: recv=${checksumByte}, calc=${calc}`);
 	}
@@ -97,30 +98,30 @@ function parseBlePacket(arrayBuffer, littleEndian = true) {
 function handleReceivedData(arrayBuffer) {
 	try {
 		const pkt = parseBlePacket(arrayBuffer);
-		console.log('handleReceivedData', pkt);
+		qkeerV2VendorConsole.log('handleReceivedData', pkt);
 
 		// 内部协议解析机制
 		const funReceiver = receive_map[pkt.dataInfo.cmd];
 		if (!funReceiver) {
-			console.warn('内部接收-未知的CMD:', pkt.dataInfo.cmd);
+			qkeerV2VendorConsole.warn('内部接收-未知的CMD:', pkt.dataInfo.cmd);
 			return;
 		}
 		const mapOrList = funReceiver(pkt.dataInfo.data, pkt.packetSum, pkt.packetIndex);
 		if (!mapOrList) {
-			console.warn('内部接收-数据解析失败 或 多条数据 CMD:', pkt.dataInfo.cmd);
+			qkeerV2VendorConsole.warn('内部接收-数据解析失败 或 多条数据 CMD:', pkt.dataInfo.cmd);
 			return;
 		}
 
 		// 外部注册的监听器回调
 		const funListener = device_state.listenerMaps[pkt.dataInfo.cmd];
 		if (!funListener) {
-			console.warn('接收-外部注册-未知的CMD:', pkt.dataInfo.cmd);
+			qkeerV2VendorConsole.warn('接收-外部注册-未知的CMD:', pkt.dataInfo.cmd);
 			return;
 		}
 		funListener(pkt.dataInfo.cmd, mapOrList);
 
 	} catch (error) {
-		console.error('数据解析错误:', error);
+		qkeerV2VendorConsole.error('数据解析错误:', error);
 	}
 }
 
@@ -129,7 +130,7 @@ function handleReceivedData(arrayBuffer) {
 function initBLENotifyListener() {
 	// 监听设备通知
 	uni.onBLECharacteristicValueChange((result) => {
-		// console.log('接收到设备数据');
+		// qkeerV2VendorConsole.log('接收到设备数据');
 		handleReceivedData(result.value);
 	});
 }
@@ -143,13 +144,13 @@ export default async function enableBLENotify(deviceId) {
 			serviceId: ble_config.UUID_SERVICE_TARGET,
 			characteristicId: ble_config.UUID_TARGET_NOTIFY,
 			success: (res) => {
-				console.log('启用通知成功:enableBLENotify');
+				qkeerV2VendorConsole.log('启用通知成功:enableBLENotify');
 				// 启用通知后立即开始监听
 				initBLENotifyListener();
 				resolve(res);
 			},
 			fail: (err) => {
-				console.error('启用通知失败:', err);
+				qkeerV2VendorConsole.error('启用通知失败:', err);
 				reject(err);
 			}
 		});

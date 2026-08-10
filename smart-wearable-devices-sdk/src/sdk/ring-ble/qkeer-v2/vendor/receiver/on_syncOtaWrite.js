@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 import ble_ota_data from '../common/ble_ota_data.js';
 
 // OTA 写入文件响应
@@ -5,7 +6,7 @@ import ble_ota_data from '../common/ble_ota_data.js';
  * @param {ArrayBuffer} arrayBuffer
  */
 export default function on_syncOtaWrite(arrayBuffer, packet_sum, packet_index) {
-    console.log('on_syncOtaWrite', arrayBuffer, packet_sum, packet_index);
+    qkeerV2VendorConsole.log('on_syncOtaWrite', arrayBuffer, packet_sum, packet_index);
 
     const dv = new DataView(arrayBuffer);
     if (dv.byteLength < 1)
@@ -19,7 +20,7 @@ export default function on_syncOtaWrite(arrayBuffer, packet_sum, packet_index) {
         map.index = 0;
     }
 
-    console.log('on_syncOtaWrite', map);
+    qkeerV2VendorConsole.log('on_syncOtaWrite', map);
 
     ble_ota_data.sendOtaDataWrite();
 

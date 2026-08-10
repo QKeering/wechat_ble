@@ -23,6 +23,7 @@ import {
   buildRingHistorySubmitRecords,
   getRingHistoryRecordSyncUnixTime,
   getRingSubmitDeviceMac,
+  isRingHistoryReadComplete,
   type RingHistorySubmitRecord
 } from './useRingHistoryUpload';
 import { resolveRingProtocol, type RingDeviceInfo, type RwHistoryDataName } from '@/sdk/ring-ble';
@@ -872,6 +873,19 @@ export const useRingBusinessHistoryPageSync = () => {
     return Array.from(keyedFrames.values());
   };
 
+  const isHistoryPageDeviceReadDone = (results: Array<unknown>) => {
+    if (!results.length) return false;
+    return results.some((result) => {
+      const candidates: Array<Record<string, any>> = [];
+      if (result && typeof result === 'object') {
+        candidates.push(result as Record<string, any>);
+        const parsed = (result as Record<string, any>).parsed;
+        if (parsed && typeof parsed === 'object') candidates.push(parsed as Record<string, any>);
+      }
+      return isRingHistoryReadComplete(candidates as any);
+    });
+  };
+
   const uploadHistoryPageRecords = async (
     records: Array<Record<string, any>>,
     details: Record<string, unknown>,
@@ -897,6 +911,9 @@ export const useRingBusinessHistoryPageSync = () => {
     }
     const uploadProtocol = getCurrentProtocol() || 'legacy';
     const rawFrames = getHistoryPageRawUploadFrames(rawResults, deviceMac);
+    const uploadDeviceReadDone = isHistoryPageDeviceReadDone(rawResults);
+    const uploadCoverageStatus = uploadDeviceReadDone ? 'complete' : 'partial';
+    const uploadPartial = !uploadDeviceReadDone;
     let rawSubmitResponse: unknown = rawFrames.length > 0
       ? { rawStatus: 'pending', rawFrameCount: rawFrames.length }
       : { rawStatus: 'none', rawFrameCount: 0 };
@@ -1042,7 +1059,12 @@ export const useRingBusinessHistoryPageSync = () => {
           bindingVersion: backendBinding.bindingVersion == null ? undefined : String(backendBinding.bindingVersion),
           dataUserId: backendBinding.dataUserId == null ? undefined : String(backendBinding.dataUserId),
           dataList: [],
-          rawFrames
+          rawFrames,
+          deviceReadDone: uploadDeviceReadDone,
+          historyCompleted: uploadDeviceReadDone,
+          partialUpload: uploadPartial,
+          coverageStatus: uploadCoverageStatus,
+          canDeleteDeviceBlocks: uploadDeviceReadDone
         });
         appendRingDiagnosticLog('RW PAGE', 'upload-start', {
           ...details,
@@ -1103,7 +1125,12 @@ export const useRingBusinessHistoryPageSync = () => {
       bindingVersion: backendBinding.bindingVersion == null ? undefined : String(backendBinding.bindingVersion),
       dataUserId: backendBinding.dataUserId == null ? undefined : String(backendBinding.dataUserId),
       dataList: submitPreviewRecords,
-      rawFrames
+      rawFrames,
+      deviceReadDone: uploadDeviceReadDone,
+      historyCompleted: uploadDeviceReadDone,
+      partialUpload: uploadPartial,
+      coverageStatus: uploadCoverageStatus,
+      canDeleteDeviceBlocks: uploadDeviceReadDone
     });
     const uploadDetails = {
       ...details,
@@ -1127,6 +1154,10 @@ export const useRingBusinessHistoryPageSync = () => {
       rawMetricCounts: countHistoryPageRecordMetrics(records),
       submitMetricCounts: countHistoryPageRecordMetrics(submitPreviewRecords as any),
       rawFrameCount: rawFrames.length,
+      deviceReadDone: uploadDeviceReadDone,
+      historyCompleted: uploadDeviceReadDone,
+      partialUpload: uploadPartial,
+      coverageStatus: uploadCoverageStatus,
       rawSubmitResponse,
       rawRecordSample: records.slice(0, 2).map(summarizeHistoryPageRecord),
       submitRecordSample: submitPreviewRecords.slice(0, 2)
@@ -1238,9 +1269,21 @@ export const useRingBusinessHistoryPageSync = () => {
     }, 0);
     completeHistoryPageUploadSignature(uploadSignature);
     const previousLastReadTimestamp = getDeviceHistoryCheckpoint(deviceMac, uploadCheckpointProtocol);
-    if (maxTimestamp > 0 && maxTimestamp > previousLastReadTimestamp) {
+    if (!uploadPartial && maxTimestamp > 0 && maxTimestamp > previousLastReadTimestamp) {
       setDeviceHistoryCheckpoint(deviceMac, uploadCheckpointProtocol, maxTimestamp);
       userStore.updateLastReadTimestamp(maxTimestamp);
+    } else if (uploadPartial && maxTimestamp > 0) {
+      appendRingDiagnosticLog('RW PAGE', 'history-page-checkpoint-kept-partial', {
+        ...details,
+        deviceMac,
+        maxTimestamp,
+        previousLastReadTimestamp,
+        uploadCheckpointProtocol,
+        deviceReadDone: uploadDeviceReadDone,
+        historyCompleted: uploadDeviceReadDone,
+        partialUpload: uploadPartial,
+        coverageStatus: uploadCoverageStatus
+      });
     }
     appendRingDiagnosticLog('RW PAGE', 'history-page-upload-result', {
       ...details,

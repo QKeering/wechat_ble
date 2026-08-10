@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * 单次检测（CMD_SYNC_MEASURE, 0x05）
  *
@@ -33,7 +34,7 @@ export default function to_syncMeasureInfo(mapData = {}) {
     const db = new ArrayBuffer(1);
     const dv = new DataView(db);
     dv.setUint8(0, mask);
-    console.log('to_syncMeasureInfo', mapData, mask, db);
+    qkeerV2VendorConsole.log('to_syncMeasureInfo', mapData, mask, db);
 
     return db;
 }

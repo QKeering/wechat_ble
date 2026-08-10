@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * 重启设备（CMD_SYNC_REBOOT, 0x6C）
  *
@@ -13,7 +14,7 @@ export default function to_syncReboot(mapData = {}) {
     const dv = new DataView(db);
     dv.setUint8(0, value);
 
-    console.log('to_syncReboot', mapData, db);
+    qkeerV2VendorConsole.log('to_syncReboot', mapData, db);
 
     return db;
 }

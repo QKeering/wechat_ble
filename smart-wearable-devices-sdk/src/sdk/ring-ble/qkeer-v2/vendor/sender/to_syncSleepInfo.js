@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * 取睡眠数据
  *
@@ -20,7 +21,7 @@ export default function to_syncSleepInfo(mapData) {
     db_vi.setUint32(0, mapData.startTimestamp >>> 0, true); // 开始时间
     db_vi.setUint32(4, mapData.endTimestamp >>> 0, true);   // 结束时间
 
-    console.log('to_syncSleepInfo', mapData, db);
+    qkeerV2VendorConsole.log('to_syncSleepInfo', mapData, db);
 
     return db;
 }

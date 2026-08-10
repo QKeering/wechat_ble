@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   submitDataType,
   heartRateDetail,
   heartRateGetParams,
@@ -23,9 +23,165 @@ import type {
 } from '@/types/api/homeDetail';
 import type { HttpRequestConfig } from '@/uni_modules/uv-ui-tools/libs/luch-request/index';
 import type { RingRawHistoryFrame } from '@/api/ringDevice';
-// 蓝牙测量完提交数据接口
-export const submitData = (params: submitDataType, config = {}) => {
-  return (uni as any).$uv.http.post('/app/data/sync', params, config);
+import { getFullUrl } from '@/utils/utils.js';
+// 钃濈墮娴嬮噺瀹屾彁浜ゆ暟鎹帴鍙?
+type SubmitDataRequestConfig = HttpRequestConfig & {
+  timeout?: number;
+  header?: Record<string, string>;
+  headers?: Record<string, string>;
+  custom?: Record<string, any>;
+  getTask?: (task: { abort?: () => void } | null) => void;
+  onTiming?: (phase: string, detail: Record<string, unknown>) => void;
+};
+
+const DATA_SYNC_URL = '/app/data/sync';
+
+const parseSubmitDataBody = (value: unknown) => {
+  if (typeof value !== 'string') return value as any;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+};
+
+const readSubmitDataToken = () => {
+  try {
+    return String(uni.getStorageSync?.('token') || '').trim();
+  } catch {
+    return '';
+  }
+};
+
+const buildSubmitDataHeaders = (config: SubmitDataRequestConfig = {}) => {
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    ...((config as any).header || {}),
+    ...((config as any).headers || {})
+  };
+  const token = readSubmitDataToken();
+  if (token && config.custom?.auth !== false) {
+    headers.Authorization = token;
+    headers.token = token;
+  }
+  return headers;
+};
+
+const buildSubmitDataError = (payload: Record<string, any>) => ({
+  code: payload.code,
+  msg: payload.msg || payload.rawMsg || payload.errMsg || 'data sync request failed',
+  rawMsg: payload.rawMsg || payload.msg || payload.errMsg || '',
+  result: payload.result,
+  url: DATA_SYNC_URL,
+  statusCode: payload.statusCode,
+  response: payload.response
+});
+
+export const submitData = (params: submitDataType, config: SubmitDataRequestConfig = {}) => {
+  return new Promise((resolve, reject) => {
+    const timeout = Number(config.timeout || 10000);
+    let requestTask: { abort?: () => void } | null = null;
+    const requestStartedAt = Date.now();
+    let successCallbackAt = 0;
+    let failCallbackAt = 0;
+    const notifyTiming = (phase: string, detail: Record<string, unknown> = {}) => {
+      try {
+        config.onTiming?.(phase, {
+          ...detail,
+          elapsedMs: Date.now() - requestStartedAt,
+          timeout
+        });
+      } catch {
+        // Timing diagnostics must never affect the upload request.
+      }
+    };
+
+    notifyTiming('before-request', {
+      url: DATA_SYNC_URL,
+      method: 'POST',
+      dataCount: Array.isArray((params as any)?.dataList) ? (params as any).dataList.length : undefined
+    });
+    requestTask = uni.request({
+      url: getFullUrl(DATA_SYNC_URL),
+      method: 'POST',
+      data: params,
+      timeout,
+      header: buildSubmitDataHeaders(config),
+      success: (response: any) => {
+        successCallbackAt = Date.now();
+        const statusCode = Number(response?.statusCode || 0);
+        const body = parseSubmitDataBody(response?.data);
+        const bodyObject = body && typeof body === 'object' ? (body as Record<string, any>) : {};
+        const codeValue = bodyObject.code ?? bodyObject.statusCode;
+        const code = Number(codeValue);
+        const msg = String(bodyObject.msg ?? bodyObject.message ?? '');
+        const result = Object.prototype.hasOwnProperty.call(bodyObject, 'data') ? bodyObject.data : body;
+        const httpOk = statusCode >= 200 && statusCode < 300;
+        const businessOk = Number.isFinite(code) ? code === 0 || code === 200 : httpOk;
+        notifyTiming('success-callback', {
+          statusCode,
+          code: Number.isFinite(code) ? code : undefined,
+          businessOk,
+          httpOk
+        });
+
+        if (httpOk && businessOk) {
+          if (config.custom?.returnAll) {
+            resolve({
+              code: Number.isFinite(code) ? code : statusCode,
+              msg,
+              data: result,
+              originalResponse: response
+            });
+          } else {
+            resolve(result);
+          }
+          return;
+        }
+
+        reject(
+          buildSubmitDataError({
+            code: Number.isFinite(code) ? code : statusCode,
+            msg: msg || `HTTP ${statusCode}`,
+            rawMsg: msg,
+            result,
+            statusCode,
+            response
+          })
+        );
+      },
+      fail: (error: any) => {
+        failCallbackAt = Date.now();
+        notifyTiming('fail-callback', {
+          errCode: error?.errCode,
+          errMsg: error?.errMsg || error?.message
+        });
+        reject(
+          buildSubmitDataError({
+            code: error?.errCode,
+            msg: error?.errMsg || error?.message,
+            rawMsg: error?.errMsg || error?.message,
+            result: error,
+            response: error
+          })
+        );
+      },
+      complete: (response: any) => {
+        notifyTiming('complete-callback', {
+          statusCode: response?.statusCode,
+          errCode: response?.errCode,
+          errMsg: response?.errMsg,
+          afterSuccessMs: successCallbackAt > 0 ? Date.now() - successCallbackAt : undefined,
+          afterFailMs: failCallbackAt > 0 ? Date.now() - failCallbackAt : undefined
+        });
+      }
+    } as any) as any;
+
+    notifyTiming('request-task-created', {
+      hasAbort: typeof requestTask?.abort === 'function'
+    });
+    config.getTask?.(requestTask);
+  });
 };
 
 export type RingHistoryRawFramesSubmitParams = {
@@ -82,12 +238,12 @@ export const repairRingHistoryRawToday = (params: RingHistoryRawRepairParams, co
 };
 
 type GirlHealthSubmitParams = {
-  birthday: string;         // 出生日期 yyyy-MM-dd
-  cycleDay: number;         // 平均生理周期天数
-  menstruationDay: number;  // 经期持续天数
-  lastMenstruationDate: string; // 最近一次月经开始日期 yyyy-MM-dd
-  cycleRegularity: string;  // 周期规律：very_regular/regular/fairly_regular/irregular
-  healthConditions: string; // 健康情况，多选逗号拼接
+  birthday: string;         // 鍑虹敓鏃ユ湡 yyyy-MM-dd
+  cycleDay: number;         // 骞冲潎鐢熺悊鍛ㄦ湡澶╂暟
+  menstruationDay: number;  // 缁忔湡鎸佺画澶╂暟
+  lastMenstruationDate: string; // 鏈€杩戜竴娆℃湀缁忓紑濮嬫棩鏈?yyyy-MM-dd
+  cycleRegularity: string;  // 鍛ㄦ湡瑙勫緥锛歷ery_regular/regular/fairly_regular/irregular
+  healthConditions: string; // 鍋ュ悍鎯呭喌锛屽閫夐€楀彿鎷兼帴
   userId?: number | string;
   id?: number;
 };
@@ -123,11 +279,11 @@ const normalizeGirlHealthDateList = (value: unknown): string[] => {
       const parsed = JSON.parse(text);
       if (Array.isArray(parsed)) return normalizeGirlHealthDateList(parsed);
     } catch {
-      // 兼容非标准数组字符串，继续走分隔符解析。
+      // 鍏煎闈炴爣鍑嗘暟缁勫瓧绗︿覆锛岀户缁蛋鍒嗛殧绗﹁В鏋愩€?
     }
   }
   return text
-    .split(/[,，\s]+/)
+    .split(/[,锛孿s]+/)
     .map((item) => item.trim().replace(/^['"]|['"]$/g, ''))
     .filter(Boolean);
 };
@@ -149,7 +305,7 @@ const normalizeGirlHealthSubmitParams = (params: LegacyGirlHealthSubmitParams): 
     lastMenstruationDate,
     cycleRegularity,
     healthConditions,
-    // 兼容当前 FastAPI/旧 Java 后端表字段：user_girl_health 仍落 birth_day、period_cycle、period_runtime、last_period_time。
+    // 鍏煎褰撳墠 FastAPI/鏃?Java 鍚庣琛ㄥ瓧娈碉細user_girl_health 浠嶈惤 birth_day銆乸eriod_cycle銆乸eriod_runtime銆乴ast_period_time銆?
     birthDay: birthday,
     periodCycle: cycleDay,
     periodRuntime: menstruationDay,
@@ -162,109 +318,109 @@ const normalizeGirlHealthSubmitParams = (params: LegacyGirlHealthSubmitParams): 
   };
 };
 
-// 提交生理期问卷
+// 鎻愪氦鐢熺悊鏈熼棶鍗?
 export const addGirlHealth = (params: LegacyGirlHealthSubmitParams, config = {}) => {
   return (uni as any).$uv.http.post('/app/girlHealth/addGirlHealth', normalizeGirlHealthSubmitParams(params), config);
 };
 
-// 提交生理期问卷
+// 鎻愪氦鐢熺悊鏈熼棶鍗?
 export const updateGirlHealth = (params: LegacyGirlHealthSubmitParams & { id: number }, config = {}) => {
   return (uni as any).$uv.http.post('/app/girlHealth/updateGirlHealth', normalizeGirlHealthSubmitParams(params), config);
 };
-// 获取身心平衡评分
+// 鑾峰彇韬績骞宠　璇勫垎
 export const getBalanceScore = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<balanceScoreType> => {
   return (uni as any).$uv.http.get('/app/data/balanceScore', { params, ...config });
 };
-// 获取生命特征
+// 鑾峰彇鐢熷懡鐗瑰緛
 export const getVitalSign = (params: heartRateGetParams, config: HttpRequestConfig = {}): Promise<vitalSignType> => {
   return (uni as any).$uv.http.get('/app/data/vitalSign', { params, ...config });
 };
-// 获取心率详情
+// 鑾峰彇蹇冪巼璇︽儏
 export const getHeartRateDetail = (params: heartRateGetParams, config: HttpRequestConfig = {}): Promise<heartRateDetail> => {
   return (uni as any).$uv.http.get('/app/data/heartRate/heartRateDetail', { params, ...config });
 };
-// 获取心率变异性
+// 鑾峰彇蹇冪巼鍙樺紓鎬?
 export const getHrvDetail = (params: heartRateGetParams, config: HttpRequestConfig = {}): Promise<heartRateDetail> => {
   return (uni as any).$uv.http.get('/app/data/hrv/hrvDetail', { params, ...config });
 };
-// 获取血氧详情
+// 鑾峰彇琛€姘ц鎯?
 export const getBloodOxygenDetail = (params: heartRateGetParams, config: HttpRequestConfig = {}): Promise<heartRateDetail> => {
   return (uni as any).$uv.http.get('/app/data/bloodOxygen/bloodOxygenDetail', { params, ...config });
 };
-// 获取体温详情
+// 鑾峰彇浣撴俯璇︽儏
 export const getBodyTemperatureDetail = (params: heartRateGetParams, config: HttpRequestConfig = {}): Promise<heartRateDetail> => {
   return (uni as any).$uv.http.get('/app/data/bodyTemperature/bodyTemperatureDetail', { params, ...config });
 };
-// 获取睡眠总览信息
+// 鑾峰彇鐫＄湢鎬昏淇℃伅
 export const getSleepOverview = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<sleepOverview> => {
   return (uni as any).$uv.http.get('/app/data/sleep/sleepOverview', { params, ...config });
 };
-// 获取睡眠详情
+// 鑾峰彇鐫＄湢璇︽儏
 export const getSleepDetail = (params: heartRateGetParams, config: HttpRequestConfig = {}): Promise<sleepDetail> => {
   return (uni as any).$uv.http.get('/app/data/sleep/sleepDetail', { params, ...config });
 };
-// 获取睡眠详情-心率详情
+// 鑾峰彇鐫＄湢璇︽儏-蹇冪巼璇︽儏
 export const getSleepHeartRateDetail = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<heartRateDetail> => {
   return (uni as any).$uv.http.get('/app/data/sleep/heartRateDetail', { params, ...config });
 };
-// 获取睡眠详情-心率变异性详情
+// 鑾峰彇鐫＄湢璇︽儏-蹇冪巼鍙樺紓鎬ц鎯?
 export const getSleepHrvDetail = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<heartRateDetail> => {
   return (uni as any).$uv.http.get('/app/data/sleep/hrvDetail', { params, ...config });
 };
-// 获取睡眠详情-血氧详情
+// 鑾峰彇鐫＄湢璇︽儏-琛€姘ц鎯?
 export const getSleepBloodOxygenDetail = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<heartRateDetail> => {
   return (uni as any).$uv.http.get('/app/data/sleep/bloodOxygenDetail', { params, ...config });
 };
 
-// 获取睡眠区间
+// 鑾峰彇鐫＄湢鍖洪棿
 export const getSleepSegment = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<sleepSegment> => {
   return (uni as any).$uv.http.get('/app/data/sleep/sleepSegment', { params, ...config });
 };
-// 获取小睡列表
+// 鑾峰彇灏忕潯鍒楄〃
 export const getSleepNap = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<sleepNapType[]> => {
   return (uni as any).$uv.http.get('/app/data/sleep/napList', { params, ...config });
 };
-// 添加小睡
+// 娣诲姞灏忕潯
 export const addSleepNap = (params: addSleepNapType, config = {}) => {
   return (uni as any).$uv.http.post('/app/data/sleep/addNap', params, config);
 };
-//删除小睡
+//鍒犻櫎灏忕潯
 export const deleteSleepNap = (params: { id?: number }, config = {}) => {
   return (uni as any).$uv.http.delete(`/app/data/sleep/deleteNap?id=${params.id}`, {}, config);
 };
-//睡眠活动总结
+//鐫＄湢娲诲姩鎬荤粨
 export const getsleepSummary = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<sleepSummaryData> => {
   return (uni as any).$uv.http.get('/app/data/sleep/sleepSummary', { params, ...config });
 };
-// 获取活动概览
+// 鑾峰彇娲诲姩姒傝
 export const getMotionOverview = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<motionOverview> => {
   return (uni as any).$uv.http.get('/app/data/motion/motionOverview', { params, ...config });
 };
-// 获取活动卡
+// 鑾峰彇娲诲姩鍗?
 export const getMotionCalorie = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<motionCalorie> => {
   return (uni as any).$uv.http.get('/app/data/motion/motionCalorie', { params, ...config });
 };
-// 获取全天活动强度
+// 鑾峰彇鍏ㄥぉ娲诲姩寮哄害
 export const getMotionIntensity = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<motionIntensity> => {
   return (uni as any).$uv.http.get('/app/data/motion/motionIntensity', { params, ...config });
 };
-// 获取活动详情
+// 鑾峰彇娲诲姩璇︽儏
 export const getMotionDetail = (params: heartRateGetParams, config: HttpRequestConfig = {}): Promise<motionDetail> => {
   return (uni as any).$uv.http.get('/app/data/motion/motionDetail', { params, ...config });
 };
-// 获取活动总结
+// 鑾峰彇娲诲姩鎬荤粨
 export const getMotionSummary = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<motionSummary> => {
   return (uni as any).$uv.http.get('/app/data/motion/motionSummary', { params, ...config });
 };
-// 获取压力详情
+// 鑾峰彇鍘嬪姏璇︽儏
 export const getStressData = (params: heartRateGetParams, config: HttpRequestConfig = {}): Promise<stressDetail> => {
   return (uni as any).$uv.http.get('/app/data/stress/stressDetail', { params, ...config });
 };
-// 获取压力比例
+// 鑾峰彇鍘嬪姏姣斾緥
 export const getStressProportion = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<stressProportion> => {
   return (uni as any).$uv.http.get('/app/data/stress/stressProportion', { params, ...config });
 };
-// 获取压力总结
+// 鑾峰彇鍘嬪姏鎬荤粨
 export const getStressSummary = (params: { date?: string }, config: HttpRequestConfig = {}): Promise<stressSummaryType> => {
   return (uni as any).$uv.http.get('/app/data/stress/stressSummary', { params, ...config });
 };

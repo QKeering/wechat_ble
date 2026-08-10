@@ -1,5 +1,6 @@
 ﻿import csv
 import io
+import asyncio
 import hashlib
 import hmac
 import json
@@ -7,12 +8,14 @@ import logging
 import math
 import random
 import re
+import traceback
 import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import perf_counter
+from typing import Callable
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -25,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.responses import error, not_migrated, success, table
+from app.api.rw_debug import RW_DEBUG_TABLE, initialize_rw_debug_schema, json_text, now_app_time
 from app.db.redis import get_redis
 from app.db.session import SessionLocal, get_db
 from app.services import ai_growth, ai_lab, app_auth, family, health
@@ -34,6 +38,8 @@ router = APIRouter(prefix="/app", tags=["app"])
 
 APP_TIMEZONE = timezone(timedelta(hours=8))
 CALORIE_UNIT = "千卡"
+DATA_SYNC_SLOW_PHASE_MS = 3000
+DATA_SYNC_SLOW_REQUEST_MS = 8000
 
 ALGORITHM_LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
 ALGORITHM_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -53,6 +59,71 @@ def write_algorithm_log(event: str, **data) -> None:
         algorithm_logger.info(json.dumps(record, ensure_ascii=False, default=str))
     except Exception:
         pass
+
+
+_BACKEND_DIAGNOSTIC_SCHEMA_READY = False
+
+
+def write_backend_diagnostic_log(
+    event: str,
+    *,
+    source: str = "BACKEND DATA SYNC",
+    user_id: int | None = None,
+    device_id: str | None = None,
+    session_id: str | None = None,
+    build_tag: str | None = "backend-data-sync",
+    details: dict | None = None,
+) -> None:
+    """Write server-side sync phases into the same RW diagnostic table.
+
+    Use a separate session so a slow or rolled-back /app/data/sync transaction
+    does not hide the phase that caused the stall.
+    """
+    global _BACKEND_DIAGNOSTIC_SCHEMA_READY
+    log_db = SessionLocal()
+    try:
+        if not _BACKEND_DIAGNOSTIC_SCHEMA_READY:
+            initialize_rw_debug_schema(log_db)
+            _BACKEND_DIAGNOSTIC_SCHEMA_READY = True
+        log_db.execute(
+            text(
+                f"""
+                insert into {RW_DEBUG_TABLE}
+                  (created_at, client_log_id, client_time, source, event, build_tag, device_id,
+                   user_id, session_id, details_json, payload_json)
+                values
+                  (:created_at, :client_log_id, :client_time, :source, :event, :build_tag, :device_id,
+                   :user_id, :session_id, :details_json, :payload_json)
+                """
+            ),
+            {
+                "created_at": now_app_time(),
+                "client_log_id": None,
+                "client_time": datetime.now(APP_TIMEZONE).strftime("%H:%M:%S.%f")[:-3],
+                "source": (source or "BACKEND")[:64],
+                "event": (event or "log")[:128],
+                "build_tag": (build_tag or "")[:128] or None,
+                "device_id": (device_id or "")[:128] or None,
+                "user_id": user_id,
+                "session_id": (session_id or "")[:128] or None,
+                "details_json": json_text(details or {}),
+                "payload_json": json_text({
+                    "source": source,
+                    "event": event,
+                    "details": details or {},
+                    "sessionId": session_id,
+                    "buildTag": build_tag,
+                    "deviceId": device_id,
+                    "userId": user_id,
+                }),
+            },
+        )
+        log_db.commit()
+    except Exception as exc:
+        log_db.rollback()
+        write_algorithm_log("backend_diagnostic_log_failed", event=event, error=str(exc))
+    finally:
+        log_db.close()
 
 
 SMS_LOG_PATH = ALGORITHM_LOG_DIR / "sms.log"
@@ -106,6 +177,11 @@ def recalculate_sync_summaries(user_id: int, dates: list[str]) -> None:
         db.close()
 
 
+async def recalculate_sync_summaries_background(user_id: int, dates: list[str]) -> None:
+    """Run summary recalculation outside the FastAPI event loop."""
+    await asyncio.to_thread(recalculate_sync_summaries, user_id, dates)
+
+
 def request_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
@@ -146,8 +222,29 @@ def compare_version(v1: str | None, v2: str | None) -> int:
     return 0
 
 
-def daily_summary(db: Session, user_id: int, date_value: str | None = None) -> dict | None:
-    return health.daily_summary(db, user_id, date_value)
+def daily_summary(
+    db: Session,
+    user_id: int,
+    date_value: str | None = None,
+    *,
+    calculate_if_missing: bool = False,
+) -> dict | None:
+    try:
+        return health.daily_summary(db, user_id, date_value, calculate_if_missing=calculate_if_missing)
+    except TypeError as exc:
+        if "calculate_if_missing" not in str(exc):
+            raise
+        # 兼容线上 app.py 已更新但 services/health.py 尚未同步部署的过渡状态。
+        # 旧版 health.daily_summary 没有 calculate_if_missing 参数，先退回旧签名，
+        # 避免首页 6 个概览接口因为部署不一致全部 500。
+        write_algorithm_log(
+            "daily_summary_compat_retry",
+            user_id=user_id,
+            date_value=date_value,
+            calculate_if_missing=calculate_if_missing,
+            error=str(exc),
+        )
+        return health.daily_summary(db, user_id, date_value)
 
 
 RAW_SERIES_FIELD_RANGES = {
@@ -3952,7 +4049,14 @@ def previous_step_baseline_for_rw_cumulative(db: Session, table, user_id: int, d
         return None
 
 
-def apply_rw_cumulative_step_delta(db: Session, table, item, user_id: int, device_mac: str | None):
+def apply_rw_cumulative_step_delta(
+    db: Session,
+    table,
+    item,
+    user_id: int,
+    device_mac: str | None,
+    baseline_cache: dict[tuple[str, date], int | None] | None = None,
+):
     raw_step = rw_current_day_cumulative_step_value(item)
     if raw_step is None:
         return item
@@ -3965,7 +4069,13 @@ def apply_rw_cumulative_step_delta(db: Session, table, item, user_id: int, devic
     if record_time is None:
         return next_item
 
-    baseline = previous_step_baseline_for_rw_cumulative(db, table, user_id, device_mac, record_time)
+    baseline_cache_key = ((device_mac or "").upper(), record_time.date())
+    if baseline_cache is not None and baseline_cache_key in baseline_cache:
+        baseline = baseline_cache[baseline_cache_key]
+    else:
+        baseline = previous_step_baseline_for_rw_cumulative(db, table, user_id, device_mac, record_time)
+        if baseline_cache is not None:
+            baseline_cache[baseline_cache_key] = baseline
     if baseline is None:
         return next_item
 
@@ -4499,6 +4609,116 @@ def upsert_sync_sleep_records(db: Session, table, records: list[dict]) -> dict:
     }
 
 
+def sync_health_raw_device_key(value) -> str | None:
+    text_value = str(value or "").strip().upper()
+    return text_value or None
+
+
+def sync_health_raw_identity_key(values: dict) -> tuple[int, datetime, str | None]:
+    return (
+        int(values["user_id"]),
+        values["record_time"],
+        sync_health_raw_device_key(values.get("device_mac")),
+    )
+
+
+def dedupe_sync_health_raw_records(records: list[dict]) -> list[dict]:
+    keyed_records: dict[tuple[int, datetime, str | None], dict] = {}
+    for values in records:
+        key = sync_health_raw_identity_key(values)
+        if key not in keyed_records:
+            keyed_records[key] = dict(values)
+            continue
+        merged = keyed_records[key]
+        for field, value in values.items():
+            if value is None:
+                continue
+            if field == "create_time" and merged.get("create_time") is not None:
+                continue
+            merged[field] = value
+    return sorted(
+        keyed_records.values(),
+        key=lambda item: (
+            int(item.get("user_id") or 0),
+            item.get("record_time") or datetime.min,
+            sync_health_raw_device_key(item.get("device_mac")) or "",
+        ),
+    )
+
+
+def prefetch_sync_health_raw_ids(db: Session, table, records: list[dict]) -> dict[tuple[int, datetime, str | None], int]:
+    if not records:
+        return {}
+    user_ids = sorted({int(item["user_id"]) for item in records if item.get("user_id") is not None})
+    record_times = [item.get("record_time") for item in records if item.get("record_time") is not None]
+    if not user_ids or not record_times:
+        return {}
+    query = (
+        select(table.c.id, table.c.user_id, table.c.record_time, table.c.device_mac)
+        .where(table.c.user_id.in_(user_ids))
+        .where(table.c.record_time >= min(record_times))
+        .where(table.c.record_time <= max(record_times))
+        .order_by(table.c.id)
+    )
+    existing_ids: dict[tuple[int, datetime, str | None], int] = {}
+    for row in db.execute(query).mappings().all():
+        key = (
+            int(row["user_id"]),
+            row["record_time"],
+            sync_health_raw_device_key(row.get("device_mac")),
+        )
+        existing_ids.setdefault(key, int(row["id"]))
+    return existing_ids
+
+
+def insert_sync_health_raw_record(db: Session, table, values: dict):
+    columns = [key for key in values.keys() if key in table.c]
+    if not columns:
+        return
+    update_columns = [key for key in columns if key not in {"id", "create_time"}]
+    if not update_columns:
+        db.execute(table.insert().values(**values))
+        return
+    insert_columns = ", ".join(f"`{column}`" for column in columns)
+    insert_values = ", ".join(f":{column}" for column in columns)
+    update_values = ", ".join(f"`{column}`=values(`{column}`)" for column in update_columns)
+    db.execute(
+        text(
+            f"""
+            insert into `{table.name}` ({insert_columns})
+            values ({insert_values})
+            on duplicate key update {update_values}
+            """
+        ),
+        {key: values[key] for key in columns},
+    )
+
+
+def upsert_sync_health_raw_records(db: Session, table, records: list[dict]) -> dict:
+    deduped_records = dedupe_sync_health_raw_records(records)
+    existing_ids = prefetch_sync_health_raw_ids(db, table, deduped_records)
+    inserted_count = 0
+    updated_count = 0
+    for values in deduped_records:
+        existing_id = existing_ids.get(sync_health_raw_identity_key(values))
+        if existing_id:
+            update_values = {key: value for key, value in values.items() if key != "create_time"}
+            db.execute(table.update().where(table.c.id == existing_id).values(**update_values))
+            updated_count += 1
+            continue
+        insert_sync_health_raw_record(db, table, values)
+        inserted_count += 1
+    if deduped_records:
+        db.commit()
+    return {
+        "inputCount": len(records),
+        "dedupedCount": len(deduped_records),
+        "duplicateInputCount": max(len(records) - len(deduped_records), 0),
+        "insertedCount": inserted_count,
+        "updatedCount": updated_count,
+    }
+
+
 def upsert_sync_health_raw_record(db: Session, table, values: dict):
     identity_query = (
         select(table.c.id)
@@ -4553,17 +4773,29 @@ def sync_ring_data_records(
     device_mac: str | None = None,
     battery=None,
     calculate_summary: bool = True,
+    phase_logger: Callable[..., None] | None = None,
 ) -> dict:
     started_at = perf_counter()
+
+    def emit_phase(event: str, phase_started_at: float | None = None, **data) -> None:
+        if not phase_logger:
+            return
+        try:
+            phase_logger(event, phase_started_at, **data)
+        except Exception:
+            pass
+
     table = get_table("health_raw")
     sleep_table = get_table("sleep_record")
-    health_count = 0
     fail_count = 0
     touched_dates = set()
     sleep_record_values = []
-    health_write_started_at = perf_counter()
+    health_raw_values = []
+    step_baseline_cache: dict[tuple[str, date], int | None] = {}
+    parse_started_at = perf_counter()
+    emit_phase("data_sync_records_parse_start", input_count=len(records))
     for item in records:
-        normalized_item = apply_rw_cumulative_step_delta(db, table, item, user_id, device_mac)
+        normalized_item = apply_rw_cumulative_step_delta(db, table, item, user_id, device_mac, step_baseline_cache)
         values = java_sync_health_raw_values(table, normalized_item, user_id, device_mac)
         sleep_values = java_sync_sleep_record_values(sleep_table, normalized_item, user_id)
         if sleep_values:
@@ -4575,25 +4807,54 @@ def sync_ring_data_records(
             if not sleep_values:
                 fail_count += 1
             continue
-        try:
-            upsert_sync_health_raw_record(db, table, values)
-            health_count += 1
-        except Exception:
-            db.rollback()
-            fail_count += 1
-            continue
+        health_raw_values.append(values)
         touched_dates.add(values["record_time"].date().isoformat())
-    db.commit()
+    emit_phase(
+        "data_sync_records_parse_result",
+        parse_started_at,
+        health_input_count=len(health_raw_values),
+        sleep_input_count=len(sleep_record_values),
+        fail_count=fail_count,
+        touched_dates=sorted(touched_dates),
+    )
+    health_write_started_at = perf_counter()
+    emit_phase("data_sync_health_write_start", health_input_count=len(health_raw_values))
+    health_write_result = upsert_sync_health_raw_records(db, table, health_raw_values)
+    health_count = int(health_write_result.get("dedupedCount") or 0)
     health_write_ms = round((perf_counter() - health_write_started_at) * 1000)
+    emit_phase(
+        "data_sync_health_write_result",
+        health_write_started_at,
+        health_input_count=health_write_result.get("inputCount", len(health_raw_values)),
+        health_deduped_count=health_write_result.get("dedupedCount"),
+        health_duplicate_input_count=health_write_result.get("duplicateInputCount"),
+        health_inserted_count=health_write_result.get("insertedCount"),
+        health_updated_count=health_write_result.get("updatedCount"),
+    )
     sleep_write_started_at = perf_counter()
+    emit_phase("data_sync_sleep_write_start", sleep_input_count=len(sleep_record_values))
     sleep_write_result = upsert_sync_sleep_records(db, sleep_table, sleep_record_values)
     sleep_write_ms = round((perf_counter() - sleep_write_started_at) * 1000)
+    emit_phase(
+        "data_sync_sleep_write_result",
+        sleep_write_started_at,
+        sleep_input_count=sleep_write_result.get("inputCount", len(sleep_record_values)),
+        sleep_deduped_count=sleep_write_result.get("dedupedCount"),
+        sleep_duplicate_input_count=sleep_write_result.get("duplicateInputCount"),
+        sleep_overlap_deleted_count=sleep_write_result.get("deletedOverlapCount"),
+        sleep_inserted_count=sleep_write_result.get("insertedCount"),
+        sleep_updated_count=sleep_write_result.get("updatedCount"),
+    )
     device_update_started_at = perf_counter()
+    emit_phase("data_sync_device_update_start", battery=battery)
     update_device_sync(db, user_id, device_mac, battery)
     device_update_ms = round((perf_counter() - device_update_started_at) * 1000)
+    emit_phase("data_sync_device_update_result", device_update_started_at, battery=battery)
     summary_ms = 0
     summary_dates = []
     if calculate_summary:
+        summary_all_started_at = perf_counter()
+        emit_phase("data_sync_summary_start", touched_dates=sorted(touched_dates))
         for item_date in touched_dates:
             if item_date:
                 summary_started_at = perf_counter()
@@ -4605,12 +4866,17 @@ def sync_ring_data_records(
                     "elapsedMs": item_summary_ms,
                     "hasSummary": bool(summary),
                 })
+        emit_phase("data_sync_summary_result", summary_all_started_at, summary_dates=summary_dates)
     sleep_count = int(sleep_write_result.get("dedupedCount") or 0)
     total_count = health_count + sleep_count
     return {
         "success": total_count > 0,
         "count": total_count,
         "healthCount": health_count,
+        "healthInputCount": health_write_result.get("inputCount", len(health_raw_values)),
+        "healthDuplicateInputCount": health_write_result.get("duplicateInputCount", 0),
+        "healthInsertedCount": health_write_result.get("insertedCount", 0),
+        "healthUpdatedCount": health_write_result.get("updatedCount", 0),
         "sleepCount": sleep_count,
         "sleepInputCount": sleep_write_result.get("inputCount", len(sleep_record_values)),
         "sleepDuplicateInputCount": sleep_write_result.get("duplicateInputCount", 0),
@@ -4682,8 +4948,6 @@ def repair_l19_raw_history_data(
     clear_result = health.clear_l19_raw_history_repair_window(db, user_id, normalized_device_mac, target_date) if clear_existing else {}
     sync_result = sync_ring_data_records(db, user_id, records, normalized_device_mac, battery, calculate_summary=False)
     summary_dates = sorted(set((sync_result.get("touchedDates") or []) + [target_date.isoformat()]))
-    if summary_dates:
-        recalculate_sync_summaries(user_id, summary_dates)
     success_flag = bool(sync_result.get("success"))
     health.mark_l19_raw_history_repair_result(
         db,
@@ -4922,6 +5186,7 @@ async def data_raw_history_upload(
 @router.post("/data/rawHistory/repairToday")
 async def data_raw_history_repair_today(
     request: Request,
+    background_tasks: BackgroundTasks,
     user: dict = Depends(app_user),
     db: Session = Depends(get_db),
 ):
@@ -4930,7 +5195,24 @@ async def data_raw_history_repair_today(
     record_date = payload.get("date") or payload.get("recordDate") or payload.get("record_date")
     clear_existing = str(payload.get("clearExisting", payload.get("clear_existing", "true"))).strip().lower() not in {"0", "false", "no", "off"}
     target_user_id = family.resolve_sync_user_id(db, int(user["id"]), device_mac)
-    result = repair_l19_raw_history_data(db, target_user_id, device_mac or "", record_date, clear_existing, payload.get("battery"))
+    def run_repair_in_thread() -> dict:
+        repair_db = SessionLocal()
+        try:
+            return repair_l19_raw_history_data(
+                repair_db,
+                target_user_id,
+                device_mac or "",
+                record_date,
+                clear_existing,
+                payload.get("battery"),
+            )
+        finally:
+            repair_db.close()
+
+    result = await asyncio.to_thread(run_repair_in_thread)
+    summary_dates = result.get("summaryDates") or []
+    if summary_dates:
+        background_tasks.add_task(recalculate_sync_summaries_background, target_user_id, summary_dates)
     write_algorithm_log(
         "data_raw_history_repair",
         user_id=target_user_id,
@@ -4954,9 +5236,39 @@ async def data_sync(
     db: Session = Depends(get_db),
 ):
     started_at = perf_counter()
-    payload = await request.json()
-    upload_session_id = str(payload.get("uploadSessionId") or payload.get("upload_session_id") or uuid4())
     operator_user_id = int(user["id"])
+    request_meta = {
+        "content_length": request.headers.get("content-length"),
+        "user_agent": request.headers.get("user-agent"),
+        "client_host": request.client.host if request.client else None,
+        "path": str(request.url.path),
+    }
+    payload_parse_started_at = perf_counter()
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        upload_session_id = str(uuid4())
+        elapsed_ms = round((perf_counter() - started_at) * 1000)
+        details = {
+            "upload_session_id": upload_session_id,
+            "operator_user_id": operator_user_id,
+            "elapsed_ms": elapsed_ms,
+            "phase_elapsed_ms": round((perf_counter() - payload_parse_started_at) * 1000),
+            "error_type": type(exc).__name__,
+            "last_error": str(exc),
+            "traceback": traceback.format_exc(limit=8),
+            **request_meta,
+        }
+        write_algorithm_log("data_sync_payload_parse_failed", **details)
+        write_backend_diagnostic_log(
+            "data_sync_payload_parse_failed",
+            user_id=operator_user_id,
+            session_id=upload_session_id,
+            details=details,
+        )
+        raise
+    payload_parse_ms = round((perf_counter() - payload_parse_started_at) * 1000)
+    upload_session_id = str(payload.get("uploadSessionId") or payload.get("upload_session_id") or uuid4())
     records = payload.get("dataList") or payload.get("records") or payload.get("data") or payload.get("list") or []
     if isinstance(records, dict):
         records = [records]
@@ -4965,6 +5277,78 @@ async def data_sync(
         raw_frames = [raw_frames]
     if not isinstance(raw_frames, list):
         raw_frames = []
+    device_mac = payload.get("deviceMac") or payload.get("device_mac")
+    protocol = payload.get("protocol")
+    upload_status = payload.get("uploadStatus") if isinstance(payload.get("uploadStatus"), dict) else {}
+
+    def payload_bool(*keys, default: bool = False) -> bool:
+        for key in keys:
+            source = upload_status if str(key).startswith("uploadStatus.") else payload
+            field = str(key).split(".", 1)[1] if str(key).startswith("uploadStatus.") else key
+            if not isinstance(source, dict) or field not in source:
+                continue
+            value = source.get(field)
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                continue
+            text = str(value).strip().lower()
+            if text in {"1", "true", "yes", "y", "on", "done", "complete", "completed"}:
+                return True
+            if text in {"0", "false", "no", "n", "off", "partial", "missing", "incomplete"}:
+                return False
+        return default
+
+    requested_coverage_status = str(
+        payload.get("coverageStatus")
+        or payload.get("coverage_status")
+        or upload_status.get("coverageStatus")
+        or upload_status.get("coverage_status")
+        or ""
+    ).strip().lower()
+    device_read_done = payload_bool("deviceReadDone", "device_read_done", "uploadStatus.deviceReadDone", "uploadStatus.device_read_done", default=True)
+    history_completed = payload_bool("historyCompleted", "history_completed", "uploadStatus.historyCompleted", "uploadStatus.history_completed", default=device_read_done)
+    partial_upload = (
+        payload_bool("partialUpload", "partial_upload", "uploadStatus.partialUpload", "uploadStatus.partial_upload", default=False)
+        or not device_read_done
+        or not history_completed
+        or requested_coverage_status == "partial"
+    )
+
+    def log_data_sync_phase(event: str, phase_started_at: float | None = None, **data) -> None:
+        phase_payload = {
+            "upload_session_id": upload_session_id,
+            "operator_user_id": operator_user_id,
+            "device_mac": device_mac,
+            "protocol": protocol,
+            "input_count": len(records),
+            "raw_frame_count": len(raw_frames),
+            "device_read_done": device_read_done,
+            "history_completed": history_completed,
+            "partial_upload": partial_upload,
+            "coverage_status": requested_coverage_status or None,
+            "elapsed_ms": round((perf_counter() - started_at) * 1000),
+        }
+        if phase_started_at is not None:
+            phase_payload["phase_elapsed_ms"] = round((perf_counter() - phase_started_at) * 1000)
+            phase_payload["slow_phase"] = phase_payload["phase_elapsed_ms"] >= DATA_SYNC_SLOW_PHASE_MS
+        phase_payload["slow_request"] = phase_payload["elapsed_ms"] >= DATA_SYNC_SLOW_REQUEST_MS
+        phase_payload.update(data)
+        write_algorithm_log(event, **phase_payload)
+        write_backend_diagnostic_log(
+            event,
+            user_id=int(data.get("data_user_id") or operator_user_id),
+            device_id=str(data.get("resolved_device_mac") or device_mac or ""),
+            session_id=upload_session_id,
+            details=phase_payload,
+        )
+
+    log_data_sync_phase(
+        "data_sync_start",
+        payload_parse_ms=payload_parse_ms,
+        payload_keys=sorted(list(payload.keys()))[:40],
+        **request_meta,
+    )
     if not records:
         result = {
             "uploadSessionId": upload_session_id,
@@ -4992,9 +5376,20 @@ async def data_sync(
             request_snapshot={"inputCount": 0},
             response_snapshot=result,
         )
+        log_data_sync_phase("data_sync_empty", data_status="empty")
         return success(result, "没有可同步数据")
-    device_mac = payload.get("deviceMac") or payload.get("device_mac")
+
+    binding_started_at = perf_counter()
     binding = resolve_active_upload_binding(db, operator_user_id, device_mac)
+    log_data_sync_phase(
+        "data_sync_binding_result",
+        binding_started_at,
+        ok=bool(binding.get("ok")),
+        reason_code=binding.get("reasonCode"),
+        data_user_id=binding.get("dataUserId"),
+        binding_id=binding.get("bindingId"),
+        binding_version=binding.get("bindingVersion"),
+    )
     if not binding.get("ok"):
         result = {
             "uploadSessionId": upload_session_id,
@@ -5041,37 +5436,119 @@ async def data_sync(
             request_snapshot={"inputCount": len(records), "deviceMac": device_mac},
             response_snapshot=result,
         )
+        log_data_sync_phase(
+            "data_sync_binding_failed",
+            reason_code=binding.get("reasonCode"),
+            last_error=binding.get("message"),
+            data_status="failed",
+        )
         return error(result.get("message") or "上传设备绑定无效", code=409, data=result)
     target_user_id = int(binding["dataUserId"])
     resolved_device_mac = binding.get("deviceMac") or device_mac
     battery = payload.get("battery")
     raw_store_result = None
     if raw_frames:
+        raw_started_at = perf_counter()
+        log_data_sync_phase(
+            "data_sync_raw_queue_start",
+            data_user_id=target_user_id,
+            resolved_device_mac=resolved_device_mac,
+        )
         try:
-            raw_store_result = health.store_ring_history_raw_frames(
+            raw_store_result = health.enqueue_ring_history_raw_upload_job(
                 db,
                 target_user_id,
                 resolved_device_mac,
                 raw_frames,
+                upload_session_id=upload_session_id,
                 upload_user_id=operator_user_id,
+                binding_id=binding.get("bindingId"),
+                binding_version=str(binding.get("bindingVersion") or ""),
+                protocol=payload.get("protocol") or binding.get("protocol"),
+            )
+            log_data_sync_phase(
+                "data_sync_raw_queue_result",
+                raw_started_at,
+                data_user_id=target_user_id,
+                resolved_device_mac=resolved_device_mac,
+                raw_queued=bool(raw_store_result.get("rawQueued")),
+                raw_job_id=raw_store_result.get("jobId"),
+                raw_status=raw_store_result.get("rawStatus"),
+                raw_frame_count=raw_store_result.get("rawFrameCount"),
+                payload_hash=raw_store_result.get("payloadHash"),
             )
         except Exception as exc:
             db.rollback()
             raw_store_result = {
-                "rawStored": False,
+                "rawQueued": False,
                 "rawFrameCount": len(raw_frames),
-                "rawStoredCount": 0,
-                "rawUpdatedCount": 0,
-                "rawSkippedCount": len(raw_frames),
                 "error": str(exc),
             }
-    result = sync_ring_data_records(db, target_user_id, records, resolved_device_mac, battery, calculate_summary=False)
+            log_data_sync_phase(
+                "data_sync_raw_queue_failed",
+                raw_started_at,
+                data_user_id=target_user_id,
+                resolved_device_mac=resolved_device_mac,
+                error_type=type(exc).__name__,
+                last_error=str(exc),
+                traceback=traceback.format_exc(limit=8),
+            )
+
+    records_started_at = perf_counter()
+    log_data_sync_phase(
+        "data_sync_records_start",
+        data_user_id=target_user_id,
+        resolved_device_mac=resolved_device_mac,
+    )
+    try:
+        result = sync_ring_data_records(
+            db,
+            target_user_id,
+            records,
+            resolved_device_mac,
+            battery,
+            calculate_summary=False,
+            phase_logger=log_data_sync_phase,
+        )
+    except Exception as exc:
+        db.rollback()
+        log_data_sync_phase(
+            "data_sync_records_failed",
+            records_started_at,
+            data_user_id=target_user_id,
+            resolved_device_mac=resolved_device_mac,
+            error_type=type(exc).__name__,
+            last_error=str(exc),
+            traceback=traceback.format_exc(limit=8),
+        )
+        raise
+    log_data_sync_phase(
+        "data_sync_records_result",
+        records_started_at,
+        data_user_id=target_user_id,
+        resolved_device_mac=resolved_device_mac,
+        count=result.get("count"),
+        health_count=result.get("healthCount"),
+        sleep_count=result.get("sleepCount"),
+        fail_count=result.get("failCount"),
+        touched_dates=result.get("touchedDates"),
+        sync_elapsed_ms=result.get("syncElapsedMs"),
+        health_write_ms=result.get("healthWriteMs"),
+        sleep_write_ms=result.get("sleepWriteMs"),
+        device_update_ms=result.get("deviceUpdateMs"),
+    )
     summary_dates = result.get("touchedDates") or []
-    summary_inline = 0 < len(summary_dates) <= SYNC_INLINE_SUMMARY_DATE_LIMIT
-    if summary_inline:
-        recalculate_sync_summaries(target_user_id, summary_dates)
-    elif summary_dates:
-        background_tasks.add_task(recalculate_sync_summaries, target_user_id, summary_dates)
+    summary_inline = False
+    if summary_dates:
+        background_tasks.add_task(recalculate_sync_summaries_background, target_user_id, summary_dates)
+    log_data_sync_phase(
+        "data_sync_summary_scheduled",
+        data_user_id=target_user_id,
+        resolved_device_mac=resolved_device_mac,
+        summary_dates=summary_dates,
+        summary_inline=summary_inline,
+        summary_scheduled=bool(summary_dates),
+    )
     result["inputCount"] = len(records)
     result["summaryScheduled"] = bool(summary_dates) and not summary_inline
     result["summaryInline"] = summary_inline
@@ -5079,7 +5556,8 @@ async def data_sync(
     success_count = int(result.get("count") or 0)
     fail_count = int(result.get("failCount") or 0)
     data_status = "done" if success_count > 0 and fail_count == 0 else ("partial" if success_count > 0 else "failed")
-    requested_coverage_status = str(payload.get("coverageStatus") or payload.get("coverage_status") or "").strip().lower()
+    if partial_upload and data_status == "done":
+        data_status = "partial"
     coverage_status = requested_coverage_status or ("complete" if data_status == "done" else ("partial" if data_status == "partial" else "missing"))
     raw_local_status = str(payload.get("rawLocalStatus") or payload.get("raw_local_status") or "").strip().lower()
     if raw_local_status not in {"done", "none", "failed"}:
@@ -5094,14 +5572,18 @@ async def data_sync(
     except (TypeError, ValueError):
         raw_frame_count = 0
     if raw_store_result:
+        raw_durable = bool(raw_store_result.get("rawStored") or raw_store_result.get("rawQueued"))
         result["rawStored"] = bool(raw_store_result.get("rawStored"))
-        result["rawStatus"] = "done" if raw_store_result.get("rawStored") else "failed"
+        result["rawQueued"] = bool(raw_store_result.get("rawQueued"))
+        result["rawStatus"] = raw_store_result.get("rawStatus") or ("queued" if raw_store_result.get("rawQueued") else ("done" if raw_store_result.get("rawStored") else "failed"))
+        result["rawJobId"] = raw_store_result.get("jobId")
+        result["rawPayloadHash"] = raw_store_result.get("payloadHash")
         result["rawStoredCount"] = int(raw_store_result.get("rawStoredCount") or raw_store_result.get("storedCount") or 0)
         result["rawUpdatedCount"] = int(raw_store_result.get("rawUpdatedCount") or raw_store_result.get("updatedCount") or 0)
         result["rawSkippedCount"] = int(raw_store_result.get("rawSkippedCount") or raw_store_result.get("skippedCount") or 0)
         result["rawStoreError"] = raw_store_result.get("error")
-        raw_local_status = "done" if raw_store_result.get("rawStored") else "failed"
-    can_delete_device_blocks = data_status == "done" and raw_local_status == "done"
+        raw_local_status = "done" if raw_durable else "failed"
+    can_delete_device_blocks = (not partial_upload) and device_read_done and history_completed and data_status == "done" and raw_local_status == "done"
     result["uploadSessionId"] = upload_session_id
     result["dataUserId"] = target_user_id
     result["deviceMac"] = resolved_device_mac
@@ -5110,34 +5592,80 @@ async def data_sync(
     result["bindingVersion"] = binding.get("bindingVersion")
     result["dataStatus"] = data_status
     result["coverageStatus"] = coverage_status
+    result["deviceReadDone"] = device_read_done
+    result["historyCompleted"] = history_completed
+    result["partialUpload"] = partial_upload
     result["rawLocalStatus"] = raw_local_status
     result["rawFrameCount"] = raw_frame_count
     result["canDeleteDeviceBlocks"] = can_delete_device_blocks
     result["elapsedMs"] = round((perf_counter() - started_at) * 1000)
-    upsert_device_upload_session(
-        db,
-        upload_session_id=upload_session_id,
-        operator_user_id=operator_user_id,
+    session_started_at = perf_counter()
+    log_data_sync_phase(
+        "data_sync_session_upsert_start",
         data_user_id=target_user_id,
-        binding_id=binding.get("bindingId"),
-        binding_version=binding.get("bindingVersion"),
-        device_mac=resolved_device_mac,
-        protocol=payload.get("protocol") or binding.get("protocol"),
-        status="data_done" if data_status == "done" else f"data_{data_status}",
+        resolved_device_mac=resolved_device_mac,
         data_status=data_status,
         raw_local_status=raw_local_status,
-        raw_status=result.get("rawStatus") or payload.get("rawStatus") or payload.get("raw_status"),
-        data_count=success_count,
-        raw_frame_count=raw_frame_count,
+        device_read_done=device_read_done,
+        history_completed=history_completed,
+        partial_upload=partial_upload,
         can_delete_device_blocks=can_delete_device_blocks,
-        request_snapshot={
-            "inputCount": len(records),
-            "deviceMac": resolved_device_mac,
-            "rawFrameCount": raw_frame_count,
-            "rawLocalStatus": raw_local_status,
-            "inlineRawFrameCount": len(raw_frames),
-        },
-        response_snapshot=result,
+    )
+    try:
+        upsert_device_upload_session(
+            db,
+            upload_session_id=upload_session_id,
+            operator_user_id=operator_user_id,
+            data_user_id=target_user_id,
+            binding_id=binding.get("bindingId"),
+            binding_version=binding.get("bindingVersion"),
+            device_mac=resolved_device_mac,
+            protocol=payload.get("protocol") or binding.get("protocol"),
+            status="data_done" if data_status == "done" else f"data_{data_status}",
+            data_status=data_status,
+            raw_local_status=raw_local_status,
+            raw_status=result.get("rawStatus") or payload.get("rawStatus") or payload.get("raw_status"),
+            data_count=success_count,
+            raw_frame_count=raw_frame_count,
+            can_delete_device_blocks=can_delete_device_blocks,
+            request_snapshot={
+                "inputCount": len(records),
+                "deviceMac": resolved_device_mac,
+                "rawFrameCount": raw_frame_count,
+                "rawLocalStatus": raw_local_status,
+                "inlineRawFrameCount": len(raw_frames),
+                "deviceReadDone": device_read_done,
+                "historyCompleted": history_completed,
+                "partialUpload": partial_upload,
+                "coverageStatus": coverage_status,
+            },
+            response_snapshot=result,
+        )
+    except Exception as exc:
+        db.rollback()
+        log_data_sync_phase(
+            "data_sync_session_upsert_failed",
+            session_started_at,
+            data_user_id=target_user_id,
+            resolved_device_mac=resolved_device_mac,
+            data_status=data_status,
+            raw_local_status=raw_local_status,
+            error_type=type(exc).__name__,
+            last_error=str(exc),
+            traceback=traceback.format_exc(limit=8),
+        )
+        raise
+    log_data_sync_phase(
+        "data_sync_session_upsert_result",
+        session_started_at,
+        data_user_id=target_user_id,
+        resolved_device_mac=resolved_device_mac,
+        data_status=data_status,
+        raw_local_status=raw_local_status,
+        device_read_done=device_read_done,
+        history_completed=history_completed,
+        partial_upload=partial_upload,
+        can_delete_device_blocks=can_delete_device_blocks,
     )
     write_algorithm_log(
         "data_sync",
@@ -5162,11 +5690,33 @@ async def data_sync(
         raw_local_status=raw_local_status,
         raw_frame_count=raw_frame_count,
         inline_raw_frame_count=len(raw_frames),
+        device_read_done=device_read_done,
+        history_completed=history_completed,
+        partial_upload=partial_upload,
         raw_status=result.get("rawStatus"),
         raw_stored=result.get("rawStored"),
         raw_stored_count=result.get("rawStoredCount"),
         raw_updated_count=result.get("rawUpdatedCount"),
         raw_skipped_count=result.get("rawSkippedCount"),
+        can_delete_device_blocks=can_delete_device_blocks,
+    )
+    log_data_sync_phase(
+        "data_sync_finish",
+        data_user_id=target_user_id,
+        resolved_device_mac=resolved_device_mac,
+        data_status=data_status,
+        coverage_status=coverage_status,
+        raw_local_status=raw_local_status,
+        count=result.get("count"),
+        health_count=result.get("healthCount"),
+        sleep_count=result.get("sleepCount"),
+        fail_count=result.get("failCount"),
+        touched_dates=result.get("touchedDates"),
+        sync_elapsed_ms=result.get("syncElapsedMs"),
+        health_write_ms=result.get("healthWriteMs"),
+        sleep_write_ms=result.get("sleepWriteMs"),
+        device_update_ms=result.get("deviceUpdateMs"),
+        summary_scheduled=result.get("summaryScheduled"),
         can_delete_device_blocks=can_delete_device_blocks,
     )
     return success(

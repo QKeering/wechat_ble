@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 
 /**
  * @param {ArrayBuffer} packetArrayBuffer 
@@ -7,7 +8,7 @@
  * @returns {ArrayBuffer}
  */
 function parseReceiverList(packetArrayBuffer, arrayBuffer, packet_sum, packet_index) {
-    console.log('parseReceiverList', packetArrayBuffer, arrayBuffer, packet_sum, packet_index);
+    qkeerV2VendorConsole.log('parseReceiverList', packetArrayBuffer, arrayBuffer, packet_sum, packet_index);
 
     if (packet_sum > 1) {
         if (packet_index < packet_sum - 1) {

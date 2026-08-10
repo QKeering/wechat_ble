@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * 监测定时（CMD_SYNC_MEASURE_TIMER, 0x0A）
  *
@@ -36,7 +37,7 @@ export default function to_syncMeasureTimer(mapData = {}) {
 
     dv.setUint8(6, mapData.frequency);
 
-    console.log('to_syncMeasureTimer', mapData, db);
+    qkeerV2VendorConsole.log('to_syncMeasureTimer', mapData, db);
 
     return db;
 }

@@ -2,6 +2,11 @@ import { bindRingDevice, clearBoundRingDevice, getBoundRingDevice, normalizeRing
 import type { RingBindPayload } from '@/sdk/ring-ble';
 import type { DeviceInfo, DeviceModel } from '@/types/api/device';
 import { getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
+import {
+  markDeviceIdentityCacheConnected,
+  normalizeDeviceIdentityMac,
+  readDeviceIdentityCache
+} from '@/utils/deviceIdentityCache';
 
 export interface HttpRequestConfigCompat {
   [key: string]: any;
@@ -88,6 +93,58 @@ const getDeviceBindMac = (device: unknown) => {
   );
 };
 
+const getDeviceCommunicationId = (device: DeviceInfo | null | undefined) =>
+  String(
+    (device as Record<string, any> | null | undefined)?.deviceId ||
+      (device as Record<string, any> | null | undefined)?.platformDeviceId ||
+      (device as Record<string, any> | null | undefined)?.wxDeviceId ||
+      (device as Record<string, any> | null | undefined)?.bleDeviceId ||
+      (device as Record<string, any> | null | undefined)?.bluetoothDeviceId ||
+      ''
+  ).trim();
+
+const isConflictingMacLikeCommunicationId = (communicationId: unknown, stableMac: string) => {
+  const macKey = normalizeDeviceIdentityMac(stableMac);
+  const communicationMacKey = normalizeDeviceIdentityMac(communicationId);
+  return Boolean(macKey && communicationMacKey && communicationMacKey !== macKey);
+};
+
+const isSameMacLikeCommunicationId = (communicationId: unknown, stableMac: string) => {
+  const macKey = normalizeDeviceIdentityMac(stableMac);
+  const communicationMacKey = normalizeDeviceIdentityMac(communicationId);
+  return Boolean(macKey && communicationMacKey && communicationMacKey === macKey);
+};
+
+const pickBoundCommunicationDeviceId = (
+  stableMac: string,
+  payload?: DeviceInfo | null,
+  local?: DeviceInfo | null,
+  remote?: DeviceInfo | null
+) => {
+  const macKey = normalizeDeviceIdentityMac(stableMac);
+  if (!macKey) return getDeviceCommunicationId(payload) || '';
+
+  // Backend binding only provides the stable MAC. Runtime communication id must
+  // come from the verified userId + platform + MAC mapping cache.
+  const cached = readDeviceIdentityCache({ mac: macKey });
+  if (cached?.deviceId && !isConflictingMacLikeCommunicationId(cached.deviceId, macKey)) {
+    return cached.deviceId;
+  }
+
+  const payloadDeviceId = getDeviceCommunicationId(payload);
+  if (isSameMacLikeCommunicationId(payloadDeviceId, macKey)) return payloadDeviceId;
+
+  // Android 上微信 deviceId 通常就是 MAC。只有 deviceId 与后端 MAC 完全一致时才允许直接复用；
+  // iOS 或未知来源的旧本地 deviceId 必须通过扫描匹配后重新写入缓存。
+  const localDeviceId = getDeviceCommunicationId(local);
+  if (isSameMacLikeCommunicationId(localDeviceId, macKey)) return localDeviceId;
+
+  const remoteDeviceId = getDeviceCommunicationId(remote);
+  if (isSameMacLikeCommunicationId(remoteDeviceId, macKey)) return remoteDeviceId;
+
+  return '';
+};
+
 const mergeBoundRingDevice = (
   remote: DeviceInfo | null | undefined,
   local?: DeviceInfo | null,
@@ -118,6 +175,12 @@ const mergeBoundRingDevice = (
     ...(normalizedRemote?.advertis || {}),
     ...(stableMac ? { macInfo: stableMac } : {})
   };
+  const communicationDeviceId = pickBoundCommunicationDeviceId(
+    stableMac,
+    compatiblePayload,
+    compatibleLocal,
+    normalizedRemote
+  );
 
   return normalizeRingBoundDevice({
     ...(compatibleLocal || {}),
@@ -125,7 +188,11 @@ const mergeBoundRingDevice = (
     ...(normalizedRemote || {}),
     mac: stableMac || normalizedRemote?.mac || compatiblePayload?.mac || compatibleLocal?.mac || identityBase.mac,
     uniMacId: stableMac || normalizedRemote?.uniMacId || compatiblePayload?.uniMacId || compatibleLocal?.uniMacId || identityBase.uniMacId,
-    deviceId: compatiblePayload?.deviceId || compatibleLocal?.deviceId || normalizedRemote?.deviceId || identityBase.deviceId,
+    deviceId: communicationDeviceId,
+    platformDeviceId: communicationDeviceId,
+    wxDeviceId: communicationDeviceId,
+    bleDeviceId: communicationDeviceId,
+    bluetoothDeviceId: communicationDeviceId,
     deviceName:
       normalizedRemote?.deviceName ||
       normalizedRemote?.name ||
@@ -247,6 +314,16 @@ export const bind = async (params: RingBindPayload, _config: HttpRequestConfigCo
   const authoritative = mergeBoundRingDevice(remote, localBeforeRemote as DeviceInfo | null, params);
   if (!hasBoundRingIdentity(authoritative)) {
     throw new Error('Backend binding response missing valid device info');
+  }
+  const bindMac = getDeviceBindMac(authoritative) || getDeviceBindMac(params);
+  const bindDeviceId = getDeviceCommunicationId(normalizeRingBoundDevice(params as any) as DeviceInfo | null);
+  if (bindMac && bindDeviceId) {
+    markDeviceIdentityCacheConnected({
+      mac: bindMac,
+      deviceId: bindDeviceId,
+      name: authoritative?.name || authoritative?.deviceName || (params as any).name || (params as any).deviceName,
+      source: 'first-bind'
+    });
   }
   const device = await bindRingDevice(authoritative as any);
   clearRemoteBindInfoCache();

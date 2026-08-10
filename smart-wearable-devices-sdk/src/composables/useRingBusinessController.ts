@@ -778,7 +778,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 
   const restoreLastBusinessDevice = async (restoreOptions: RestoreLastBusinessDeviceOptions = {}) => {
     if (restorePromise) return restorePromise;
-    const refreshAfterRestore = restoreOptions.refreshAfterRestore ?? true;
+    const refreshAfterRestore = restoreOptions.refreshAfterRestore ?? false;
 
     if (isReady.value) {
       const readyMatchesBound = await ensureReadyDeviceMatchesBusinessIdentity('restore-already-ready');
@@ -789,14 +789,19 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       } else {
         const diagnosticLock = getRwDiagnosticCommandLock();
         if (!diagnosticLock) isAutoRefreshPaused = false;
-        await syncRwDeviceTimeAfterReady('ready', {
-          reason: 'restore-already-ready'
-        });
+        if (getResolvedCurrentProtocol() === 'rw') {
+          appendRingDiagnosticLog('RW FLOW', 'restore-time-sync-deferred', {
+            reason: 'restore-already-ready',
+            deviceId: ble.deviceInfo.value.deviceId
+          });
+        }
         if (refreshAfterRestore && shouldAutoRefresh() && getResolvedCurrentProtocol() !== 'rw') {
           await refreshBusinessDataSafely();
         } else if (!refreshAfterRestore && getResolvedCurrentProtocol() === 'rw') {
-          schedulePostConnectDeviceInfoRefresh('restore-already-ready-background', {
-            refreshAfterRestore
+          appendRingDiagnosticLog('RW FLOW', 'restore-rw-refresh-deferred', {
+            reason: 'restore-already-ready',
+            refreshAfterRestore,
+            deviceId: ble.deviceInfo.value.deviceId
           });
         }
         if (!diagnosticLock && !isAutoRefreshPaused) {
@@ -817,15 +822,42 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     restorePromise = (async () => {
       const timeoutMs = getRestoreTimeoutMs();
       const boundDevice = ble.ringStore.boundDevice as RingDeviceInfo | null | undefined;
+      const boundIdentity = boundDevice ? getRingDeviceStableIdentity(boundDevice) : '';
       appendRingDiagnosticLog('RW FLOW', 'restore-start', {
         timeoutMs,
         currentProtocol: getResolvedCurrentProtocol(),
         boundProtocol: boundDevice ? resolveRingProtocol(boundDevice) : undefined,
         currentDeviceId: ble.deviceInfo.value.deviceId,
         boundDeviceId: boundDevice?.deviceId,
-        boundIdentity: boundDevice ? getRingDeviceStableIdentity(boundDevice) : '',
+        boundIdentity,
         refreshAfterRestore
       });
+      if (!boundIdentity && !refreshAfterRestore) {
+        appendRingDiagnosticLog('RW FLOW', 'restore-skip-no-bound-identity', {
+          timeoutMs,
+          currentProtocol: getResolvedCurrentProtocol(),
+          currentDeviceId: ble.deviceInfo.value.deviceId,
+          boundDeviceId: boundDevice?.deviceId,
+          refreshAfterRestore
+        });
+        return false;
+      }
+      if (isReady.value) {
+        const readyMatchesBound = await ensureReadyDeviceMatchesBusinessIdentity(
+          'restore-ready-before-autoconnect',
+          boundDevice || null
+        );
+        if (readyMatchesBound) {
+          appendRingDiagnosticLog('RW FLOW', 'restore-skip-already-ready-before-autoconnect', {
+            timeoutMs,
+            currentDeviceId: ble.deviceInfo.value.deviceId,
+            boundDeviceId: boundDevice?.deviceId,
+            boundIdentity,
+            refreshAfterRestore
+          });
+          return true;
+        }
+      }
       const result = await withTimeout(
         ble.autoConnectLastDevice().then((success) => ({ success, timedOut: false })),
         timeoutMs,
@@ -838,7 +870,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
           timeoutMs,
           currentDeviceId: ble.deviceInfo.value.deviceId,
           boundDeviceId: boundDevice?.deviceId,
-          boundIdentity: boundDevice ? getRingDeviceStableIdentity(boundDevice) : ''
+          boundIdentity
         });
         return false;
       }
@@ -864,16 +896,21 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         }
         const diagnosticLock = getRwDiagnosticCommandLock();
         if (!diagnosticLock) isAutoRefreshPaused = false;
-        await syncRwDeviceTimeAfterReady('ready', {
-          reason: 'restore-success',
-          timeoutMs
-        });
+        if (getResolvedCurrentProtocol() === 'rw') {
+          appendRingDiagnosticLog('RW FLOW', 'restore-time-sync-deferred', {
+            reason: 'restore-success',
+            timeoutMs,
+            deviceId: ble.deviceInfo.value.deviceId
+          });
+        }
         if (refreshAfterRestore && getResolvedCurrentProtocol() !== 'rw') {
           await refreshBusinessDataSafely();
         } else if (!refreshAfterRestore && getResolvedCurrentProtocol() === 'rw') {
-          schedulePostConnectDeviceInfoRefresh('restore-success-background', {
+          appendRingDiagnosticLog('RW FLOW', 'restore-rw-refresh-deferred', {
+            reason: 'restore-success',
             refreshAfterRestore,
-            timeoutMs
+            timeoutMs,
+            deviceId: ble.deviceInfo.value.deviceId
           });
         }
         if (!diagnosticLock && !isAutoRefreshPaused) {
@@ -1365,11 +1402,14 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         });
       } else {
         isAutoRefreshPaused = false;
-        await syncRwDeviceTimeAfterReady('ready', {
-          reason: 'connect-same-device-ready',
-          stableIdentity,
-          deviceName
-        });
+        if (getResolvedCurrentProtocol() === 'rw') {
+          appendRingDiagnosticLog('RW FLOW', 'connect-time-sync-deferred', {
+            reason: 'connect-same-device-ready',
+            stableIdentity,
+            deviceName,
+            deviceId: ble.deviceInfo.value.deviceId
+          });
+        }
         if (connectOptions.refreshAfterConnect ?? true) {
           await refreshBusinessDataSafely(getPostConnectRefreshOptions());
         } else {
@@ -1465,11 +1505,14 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       notifyEnabled: ble.deviceInfo.value.notifyEnabled,
       notifyError: ble.deviceInfo.value.notifyError
     });
-    await syncRwDeviceTimeAfterReady('ready', {
-      reason: 'connect-ready',
-      stableIdentity,
-      deviceName
-    });
+    if (getResolvedCurrentProtocol() === 'rw') {
+      appendRingDiagnosticLog('RW FLOW', 'connect-time-sync-deferred', {
+        reason: 'connect-ready',
+        stableIdentity,
+        deviceName,
+        deviceId: ble.deviceInfo.value.deviceId
+      });
+    }
     if (connectOptions.refreshAfterConnect ?? true) {
       await refreshBusinessDataSafely(getPostConnectRefreshOptions());
     } else {
@@ -1573,40 +1616,23 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 
   const resumeBusinessAutoRefresh = () => {
     isAutoRefreshPaused = false;
-    if (isCurrentOrBoundRw() && !rwBackgroundRefreshEnabled) {
-      clearRwPendingRetryTimer();
-      clearRwMaintainRefreshTimer();
-      clearRwEmptyRefreshRetryTimer();
-      return;
-    }
+    clearRwPendingRetryTimer();
+    clearRwMaintainRefreshTimer();
+    clearRwEmptyRefreshRetryTimer();
     const shouldRecoverRwRefresh = isRwBusinessReady() && hasRwRefreshRecoverySignal();
     if (shouldRecoverRwRefresh) {
       refreshRequestId += 1;
       refreshPromise = null;
       clearRefreshStateTimer();
-      clearRwPendingRetryTimer();
-      clearRwMaintainRefreshTimer();
-      clearRwEmptyRefreshRetryTimer();
       isRefreshingBusinessData.value = false;
     }
-    if (shouldRecoverRwRefresh && isRwBusinessReady()) {
-      void refreshBusinessDataSafely({
-        silent: true,
-        forceDeviceInfo: true,
-        includeRealtimeMetrics: false,
-        includeHistorySnapshot: false
-      });
-      return;
-    }
-    if (isReady.value && shouldAutoRefresh()) {
-      void refreshBusinessDataSafely({
-        silent: true,
-        forceDeviceInfo: true,
-        includeRealtimeMetrics: false,
-        includeHistorySnapshot: false
-      });
-      return;
-    }
+    appendRingDiagnosticLog('RW FLOW', 'auto-refresh-resume-passive', {
+      ready: isReady.value,
+      protocol: getResolvedCurrentProtocol(),
+      effectiveProtocol: getCurrentOrBoundProtocol(),
+      shouldRecoverRwRefresh,
+      wouldAutoRefresh: shouldAutoRefresh()
+    });
     scheduleRwMaintainRefresh();
   };
 
