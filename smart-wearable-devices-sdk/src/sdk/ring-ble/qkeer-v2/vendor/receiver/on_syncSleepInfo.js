@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * @param {ArrayBuffer} arrayBuffer
  * 睡眠类型: 0x00 普通睡眠，0x01 其他睡眠
@@ -6,7 +7,7 @@
  * 睡眠时长: 分钟高位 分钟低位
  */
 export default function on_syncSleepInfo(arrayBuffer, packet_sum, packet_index) {
-    console.log('on_syncSleepInfo', arrayBuffer, packet_sum, packet_index);
+    qkeerV2VendorConsole.log('on_syncSleepInfo', arrayBuffer, packet_sum, packet_index);
 
     const dv = new DataView(arrayBuffer);
     if (dv.byteLength < 8)
@@ -19,7 +20,7 @@ export default function on_syncSleepInfo(arrayBuffer, packet_sum, packet_index) 
     map.status = dv.getUint8(offset + 5);
     map.timeLen = dv.getUint16(offset + 6, true);
 
-    console.log('on_syncSleepInfo', map);
+    qkeerV2VendorConsole.log('on_syncSleepInfo', map);
 
     return map;
 }

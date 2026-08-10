@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * 恢复出厂设置（CMD_SYNC_RESET, 0x0B）
  *
@@ -15,7 +16,7 @@ export default function to_syncReset(mapData = {}) {
     const dv = new DataView(db);
     dv.setUint8(0, value);
 
-    console.log('to_syncReset', mapData, db);
+    qkeerV2VendorConsole.log('to_syncReset', mapData, db);
 
     return db;
 }

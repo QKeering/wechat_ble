@@ -5,6 +5,7 @@ import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 export type UploadDataStatus = 'pending' | 'done' | 'partial' | 'failed' | 'empty';
 export type UploadRawLocalStatus = 'done' | 'none' | 'failed';
 export type UploadRawServerStatus = 'pending' | 'queued' | 'done' | 'failed' | 'none';
+export type UploadCoverageStatus = 'complete' | 'partial' | 'missing';
 
 export interface PendingUploadSession<T = Record<string, any>> {
   uploadSessionId: string;
@@ -26,6 +27,10 @@ export interface PendingUploadSession<T = Record<string, any>> {
   rawLocalStatus: UploadRawLocalStatus;
   rawStatus: UploadRawServerStatus;
   canDeleteDeviceBlocks: boolean;
+  deviceReadDone: boolean;
+  historyCompleted: boolean;
+  partialUpload: boolean;
+  coverageStatus: UploadCoverageStatus;
   retryCount: number;
   rawRetryCount: number;
   lastError?: string;
@@ -330,6 +335,10 @@ export const stagePendingUploadSession = <T = Record<string, any>>(
       ? existing.dataList
       : [];
   const rawLocalStatus: UploadRawLocalStatus = rawFrames.length > 0 ? 'done' : 'none';
+  const deviceReadDone = input.deviceReadDone ?? existing?.deviceReadDone ?? true;
+  const historyCompleted = input.historyCompleted ?? existing?.historyCompleted ?? deviceReadDone;
+  const coverageStatus = (input.coverageStatus || existing?.coverageStatus || (historyCompleted ? 'complete' : 'partial')) as UploadCoverageStatus;
+  const partialUpload = input.partialUpload ?? existing?.partialUpload ?? (!deviceReadDone || !historyCompleted || coverageStatus !== 'complete');
   const next: PendingUploadSession<T> = {
     uploadSessionId,
     userId: input.userId ?? existing?.userId,
@@ -346,7 +355,11 @@ export const stagePendingUploadSession = <T = Record<string, any>>(
     dataStatus: dataList.length > 0 ? existing?.dataStatus || 'pending' : 'empty',
     rawLocalStatus,
     rawStatus: rawFrames.length > 0 ? existing?.rawStatus || 'pending' : 'none',
-    canDeleteDeviceBlocks: Boolean(existing?.canDeleteDeviceBlocks),
+    canDeleteDeviceBlocks: Boolean(input.canDeleteDeviceBlocks ?? existing?.canDeleteDeviceBlocks) && !partialUpload,
+    deviceReadDone,
+    historyCompleted,
+    partialUpload,
+    coverageStatus,
     retryCount: Number(existing?.retryCount || 0),
     rawRetryCount: Number(existing?.rawRetryCount || 0),
     lastError: input.lastError || existing?.lastError,
@@ -433,23 +446,37 @@ export const markPendingUploadRawFailed = (uploadSessionId: string, error: unkno
     lastError: error instanceof Error ? error.message : String((error as any)?.errMsg || error || 'raw upload failed')
   }));
 
-export const buildUploadSyncMeta = (session: PendingUploadSession) => ({
-  uploadSessionId: session.uploadSessionId,
-  bindingId: session.bindingId,
-  bindingVersion: session.bindingVersion,
-  dataUserId: session.dataUserId,
-  protocol: session.protocol,
-  rawLocalStatus: session.rawLocalStatus,
-  rawFrameCount: session.rawFrames.length,
-  ...(session.rawFrames.length > 0 ? { rawFrames: session.rawFrames } : {}),
-  deviceBlockRefs: session.deviceBlockRefs,
-  uploadStatus: {
-    deviceReadDone: true,
-    dataStatus: session.dataStatus,
+export const buildUploadSyncMeta = (session: PendingUploadSession) => {
+  const deviceReadDone = session.deviceReadDone !== false;
+  const historyCompleted = session.historyCompleted !== false && deviceReadDone;
+  const coverageStatus = session.coverageStatus || (historyCompleted ? 'complete' : 'partial');
+  const partialUpload = session.partialUpload === true || !deviceReadDone || !historyCompleted || coverageStatus !== 'complete';
+  return {
+    uploadSessionId: session.uploadSessionId,
+    bindingId: session.bindingId,
+    bindingVersion: session.bindingVersion,
+    dataUserId: session.dataUserId,
+    protocol: session.protocol,
+    deviceReadDone,
+    historyCompleted,
+    partialUpload,
+    coverageStatus,
+    canDeleteDeviceBlocks: session.canDeleteDeviceBlocks && !partialUpload,
     rawLocalStatus: session.rawLocalStatus,
-    rawStatus: session.rawStatus
-  }
-});
+    rawFrameCount: session.rawFrames.length,
+    ...(session.rawFrames.length > 0 ? { rawFrames: session.rawFrames } : {}),
+    deviceBlockRefs: session.deviceBlockRefs,
+    uploadStatus: {
+      deviceReadDone,
+      historyCompleted,
+      partialUpload,
+      coverageStatus,
+      dataStatus: session.dataStatus,
+      rawLocalStatus: session.rawLocalStatus,
+      rawStatus: session.rawStatus
+    }
+  };
+};
 
 export const buildParsedUploadSyncMeta = (session: PendingUploadSession) => {
   const meta = { ...buildUploadSyncMeta(session) } as Record<string, unknown>;

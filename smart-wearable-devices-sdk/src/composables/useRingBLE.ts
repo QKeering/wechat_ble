@@ -330,6 +330,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       }
     });
   const syncHistoricalData = readLocalData;
+  const cancelReadLocalData = () => sdk.clearDataListener?.();
   const syncAllHealthData = () => runWithReady(() => sdk.syncAllHealthData());
   const syncHealthDataByType = (name?: CompatRwHistoryDataName) =>
     runWithReady(() => sdk.syncHealthDataByType(name ? normalizeCompatRwHistoryDataName(name) : undefined));
@@ -587,6 +588,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     reScan,
     waitForRwCompatHistoryIdle: waitForRwCompatHistoryQueueIdle,
     readLocalData,
+    cancelReadLocalData,
     connectDevice,
     handleConnectDevice,
     discoverServicesAndChars,

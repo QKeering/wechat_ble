@@ -8,12 +8,9 @@ export const ensureRingBusinessPageReady = async (ring: RingBusinessController =
 
   if (ring.isScanning.value) return false;
 
-  const restored = await ring.restoreLastBusinessDevice();
-  if (!restored && !ring.isScanning.value) {
-    await ring.scanForBusinessDevices();
-    return false;
-  }
-
+  // Non-home pages only keep the BLE channel available.
+  // History sync, upload and final "today data" refresh are owned by the home/global session.
+  const restored = await ring.restoreLastBusinessDevice({ refreshAfterRestore: false });
   return restored;
 };
 
@@ -30,11 +27,7 @@ export const registerRingHealthPullDownRefresh = () => {
 
   onPullDownRefresh(async () => {
     try {
-      if (ring.isReady.value) {
-        await ring.refreshBusinessData();
-      } else {
-        await ensureRingBusinessPageReady(ring);
-      }
+      await ensureRingBusinessPageReady(ring);
     } finally {
       uni.stopPullDownRefresh();
     }

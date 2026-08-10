@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * 取健康信息
  *
@@ -20,7 +21,7 @@ export default function to_syncHealthInfo(mapData) {
     db_vi.setUint32(0, mapData.startTimestamp >>> 0, true); // 开始时间
     db_vi.setUint32(4, mapData.endTimestamp >>> 0, true);   // 结束时间
 
-    console.log('to_syncHealthInfo', mapData, db);
+    qkeerV2VendorConsole.log('to_syncHealthInfo', mapData, db);
 
     return db;
 }

@@ -4,6 +4,18 @@ export const RING_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 export const RING_DIAGNOSTIC_VERBOSE_STORAGE_KEY = 'qkeer:ring-diagnostic-verbose';
 const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
 const RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH = 4000;
+const RING_DIAGNOSTIC_LOG_FLUSH_DELAY_MS = 2500;
+
+type RingDiagnosticLogEntry = {
+  id: number;
+  time: string;
+  source: string;
+  event: string;
+  details: string;
+};
+
+let diagnosticLogCache: RingDiagnosticLogEntry[] | null = null;
+let diagnosticLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const isRingDiagnosticNodeRuntime = () => Boolean((globalThis as any).process?.versions?.node);
 const padDiagnosticNumber = (value: number, length: number) => `${value}`.padStart(length, '0');
@@ -47,14 +59,32 @@ const DIAGNOSTIC_DEFAULT_HIDDEN_EVENTS = new Set([
   'business-aux-request-storage-hit',
   'girl-health-home-module-state',
   'business-overview-page-show-refresh-skip',
+  'home-sync-cooldown-mark',
+  'home-sync-cooldown-skip',
+  'home-sync-session-skipped',
+  'home-sync-session-claimed',
+  'home-sync-session-released',
+  'home-sync-global-session-skipped',
   'page-show',
   'page-show-already-connected',
   'page-show-skip-auto-refresh',
   'history-page-sync-skip',
   'history-page-upload-skip',
   'history-page-fallback-skip',
+  'history-page-query-result',
   'history-sync-skip',
   'history-sync-reuse-inflight',
+  'legacy-local-data-stable-wait-skip',
+  'legacy-local-data-stable-wait-progress',
+  'legacy-local-data-incomplete-flush-schedule-skip',
+  'legacy-local-data-incomplete-flush-scheduled',
+  'legacy-local-data-incomplete-flush-timer-fired',
+  'legacy-local-data-incomplete-flush-immediate',
+  'legacy-local-data-incomplete-flush-early',
+  'legacy-local-data-upload-pending',
+  'legacy-home-history-read-completed-skip',
+  'legacy-home-history-read-completed-marked',
+  'legacy-home-history-long-retry-skip',
   'refresh-skip-history-exclusive',
   'device-info-refresh-skip-history-exclusive',
   'device-info-wait-active-refresh',
@@ -226,14 +256,47 @@ const normalizeDiagnosticDetails = (details: unknown) => {
     : text;
 };
 
+const readDiagnosticLogCache = () => {
+  if (diagnosticLogCache) return diagnosticLogCache;
+  if (isRingDiagnosticNodeRuntime()) {
+    diagnosticLogCache = [];
+    return diagnosticLogCache;
+  }
+  try {
+    const raw = uni.getStorageSync?.(RING_DIAGNOSTIC_LOG_STORAGE_KEY);
+    diagnosticLogCache = Array.isArray(raw)
+      ? raw.filter((item): item is RingDiagnosticLogEntry => Boolean(item && typeof item === 'object')).slice(-RING_DIAGNOSTIC_LOG_MAX_COUNT)
+      : [];
+  } catch {
+    diagnosticLogCache = [];
+  }
+  return diagnosticLogCache;
+};
+
+export const flushRingDiagnosticLogs = () => {
+  if (isRingDiagnosticNodeRuntime() || !diagnosticLogCache) return;
+  try {
+    uni.setStorageSync?.(RING_DIAGNOSTIC_LOG_STORAGE_KEY, diagnosticLogCache.slice(-RING_DIAGNOSTIC_LOG_MAX_COUNT));
+  } catch {
+    // Diagnostic logging must never affect Bluetooth sync.
+  }
+};
+
+const scheduleDiagnosticLogFlush = () => {
+  if (isRingDiagnosticNodeRuntime() || diagnosticLogFlushTimer) return;
+  diagnosticLogFlushTimer = setTimeout(() => {
+    diagnosticLogFlushTimer = null;
+    flushRingDiagnosticLogs();
+  }, RING_DIAGNOSTIC_LOG_FLUSH_DELAY_MS);
+};
+
 export const appendRingDiagnosticLog = (source: string, event: string, details?: unknown) => {
   if (isRingDiagnosticNodeRuntime()) return;
   try {
     if (shouldHideDiagnosticLogByDefault(event)) return;
     const sampled = sampleDiagnosticLog(source, event, details);
     if (!sampled.keep) return;
-    const raw = uni.getStorageSync?.(RING_DIAGNOSTIC_LOG_STORAGE_KEY);
-    const logs = Array.isArray(raw) ? raw : [];
+    const logs = readDiagnosticLogCache();
     const entry = {
       id: Date.now() * 1000 + Math.floor(Math.random() * 1000),
       time: formatDiagnosticTime(),
@@ -242,7 +305,10 @@ export const appendRingDiagnosticLog = (source: string, event: string, details?:
       details: normalizeDiagnosticDetails(sampled.details)
     };
     logs.push(entry);
-    uni.setStorageSync?.(RING_DIAGNOSTIC_LOG_STORAGE_KEY, logs.slice(-RING_DIAGNOSTIC_LOG_MAX_COUNT));
+    if (logs.length > RING_DIAGNOSTIC_LOG_MAX_COUNT) {
+      logs.splice(0, logs.length - RING_DIAGNOSTIC_LOG_MAX_COUNT);
+    }
+    scheduleDiagnosticLogFlush();
     enqueueRwDiagnosticUpload(entry);
   } catch {
     // Diagnostic logging must never affect Bluetooth sync.

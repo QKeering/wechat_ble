@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /*
 数据共 8 字节，各字段含义：
 位置1：状态（1 字节）
@@ -36,11 +37,11 @@
  * @param {number} packet_index
  */
 export default function on_syncMeasureInfo(arrayBuffer, packet_sum, packet_index) {
-    console.log('on_syncMeasureInfo', arrayBuffer, packet_sum, packet_index);
+    qkeerV2VendorConsole.log('on_syncMeasureInfo', arrayBuffer, packet_sum, packet_index);
 
     const dv = new DataView(arrayBuffer);
     if (dv.byteLength < 8) {
-        console.warn('on_syncMeasureInfo: length error', dv.byteLength);
+        qkeerV2VendorConsole.warn('on_syncMeasureInfo: length error', dv.byteLength);
         return;
     }
 
@@ -134,7 +135,7 @@ export default function on_syncMeasureInfo(arrayBuffer, packet_sum, packet_index
     map.alarmText =
         alarm === 0x00 ? '无异常' : alarmTextList.join('、') || '未知报警';
 
-    console.log('on_syncMeasureInfo parsed', map);
+    qkeerV2VendorConsole.log('on_syncMeasureInfo parsed', map);
 
     return map;
 }

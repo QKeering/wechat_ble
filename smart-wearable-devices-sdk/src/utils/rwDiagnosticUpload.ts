@@ -17,11 +17,15 @@ const SESSION_STORAGE_KEY = 'qkeer:rw-diagnostic-session-id';
 const MAX_QUEUE_COUNT = 600;
 const BATCH_SIZE = 120;
 const FLUSH_DELAY_MS = 2500;
+const QUEUE_PERSIST_DELAY_MS = 2500;
 const REQUEST_TIMEOUT_MS = 3000;
 
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let queuePersistTimer: ReturnType<typeof setTimeout> | null = null;
 let flushing = false;
 let pendingFlush = false;
+let queueCache: RwDiagnosticUploadEntry[] | null = null;
+let diagnosticSessionIdCache = '';
 
 const isNodeRuntime = () => Boolean((globalThis as any).process?.versions?.node);
 
@@ -35,31 +39,51 @@ const getRwDiagnosticLogsUrl = () => {
 
 const readQueue = (): RwDiagnosticUploadEntry[] => {
   if (isNodeRuntime()) return [];
+  if (queueCache) return queueCache;
   try {
     const raw = uni.getStorageSync?.(QUEUE_STORAGE_KEY);
-    return Array.isArray(raw) ? raw.filter((item) => item && typeof item === 'object') : [];
+    queueCache = Array.isArray(raw) ? raw.filter((item) => item && typeof item === 'object').slice(-MAX_QUEUE_COUNT) : [];
   } catch {
-    return [];
+    queueCache = [];
   }
+  return queueCache;
 };
 
-const writeQueue = (queue: RwDiagnosticUploadEntry[]) => {
-  if (isNodeRuntime()) return;
+const persistQueueNow = () => {
+  if (isNodeRuntime() || !queueCache) return;
   try {
-    uni.setStorageSync?.(QUEUE_STORAGE_KEY, queue.slice(-MAX_QUEUE_COUNT));
+    uni.setStorageSync?.(QUEUE_STORAGE_KEY, queueCache.slice(-MAX_QUEUE_COUNT));
   } catch {
     // Upload queue must never affect diagnostics.
   }
 };
 
+const writeQueue = (queue: RwDiagnosticUploadEntry[], immediate = true) => {
+  if (isNodeRuntime()) return;
+  queueCache = queue.slice(-MAX_QUEUE_COUNT);
+  if (immediate) {
+    persistQueueNow();
+  } else if (!queuePersistTimer) {
+    queuePersistTimer = setTimeout(() => {
+      queuePersistTimer = null;
+      persistQueueNow();
+    }, QUEUE_PERSIST_DELAY_MS);
+  }
+};
+
 export const getRwDiagnosticUploadSessionId = () => {
   if (isNodeRuntime()) return '';
+  if (diagnosticSessionIdCache) return diagnosticSessionIdCache;
   try {
     const existing = uni.getStorageSync?.(SESSION_STORAGE_KEY);
-    if (existing) return String(existing);
+    if (existing) {
+      diagnosticSessionIdCache = String(existing);
+      return diagnosticSessionIdCache;
+    }
     const created = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    diagnosticSessionIdCache = created;
     uni.setStorageSync?.(SESSION_STORAGE_KEY, created);
-    return created;
+    return diagnosticSessionIdCache;
   } catch {
     return '';
   }
@@ -149,8 +173,9 @@ export const flushRwDiagnosticUploadQueue = async () => {
     const batch = queue.slice(0, BATCH_SIZE);
     const ok = await requestRwDiagnosticUpload(batch);
     if (!ok) return;
-    writeQueue(queue.slice(batch.length));
-    if (readQueue().length > 0) {
+    queue.splice(0, batch.length);
+    persistQueueNow();
+    if (queue.length > 0) {
       pendingFlush = true;
     }
   } finally {
@@ -175,7 +200,10 @@ export const enqueueRwDiagnosticUpload = (entry: RwDiagnosticUploadEntry) => {
   if (isNodeRuntime()) return;
   const queue = readQueue();
   queue.push(normalizeUploadEntry(entry));
-  writeQueue(queue);
+  if (queue.length > MAX_QUEUE_COUNT) {
+    queue.splice(0, queue.length - MAX_QUEUE_COUNT);
+  }
+  writeQueue(queue, false);
   scheduleRwDiagnosticUploadFlush();
 };
 

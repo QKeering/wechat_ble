@@ -1018,10 +1018,13 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
   const updateDeviceTime = async (timestampMs = Date.now(), timezone = 8) => {
     const payload = concatBytes(numberToUint64LE(timestampMs), new Uint8Array([timezone & 0xff]));
-    await sendBytes(buildLegacyCommandBytes(0x10, 0x00, { frameType: 0x01, payload }), 'device-time-write');
-    return new Promise<unknown>((resolve) => {
-      setTimeout(() => resolve(readDeviceTime()), 500);
+    const result = await sendBytes(buildLegacyCommandBytes(0x10, 0x00, { frameType: 0x01, payload }), 'device-time-write');
+    appendRingDiagnosticLog('L19 BLE', 'legacy-device-time-write-only', {
+      timestampMs,
+      timezone,
+      reason: 'skip-readback-to-avoid-history-sync-blocking'
     });
+    return result;
   };
 
   const sendFactoryResetWithTimeCommand = () => {

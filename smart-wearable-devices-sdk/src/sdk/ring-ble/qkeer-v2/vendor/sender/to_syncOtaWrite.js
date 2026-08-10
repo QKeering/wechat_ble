@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * OTA 写入文件（CMD_SYNC_OTA_WRITE, 0x6E）
  *
@@ -7,6 +8,6 @@
  * @param {ArrayBuffer} mapData.data 固件整包数据，长度超长发送时会自动分包
  */
 export default function to_syncOtaWrite(mapData = {}) {
-    console.log('to_syncOtaWrite', mapData);
+    qkeerV2VendorConsole.log('to_syncOtaWrite', mapData);
     return mapData.data;
 }

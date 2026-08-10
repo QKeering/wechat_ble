@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * Ecg CMD_SYNC_ECG, 0x6）
  *
@@ -20,7 +21,7 @@ export default function to_syncEcg(mapData = {}) {
     const dv = new DataView(db);
     dv.setUint8(0, value);
 
-    console.log('to_syncEcg', mapData, db);
+    qkeerV2VendorConsole.log('to_syncEcg', mapData, db);
 
     return db;
 }

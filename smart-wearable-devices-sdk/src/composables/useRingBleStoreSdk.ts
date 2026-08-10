@@ -116,6 +116,12 @@ const normalizeRecordIdentity = (value: unknown) => {
 
 const isColonSeparatedBleMac = (value?: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){2,5}$/.test(String(value || '').trim());
 
+const hasConflictingMacLikeCommunicationId = (device: RingDeviceInfo, boundStableMac: string) => {
+  const communicationId = String(device.deviceId || device.platformDeviceId || '').trim();
+  if (!communicationId || !boundStableMac || !isColonSeparatedBleMac(communicationId)) return false;
+  return !hasMatchingStableRecordIdentity([boundStableMac], [communicationId]);
+};
+
 const getLocalDataNumber = (...values: unknown[]) => {
   for (const value of values) {
     if (value == null || value === '') continue;
@@ -179,6 +185,11 @@ const isSdkDeviceInfoAllowedForBoundDevice = (
   if (!device?.deviceId) return true;
   const boundStableMac = getStableDeviceMacFromSource(boundDevice as Record<string, any> | null);
   if (!boundStableMac) return true;
+
+  // Android 场景下微信 deviceId 常直接是 MAC。若它与后端绑定 MAC 不一致，
+  // 说明 SDK/store 当前运行态已经串号，不能再同步进 ringStore。
+  // iOS deviceId 通常不是 MAC 形态，不走这个拦截。
+  if (hasConflictingMacLikeCommunicationId(device, boundStableMac)) return false;
 
   const boundDeviceId = String(boundDevice?.deviceId || boundDevice?.platformDeviceId || '').trim();
   if (boundDeviceId && boundDeviceId === String(device.deviceId || device.platformDeviceId || '').trim()) return true;
@@ -550,7 +561,7 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
 
   const storeSyncScope = effectScope(true);
   storeSyncScope.run(() => {
-  watch(sdk.devices, (value) => ringStore.setDevices(value), { deep: true, immediate: true });
+  watch(sdk.devices, (value) => ringStore.setDevices(value), { immediate: true });
   watch(
     sdk.deviceInfo,
     (value) => {
@@ -584,9 +595,9 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
         ringStore.setIosMacId(stableMac);
       }
     },
-    { deep: true, immediate: true }
+    { immediate: true }
   );
-  watch(sdk.receivedData, (value) => ringStore.setReceivedData(value), { deep: true, immediate: true });
+  watch(sdk.receivedData, (value) => ringStore.setReceivedData(value), { immediate: true });
   watch(
     sdk.receivedData,
     (value) => {
@@ -659,9 +670,9 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
         ringStore.setLastReadTimestamp(latestUnixTime);
       }
     },
-    { deep: true, immediate: true }
+    { immediate: true }
   );
-  watch(sdk.normalizedData, (value) => ringStore.setNormalizedData(value), { deep: true, immediate: true });
+  watch(sdk.normalizedData, (value) => ringStore.setNormalizedData(value), { immediate: true });
   watch(sdk.isScanning, (value) => ringStore.setScanning(value), { immediate: true });
   watch(sdk.isBluetoothReady, (value) => ringStore.setBluetoothReady(value), { immediate: true });
   watch(sdk.reconnectStatus, (value) => ringStore.setReconnectStatus(value), { immediate: true });

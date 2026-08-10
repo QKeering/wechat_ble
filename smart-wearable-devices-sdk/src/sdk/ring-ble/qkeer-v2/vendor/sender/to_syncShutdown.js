@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * 设备关机（CMD_SYNC_SHUTDOWN, 0x09）
  *
@@ -14,7 +15,7 @@ export default function to_syncShutdown(mapData = {}) {
     const dv = new DataView(db);
     dv.setUint8(0, value);
 
-    console.log('to_syncShutdown', mapData, db);
+    qkeerV2VendorConsole.log('to_syncShutdown', mapData, db);
 
     return db;
 }

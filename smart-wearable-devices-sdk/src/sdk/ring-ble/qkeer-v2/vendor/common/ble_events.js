@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from './debug_console.js';
 
 function bleConnected(deviceInfo) {
 	uni.$emit('deviceConnected', {
@@ -13,7 +14,7 @@ function bleDisconnected(deviceId) {
 }
 
 function otaStatus(status) {
-	console.log("otaStatus", status);
+	qkeerV2VendorConsole.log("otaStatus", status);
 	uni.$emit('otaStatus', {
 		status: status
 	});

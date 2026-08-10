@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * 预览当天最后记录数据（CMD_SYNC_LAST_DATA, 0x70）
  *
@@ -13,7 +14,7 @@ export default function to_syncLastData(mapData = {}) {
     const dv = new DataView(db);
     dv.setUint8(0, value);
 
-    console.log('to_syncLastData', mapData, db);
+    qkeerV2VendorConsole.log('to_syncLastData', mapData, db);
 
     return db;
 }

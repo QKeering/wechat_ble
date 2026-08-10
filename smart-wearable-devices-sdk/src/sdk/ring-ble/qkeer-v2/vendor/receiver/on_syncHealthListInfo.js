@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 import util_device_info from '../utils/util_device_info.js';
 import receiver_util from './ble_receiver_util.js';
 
@@ -7,7 +8,7 @@ let g_packetArrayBuffer = null;
  * @param {ArrayBuffer} arrayBuffer
  */
 export default function on_syncHealthListInfo(arrayBuffer, packet_sum, packet_index) {
-    console.log('on_syncHealthListInfo', arrayBuffer, packet_sum, packet_index);
+    qkeerV2VendorConsole.log('on_syncHealthListInfo', arrayBuffer, packet_sum, packet_index);
 
     g_packetArrayBuffer = receiver_util.parseReceiverList(g_packetArrayBuffer, arrayBuffer, packet_sum, packet_index);
     if (packet_index < packet_sum - 1) return;
@@ -26,7 +27,7 @@ export default function on_syncHealthListInfo(arrayBuffer, packet_sum, packet_in
         list.push(map);
     }
 
-    console.log('on_syncHealthListInfo', list);
+    qkeerV2VendorConsole.log('on_syncHealthListInfo', list);
 
     return list;
 }

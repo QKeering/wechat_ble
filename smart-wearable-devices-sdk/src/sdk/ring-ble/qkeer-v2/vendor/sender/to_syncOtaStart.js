@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * OTA 指令（CMD_SYNC_OTA, 0x6D）
  *
@@ -20,7 +21,7 @@ export default function to_syncOtaStart(mapData = {}) {
     const dv = new DataView(db);
     dv.setUint8(0, value);
 
-    console.log('to_syncOtaStart', mapData, db);
+    qkeerV2VendorConsole.log('to_syncOtaStart', mapData, db);
 
     return db;
 }

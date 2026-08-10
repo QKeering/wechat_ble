@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 /**
  * 监测定时 0x0A 回复解析
  *
@@ -12,7 +13,7 @@
  * @param {ArrayBuffer} arrayBuffer
  */
 export default function on_syncMeasureTimer(arrayBuffer, packet_sum, packet_index) {
-    console.log('on_syncMeasureTimer', arrayBuffer, packet_sum, packet_index);
+    qkeerV2VendorConsole.log('on_syncMeasureTimer', arrayBuffer, packet_sum, packet_index);
 
     const dv = new DataView(arrayBuffer);
     if (dv.byteLength < 6) {
@@ -35,7 +36,7 @@ export default function on_syncMeasureTimer(arrayBuffer, packet_sum, packet_inde
         frequency,
     };
 
-    console.log('on_syncMeasureTimer', map);
+    qkeerV2VendorConsole.log('on_syncMeasureTimer', map);
 
     return map;
 }

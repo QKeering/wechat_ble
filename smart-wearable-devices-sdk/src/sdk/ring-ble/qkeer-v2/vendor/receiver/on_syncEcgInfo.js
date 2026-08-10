@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 import receiver_util from './ble_receiver_util.js';
 
 let g_packetArrayBuffer = null;
@@ -6,7 +7,7 @@ let g_packetArrayBuffer = null;
  * @param {ArrayBuffer} arrayBuffer
  */
 export default function on_syncEcgInfo(arrayBuffer, packet_sum, packet_index) {
-    console.log('on_syncEcgInfo', arrayBuffer, packet_sum, packet_index);
+    qkeerV2VendorConsole.log('on_syncEcgInfo', arrayBuffer, packet_sum, packet_index);
 
     g_packetArrayBuffer = receiver_util.parseReceiverList(g_packetArrayBuffer, arrayBuffer, packet_sum, packet_index);
     if (packet_index < packet_sum - 1) return;
@@ -15,7 +16,7 @@ export default function on_syncEcgInfo(arrayBuffer, packet_sum, packet_index) {
 
     // 后续实现
 
-    console.log('on_syncEcgInfo', list);
+    qkeerV2VendorConsole.log('on_syncEcgInfo', list);
 
     return list;
 }

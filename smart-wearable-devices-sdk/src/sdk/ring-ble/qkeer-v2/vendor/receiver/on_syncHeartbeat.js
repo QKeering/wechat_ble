@@ -1,3 +1,4 @@
+import qkeerV2VendorConsole from '../common/debug_console.js';
 import util_device_info from '../utils/util_device_info.js';
 import device_info from '../utils/util_device_info.js';
 
@@ -9,7 +10,7 @@ import device_info from '../utils/util_device_info.js';
  * @param {number} packet_index
  */
 export default function on_syncHeartbeat(arrayBuffer, packet_sum, packet_index) {
-    console.log('on_syncHeartbeat', arrayBuffer, packet_sum, packet_index);
+    qkeerV2VendorConsole.log('on_syncHeartbeat', arrayBuffer, packet_sum, packet_index);
 
     const dv = new DataView(arrayBuffer);
     if (dv.byteLength < 14) {
@@ -85,7 +86,7 @@ export default function on_syncHeartbeat(arrayBuffer, packet_sum, packet_index) 
         }
     }
 
-    console.log('on_syncHeartbeat', map);
+    qkeerV2VendorConsole.log('on_syncHeartbeat', map);
 
     return map;
 }
