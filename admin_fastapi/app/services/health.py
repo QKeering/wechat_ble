@@ -76,6 +76,7 @@ L19_SLEEP_WINDOW_START_HOUR = 21
 L19_SLEEP_WINDOW_END_HOUR = 11
 L19_SLEEP_DEFAULT_SAMPLE_MINUTES = 5
 L19_SLEEP_MAX_POINT_GAP_MINUTES = 90
+L19_SLEEP_MAX_AWAKE_BREAK_MINUTES = L19_SLEEP_MAX_POINT_GAP_MINUTES
 SLEEP_ACTIVE_STAGE_KEYS = {"REM", "LIGHT", "DEEP", "NAP"}
 L19_RAW_RECORD_MIN_DATE = date(2020, 1, 1)
 RING_HISTORY_RAW_FRAME_TABLE = "ring_history_raw_frame"
@@ -798,35 +799,105 @@ def _record_time_from_submit_item(item: dict[str, Any]) -> datetime | None:
     return coerce_datetime(item.get("recordTime") or item.get("record_time") or item.get("time") or item.get("timestamp"))
 
 
-def clip_l19_sleep_segment_records_to_active_sleep(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    active_ranges: list[tuple[datetime, datetime]] = []
-    for item in segments:
-        stage_key = sleep_type_key(item.get("sleepState") if item.get("sleepState") is not None else item.get("sleepType"))
-        start_time = coerce_datetime(item.get("startTime"))
-        end_time = coerce_datetime(item.get("endTime"))
-        if stage_key in SLEEP_ACTIVE_STAGE_KEYS and start_time is not None and end_time is not None and end_time > start_time:
-            active_ranges.append((start_time, end_time))
-    if not active_ranges:
-        return []
+def _primary_l19_sleep_session(intervals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one continuous main sleep session and cut long awake breaks.
 
-    sleep_start = min(item[0] for item in active_ranges)
-    sleep_end = max(item[1] for item in active_ranges)
-    clipped_segments: list[dict[str, Any]] = []
+    L19 sleep data is read from a broad 21:00-11:00 window. If the user wakes
+    for several hours, the device can keep reporting AWAKE points; treating the
+    first and last active points as one session makes the detail page show
+    huge awake blocks. A continuous awake run >= L19_SLEEP_MAX_AWAKE_BREAK_MINUTES
+    splits the session. We display the session with the largest active sleep
+    duration, which matches the user's main sleep block.
+    """
+    ordered = sorted(intervals or [], key=lambda item: coerce_datetime(item.get("start")) or datetime.min)
+    sessions: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    pending_awake: list[dict[str, Any]] = []
+    pending_awake_minutes = 0
+    has_active = False
+
+    def active_minutes(items: list[dict[str, Any]]) -> int:
+        return sum(int(item.get("minutes") or 0) for item in items if item.get("stage_key") in SLEEP_ACTIVE_STAGE_KEYS)
+
+    def flush_current() -> None:
+        nonlocal current, pending_awake, pending_awake_minutes, has_active
+        if has_active and active_minutes(current) > 0:
+            sessions.append(current)
+        current = []
+        pending_awake = []
+        pending_awake_minutes = 0
+        has_active = False
+
+    previous_end: datetime | None = None
+    for item in ordered:
+        start_time = coerce_datetime(item.get("start"))
+        end_time = coerce_datetime(item.get("end"))
+        if start_time is None or end_time is None or end_time <= start_time:
+            continue
+        minutes = max(1, round((end_time - start_time).total_seconds() / 60))
+        normalized = {**item, "start": start_time, "end": end_time, "minutes": minutes}
+        stage_key = str(normalized.get("stage_key") or "")
+
+        if previous_end is not None:
+            gap_minutes = round((start_time - previous_end).total_seconds() / 60)
+            if gap_minutes >= L19_SLEEP_MAX_AWAKE_BREAK_MINUTES:
+                flush_current()
+
+        if stage_key in SLEEP_ACTIVE_STAGE_KEYS:
+            if pending_awake:
+                if pending_awake_minutes >= L19_SLEEP_MAX_AWAKE_BREAK_MINUTES:
+                    flush_current()
+                else:
+                    current.extend(pending_awake)
+                pending_awake = []
+                pending_awake_minutes = 0
+            current.append(normalized)
+            has_active = True
+        elif stage_key == "AWAKE":
+            if has_active:
+                pending_awake.append(normalized)
+                pending_awake_minutes += minutes
+        previous_end = end_time
+
+    # trailing awake is outside the effective sleep session
+    pending_awake = []
+    pending_awake_minutes = 0
+    flush_current()
+
+    if not sessions:
+        return []
+    return max(sessions, key=lambda items: (active_minutes(items), sum(int(item.get("minutes") or 0) for item in items)))
+
+
+def clip_l19_sleep_segment_records_to_active_sleep(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    intervals: list[dict[str, Any]] = []
     for item in segments:
         start_time = coerce_datetime(item.get("startTime"))
         end_time = coerce_datetime(item.get("endTime"))
-        if start_time is None or end_time is None:
+        if start_time is None or end_time is None or end_time <= start_time:
             continue
-        clipped_start = max(start_time, sleep_start)
-        clipped_end = min(end_time, sleep_end)
-        duration = max(0, round((clipped_end - clipped_start).total_seconds() / 60))
-        if duration <= 0:
-            continue
-        clipped_segments.append({
+        duration = max(1, round((end_time - start_time).total_seconds() / 60))
+        intervals.append({
             **item,
-            "recordTime": clipped_start.strftime("%Y-%m-%d %H:%M:%S"),
-            "startTime": clipped_start.strftime("%Y-%m-%d %H:%M:%S"),
-            "endTime": clipped_end.strftime("%Y-%m-%d %H:%M:%S"),
+            "start": start_time,
+            "end": end_time,
+            "stage_key": sleep_type_key(item.get("sleepState") if item.get("sleepState") is not None else item.get("sleepType")),
+            "minutes": duration,
+        })
+
+    primary = _primary_l19_sleep_session(intervals)
+    clipped_segments: list[dict[str, Any]] = []
+    for item in primary:
+        start_time = coerce_datetime(item.get("start"))
+        end_time = coerce_datetime(item.get("end"))
+        if start_time is None or end_time is None or end_time <= start_time:
+            continue
+        duration = max(1, round((end_time - start_time).total_seconds() / 60))
+        clipped_segments.append({
+            **{key: value for key, value in item.items() if key not in {"start", "end", "stage_key", "minutes"}},
+            "recordTime": start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "startTime": start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "endTime": end_time.strftime("%Y-%m-%d %H:%M:%S"),
             "sleepDuration": duration,
         })
     return clipped_segments
@@ -1331,14 +1402,15 @@ def raw_sleep_state_intervals_from_rows(rows: list[dict[str, Any]] | Any) -> lis
             "minutes": minutes,
         })
 
-    active_intervals = [item for item in intervals if item.get("stage_key") in SLEEP_ACTIVE_STAGE_KEYS]
+    primary_intervals = _primary_l19_sleep_session(intervals)
+    active_intervals = [item for item in primary_intervals if item.get("stage_key") in SLEEP_ACTIVE_STAGE_KEYS]
     if not active_intervals:
         return []
 
     sleep_start = min(item["start"] for item in active_intervals)
     sleep_end = max(item["end"] for item in active_intervals)
     clipped: list[dict[str, Any]] = []
-    for item in intervals:
+    for item in primary_intervals:
         start_time = max(item["start"], sleep_start)
         end_time = min(item["end"], sleep_end)
         if end_time <= start_time:

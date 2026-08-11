@@ -248,6 +248,11 @@ export type motionSummary = {
 };
 // 获取压力详情
 export type stressDetail = {
+  stressEmotion?: string; // 算法返回的情绪/状态文案
+  emotion?: string; // 算法返回的情绪/状态文案
+  mood?: string; // 算法返回的情绪/状态文案
+  stressMood?: string; // 算法返回的情绪/状态文案
+  algorithm?: Record<string, any>;
   stressValue?: number; // 压力值
   stressLevel?: string; // 压力等级
   stressChart?: Point[]; // 压力图表数据（数组项为 Point 类型）
@@ -263,6 +268,11 @@ export type stressProportion = {
 };
 // 获取压力总结
 export type stressSummaryType = {
+  stressEmotion?: string; // 算法返回的情绪/状态文案
+  emotion?: string; // 算法返回的情绪/状态文案
+  mood?: string; // 算法返回的情绪/状态文案
+  stressMood?: string; // 算法返回的情绪/状态文案
+  algorithm?: Record<string, any>;
   todayStressChart?: Point[]; // 今天压力图表
   weekStressChart?: Point[]; // 本周压力图表
   todayStressScore?: number; // 今天压力得分

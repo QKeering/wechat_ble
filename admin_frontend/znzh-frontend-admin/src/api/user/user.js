@@ -99,3 +99,11 @@ export function getUserHealthRawFrames(query) {
     params: query
   })
 }
+
+export function getUserBatteryLogList(query) {
+  return request({
+    url: '/admin/user/batteryLog/list',
+    method: 'get',
+    params: query
+  })
+}

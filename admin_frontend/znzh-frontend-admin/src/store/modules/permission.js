@@ -34,8 +34,8 @@ const permission = {
       return new Promise(resolve => {
         // 向后端请求路由数据
         getRouters().then(res => {
-          const sdata = ensureHealthDataRoute(JSON.parse(JSON.stringify(res.data)))
-          const rdata = ensureHealthDataRoute(JSON.parse(JSON.stringify(res.data)))
+          const sdata = ensureUserDataRoutes(JSON.parse(JSON.stringify(res.data)))
+          const rdata = ensureUserDataRoutes(JSON.parse(JSON.stringify(res.data)))
           const sidebarRoutes = filterAsyncRouter(sdata)
           const rewriteRoutes = filterAsyncRouter(rdata, false, true)
           const asyncRoutes = filterDynamicRoutes(dynamicRoutes)
@@ -52,36 +52,44 @@ const permission = {
   }
 }
 
-// 遍历后台传来的路由字符串，转换为组件对象
-function ensureHealthDataRoute(routes) {
+// 遍历后台传来的路由字符串，转换为组件对象；补齐用户管理下的固定业务页面
+function ensureUserDataRoutes(routes) {
   if (!Array.isArray(routes)) {
     return routes
   }
-  const healthRoute = {
-    name: 'HealthData',
-    path: 'healthData',
-    component: 'user/healthData/index',
-    meta: { title: '健康数据', icon: 'clipboard', noCache: false }
-  }
+  const userDataRoutes = [
+    {
+      name: 'HealthData',
+      path: 'healthData',
+      component: 'user/healthData/index',
+      meta: { title: '健康数据', icon: 'clipboard', noCache: false }
+    },
+    {
+      name: 'BatteryLog',
+      path: 'batteryLog',
+      component: 'user/batteryLog/index',
+      meta: { title: '电量日志', icon: 'battery', noCache: false }
+    }
+  ]
 
-  let existingHealthRoute = null
-  const normalizeHealthDataRoute = (items) => {
+  const existingRoutes = new Map()
+  const normalizeUserDataRoutes = (items) => {
     for (const route of items) {
-      if (route && (route.component === 'user/healthData/index' || route.path === 'healthData')) {
+      const matchedRoute = userDataRoutes.find(item =>
+        route && (route.component === item.component || route.path === item.path)
+      )
+      if (matchedRoute) {
         route.hidden = false
-        route.path = route.path || healthRoute.path
-        route.component = route.component || healthRoute.component
-        route.name = route.name || healthRoute.name
-        route.meta = { ...healthRoute.meta, ...(route.meta || {}), title: '健康数据' }
-        existingHealthRoute = route
-        return route
+        route.path = route.path || matchedRoute.path
+        route.component = route.component || matchedRoute.component
+        route.name = route.name || matchedRoute.name
+        route.meta = { ...matchedRoute.meta, ...(route.meta || {}), title: matchedRoute.meta.title }
+        existingRoutes.set(matchedRoute.path, route)
       }
-      const matched = Array.isArray(route.children) && normalizeHealthDataRoute(route.children)
-      if (matched) {
-        return matched
+      if (Array.isArray(route.children)) {
+        normalizeUserDataRoutes(route.children)
       }
     }
-    return null
   }
 
   const findUserParent = (items) => {
@@ -104,21 +112,23 @@ function ensureHealthDataRoute(routes) {
     return null
   }
 
-  normalizeHealthDataRoute(routes)
+  normalizeUserDataRoutes(routes)
   const parent = findUserParent(routes)
-  if (parent && existingHealthRoute) {
+  if (parent) {
     parent.hidden = false
     parent.alwaysShow = true
     parent.children = Array.isArray(parent.children) ? parent.children : []
-    const alreadyInParent = parent.children.some(child => child === existingHealthRoute || child.component === 'user/healthData/index' || child.path === 'healthData')
-    if (!alreadyInParent) {
-      parent.children.push(existingHealthRoute)
-    }
-  } else if (parent) {
-    parent.hidden = false
-    parent.alwaysShow = true
-    parent.children = Array.isArray(parent.children) ? parent.children : []
-    parent.children.push(healthRoute)
+    userDataRoutes.forEach(item => {
+      const route = existingRoutes.get(item.path) || { ...item, meta: { ...item.meta } }
+      const alreadyInParent = parent.children.some(child =>
+        child === route ||
+        child.component === item.component ||
+        child.path === item.path
+      )
+      if (!alreadyInParent) {
+        parent.children.push(route)
+      }
+    })
   }
   return routes
 }

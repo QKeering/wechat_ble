@@ -1,6 +1,6 @@
 <!-- 设备信息 -->
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { onShow, onUnload } from '@dcloudio/uni-app';
 import { getBindInfo, unbind } from '@/common/api/device';
 import { useRingBusinessController } from '@/composables/useRingBusinessController';
@@ -13,6 +13,7 @@ import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import { formatBatteryPercentForDisplay, formatBatteryStatusForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
+import { reportRealBatteryLog } from '@/utils/deviceBatteryLog';
 import {
   applyDeviceIdentityCacheToDevice,
   getDeviceIdentityCacheMacFromDevice,
@@ -62,6 +63,18 @@ const latestFirmware = computed(() => findLatestReceivedData(['firmware_version'
 const batteryValue = computed(() =>
   getFirstMetricValue(
     ring.metrics.value.battery,
+    (ring.deviceInfo.value as any)?.metrics?.battery,
+    (ring.deviceInfo.value as any)?.battery,
+    (ring.deviceInfo.value as any)?.batteryValue,
+    (ringStore.deviceInfo as any)?.metrics?.battery,
+    (ringStore.deviceInfo as any)?.battery,
+    (ringStore.deviceInfo as any)?.batteryValue,
+    (userStore.deviceInfo as any)?.metrics?.battery,
+    (userStore.deviceInfo as any)?.battery,
+    (userStore.deviceInfo as any)?.batteryValue,
+    boundInfo.value?.metrics?.battery,
+    boundInfo.value?.battery,
+    boundInfo.value?.batteryValue,
     ring.healthData.value?.battery,
     ring.healthData.value?.batteryValue,
     userStore.latestMetrics?.battery,
@@ -73,17 +86,33 @@ const batteryValue = computed(() =>
   )
 );
 const batteryStatusRaw = computed(() =>
-    getFirstMetricValue(
-      ring.metrics.value.batteryStatus,
-      ring.metrics.value.chargingStatusText,
-      ring.healthData.value?.batteryStatus,
-      ring.healthData.value?.chargingStatusText,
-      userStore.healthData?.batteryStatus,
-      userStore.healthData?.chargingStatusText,
-      latestBattery.value?.metrics?.batteryStatus,
-      latestBattery.value?.metrics?.chargingStatusText,
-      latestBattery.value?.batteryStatus,
-      latestBattery.value?.chargingStatusText
+  getFirstMetricValue(
+    ring.metrics.value.batteryStatus,
+    ring.metrics.value.chargingStatusText,
+    (ring.deviceInfo.value as any)?.metrics?.batteryStatus,
+    (ring.deviceInfo.value as any)?.metrics?.chargingStatusText,
+    (ring.deviceInfo.value as any)?.batteryStatus,
+    (ring.deviceInfo.value as any)?.chargingStatusText,
+    (ringStore.deviceInfo as any)?.metrics?.batteryStatus,
+    (ringStore.deviceInfo as any)?.metrics?.chargingStatusText,
+    (ringStore.deviceInfo as any)?.batteryStatus,
+    (ringStore.deviceInfo as any)?.chargingStatusText,
+    (userStore.deviceInfo as any)?.metrics?.batteryStatus,
+    (userStore.deviceInfo as any)?.metrics?.chargingStatusText,
+    (userStore.deviceInfo as any)?.batteryStatus,
+    (userStore.deviceInfo as any)?.chargingStatusText,
+    boundInfo.value?.metrics?.batteryStatus,
+    boundInfo.value?.metrics?.chargingStatusText,
+    boundInfo.value?.batteryStatus,
+    boundInfo.value?.chargingStatusText,
+    ring.healthData.value?.batteryStatus,
+    ring.healthData.value?.chargingStatusText,
+    userStore.healthData?.batteryStatus,
+    userStore.healthData?.chargingStatusText,
+    latestBattery.value?.metrics?.batteryStatus,
+    latestBattery.value?.metrics?.chargingStatusText,
+    latestBattery.value?.batteryStatus,
+    latestBattery.value?.chargingStatusText
   )
 );
 const batteryText = computed(
@@ -354,6 +383,7 @@ const readBatteryOnly = async () => {
     const displayValue = formatBatteryStatusForDisplay(value, status, '-');
     if (value == null && displayValue === '-') throw new Error('设备返回的电量格式无效');
     singleReadResults.value = { ...singleReadResults.value, battery: displayValue };
+    reportDevicePageBatteryLog(value, 'device-manual-read');
     lastActionText.value = `电量读取成功：${displayValue}`;
     appendDeviceDiagnosticLog('battery-read-result', {
       value,
@@ -693,6 +723,22 @@ const getDeviceMacFromInfo = (device: Record<string, any> | null | undefined) =>
   );
 
 const getDevicePageUserId = () => String(userStore.userInfo?.id ?? userStore.userInfo?.userId ?? userStore.userInfo?.user_id ?? '').trim();
+
+const reportDevicePageBatteryLog = (battery: unknown, source = 'device-info') => {
+  void reportRealBatteryLog({
+    userId: getDevicePageUserId(),
+    mac: deviceMacText.value,
+    battery,
+    source
+  });
+};
+
+watch(
+  () => `${getDevicePageUserId()}|${deviceMacText.value}|${batteryValue.value ?? ''}`,
+  () => {
+    reportDevicePageBatteryLog(batteryValue.value, 'device-info-display');
+  }
+);
 
 const getDeviceIdFromInfo = (device: Record<string, any> | null | undefined) =>
   getFirstDeviceInfoValue(device?.deviceId, device?.platformDeviceId, device?.wxDeviceId, device?.bleDeviceId, device?.bluetoothDeviceId);

@@ -80,7 +80,38 @@ const pressureIcon = computed(() => {
   // 默认返回良好
   return '/static/images/homeDetail/normal.png';
 });
+const PRESSURE_LEVEL_STATUS_TEXTS = new Set(['\u538b\u529b\u504f\u9ad8', '\u504f\u9ad8', '\u5f88\u9ad8', '\u4e2d\u7b49', '\u6b63\u5e38']);
+const STRESS_ALGORITHM_EMOTION_KEYS = [
+  'stressEmotion',
+  'pressureEmotion',
+  'emotion',
+  'emotionLabel',
+  'emotionStatus',
+  'emotionalState',
+  'mood',
+  'moodLabel',
+  'moodStatus',
+  'mentalState',
+  'stressMood'
+];
+const readStressEmotionText = (payload: any): string => {
+  if (!payload || typeof payload !== 'object') return '';
+  for (const key of STRESS_ALGORITHM_EMOTION_KEYS) {
+    const value = payload[key];
+    const text =
+      typeof value === 'string'
+        ? value
+        : value && typeof value === 'object'
+          ? value.text || value.label || value.name || value.value || value.status || value.state || ''
+          : '';
+    const normalized = String(text || '').trim();
+    if (normalized && !PRESSURE_LEVEL_STATUS_TEXTS.has(normalized.replace(/\s+/g, ''))) return normalized;
+  }
+  return readStressEmotionText(payload.algorithm);
+};
 const pressureText = computed(() => {
+  const emotionText = readStressEmotionText(stressDetailObj.value);
+  if (emotionText) return emotionText;
   const pressireLevel = pressureScore.value;
   // 严重
   if (pressireLevel < 60) {
@@ -99,7 +130,7 @@ const pressureText = computed(() => {
   return '优秀';
 });
 const statusClass = computed(() => {
-  const classMap = {
+  const classMap: Record<string, string> = {
     严重: 'status-bad',
     优秀: 'status-good',
     良好: 'status-normal'

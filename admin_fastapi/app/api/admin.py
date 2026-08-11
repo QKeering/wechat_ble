@@ -41,6 +41,7 @@ CRUD_RESOURCES: dict[str, dict[str, Any]] = {
     "user": {"table": "app_user", "like": {"phone", "nickName"}},
     "user/log": {"table": "user_log", "like": {"nickname", "deviceMac", "logMsg"}},
     "user/healthData": {"table": "health_daily_summary", "like": {"deviceMac", "healthLevel"}},
+    "user/batteryLog": {"table": "device_battery_log", "like": {"deviceMac", "source"}},
     "family/relation": {"table": "family_relation", "like": {"displayName", "relationType", "remark"}},
     "family/invite": {"table": "family_invite", "like": {"inviteCode", "targetPhone"}},
     "family/elderProfile": {"table": "elder_profile", "like": {"name", "phone"}},
@@ -980,6 +981,100 @@ def app_user_health_data_query(db: Session, query: dict[str, Any], paginate: boo
 @router.get("/user/historyHealthData")
 def app_user_history_health_data(request: Request, db: Session = Depends(get_db)):
     rows, total = app_user_health_data_query(db, dict(request.query_params))
+    return table(rows, total)
+
+
+DEVICE_BATTERY_LOG_SCHEMA_READY = False
+
+
+def ensure_device_battery_log_schema(db: Session) -> None:
+    global DEVICE_BATTERY_LOG_SCHEMA_READY
+    if DEVICE_BATTERY_LOG_SCHEMA_READY:
+        return
+    db.execute(
+        text(
+            """
+            create table if not exists device_battery_log (
+              id bigint primary key auto_increment,
+              user_id bigint not null,
+              device_mac varchar(64) not null,
+              device_mac_norm varchar(32) not null,
+              real_battery int not null,
+              record_time datetime not null,
+              source varchar(64) null,
+              create_time datetime not null default current_timestamp,
+              key idx_device_battery_user_time (user_id, record_time),
+              key idx_device_battery_mac_time (device_mac_norm, record_time),
+              key idx_device_battery_time (record_time)
+            ) engine=InnoDB default charset=utf8mb4
+            """
+        )
+    )
+    db.commit()
+    DEVICE_BATTERY_LOG_SCHEMA_READY = True
+
+
+def normalize_admin_device_mac_norm(value: Any) -> str:
+    return re.sub(r"[^0-9a-fA-F]", "", str(value or "")).lower()
+
+
+def app_user_battery_log_query(db: Session, query: dict[str, Any], paginate: bool = True) -> tuple[list[dict[str, Any]], int]:
+    ensure_device_battery_log_schema(db)
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+
+    user_id = query.get("userId") or query.get("user_id")
+    if user_id not in (None, ""):
+        clauses.append("l.user_id=:user_id")
+        params["user_id"] = user_id
+
+    device_mac = query.get("deviceMac") or query.get("device_mac") or query.get("mac")
+    if device_mac not in (None, ""):
+        mac_norm = normalize_admin_device_mac_norm(device_mac)
+        clauses.append("(l.device_mac like :device_mac or l.device_mac_norm like :device_mac_norm)")
+        params["device_mac"] = f"%{str(device_mac).strip()}%"
+        params["device_mac_norm"] = f"%{mac_norm}%"
+
+    begin_time = query.get("beginTime") or query.get("startDate") or query.get("params[beginTime]")
+    end_time = query.get("endTime") or query.get("endDate") or query.get("params[endTime]")
+    if begin_time:
+        clauses.append("l.record_time >= :begin_time")
+        params["begin_time"] = begin_time
+    if end_time:
+        clauses.append("l.record_time <= :end_time")
+        params["end_time"] = end_time
+
+    where = f" where {' and '.join(clauses)}" if clauses else ""
+    total = int(db.execute(text(f"select count(*) from device_battery_log l{where}"), params).scalar() or 0)
+    sql = f"""
+        select
+          l.id,
+          l.user_id,
+          u.code as user_code,
+          u.nick_name,
+          u.phone,
+          l.device_mac,
+          l.real_battery,
+          l.record_time,
+          l.source,
+          l.create_time
+        from device_battery_log l
+        left join app_user u on u.id=l.user_id
+        {where}
+        order by l.record_time desc, l.id desc
+    """
+    if paginate:
+        page_num = int(query.get("pageNum", 1) or 1)
+        page_size = int(query.get("pageSize", 10) or 10)
+        sql += " limit :limit offset :offset"
+        params.update({"limit": page_size, "offset": max(page_num - 1, 0) * page_size})
+    rows = db.execute(text(sql), params).all()
+    return [camelize_dict(dict(row._mapping)) for row in rows], total
+
+
+@router.get("/user/batteryLog/list")
+def app_user_battery_log_list(request: Request, db: Session = Depends(get_db)):
+    rows, total = app_user_battery_log_query(db, dict(request.query_params))
     return table(rows, total)
 
 

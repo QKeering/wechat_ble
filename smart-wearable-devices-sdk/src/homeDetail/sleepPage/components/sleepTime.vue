@@ -57,7 +57,9 @@ const STAGE_ALIASES: Record<string, string> = {
 
 type SleepTimelineSegment = { start: number; duration: number; type: string };
 type SleepTimelineTick = { key: string; label: string; left: number; isFirst: boolean; isLast: boolean };
+type SleepTimelinePoint = { time: number; type: string; duration?: number };
 const SUMMARY_ONLY_STAGE_ORDER = ['深睡', '浅睡', '快速眼动', '清醒', '小睡'];
+const AWAKE_STAGE_NAME = '清醒';
 
 const isLikelySummaryOnlyTimeline = (points: Array<{ time: number; type: string }>) => {
   if (points.length < 2 || points.length > SUMMARY_ONLY_STAGE_ORDER.length) return false;
@@ -184,6 +186,21 @@ const TIME_FIELD_KEYS = [
   'timestamp'
 ];
 
+const DURATION_FIELD_KEYS = [
+  'duration',
+  'durationMinute',
+  'durationMinutes',
+  'durationMins',
+  'duration_min',
+  'duration_mins',
+  'minutes',
+  'minute',
+  'sleepDuration',
+  'sleep_duration',
+  'stageDuration',
+  'stage_duration'
+];
+
 const formatTimestampLikeClock = (value: unknown) => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '';
   const timestamp = value > 100000000000 ? value : value > 1000000000 ? value * 1000 : 0;
@@ -204,6 +221,17 @@ const getPointTimeText = (item: any) => {
     if (hasClockTime(text)) return text;
   }
   return '';
+};
+
+const getPointDurationMinutes = (item: any) => {
+  if (!item || typeof item !== 'object') return 0;
+  for (const key of DURATION_FIELD_KEYS) {
+    const value = Number(item?.[key]);
+    if (Number.isFinite(value) && value > 0 && value <= 1440) return Math.round(value);
+  }
+  const seconds = Number(item?.durationSeconds ?? item?.duration_seconds ?? item?.durationSecond ?? item?.duration_second);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.max(1, Math.round(seconds / 60));
+  return 0;
 };
 
 const getSleepTimelineSourceData = () => {
@@ -306,7 +334,7 @@ const getFallbackStartMinutes = () => {
 const getFallbackSegmentsFromSummary = (): SleepTimelineSegment[] => {
   const segments: SleepTimelineSegment[] = [];
   let currentStart = getFallbackStartMinutes();
-  const stages = ['深睡', '浅睡', '快速眼动', '清醒', '小睡'];
+  const stages = ['深睡', '浅睡', '快速眼动', '小睡'];
   stages.forEach((stage) => {
     const duration = getStageDuration(stage);
     if (duration > 0) {
@@ -317,7 +345,7 @@ const getFallbackSegmentsFromSummary = (): SleepTimelineSegment[] => {
   return segments;
 };
 
-const getTypicalPointGap = (points: Array<{ time: number; type: string }>) => {
+const getTypicalPointGap = (points: SleepTimelinePoint[]) => {
   const gaps = points
     .slice(0, -1)
     .map((point, index) => points[index + 1].time - point.time)
@@ -360,11 +388,12 @@ const processTimeSegments = (): SleepTimelineSegment[] => {
       if (!Number.isFinite(rawTime) || !type) return null;
       return {
         time: normalizeTime(rawTime),
-        type
+        type,
+        duration: getPointDurationMinutes(item)
       };
     })
     .filter(Boolean)
-    .sort((a: any, b: any) => a.time - b.time) as Array<{ time: number; type: string }>;
+    .sort((a: any, b: any) => a.time - b.time) as SleepTimelinePoint[];
 
   if (!detailPoints.length) {
     return [];
@@ -380,19 +409,17 @@ const processTimeSegments = (): SleepTimelineSegment[] => {
   const sleepEnd = Math.max(sleepStart + 1, sleepEndCandidate);
   const segments: SleepTimelineSegment[] = [];
 
-  if (detailPoints[0].time > sleepStart) {
-    segments.push({
-      start: sleepStart,
-      duration: detailPoints[0].time - sleepStart,
-      type: detailPoints[0].type
-    });
-  }
-
   detailPoints.forEach((point, index) => {
     if (point.time >= sleepEnd) return;
-    const nextTime = detailPoints[index + 1]?.time ?? sleepEnd;
+    const nextTime = detailPoints[index + 1]?.time;
     const segStart = Math.max(point.time, sleepStart);
-    const segEnd = Math.min(nextTime > segStart ? nextTime : segStart + typicalGap, sleepEnd);
+    const explicitEnd = point.duration && point.duration > 0 ? segStart + point.duration : 0;
+    const inferredEnd = nextTime && nextTime > segStart ? nextTime : segStart + typicalGap;
+    const maxAwakeGap = Math.max(typicalGap, 15);
+    const rawEnd =
+      explicitEnd ||
+      (point.type === AWAKE_STAGE_NAME ? Math.min(inferredEnd, segStart + maxAwakeGap) : inferredEnd);
+    const segEnd = Math.min(rawEnd > segStart ? rawEnd : segStart + typicalGap, sleepEnd);
     if (segEnd > segStart) {
       segments.push({
         start: segStart,

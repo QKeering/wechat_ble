@@ -338,6 +338,18 @@ export const unbind = async (params: { mac: string }, _config: HttpRequestConfig
   return result;
 };
 
+export const reportDeviceBatteryLog = async (
+  params: {
+    userId?: string | number;
+    mac?: string;
+    deviceMac?: string;
+    realBattery: number;
+    recordTime?: string;
+    source?: string;
+  },
+  config: HttpRequestConfigCompat = {}
+) => postAppApi('/app/device/batteryLog', params as any, config);
+
 export const getBindInfo = async (
   params: GetBindInfoParams = {},
   _config: HttpRequestConfigCompat = {}

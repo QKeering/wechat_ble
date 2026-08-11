@@ -32,6 +32,39 @@ const stressValue = computed(() => {
 });
 
 const stressLevel = computed(() => props.stressDetail?.stressLevel || '压力');
+const PRESSURE_LEVEL_STATUS_TEXTS = new Set(['\u538b\u529b\u504f\u9ad8', '\u504f\u9ad8', '\u5f88\u9ad8', '\u4e2d\u7b49', '\u6b63\u5e38']);
+const STRESS_ALGORITHM_EMOTION_KEYS = [
+  'stressEmotion',
+  'pressureEmotion',
+  'emotion',
+  'emotionLabel',
+  'emotionStatus',
+  'emotionalState',
+  'mood',
+  'moodLabel',
+  'moodStatus',
+  'mentalState',
+  'stressMood'
+];
+const readStressEmotionText = (payload: any): string => {
+  if (!payload || typeof payload !== 'object') return '';
+  for (const key of STRESS_ALGORITHM_EMOTION_KEYS) {
+    const value = payload[key];
+    const text =
+      typeof value === 'string'
+        ? value
+        : value && typeof value === 'object'
+          ? value.text || value.label || value.name || value.value || value.status || value.state || ''
+          : '';
+    const normalized = String(text || '').trim();
+    if (normalized && !PRESSURE_LEVEL_STATUS_TEXTS.has(normalized.replace(/\s+/g, ''))) return normalized;
+  }
+  return readStressEmotionText(payload.algorithm);
+};
+const stressEmotionLevel = computed(() => {
+  const fallback = String(stressLevel.value || '').trim();
+  return readStressEmotionText(props.stressDetail) || (fallback && !PRESSURE_LEVEL_STATUS_TEXTS.has(fallback.replace(/\s+/g, '')) ? fallback : '\u538b\u529b');
+});
 const formatIntegerMetric = (value: unknown, fallback = '00') => {
   if (value == null || value === '') return fallback;
   const numeric = Number(String(value).replace(/[^\d.-]/g, ''));
@@ -97,7 +130,7 @@ const initChart = async () => {
     <view class="p-20 r-50" style="background-color: #f5fdfb">
       <view class="ta-c">
         <text class="fs-72">{{ stressValue }}</text>
-        <text class="fs-28">{{ stressLevel }}</text>
+        <text class="fs-28">{{ stressEmotionLevel }}</text>
       </view>
       <view class="ta-c fs-28">压力值<slot></slot></view>
       <view class="flex ai-center jc-center">

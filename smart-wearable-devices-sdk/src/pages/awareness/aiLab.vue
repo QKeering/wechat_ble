@@ -14,7 +14,7 @@ const handleApplyClick = () => {
       </view>
 
       <view class="ai-lab-content">
-        <text class="ai-lab-title">小轻AI成长闺蜜</text>
+        <text class="ai-lab-title">AI Label</text>
         <text class="ai-lab-subtitle">会听你说，也更懂你的状态</text>
         <text class="ai-lab-desc">AI融合多维健康大数据，生成健康、美丽、成长建议</text>
       </view>

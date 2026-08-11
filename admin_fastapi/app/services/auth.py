@@ -276,7 +276,7 @@ def get_info(db: Session, user: dict[str, Any]) -> dict[str, Any]:
 
 
 def select_menu_rows(db: Session, user_id: int) -> list[dict[str, Any]]:
-    ensure_health_data_menu_permission(db)
+    ensure_user_data_menu_permissions(db)
     if user_id == 1:
         query = """
             select distinct m.menu_id, m.parent_id, m.menu_name, m.path, m.component, m.`query`, m.route_name,
@@ -304,48 +304,108 @@ def select_menu_rows(db: Session, user_id: int) -> list[dict[str, Any]]:
     return [camelize_row(row) for row in rows]
 
 
-def ensure_health_data_menu_permission(db: Session) -> None:
-    """Keep the health data menu visible for management roles after deployments.
+def ensure_user_data_menu_permissions(db: Session) -> None:
+    """Keep user data child menus visible after deployments.
 
-    Some existing environments already have the sys_menu row for user/healthData,
-    but roles created before the menu existed do not have sys_role_menu rows for it.
-    When that happens, non-user_id=1 management accounts can open user management
-    but cannot see the health data page. Grant the child menu to roles that already
-    have the user parent menu instead of broadening access to unrelated roles.
+    The admin sidebar is driven by sys_menu. New frontend pages and API endpoints
+    are not shown until sys_menu and sys_role_menu are present. Keep the known
+    user-data pages available under the existing user management parent.
     """
-    health_menu = db.execute(
-        text("select menu_id, parent_id from sys_menu where path = 'healthData' and component = 'user/healthData/index' limit 1")
-    ).first()
-    if health_menu is None:
-        return
-
-    menu_id = int(health_menu._mapping["menu_id"])
-    parent_id = int(health_menu._mapping["parent_id"] or 0)
-    if parent_id <= 0:
-        return
-
-    db.execute(
-        text("update sys_menu set visible = '0', status = '0' where menu_id = :menu_id"),
-        {"menu_id": menu_id},
-    )
-    db.execute(
+    user_parent_id = db.execute(
         text(
             """
-            insert into sys_role_menu(role_id, menu_id)
-            select distinct rm.role_id, :menu_id
-            from sys_role_menu rm
-            inner join sys_role r on r.role_id = rm.role_id
-            where rm.menu_id = :parent_id
-              and r.status = '0'
-              and r.del_flag = '0'
-              and not exists (
-                select 1 from sys_role_menu existing
-                where existing.role_id = rm.role_id and existing.menu_id = :menu_id
-              )
+            select parent_id
+            from sys_menu
+            where component in ('user/user/index', 'user/log/index')
+              and ifnull(parent_id, 0) > 0
+            order by parent_id
+            limit 1
             """
-        ),
-        {"menu_id": menu_id, "parent_id": parent_id},
-    )
+        )
+    ).scalar()
+    if not user_parent_id:
+        return
+    user_parent_id = int(user_parent_id)
+
+    menu_specs = [
+        {
+            "menu_name": "健康数据",
+            "path": "healthData",
+            "component": "user/healthData/index",
+            "route_name": "HealthData",
+            "order_num": 3,
+            "icon": "clipboard",
+        },
+        {
+            "menu_name": "电量日志",
+            "path": "batteryLog",
+            "component": "user/batteryLog/index",
+            "route_name": "BatteryLog",
+            "order_num": 4,
+            "icon": "battery",
+        },
+    ]
+
+    for spec in menu_specs:
+        row = db.execute(
+            text("select menu_id, parent_id from sys_menu where path = :path and component = :component limit 1"),
+            {"path": spec["path"], "component": spec["component"]},
+        ).first()
+        if row is None:
+            menu_id = int(db.execute(text("select ifnull(max(menu_id), 0) + 1 from sys_menu")).scalar() or 1)
+            db.execute(
+                text(
+                    """
+                    insert into sys_menu(
+                      menu_id, menu_name, parent_id, order_num, path, component, query, route_name,
+                      is_frame, is_cache, menu_type, visible, status, perms, icon,
+                      create_by, create_time, update_by, update_time, remark
+                    ) values(
+                      :menu_id, :menu_name, :parent_id, :order_num, :path, :component, null, :route_name,
+                      1, 0, 'C', '0', '0', '', :icon,
+                      'admin', sysdate(), '', null, ''
+                    )
+                    """
+                ),
+                {"menu_id": menu_id, "parent_id": user_parent_id, **spec},
+            )
+        else:
+            menu_id = int(row._mapping["menu_id"])
+            db.execute(
+                text(
+                    """
+                    update sys_menu
+                    set parent_id = :parent_id,
+                        menu_name = :menu_name,
+                        visible = '0',
+                        status = '0',
+                        component = :component,
+                        route_name = :route_name,
+                        icon = :icon
+                    where menu_id = :menu_id
+                    """
+                ),
+                {"menu_id": menu_id, "parent_id": user_parent_id, **spec},
+            )
+
+        db.execute(
+            text(
+                """
+                insert into sys_role_menu(role_id, menu_id)
+                select distinct rm.role_id, :menu_id
+                from sys_role_menu rm
+                inner join sys_role r on r.role_id = rm.role_id
+                where rm.menu_id = :parent_id
+                  and r.status = '0'
+                  and r.del_flag = '0'
+                  and not exists (
+                    select 1 from sys_role_menu existing
+                    where existing.role_id = rm.role_id and existing.menu_id = :menu_id
+                  )
+                """
+            ),
+            {"menu_id": menu_id, "parent_id": user_parent_id},
+        )
     db.commit()
 
 

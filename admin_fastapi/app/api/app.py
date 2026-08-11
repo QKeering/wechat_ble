@@ -354,10 +354,9 @@ def sleep_type_key(value) -> str:
 
 def sleep_minutes_by_type(rows) -> dict[str, int]:
     values = {"INVALID": 0, "AWAKE": 0, "REM": 0, "LIGHT": 0, "DEEP": 0, "NAP": 0}
-    for row in rows:
-        item = dict(row._mapping)
-        key = sleep_type_key(item.get("type"))
-        minutes = int(item.get("sleep_time") or 0)
+    for item in sleep_record_session_intervals(rows):
+        key = str(item.get("stage_key") or "INVALID")
+        minutes = int(item.get("minutes") or 0)
         values[key] += max(minutes, 0)
     return values
 
@@ -383,6 +382,70 @@ def normalized_raw_sleep_state_rows(rows) -> list[dict]:
         item["record_time"] = record_time
         keyed_rows[record_time] = item
     return [keyed_rows[key] for key in sorted(keyed_rows.keys())]
+
+
+def primary_l19_sleep_session_intervals(intervals: list[dict]) -> list[dict]:
+    active_stage_keys = set(getattr(health, "SLEEP_ACTIVE_STAGE_KEYS", {"REM", "LIGHT", "DEEP", "NAP"}))
+    awake_break_minutes = int(
+        getattr(
+            health,
+            "L19_SLEEP_MAX_AWAKE_BREAK_MINUTES",
+            getattr(health, "L19_SLEEP_MAX_POINT_GAP_MINUTES", 90),
+        )
+        or 90
+    )
+    ordered = sorted(intervals or [], key=lambda item: item.get("start") or datetime.min)
+    sessions: list[list[dict]] = []
+    current: list[dict] = []
+    pending_awake: list[dict] = []
+    pending_awake_minutes = 0
+    has_active = False
+    previous_end: datetime | None = None
+
+    def active_minutes(items: list[dict]) -> int:
+        return sum(int(item.get("minutes") or 0) for item in items if item.get("stage_key") in active_stage_keys)
+
+    def flush_current() -> None:
+        nonlocal current, pending_awake, pending_awake_minutes, has_active
+        if has_active and active_minutes(current) > 0:
+            sessions.append(current)
+        current = []
+        pending_awake = []
+        pending_awake_minutes = 0
+        has_active = False
+
+    for item in ordered:
+        start_time = item.get("start")
+        end_time = item.get("end")
+        if not isinstance(start_time, datetime) or not isinstance(end_time, datetime) or end_time <= start_time:
+            continue
+        minutes = max(1, round((end_time - start_time).total_seconds() / 60))
+        normalized = {**item, "minutes": minutes}
+        stage_key = str(normalized.get("stage_key") or "")
+        if previous_end is not None and round((start_time - previous_end).total_seconds() / 60) >= awake_break_minutes:
+            flush_current()
+        if stage_key in active_stage_keys:
+            if pending_awake:
+                if pending_awake_minutes >= awake_break_minutes:
+                    flush_current()
+                else:
+                    current.extend(pending_awake)
+                pending_awake = []
+                pending_awake_minutes = 0
+            current.append(normalized)
+            has_active = True
+        elif stage_key == "AWAKE":
+            if has_active:
+                pending_awake.append(normalized)
+                pending_awake_minutes += minutes
+        previous_end = end_time
+
+    pending_awake = []
+    pending_awake_minutes = 0
+    flush_current()
+    if not sessions:
+        return []
+    return max(sessions, key=lambda items: (active_minutes(items), sum(int(item.get("minutes") or 0) for item in items)))
 
 
 def raw_sleep_state_intervals_from_rows(rows) -> list[dict]:
@@ -421,14 +484,15 @@ def raw_sleep_state_intervals_from_rows(rows) -> list[dict]:
             "minutes": minutes,
         })
 
-    active_intervals = [item for item in intervals if item.get("stage_key") in active_stage_keys]
+    primary_intervals = primary_l19_sleep_session_intervals(intervals)
+    active_intervals = [item for item in primary_intervals if item.get("stage_key") in active_stage_keys]
     if not active_intervals:
         return []
 
     sleep_start = min(item["start"] for item in active_intervals)
     sleep_end = max(item["end"] for item in active_intervals)
     clipped: list[dict] = []
-    for item in intervals:
+    for item in primary_intervals:
         stage_key = item.get("stage_key")
         if stage_key == "AWAKE":
             start_time = max(item["start"], sleep_start)
@@ -610,14 +674,67 @@ def sleep_record_chart_point(row) -> dict:
     }
 
 
+def sleep_record_session_intervals(rows) -> list[dict]:
+    intervals: list[dict] = []
+    for row in rows or []:
+        item = dict(row._mapping)
+        stage_key = sleep_type_key(item.get("type"))
+        start_time = item.get("start_time")
+        end_time = item.get("end_time")
+        duration = int(item.get("sleep_time") or 0)
+        if isinstance(start_time, str):
+            try:
+                start_time = datetime.fromisoformat(start_time.replace("Z", "+00:00")).replace(tzinfo=None)
+            except ValueError:
+                start_time = None
+        if isinstance(end_time, str):
+            try:
+                end_time = datetime.fromisoformat(end_time.replace("Z", "+00:00")).replace(tzinfo=None)
+            except ValueError:
+                end_time = None
+        if not isinstance(start_time, datetime) or not isinstance(end_time, datetime) or end_time <= start_time:
+            continue
+        minutes = max(1, round((end_time - start_time).total_seconds() / 60))
+        if duration > 0 and abs(duration - minutes) <= 1:
+            minutes = duration
+        intervals.append({
+            "row": row,
+            "start": start_time,
+            "end": end_time,
+            "stage_key": stage_key,
+            "minutes": minutes,
+        })
+    return primary_l19_sleep_session_intervals(intervals)
+
+
 def sleep_record_chart_data(rows) -> list[dict]:
     chart = []
-    for row in rows:
-        point = sleep_record_chart_point(row)
-        if point["sleepType"] in {"INVALID", "NAP"}:
+    for item in sleep_record_session_intervals(rows):
+        stage_key = str(item.get("stage_key") or "INVALID")
+        if stage_key in {"INVALID", "NAP"}:
             continue
-        if not point["time"]:
+        start_time = item.get("start")
+        end_time = item.get("end")
+        minutes = int(item.get("minutes") or 0)
+        if not isinstance(start_time, datetime) or not isinstance(end_time, datetime) or minutes <= 0:
             continue
+        stage_code = sleep_stage_code(stage_key)
+        stage_name = SLEEP_STAGE_LABELS.get(stage_key, "")
+        point = {
+            "time": start_time.strftime("%H:%M"),
+            "startTime": start_time.strftime("%H:%M"),
+            "endTime": end_time.strftime("%H:%M"),
+            # Keep the old Java interface contract: sleepDetail.chartData.value is
+            # the sleep stage code, not duration minutes.
+            "value": stage_code,
+            "duration": minutes,
+            "stageCode": stage_code,
+            "sleepStageCode": stage_code,
+            "sleepStage": stage_key,
+            "sleepStageName": stage_name,
+            "sleepType": stage_key,
+            "sleepTypeName": stage_name,
+        }
         chart.append(point)
     return chart
 
@@ -639,11 +756,10 @@ def raw_sleep_time_range(db: Session, user_id: int, date_value: str | None) -> t
 def sleep_record_time_range(rows) -> tuple[str, str]:
     active_points = []
     fallback_points = []
-    for row in rows or []:
-        item = dict(row._mapping)
-        stage_key = sleep_type_key(item.get("type"))
-        start_time = item.get("start_time")
-        end_time = item.get("end_time")
+    for item in sleep_record_session_intervals(rows):
+        stage_key = str(item.get("stage_key") or "INVALID")
+        start_time = item.get("start")
+        end_time = item.get("end")
         if start_time:
             fallback_points.append(("start", start_time))
         if end_time:
@@ -2145,6 +2261,65 @@ def stress_algorithm_response(rows, context: dict) -> dict:
     ))
 
 
+STRESS_EMOTION_KEYS = (
+    "stressEmotion",
+    "pressureEmotion",
+    "emotion",
+    "emotionLabel",
+    "emotionStatus",
+    "emotionalState",
+    "mood",
+    "moodLabel",
+    "moodStatus",
+    "mentalState",
+)
+
+STRESS_LEVEL_TEXTS = {"压力偏高", "偏高", "很高", "中等", "正常", "压力正常", "压力中等", "高压力"}
+
+
+def text_from_algorithm_payload(payload, keys: tuple[str, ...]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    def normalize_text(value) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        return ""
+
+    def nested_text(value) -> str:
+        direct = normalize_text(value)
+        if direct:
+            return direct
+        if isinstance(value, dict):
+            for nested_key in ("text", "label", "name", "value", "status", "state", "desc", "description"):
+                text = nested_text(value.get(nested_key))
+                if text:
+                    return text
+        return ""
+
+    lower_key_map = {str(key).lower(): key for key in payload.keys()}
+    for key in keys:
+        actual_key = lower_key_map.get(key.lower())
+        if actual_key is None:
+            continue
+        text = nested_text(payload.get(actual_key))
+        if text:
+            return text
+    for value in payload.values():
+        if isinstance(value, dict):
+            text = text_from_algorithm_payload(value, keys)
+            if text:
+                return text
+    return ""
+
+
+def stress_emotion_from_algorithm(algorithm: dict) -> str:
+    text = text_from_algorithm_payload(algorithm, STRESS_EMOTION_KEYS)
+    if not text or text in STRESS_LEVEL_TEXTS:
+        return ""
+    return text
+
+
 def algorithm_records(rows: list[dict], kind: str) -> list[dict]:
     if kind in {"activity", "sedentary", "regularity"}:
         return hourly_activity_records(rows)
@@ -2833,6 +3008,49 @@ def device_info(mac: str, db: Session = Depends(get_db)):
     return success(camelize_dict(dict(row._mapping)) if row else None)
 
 
+@router.post("/device/batteryLog")
+async def device_battery_log_report(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
+    payload = await request.json()
+    user_id = int(user["id"])
+    device_mac = str(payload.get("deviceMac") or payload.get("device_mac") or payload.get("mac") or "").strip()
+    device_mac_norm = normalize_device_mac_norm(device_mac)
+    real_battery = normalize_real_battery_value(
+        payload.get("realBattery")
+        if payload.get("realBattery") not in (None, "")
+        else payload.get("real_battery")
+        if payload.get("real_battery") not in (None, "")
+        else payload.get("battery")
+    )
+    if not device_mac_norm:
+        return error("缺少设备Mac")
+    if real_battery is None:
+        return error("电量值无效")
+
+    ensure_device_battery_log_schema(db)
+    record_time = parse_device_battery_record_time(payload.get("recordTime") or payload.get("record_time"))
+    source = str(payload.get("source") or "")[:64] or None
+    db.execute(
+        text(
+            """
+            insert into device_battery_log
+              (user_id, device_mac, device_mac_norm, real_battery, record_time, source)
+            values
+              (:user_id, :device_mac, :device_mac_norm, :real_battery, :record_time, :source)
+            """
+        ),
+        {
+            "user_id": user_id,
+            "device_mac": device_mac,
+            "device_mac_norm": device_mac_norm,
+            "real_battery": real_battery,
+            "record_time": record_time,
+            "source": source,
+        },
+    )
+    db.commit()
+    return success({"saved": True, "realBattery": real_battery, "recordTime": record_time.isoformat(sep=" ")})
+
+
 @router.get("/device/scanQRCode")
 def scan_qrcode(sn: str, db: Session = Depends(get_db)):
     row = db.execute(text("select device_name, mac from device where sn=:sn and del_flag=0 limit 1"), {"sn": sn}).first()
@@ -2884,12 +3102,67 @@ def parse_positive_int(value) -> int | None:
 DEVICE_MAC_NORM_SQL = "lower(replace(replace(coalesce(mac,''), ':', ''), '-', ''))"
 FAMILY_DEVICE_MAC_NORM_SQL = "lower(replace(replace(coalesce(device_mac,''), ':', ''), '-', ''))"
 DEVICE_BIND_LOG_TABLE_AVAILABLE: bool | None = None
+DEVICE_BATTERY_LOG_SCHEMA_READY = False
 
 
 def is_truthy_payload_value(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def ensure_device_battery_log_schema(db: Session) -> None:
+    global DEVICE_BATTERY_LOG_SCHEMA_READY
+    if DEVICE_BATTERY_LOG_SCHEMA_READY:
+        return
+    db.execute(
+        text(
+            """
+            create table if not exists device_battery_log (
+              id bigint primary key auto_increment,
+              user_id bigint not null,
+              device_mac varchar(64) not null,
+              device_mac_norm varchar(32) not null,
+              real_battery int not null,
+              record_time datetime not null,
+              source varchar(64) null,
+              create_time datetime not null default current_timestamp,
+              key idx_device_battery_user_time (user_id, record_time),
+              key idx_device_battery_mac_time (device_mac_norm, record_time),
+              key idx_device_battery_time (record_time)
+            ) engine=InnoDB default charset=utf8mb4
+            """
+        )
+    )
+    db.commit()
+    DEVICE_BATTERY_LOG_SCHEMA_READY = True
+
+
+def normalize_real_battery_value(value) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(str(value).replace("%", "").strip())
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed:
+        return None
+    return max(0, min(100, int(round(parsed))))
+
+
+def parse_device_battery_record_time(value) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif value not in (None, ""):
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            parsed = datetime.now(APP_TIMEZONE)
+    else:
+        parsed = datetime.now(APP_TIMEZONE)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(APP_TIMEZONE).replace(tzinfo=None)
+    return parsed.replace(tzinfo=None)
 
 
 def binding_conflict(message: str, reason_code: str, extra: dict | None = None) -> dict:
@@ -5228,6 +5501,95 @@ async def data_raw_history_repair_today(
     return success(result, "原始数据重新解析完成" if result.get("success") else result.get("message") or "没有可解析原始数据")
 
 
+def history_coverage_timestamp(value) -> int:
+    if not value:
+        return 0
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except Exception:
+            return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=APP_TIMEZONE)
+    return int(dt.timestamp())
+
+
+@router.get("/data/historyCoverage")
+def data_history_coverage(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
+    started_at = perf_counter()
+    user_id = int(user["id"])
+    query = request.query_params
+    device_mac = str(query.get("deviceMac") or query.get("device_mac") or query.get("mac") or "").strip()
+    mac_norm = normalize_device_mac_norm(device_mac)
+    date_text = str(query.get("date") or query.get("recordDate") or query.get("record_date") or "").strip()
+    try:
+        record_date = date.fromisoformat(date_text[:10]) if date_text else datetime.now(APP_TIMEZONE).date()
+    except Exception:
+        record_date = datetime.now(APP_TIMEZONE).date()
+    try:
+        fresh_window_seconds = int(query.get("freshWindowSeconds") or 600)
+    except Exception:
+        fresh_window_seconds = 600
+    fresh_window_seconds = max(60, min(fresh_window_seconds, 3600))
+
+    day_start = datetime.combine(record_date, datetime.min.time()).replace(tzinfo=APP_TIMEZONE)
+    day_end = day_start + timedelta(days=1)
+    clauses = ["user_id=:user_id", "record_time>=:day_start", "record_time<:day_end"]
+    params: dict[str, object] = {
+        "user_id": user_id,
+        "day_start": day_start.replace(tzinfo=None),
+        "day_end": day_end.replace(tzinfo=None),
+    }
+    if mac_norm:
+        clauses.append("lower(replace(replace(coalesce(device_mac,''), ':', ''), '-', ''))=:mac_norm")
+        params["mac_norm"] = mac_norm
+
+    row = db.execute(
+        text(
+            f"""
+            select count(*) as record_count,
+                   min(record_time) as earliest_record_time,
+                   max(record_time) as latest_record_time
+            from health_raw
+            where {' and '.join(clauses)}
+            """
+        ),
+        params,
+    ).mappings().first() or {}
+
+    record_count = int(row.get("record_count") or 0)
+    earliest_record_time = row.get("earliest_record_time")
+    latest_record_time = row.get("latest_record_time")
+    earliest_timestamp = history_coverage_timestamp(earliest_record_time)
+    latest_timestamp = history_coverage_timestamp(latest_record_time)
+    now_timestamp = int(datetime.now(APP_TIMEZONE).timestamp())
+    age_seconds = max(0, now_timestamp - latest_timestamp) if latest_timestamp > 0 else None
+    has_data = record_count > 0 and latest_timestamp > 0
+    is_fresh = bool(has_data and age_seconds is not None and age_seconds <= fresh_window_seconds)
+
+    return success(
+        {
+            "userId": user_id,
+            "deviceMac": device_mac,
+            "macNorm": mac_norm,
+            "date": record_date.isoformat(),
+            "recordCount": record_count,
+            "hasData": has_data,
+            "earliestRecordTime": str(earliest_record_time) if earliest_record_time else None,
+            "latestRecordTime": str(latest_record_time) if latest_record_time else None,
+            "earliestTimestamp": earliest_timestamp,
+            "latestTimestamp": latest_timestamp,
+            "ageSeconds": age_seconds,
+            "freshWindowSeconds": fresh_window_seconds,
+            "coverageStatus": "fresh" if is_fresh else ("stale" if has_data else "missing"),
+            "shouldSkipBle": is_fresh,
+            "elapsedMs": round((perf_counter() - started_at) * 1000),
+        }
+    )
+
+
 @router.post("/data/sync")
 async def data_sync(
     request: Request,
@@ -6264,15 +6626,20 @@ def stress_detail(request: Request, user: dict = Depends(app_user), db: Session 
             "avgStressValue": 0,
             "latestHrvValue": 0,
             "dailyAvgHrvValue": 0,
+            "stressEmotion": "",
+            "emotion": "",
             "algorithm": {},
         })
     values = [value for row in rows for value in [stress_value_from_row(row)] if value is not None]
     hrv_values = [int(row_mapping(row).get("hrv") or 0) for row in rows if row_mapping(row).get("hrv")]
     avg_value = int(round(sum(values) / len(values))) if values else 0
     algorithm = stress_algorithm_response(rows, {"source": "stressDetail", "userId": user_id, "date": date_value})
+    stress_emotion = stress_emotion_from_algorithm(algorithm)
     return localized_success({
         "stressValue": avg_value,
         "stressLevel": stress_level(avg_value),
+        "stressEmotion": stress_emotion,
+        "emotion": stress_emotion,
         "stressChart": stress_chart(rows),
         "stressRange": f"{min(values)}-{max(values)}" if values else "0-0",
         "avgStressValue": avg_value,
@@ -6312,6 +6679,7 @@ def stress_summary(request: Request, user: dict = Depends(app_user), db: Session
     week_values = [value for row in week_rows for value in [stress_value_from_row(row)] if value is not None]
     counts = stress_counts(today_rows)
     algorithm = stress_algorithm_response(today_rows, {"source": "stressSummary", "userId": user_id, "date": date_value})
+    stress_emotion = stress_emotion_from_algorithm(algorithm)
     return localized_success({
         "todayStressChart": stress_chart(today_rows),
         "weekStressChart": stress_chart(week_rows, "%m-%d"),
@@ -6321,6 +6689,8 @@ def stress_summary(request: Request, user: dict = Depends(app_user), db: Session
         "normalDuration": counts["正常"],
         "moderateStressDuration": counts["中等"],
         "highStressDuration": counts["偏高"],
+        "stressEmotion": stress_emotion,
+        "emotion": stress_emotion,
         "algorithm": algorithm,
     })
 

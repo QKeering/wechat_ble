@@ -237,6 +237,22 @@ export const repairRingHistoryRawToday = (params: RingHistoryRawRepairParams, co
   return (uni as any).$uv.http.post('/app/data/rawHistory/repairToday', params, config);
 };
 
+export type RingHistoryCoverageParams = {
+  deviceMac?: string;
+  device_mac?: string;
+  mac?: string;
+  date?: string;
+  recordDate?: string;
+  freshWindowSeconds?: number;
+};
+
+export const getRingHistoryCoverage = (params: RingHistoryCoverageParams, config: HttpRequestConfig = {}) => {
+  return (uni as any).$uv.http.get('/app/data/historyCoverage', {
+    params,
+    ...config
+  });
+};
+
 type GirlHealthSubmitParams = {
   birthday: string;         // 鍑虹敓鏃ユ湡 yyyy-MM-dd
   cycleDay: number;         // 骞冲潎鐢熺悊鍛ㄦ湡澶╂暟

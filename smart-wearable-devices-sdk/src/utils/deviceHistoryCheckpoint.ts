@@ -1,7 +1,7 @@
 const DEVICE_HISTORY_CHECKPOINT_STORAGE_KEY = 'qkeer:ring-device-history-checkpoints:v1';
 const DEVICE_HISTORY_CHECKPOINT_MAX_COUNT = 80;
 
-type DeviceHistoryCheckpoint = {
+export type DeviceHistoryCheckpoint = {
   key: string;
   deviceMac: string;
   deviceMacNorm: string;
@@ -72,6 +72,13 @@ export const getDeviceHistoryEmptyReadCheckpoint = (deviceMac: unknown, protocol
   if (!key) return 0;
   const matched = readDeviceHistoryCheckpoints().find((item) => item.key === key);
   return matched?.emptyReadTimestamp || 0;
+};
+
+export const getDeviceHistoryCheckpointMeta = (deviceMac: unknown, protocol?: unknown): DeviceHistoryCheckpoint | null => {
+  const key = buildHistoryCheckpointKey(deviceMac, protocol);
+  if (!key) return null;
+  const matched = readDeviceHistoryCheckpoints().find((item) => item.key === key);
+  return matched || null;
 };
 
 export const setDeviceHistoryCheckpoint = (deviceMac: unknown, protocol: unknown, timestamp: unknown) => {

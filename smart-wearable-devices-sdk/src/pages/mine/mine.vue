@@ -2755,6 +2755,9 @@ const getFirstMetricValue = (...values: any[]) => values.find((value) => value !
 const hasMineBatterySnapshot = () =>
   getFirstMetricValue(
     getMineBatterySourceValue(latestBattery.value as Record<string, any> | null),
+    getMineBatterySourceValue(ringDeviceInfo.value as Record<string, any> | null),
+    getMineBatterySourceValue(ringStore.deviceInfo as Record<string, any> | null),
+    getMineBatterySourceValue(userStore.deviceInfo as Record<string, any> | null),
     userStore.healthData?.battery,
     userStore.latestMetrics?.battery
   ) != null;
@@ -2768,6 +2771,9 @@ const hasMineFirmwareSnapshot = () =>
 const displayBatteryValue = computed(() => {
   const value = getFirstMetricValue(
     getMineBatterySourceValue(latestBattery.value as Record<string, any> | null),
+    getMineBatterySourceValue(ringDeviceInfo.value as Record<string, any> | null),
+    getMineBatterySourceValue(ringStore.deviceInfo as Record<string, any> | null),
+    getMineBatterySourceValue(userStore.deviceInfo as Record<string, any> | null),
     userStore.healthData?.battery,
     userStore.latestMetrics?.battery
   );
@@ -2777,16 +2783,29 @@ const getMineBatteryStatusValue = (item: Record<string, any> | null | undefined)
   item?.metrics?.batteryStatus ?? item?.metrics?.chargingStatusText ?? item?.metrics?.chargingStatus ?? item?.batteryStatus ?? item?.chargingStatusText ?? item?.chargingStatus;
 const isMineBatteryCharging = computed(() => {
   const batteryItem = latestBattery.value as Record<string, any> | null;
-  if (!batteryItem) return false;
-  const rawValue = getMineBatterySourceValue(batteryItem);
-  const statusValue = getMineBatteryStatusValue(batteryItem);
-  const healthStatus = userStore.healthData?.batteryStatus ?? userStore.latestMetrics?.batteryStatus;
+  const rawValue = getFirstMetricValue(
+    getMineBatterySourceValue(batteryItem),
+    getMineBatterySourceValue(ringDeviceInfo.value as Record<string, any> | null),
+    getMineBatterySourceValue(ringStore.deviceInfo as Record<string, any> | null),
+    getMineBatterySourceValue(userStore.deviceInfo as Record<string, any> | null)
+  );
+  const statusValue =
+    getMineBatteryStatusValue(batteryItem) ??
+    getMineBatteryStatusValue(ringDeviceInfo.value as Record<string, any> | null) ??
+    getMineBatteryStatusValue(ringStore.deviceInfo as Record<string, any> | null) ??
+    getMineBatteryStatusValue(userStore.deviceInfo as Record<string, any> | null);
+  const healthStatus =
+    userStore.healthData?.batteryStatus ??
+    userStore.latestMetrics?.batteryStatus;
   return isBatteryChargingLike(rawValue, statusValue ?? healthStatus);
 });
 const batteryPercent = computed(() => {
   if (isMineBatteryCharging.value) return 100;
   const value = getFirstMetricValue(
     getMineBatterySourceValue(latestBattery.value as Record<string, any> | null),
+    getMineBatterySourceValue(ringDeviceInfo.value as Record<string, any> | null),
+    getMineBatterySourceValue(ringStore.deviceInfo as Record<string, any> | null),
+    getMineBatterySourceValue(userStore.deviceInfo as Record<string, any> | null),
     userStore.healthData?.battery,
     userStore.latestMetrics?.battery
   );

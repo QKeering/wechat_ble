@@ -26,7 +26,7 @@
     {
       "path": "pages/health/growth-girlfriend",
       "style": {
-        "navigationBarTitleText": "小轻AI成长闺蜜",
+        "navigationBarTitleText": "AI Label",
         "navigationStyle": "custom"
       }
     },
