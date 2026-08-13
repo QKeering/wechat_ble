@@ -3,10 +3,16 @@ import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow, onPullDownRefresh, onReachBottom } from '@dcloudio/uni-app';
 import homeHeartChart from '@/components/homeHeartChart.vue';
 import { defaultEchartOption } from '@/homeDetail/vitalSignsHeartDetail/echartOptions';
-import { getStressData } from '@/common/api/homeDetail';
+import { getStressData, getStressSummary } from '@/common/api/homeDetail';
 import { formatDate, calculateOffset, getPrevDate, getNextDate, formatLocalDate } from '@/utils/utils.js';
-import type { stressDetail, Point } from '@/types/api/homeDetail';
+import type { stressDetail, stressSummaryType, Point } from '@/types/api/homeDetail';
 import { baseOption } from '@/homeDetail/pressureDetail/echartOptions';
+import {
+  getStressLevelNumber,
+  getStressScoreNumber,
+  getStressStatusByLevel,
+  resolveStressDisplayStatus
+} from '@/utils/stressDisplay';
 import { cloneDeep } from 'lodash-es';
 const echarts = require('../../static/echarts.min.js');
 const PRESSURE_DETAIL_REQUEST_SOFT_TIMEOUT_MS = 3500;
@@ -23,10 +29,11 @@ const activeEchartOption = ref(defaultEchartOption);
 const chartRef = ref<any>(null);
 const chartInstance = ref<any>(null);
 
-const pressureScore = ref(56);
+const pressureScore = ref(0);
 const currentDate = ref(new Date());
 
 const stressDetailObj = ref<stressDetail>();
+const stressSummaryObj = ref<stressSummaryType>();
 const maxNumber = ref(0);
 const minNumber = ref(0);
 let stressDetailRequestSeq = 0;
@@ -62,80 +69,45 @@ const withPressureDetailSoftTimeout = <T>(task: () => Promise<T>): Promise<T> =>
       });
   });
 
+const pressureLevel = computed(() =>
+  getStressLevelNumber(
+    stressDetailObj.value?.stressValue,
+    stressDetailObj.value?.stressLevel,
+    (stressSummaryObj.value as any)?.stressValue,
+    (stressSummaryObj.value as any)?.stressLevel
+  )
+);
+const hasPressureScore = computed(() => pressureScore.value > 0);
 const pressureIcon = computed(() => {
-  const pressireLevel = pressureScore.value;
-
-  // 严重
-  if (pressireLevel < 60) {
-    return '/static/images/homeDetail/cry.png';
-  }
-  // 良好
-  else if (pressireLevel >= 60 && pressireLevel <= 79) {
-    return '/static/images/homeDetail/normal.png';
-  }
-  // 优秀
-  else if (pressireLevel >= 80 && pressireLevel <= 100) {
-    return '/static/images/homeDetail/smile.png';
-  }
-  // 默认返回良好
+  const levelStatus = getStressStatusByLevel(pressureLevel.value);
+  if (levelStatus === '\u504f\u9ad8') return '/static/images/homeDetail/cry.png';
+  if (levelStatus === '\u653e\u677e' || levelStatus === '\u6b63\u5e38') return '/static/images/homeDetail/smile.png';
+  if (pressureScore.value > 0 && pressureScore.value < 60) return '/static/images/homeDetail/cry.png';
+  if (pressureScore.value >= 80) return '/static/images/homeDetail/smile.png';
   return '/static/images/homeDetail/normal.png';
 });
-const PRESSURE_LEVEL_STATUS_TEXTS = new Set(['\u538b\u529b\u504f\u9ad8', '\u504f\u9ad8', '\u5f88\u9ad8', '\u4e2d\u7b49', '\u6b63\u5e38']);
-const STRESS_ALGORITHM_EMOTION_KEYS = [
-  'stressEmotion',
-  'pressureEmotion',
-  'emotion',
-  'emotionLabel',
-  'emotionStatus',
-  'emotionalState',
-  'mood',
-  'moodLabel',
-  'moodStatus',
-  'mentalState',
-  'stressMood'
-];
-const readStressEmotionText = (payload: any): string => {
-  if (!payload || typeof payload !== 'object') return '';
-  for (const key of STRESS_ALGORITHM_EMOTION_KEYS) {
-    const value = payload[key];
-    const text =
-      typeof value === 'string'
-        ? value
-        : value && typeof value === 'object'
-          ? value.text || value.label || value.name || value.value || value.status || value.state || ''
-          : '';
-    const normalized = String(text || '').trim();
-    if (normalized && !PRESSURE_LEVEL_STATUS_TEXTS.has(normalized.replace(/\s+/g, ''))) return normalized;
-  }
-  return readStressEmotionText(payload.algorithm);
-};
-const pressureText = computed(() => {
-  const emotionText = readStressEmotionText(stressDetailObj.value);
-  if (emotionText) return emotionText;
-  const pressireLevel = pressureScore.value;
-  // 严重
-  if (pressireLevel < 60) {
-    return '严重';
-  }
-  // 良好
-  else if (pressireLevel >= 60 && pressireLevel <= 79) {
-    return '良好';
-  }
-  // 优秀
-  else if (pressireLevel >= 80 && pressireLevel <= 100) {
-    return '优秀';
-  }
-
-  // 默认返回正常
-  return '优秀';
-});
+const pressureDisplayText = computed(() =>
+  resolveStressDisplayStatus({
+    detail: stressDetailObj.value,
+    summary: stressSummaryObj.value,
+    fallbackStatus: stressDetailObj.value?.stressLevel,
+    score: Number(pressureScore.value) || 0,
+    level: pressureLevel.value,
+    fallbackText: '\u538b\u529b'
+  })
+);
+const pressureMainText = computed(() => (hasPressureScore.value ? String(pressureScore.value) : pressureDisplayText.value));
 const statusClass = computed(() => {
+  if (pressureDisplayText.value === '\u7d27\u5f20\u72b6\u6001') return 'status-bad';
+  if (pressureDisplayText.value === '\u8f7b\u5fae\u7d27\u5f20') return 'status-normal';
+  if (pressureDisplayText.value === '\u5e73\u7a33\u72b6\u6001') return 'status-good';
   const classMap: Record<string, string> = {
-    严重: 'status-bad',
-    优秀: 'status-good',
-    良好: 'status-normal'
+    '\u504f\u9ad8': 'status-bad',
+    '\u4e2d\u7b49': 'status-normal',
+    '\u6b63\u5e38': 'status-good',
+    '\u653e\u677e': 'status-good'
   };
-  return classMap[pressureText.value] || 'status-good';
+  return classMap[pressureDisplayText.value] || 'status-good';
 });
 const change = async (index: number) => {
   current.value = index;
@@ -251,19 +223,34 @@ const getStressDetail = async () => {
   const requestSeq = ++stressDetailRequestSeq;
   const isoDate = formatLocalDate(currentDate.value);
   try {
-    const res = await withPressureDetailSoftTimeout(() =>
-      getStressData(
-        {
-          date: isoDate,
-          type: currentName.value,
-          offset: offset.value
-        },
-        getPressureDetailSilentRequestConfig()
-      )
+    const [res, summaryRes] = await withPressureDetailSoftTimeout(() =>
+      Promise.all([
+        getStressData(
+          {
+            date: isoDate,
+            type: currentName.value,
+            offset: offset.value
+          },
+          getPressureDetailSilentRequestConfig()
+        ),
+        getStressSummary({ date: isoDate }, getPressureDetailSilentRequestConfig())
+      ])
     );
     if (requestSeq !== stressDetailRequestSeq) return false;
+    if (summaryRes) {
+      stressSummaryObj.value = summaryRes;
+    }
     if (res) {
       stressDetailObj.value = res;
+      const backendScore = getStressScoreNumber(
+        (res as any).avgStressValue,
+        (summaryRes as any)?.todayStressScore,
+        (summaryRes as any)?.weekAvgStressScore,
+        (res as any).stressValue
+      );
+      if (backendScore > 0) {
+        pressureScore.value = backendScore;
+      }
       return true;
     }
   } catch (error) {
@@ -292,7 +279,7 @@ const leftClick = () => {
 };
 onLoad((options) => {
   currentName.value = currentList.value[current.value];
-  pressureScore.value = options?.pressure || 0;
+  pressureScore.value = getStressScoreNumber(options?.pressure);
   void refreshPressureDetailChart();
 });
 onPageScroll((e) => {
@@ -333,11 +320,11 @@ onPageScroll((e) => {
           <view class="flex ai-center">
             <uv-image :src="pressureIcon" width="68rpx" height="68rpx"></uv-image>
             <view>
-              <text class="fs-72 ml-10">{{ pressureScore }}</text>
-              <text class="fs-24">分</text>
+              <text class="fs-72 ml-10">{{ pressureMainText }}</text>
+              <text v-if="hasPressureScore" class="fs-24">分</text>
             </view>
           </view>
-          <view class="status-tag" :class="statusClass">{{ pressureText }}</view>
+          <view v-if="hasPressureScore" class="status-tag" :class="statusClass">{{ pressureDisplayText }}</view>
         </view>
       </view>
       <view class="mt-30 bg-white r-50 p-30">

@@ -876,12 +876,29 @@ def clip_l19_sleep_segment_records_to_active_sleep(segments: list[dict[str, Any]
         end_time = coerce_datetime(item.get("endTime"))
         if start_time is None or end_time is None or end_time <= start_time:
             continue
+        sleep_state_source = None
+        for key in (
+            "sleepState",
+            "sleep_state",
+            "sleepStateValue",
+            "sleep_state_value",
+            "sleepType",
+            "sleep_type",
+            "sleepStage",
+            "sleep_stage",
+            "state",
+            "stage",
+        ):
+            value = item.get(key)
+            if value is not None:
+                sleep_state_source = value
+                break
         duration = max(1, round((end_time - start_time).total_seconds() / 60))
         intervals.append({
             **item,
             "start": start_time,
             "end": end_time,
-            "stage_key": sleep_type_key(item.get("sleepState") if item.get("sleepState") is not None else item.get("sleepType")),
+            "stage_key": sleep_type_key(sleep_state_source),
             "minutes": duration,
         })
 
@@ -910,8 +927,25 @@ def build_l19_sleep_segment_records(records: list[dict[str, Any]], record_date: 
         record_time = _record_time_from_submit_item(item)
         if record_time is None or record_time < start_window or record_time > end_window:
             continue
+        sleep_state_source = None
+        for key in (
+            "sleepState",
+            "sleep_state",
+            "sleepStateValue",
+            "sleep_state_value",
+            "sleepType",
+            "sleep_type",
+            "sleepStage",
+            "sleep_stage",
+            "state",
+            "stage",
+        ):
+            value = item.get(key)
+            if value is not None:
+                sleep_state_source = value
+                break
         try:
-            sleep_state = int(item.get("sleepState") if item.get("sleepState") is not None else item.get("sleepType"))
+            sleep_state = int(sleep_state_source)
         except (TypeError, ValueError):
             continue
         if sleep_state not in {1, 2, 3, 4, 5}:

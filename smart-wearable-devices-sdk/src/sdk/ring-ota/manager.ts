@@ -29,6 +29,12 @@ const DEFAULT_OPTIONS: Required<RingOtaOptions> = {
   writeDelayMs: 30
 };
 
+type BleCharacteristicValueCallback = Parameters<typeof uni.onBLECharacteristicValueChange>[0];
+
+const offBleCharacteristicValueChange = (callback: BleCharacteristicValueCallback) => {
+  (uni.offBLECharacteristicValueChange as unknown as (callback: BleCharacteristicValueCallback) => void)(callback);
+};
+
 const CRC16_TABLE = [
   0x0000, 0xcc01, 0xd801, 0x1400, 0xf001, 0x3c00, 0x2800, 0xe401,
   0xa001, 0x6c00, 0x7800, 0xb401, 0x5000, 0x9c01, 0x8801, 0x4400
@@ -39,6 +45,7 @@ export default class RingOTAManager {
   private currentFlashAddr = 0;
   private notifyResolver: (() => void) | null = null;
   private notifyRejecter: ((reason?: unknown) => void) | null = null;
+  private notifyHandler: BleCharacteristicValueCallback | null = null;
   private expectedResponse = '';
   private responseTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly options: Required<RingOtaOptions>;
@@ -94,6 +101,7 @@ export default class RingOTAManager {
       }
     } finally {
       this.cleanNotifyPromise();
+      this.clearNotifyListener();
     }
   }
 
@@ -215,7 +223,8 @@ export default class RingOTAManager {
         serviceId: RING_OTA_UUIDS.service,
         characteristicId: RING_OTA_UUIDS.notify,
         success: () => {
-          uni.onBLECharacteristicValueChange((res) => {
+          this.clearNotifyListener();
+          this.notifyHandler = (res) => {
             if (res.deviceId !== this.deviceId) return;
 
             const cleanHex = arrayBufferToHex(res.value as unknown as ArrayBuffer).toUpperCase();
@@ -236,12 +245,19 @@ export default class RingOTAManager {
               this.notifyResolver();
               this.cleanNotifyPromise();
             }
-          });
+          };
+          uni.onBLECharacteristicValueChange(this.notifyHandler);
           resolve();
         },
         fail: (err) => reject(new Error(`Enable OTA notify failed: ${err.errMsg}`))
       });
     });
+  }
+
+  private clearNotifyListener(): void {
+    if (!this.notifyHandler) return;
+    offBleCharacteristicValueChange(this.notifyHandler);
+    this.notifyHandler = null;
   }
 
   private waitForResponse(hexCode: string): Promise<void> {

@@ -4,6 +4,8 @@ import ble_config from './ble_config.js';
 import receive_map from '../receiver/ble_receiver_map.js';
 import common from '../utils/util_common.js';
 
+let bleNotifyListener = null;
+
 /**
  * 解析 DATA INFO 区
  * 格式：
@@ -128,14 +130,29 @@ function handleReceivedData(arrayBuffer) {
 // 初始化蓝牙通知监听
 // 监听设备返回的数据并处理
 function initBLENotifyListener() {
+	if (bleNotifyListener) {
+		return;
+	}
 	// 监听设备通知
-	uni.onBLECharacteristicValueChange((result) => {
+	bleNotifyListener = (result) => {
+		if (device_state.connectedDeviceId && result.deviceId && result.deviceId !== device_state.connectedDeviceId) {
+			return;
+		}
 		// qkeerV2VendorConsole.log('接收到设备数据');
 		handleReceivedData(result.value);
-	});
+	};
+	uni.onBLECharacteristicValueChange(bleNotifyListener);
 }
 
 // 启用设备通知
+export function clearBLENotifyListener() {
+	if (!bleNotifyListener) {
+		return;
+	}
+	uni.offBLECharacteristicValueChange(bleNotifyListener);
+	bleNotifyListener = null;
+}
+
 export default async function enableBLENotify(deviceId) {
 	return new Promise((resolve, reject) => {
 		uni.notifyBLECharacteristicValueChange({

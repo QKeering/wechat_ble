@@ -216,8 +216,14 @@ let measureTimeout: any = null;
 let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
 let measureStartedAt = 0;
+let userReceivedCursor = 0;
+let ringReceivedCursor = 0;
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
-const getLatestSpo2ReadingFromStores = () => getLatestSpo2Reading(userStore, measureStartedAt) || getLatestSpo2Reading(ringStore, measureStartedAt);
+const getStoreReceivedCursor = (store: { receivedData?: unknown[] }) =>
+  Array.isArray(store.receivedData) ? store.receivedData.length : 0;
+const getLatestSpo2ReadingFromStores = () =>
+  getLatestSpo2Reading(userStore, measureStartedAt, userReceivedCursor) ||
+  getLatestSpo2Reading(ringStore, measureStartedAt, ringReceivedCursor);
 const clearMeasureCompleteTimer = () => {
   if (!measureCompleteTimer) return;
   clearTimeout(measureCompleteTimer);
@@ -258,6 +264,10 @@ const completeMeasureWithLatestReading = async () => {
   }
   measureStatus.value = 'completed';
 };
+const completeMeasureWhenLatestReadingReady = async () => {
+  if (!getLatestSpo2ReadingFromStores()) return;
+  await completeMeasureWithLatestReading();
+};
 // 开始测量
 const handleMeasure = () => {
   // 如果勾选了不再提示，直接开始测量
@@ -288,6 +298,8 @@ const startMeasure = async () => {
   isMeasureCompletePending = false;
 
   measureStatus.value = 'measuring';
+  userReceivedCursor = getStoreReceivedCursor(userStore);
+  ringReceivedCursor = getStoreReceivedCursor(ringStore);
   measureStartedAt = Date.now();
 
   await showMeasureWaitingPopup();
@@ -302,11 +314,14 @@ const startMeasure = async () => {
         measureStatus: () => measureStatus.value,
         source: 'RW VITAL'
       });
-      await completeMeasureWithLatestReading();
+      await completeMeasureWhenLatestReadingReady();
       return;
     }
-    await requestMetricRefresh(refreshHealthData, sendOxyGenCommand, { expectedSteps: 'blood_oxygen' });
-    await completeMeasureWithLatestReading();
+    await requestMetricRefresh(refreshHealthData, sendOxyGenCommand, {
+      expectedSteps: 'blood_oxygen',
+      acceptPending: false
+    });
+    await completeMeasureWhenLatestReadingReady();
   } catch (error) {
     if (measureStatus.value !== 'measuring') return;
     popup.value?.close();
@@ -315,6 +330,8 @@ const startMeasure = async () => {
     }
     measureStatus.value = 'idle';
     measureStartedAt = 0;
+    userReceivedCursor = 0;
+    ringReceivedCursor = 0;
     uni.showToast({ title: formatBleErrorMessage(error, '测量指令发送失败'), icon: 'none' });
     return;
   }
@@ -333,13 +350,6 @@ watch(
     if (latestReading) {
       void completeMeasureWithLatestReading();
       return;
-    }
-
-    // 检查是否有已完成的测量（即使数据无效），由 measureStatus watch 中的 latest?.bloodOxygen > 0 判断跳过
-    const hasCompletedMeasure = Array.isArray(userStore.receivedData) &&
-      (userStore.receivedData as any[]).some((d) => d.type === 'active_OxyGenMeasure' && d.bloodOxygenStatus !== 0x03);
-    if (hasCompletedMeasure) {
-      void completeMeasureWithLatestReading();
     }
   },
   { deep: true }

@@ -182,9 +182,24 @@ const isAlreadyConnectedError = (error: unknown) => {
 };
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
+type BleConnectionStateCallback = Parameters<typeof uni.onBLEConnectionStateChange>[0];
+type BleCharacteristicValueCallback = Parameters<typeof uni.onBLECharacteristicValueChange>[0];
+type BluetoothAdapterStateCallback = (result: { available?: boolean; discovering?: boolean }) => void;
 
 const offBluetoothDeviceFound = (callback: BluetoothDeviceFoundCallback) => {
   (uni.offBluetoothDeviceFound as unknown as (callback: BluetoothDeviceFoundCallback) => void)(callback);
+};
+
+const offBleConnectionStateChange = (callback: BleConnectionStateCallback) => {
+  (uni.offBLEConnectionStateChange as unknown as (callback?: BleConnectionStateCallback) => void)(callback);
+};
+
+const offBleCharacteristicValueChange = (callback: BleCharacteristicValueCallback) => {
+  (uni.offBLECharacteristicValueChange as unknown as (callback?: BleCharacteristicValueCallback) => void)(callback);
+};
+
+const offBluetoothAdapterStateChange = (callback: BluetoothAdapterStateCallback) => {
+  (uni.offBluetoothAdapterStateChange as unknown as ((callback?: BluetoothAdapterStateCallback) => void) | undefined)?.(callback);
 };
 
 const ensureWriteDevice = (runtime: RingBleRuntime) => {
@@ -392,6 +407,65 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   }> = [];
   let legacyCommandWriteQueue: Promise<unknown> = Promise.resolve();
   let legacyCommandWriteQueueSeq = 0;
+  let connectionStateHandler: BleConnectionStateCallback | null = null;
+  let bluetoothAdapterStateHandler: BluetoothAdapterStateCallback | null = null;
+  let dataListenerHandler: BleCharacteristicValueCallback | null = null;
+  let historyWireTrace: {
+    startedAt: number;
+    sinceTimestamp: number;
+    readAll: boolean;
+    subcmd: number;
+    payloadHex: string;
+    notifyCount: number;
+  } | null = null;
+
+  const appendHistoryWireNotifyLog = (
+    event: string,
+    result: any,
+    notifyFrame: ReturnType<typeof summarizeLegacyBleFrame>,
+    parsed?: RingParsedData | null
+  ) => {
+    const trace = historyWireTrace;
+    if (!trace) return;
+
+    const elapsedMs = Date.now() - trace.startedAt;
+    if (elapsedMs > 60000) return;
+
+    trace.notifyCount += 1;
+    const parsedRecordCount = Array.isArray((parsed as any)?.records) ? (parsed as any).records.length : undefined;
+    const parsedDataCount = Array.isArray((parsed as any)?.data) ? (parsed as any).data.length : undefined;
+    const parsedStatus = (parsed as any)?.status;
+    const shouldLog =
+      trace.notifyCount <= 20 ||
+      Number(parsedRecordCount || 0) > 0 ||
+      Number(parsedDataCount || 0) > 0 ||
+      parsedStatus === 'complete' ||
+      parsedStatus === 'empty';
+
+    if (!shouldLog) return;
+
+    appendRingDiagnosticLog('L19 BLE', event, {
+      elapsedMs,
+      notifyCount: trace.notifyCount,
+      historyCmd: '0x36',
+      historySubcmd: formatLegacyFrameByte(trace.subcmd),
+      sinceTimestamp: trace.sinceTimestamp,
+      readAll: trace.readAll,
+      requestPayloadHex: trace.payloadHex,
+      deviceId: result?.deviceId,
+      serviceId: result?.serviceId,
+      characteristicId: result?.characteristicId,
+      ...notifyFrame,
+      parsedType: parsed?.type,
+      status: parsedStatus,
+      recordCount: parsedRecordCount,
+      dataCount: parsedDataCount
+    });
+
+    if (parsedStatus === 'complete' || parsedStatus === 'empty') {
+      historyWireTrace = null;
+    }
+  };
 
   const openBluetoothAdapter = () => {
     return new Promise<unknown>((resolve, reject) => {
@@ -402,24 +476,49 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     });
   };
 
+  const clearConnectionStateListener = () => {
+    if (!connectionStateHandler) return;
+    offBleConnectionStateChange(connectionStateHandler);
+    connectionStateHandler = null;
+  };
+
+  const clearBluetoothAdapterStateListener = () => {
+    if (!bluetoothAdapterStateHandler) return;
+    offBluetoothAdapterStateChange(bluetoothAdapterStateHandler);
+    bluetoothAdapterStateHandler = null;
+  };
+
   const registerConnectionStateListener = (options: LegacyConnectionStateOptions = {}) => {
-    uni.offBLEConnectionStateChange();
-    uni.onBLEConnectionStateChange((result) => {
-      if (result.connected) {
-        options.onConnected?.(result.deviceId);
+    clearConnectionStateListener();
+    connectionStateHandler = (result) => {
+      const eventDeviceId = `${result?.deviceId || ''}`;
+      const currentDeviceId = runtime?.getDeviceInfo?.().deviceId;
+      if (currentDeviceId && eventDeviceId && eventDeviceId !== currentDeviceId) {
+        appendRingDiagnosticLog(
+          'L19 BLE',
+          result.connected ? 'connection-state-ignore-non-target-connected' : 'connection-state-ignore-non-target-disconnected',
+          {
+            currentDeviceId,
+            eventDeviceId,
+            connected: Boolean(result.connected)
+          }
+        );
         return;
       }
 
-      const currentDeviceId = runtime?.getDeviceInfo?.().deviceId;
-      if (currentDeviceId && result.deviceId !== currentDeviceId) return;
+      if (result.connected) {
+        options.onConnected?.(eventDeviceId || result.deviceId);
+        return;
+      }
 
       clearDataListener();
-      options.onDisconnected?.(result.deviceId);
+      options.onDisconnected?.(eventDeviceId || result.deviceId);
       runtime?.onDisconnected?.(result);
-    });
+    };
+    uni.onBLEConnectionStateChange(connectionStateHandler);
 
-    (uni.offBluetoothAdapterStateChange as unknown as (() => void) | undefined)?.();
-    uni.onBluetoothAdapterStateChange?.((result) => {
+    clearBluetoothAdapterStateListener();
+    bluetoothAdapterStateHandler = (result) => {
       runtime?.onBluetoothReadyChange?.(Boolean(result.available));
       if (result.available) return;
 
@@ -430,7 +529,8 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         available: false,
         discovering: result.discovering
       });
-    });
+    };
+    uni.onBluetoothAdapterStateChange?.(bluetoothAdapterStateHandler);
   };
 
   const initBluetooth = async () => {
@@ -702,16 +802,6 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     });
   };
 
-  const closeConnectedLegacyDevicesQuietly = async (targetDeviceId?: string) => {
-    const connectedDeviceIds = await getConnectedLegacyDeviceIds();
-    await Promise.all(
-      connectedDeviceIds
-        .filter((connectedDeviceId) => connectedDeviceId && connectedDeviceId !== targetDeviceId)
-        .map((connectedDeviceId) => closeBleConnectionQuietly(connectedDeviceId))
-    );
-    return connectedDeviceIds;
-  };
-
   const createBleConnectionOnce = (deviceId: string, deviceName = '') => {
     return new Promise<RingDeviceInfo>((resolve, reject) => {
       uni.createBLEConnection({
@@ -737,7 +827,10 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         return { ...sourceDevice, deviceId, name: deviceName, protocol: 'legacy' as const };
       }
 
-      await closeConnectedLegacyDevicesQuietly();
+      appendRingDiagnosticLog('L19 BLE', 'already-connected-target-retry-without-closing-others', {
+        deviceId,
+        connectedDeviceIds
+      });
       await closeBleConnectionQuietly(deviceId);
       await sleep(350);
       return { ...sourceDevice, ...(await createBleConnectionOnce(deviceId, deviceName)) };
@@ -893,8 +986,8 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   const cleanup = async () => {
     await stopScan();
     clearDataListener();
-    uni.offBLEConnectionStateChange();
-    (uni.offBluetoothAdapterStateChange as unknown as (() => void) | undefined)?.();
+    clearConnectionStateListener();
+    clearBluetoothAdapterStateListener();
   };
 
   const sendBytes = (bytes: Uint8Array, label = '') => {
@@ -998,7 +1091,48 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
   const sendReadLocalDataCommand = (sinceTimestamp = 0, readAll = true) => {
     const subcmd = readAll ? 0x01 : 0x00;
-    return sendCommand(0x36, subcmd, numberToUint32LE(sinceTimestamp));
+    const payload = numberToUint32LE(sinceTimestamp);
+    const startedAt = Date.now();
+    historyWireTrace = {
+      startedAt,
+      sinceTimestamp,
+      readAll,
+      subcmd,
+      payloadHex: getLegacyBytesHex(payload),
+      notifyCount: 0
+    };
+    appendRingDiagnosticLog('L19 BLE', 'legacy-history-wire-write', {
+      historyCmd: '0x36',
+      historySubcmd: formatLegacyFrameByte(subcmd),
+      sinceTimestamp,
+      readAll,
+      payloadHex: historyWireTrace.payloadHex
+    });
+    return sendCommand(0x36, subcmd, payload)
+      .then((result) => {
+        appendRingDiagnosticLog('L19 BLE', 'legacy-history-wire-write-result', {
+          elapsedMs: Date.now() - startedAt,
+          historyCmd: '0x36',
+          historySubcmd: formatLegacyFrameByte(subcmd),
+          sinceTimestamp,
+          readAll,
+          result
+        });
+        return result;
+      })
+      .catch((error) => {
+        appendRingDiagnosticLog('L19 BLE', 'legacy-history-wire-write-failed', {
+          elapsedMs: Date.now() - startedAt,
+          historyCmd: '0x36',
+          historySubcmd: formatLegacyFrameByte(subcmd),
+          sinceTimestamp,
+          readAll,
+          error: formatLegacyBleError(error),
+          rawError: error
+        });
+        historyWireTrace = null;
+        throw error;
+      });
   };
 
   const readLocalData = (options: LegacyReadLocalDataOptions = {}) => {
@@ -1057,7 +1191,12 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     const { deviceId, serviceId, dataCharId } = device || runtime.getDeviceInfo();
     if (!deviceId || !serviceId || !dataCharId) return;
 
-    uni.onBLECharacteristicValueChange((result) => {
+    if (dataListenerHandler) {
+      offBleCharacteristicValueChange(dataListenerHandler);
+      dataListenerHandler = null;
+    }
+
+    dataListenerHandler = (result) => {
       if (result.deviceId !== deviceId || result.serviceId !== serviceId || result.characteristicId !== dataCharId) return;
 
       const notifyBytes = new Uint8Array(result.value);
@@ -1071,6 +1210,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
       const parsed = parseLegacyRingData(notifyBytes);
       if (parsed) {
+        appendHistoryWireNotifyLog('legacy-history-wire-notify-parsed', result, notifyFrame, parsed);
         appendRingDiagnosticLog('L19 BLE', 'legacy-notify-parsed', {
           deviceId: result.deviceId,
           serviceId: result.serviceId,
@@ -1097,6 +1237,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         }
         runtime.onParsedData?.(parsedWithDevice);
       } else {
+        appendHistoryWireNotifyLog('legacy-history-wire-notify-unparsed', result, notifyFrame, null);
         appendRingDiagnosticLog('L19 BLE', 'legacy-notify-unparsed', {
           deviceId: result.deviceId,
           serviceId: result.serviceId,
@@ -1104,7 +1245,8 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
           ...notifyFrame
         });
       }
-    });
+    };
+    uni.onBLECharacteristicValueChange(dataListenerHandler);
   };
 
   const clearDataListener = () => {
@@ -1112,7 +1254,10 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       clearTimeout(waiter.timer);
       waiter.reject(new Error('Ring data listener was cleared.'));
     }
-    uni.offBLECharacteristicValueChange();
+    if (dataListenerHandler) {
+      offBleCharacteristicValueChange(dataListenerHandler);
+      dataListenerHandler = null;
+    }
   };
 
   return {

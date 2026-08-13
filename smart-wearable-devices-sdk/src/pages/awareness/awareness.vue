@@ -43,12 +43,14 @@ import DetailInfo from '@/components/DetailInfo.vue';
 import { usePopupFixer } from '@/hooks/usePopupFixer';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
+import { getStressLevelNumber, getStressScoreNumber, resolveStressDisplayStatus } from '@/utils/stressDisplay';
 import { clearFrontendRingBindingState, getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
 import { useRingBusinessHistoryPageSync } from '@/composables/useRingBusinessHistoryPageSync';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import { MOTION_CALORIE_DISPLAY_UNIT, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 import { formatBatteryStatusForDisplay, getRawBatteryPercent, isBatteryChargingLike } from '@/utils/batteryDisplay';
+import { readBatteryDisplayCache, writeBatteryDisplayCache } from '@/utils/batteryCache';
 import { reportRealBatteryLog } from '@/utils/deviceBatteryLog';
 import { getAppForegroundSessionId } from '@/utils/appForegroundSession';
 import {
@@ -70,6 +72,7 @@ import {
 } from '@/utils/deviceHistoryCheckpoint';
 import {
   decideDeviceSync,
+  DEVICE_SYNC_AUTO_COOLDOWN_MS,
   DEVICE_SYNC_SLEEP_OVERLAP_SECONDS
 } from '@/utils/deviceSyncPlanner';
 import {
@@ -119,12 +122,13 @@ const {
 const ringBusinessBridge = useRingBusinessHistoryPageSync();
 const RW_HOME_HISTORY_SYNC_TIMEOUT_MS = 5000;
 const LEGACY_HOME_DEVICE_INFO_TIMEOUT_MS = 6000;
-const LEGACY_HOME_DEVICE_INFO_BEFORE_HISTORY_TIMEOUT_MS = 4000;
+const LEGACY_HOME_DEVICE_INFO_BEFORE_HISTORY_TIMEOUT_MS = 2500;
 const RW_HOME_DEVICE_INFO_BEFORE_HISTORY_TIMEOUT_MS = 8000;
 const LEGACY_HOME_DEVICE_INFO_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const LEGACY_HOME_HISTORY_SYNC_TIMEOUT_MS = 30000;
 const LEGACY_HOME_HISTORY_BACKGROUND_TIMEOUT_MS = 30000;
 const LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS = 5000;
+const LEGACY_HOME_EMPTY_HISTORY_FULL_FALLBACK_TIMEOUT_MS = 15000;
 const LEGACY_HOME_HISTORY_READ_WATCHDOG_EXTRA_MS = 5000;
 const AWARENESS_AUXILIARY_SYNC_IDLE_INITIAL_DELAY_MS = 1000;
 const AWARENESS_AUXILIARY_SYNC_IDLE_POLL_MS = 500;
@@ -221,7 +225,7 @@ let legacyHomeHistoryUploadDispatchKey = '';
 let legacyHomeHistoryUploadDispatchAt = 0;
 let lastAwarenessRefreshAt = 0;
 let lastAwarenessHistorySyncAt = 0;
-let lastAwarenessDeviceTimeSyncAt = 0;
+const awarenessDeviceTimeSyncAtByIdentity = new Map<string, number>();
 let lastAwarenessHomeUploadSessionKey = '';
 let activeAwarenessHomeSyncClaim: DeviceSyncSessionClaim | null = null;
 let lastLegacyLocalDataUploadKey = '';
@@ -264,7 +268,7 @@ const completedLegacyLocalDataUploadSignatures = new Map<
   { uploadDedupKey: string; deviceMacNorm: string; signature: string; uploadedUntil: number; completedAt: number }
 >();
 const RW_AWARENESS_REFRESH_DEDUP_MS = 8000;
-const AWARENESS_HOME_SYNC_COOLDOWN_MS = 5 * 60 * 1000;
+const AWARENESS_HOME_SYNC_COOLDOWN_MS = DEVICE_SYNC_AUTO_COOLDOWN_MS;
 const RW_AWARENESS_HISTORY_DEDUP_MS = AWARENESS_HOME_SYNC_COOLDOWN_MS;
 const RW_AWARENESS_DEVICE_TIME_SYNC_DEDUP_MS = 10 * 60 * 1000;
 const LEGACY_LOCAL_DATA_UPLOAD_DEDUP_MS = 60 * 1000;
@@ -299,6 +303,7 @@ const LEGACY_HOME_HISTORY_PARTIAL_CONTINUE_MAX_ROUNDS = 30;
 const LEGACY_HOME_HISTORY_READ_RETRY_DEDUP_MS = 5 * 60 * 1000;
 const LEGACY_HOME_HISTORY_READ_SCOPE_DEDUP_MS = 5 * 60 * 1000;
 const LEGACY_HOME_HISTORY_READ_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
+const LEGACY_HOME_HISTORY_READ_COMMUNICATION_FAILURE_COOLDOWN_MS = 60 * 1000;
 const LEGACY_HOME_HISTORY_READ_RESULT_CACHE_TTL_MS = 10 * 60 * 1000;
 const LEGACY_HOME_CLOUD_COVERAGE_FRESH_MS = 10 * 60 * 1000;
 const LEGACY_HOME_CLOUD_COVERAGE_TIMEOUT_MS = 1200;
@@ -339,6 +344,7 @@ const LEGACY_DEFAULT_SLEEP_WINDOW_START_HOUR = 21;
 const legacyHomeHistoryReadAttemptAt = new Map<string, number>();
 const legacyHomeHistoryReadCompletedAt = new Map<string, number>();
 const legacyHomeHistoryReadFailedAt = new Map<string, number>();
+const legacyHomeHistoryReadFailedReason = new Map<string, string>();
 const legacyHomeHistoryLongRetryAttemptAt = new Map<string, number>();
 const legacyHomeHistoryPartialContinueAttempts = new Map<string, number>();
 const legacyHomeHistoryReadTerminalByDevice = new Map<
@@ -362,6 +368,16 @@ const legacyHomeHistoryReadRecordsByDevice = new Map<
     reason: string;
   }
 >();
+type LegacyHomeCloudCoverageSnapshot = {
+  deviceMac: string;
+  date: string;
+  recordCount: number;
+  latestTimestamp: number;
+  coverageStatus: string;
+  shouldSkipBle: boolean;
+  updatedAt: number;
+};
+const legacyHomeCloudCoverageByScope = new Map<string, LegacyHomeCloudCoverageSnapshot>();
 let legacyHomeHistoryPartialContinuationPending = false;
 const buildParsedDataUploadSyncMeta = (session: any) => {
   const meta = { ...(buildUploadSyncMeta(session) as Record<string, any>) };
@@ -467,6 +483,18 @@ const getAwarenessConnectionSnapshot = () => ({
   storeDevice: summarizeAwarenessDevice(ringStore.deviceInfo as Record<string, any>),
   userDevice: summarizeAwarenessDevice(userStore.deviceInfo as Record<string, any>)
 });
+const getAwarenessDeviceTimeSyncIdentity = () => {
+  const canonicalMac = normalizeHistoryCheckpointDeviceMac(getAwarenessCanonicalDeviceMac());
+  if (canonicalMac) return canonicalMac;
+  const snapshot = getAwarenessConnectionSnapshot();
+  return String(
+    snapshot.storeDevice.canonicalDeviceMac ||
+      snapshot.userDevice.canonicalDeviceMac ||
+      snapshot.storeDevice.deviceId ||
+      snapshot.userDevice.deviceId ||
+      'unknown-device'
+  );
+};
 const getAwarenessHomeUploadDeviceKey = () => {
   const canonicalMac = getAwarenessCanonicalDeviceMac();
   if (canonicalMac) return canonicalMac;
@@ -968,6 +996,42 @@ const getLegacyHomeHistoryReadScopeKey = (deviceMac: string, date: string) =>
   `${normalizeHistoryCheckpointDeviceMac(deviceMac) || 'unknown-device'}:${date}`;
 const getLegacyHomeHistoryReadKey = (deviceMac: string, date: string, sinceTimestamp: number) =>
   `${getLegacyHomeHistoryReadScopeKey(deviceMac, date)}:${sinceTimestamp}`;
+const clearLegacyHomeHistoryReadFailureKeys = (historyReadKey = '', historyScopeKey = '') => {
+  if (historyReadKey) {
+    legacyHomeHistoryReadFailedAt.delete(historyReadKey);
+    legacyHomeHistoryReadFailedReason.delete(historyReadKey);
+  }
+  if (historyScopeKey) {
+    legacyHomeHistoryReadFailedAt.delete(historyScopeKey);
+    legacyHomeHistoryReadFailedReason.delete(historyScopeKey);
+  }
+};
+const clearLegacyHomeHistoryReadFailuresByDevice = (deviceMac: string, trigger = '') => {
+  const normalizedDeviceMac = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  if (!normalizedDeviceMac) return false;
+  const keyPrefix = `${normalizedDeviceMac}:`;
+  let clearedCount = 0;
+  Array.from(legacyHomeHistoryReadFailedAt.keys()).forEach((key) => {
+    if (key.startsWith(keyPrefix)) {
+      legacyHomeHistoryReadFailedAt.delete(key);
+      clearedCount += 1;
+    }
+  });
+  Array.from(legacyHomeHistoryReadFailedReason.keys()).forEach((key) => {
+    if (key.startsWith(keyPrefix)) {
+      legacyHomeHistoryReadFailedReason.delete(key);
+    }
+  });
+  if (clearedCount > 0) {
+    appendAwarenessDiagnosticLog('legacy-home-history-read-failure-cleared', {
+      trigger,
+      deviceMac: normalizedDeviceMac,
+      clearedCount,
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+  }
+  return clearedCount > 0;
+};
 const shouldBypassLegacyHomeHistoryRecentReadGate = (
   reason = '',
   options: { force?: boolean; longRetry?: boolean } = {}
@@ -983,6 +1047,29 @@ const getLegacyHomeHistoryDateStartTimestamp = (date: string) => {
   const [, year, month, day] = match;
   return Math.floor(new Date(Number(year), Number(month) - 1, Number(day), 0, 0, 0, 0).getTime() / 1000);
 };
+const getLegacyHomeHistorySleepWindowStartTimestamp = (date: string) => {
+  const dateStartTimestamp = getLegacyHomeHistoryDateStartTimestamp(date);
+  if (dateStartTimestamp <= 0) return 0;
+  return Math.max(0, dateStartTimestamp - (24 - LEGACY_DEFAULT_SLEEP_WINDOW_START_HOUR) * 3600);
+};
+const getLegacyHomeCloudCoverageScopeKey = (deviceMac: string, date: string) =>
+  `${normalizeHistoryCheckpointDeviceMac(deviceMac) || 'unknown-device'}:${date || 'unknown-date'}`;
+const rememberLegacyHomeCloudCoverageSnapshot = (
+  deviceMac: string,
+  date: string,
+  details: Omit<LegacyHomeCloudCoverageSnapshot, 'deviceMac' | 'date' | 'updatedAt'>
+) => {
+  const normalizedDeviceMac = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  if (!normalizedDeviceMac || !date) return;
+  legacyHomeCloudCoverageByScope.set(getLegacyHomeCloudCoverageScopeKey(normalizedDeviceMac, date), {
+    deviceMac: normalizedDeviceMac,
+    date,
+    ...details,
+    updatedAt: Date.now()
+  });
+};
+const getLegacyHomeCloudCoverageSnapshot = (deviceMac: string, date: string) =>
+  legacyHomeCloudCoverageByScope.get(getLegacyHomeCloudCoverageScopeKey(deviceMac, date)) || null;
 const hasLegacyHomeHistoryReachedDate = (maxReachedTimestamp: number, date: string) => {
   const dateStartTimestamp = getLegacyHomeHistoryDateStartTimestamp(date);
   return Boolean(maxReachedTimestamp > 0 && dateStartTimestamp > 0 && maxReachedTimestamp >= dateStartTimestamp);
@@ -1041,6 +1128,9 @@ const getLegacyHomeHistoryReadTerminalForDevice = (deviceMac: string) => {
   pruneLegacyHomeHistoryReadResultCache();
   return legacyHomeHistoryReadTerminalByDevice.get(deviceMacNorm) || null;
 };
+const isLegacyHomeHistoryReadTerminalComplete = (
+  terminal?: { completed?: boolean; parsedComplete?: boolean } | null
+) => Boolean(terminal?.completed === true || terminal?.parsedComplete === true);
 const getLegacyHomeHistoryReadRecordsForDevice = (deviceMac: string) => {
   const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
   if (!deviceMacNorm) return [] as Array<Record<string, any>>;
@@ -1127,8 +1217,8 @@ const homeDetailRoutes = {
   relax: '/homeDetail/relaxStatus/relaxStatus',
   vitalSigns: '/homeDetail/vitalSigns/vitalSigns'
 } as const;
-const HOME_DETAIL_NAVIGATION_LOCK_MS = 500;
-const HOME_DETAIL_NAVIGATION_TARGET_DEDUP_MS = 1500;
+const HOME_DETAIL_NAVIGATION_LOCK_MS = 0;
+const HOME_DETAIL_NAVIGATION_TARGET_DEDUP_MS = 300;
 const homeDetailNavigating = ref(false);
 const getAwarenessNavigationDedupeState = () => {
   const globalState = globalThis as typeof globalThis & {
@@ -1148,6 +1238,24 @@ const claimAwarenessNavigationTarget = (key: string) => {
   state.key = key;
   state.at = now;
   return true;
+};
+const releaseAwarenessNavigationLock = () => {
+  homeDetailNavigating.value = false;
+};
+const resetAwarenessNavigationState = (reason: string) => {
+  const wasNavigating = homeDetailNavigating.value;
+  const state = getAwarenessNavigationDedupeState();
+  const hadDedupe = Boolean(state.key || state.at);
+  homeDetailNavigating.value = false;
+  state.key = '';
+  state.at = 0;
+  if (wasNavigating || hadDedupe) {
+    appendAwarenessDiagnosticLog('home-detail-navigation-reset', {
+      reason,
+      wasNavigating,
+      hadDedupe
+    });
+  }
 };
 const currentPhaseIndex = ref(3);
 const periodTodayDate = ref('');
@@ -1201,6 +1309,17 @@ const summarizeLegacyUploadRecordsForLog = (records: Array<Record<string, any>> 
   syncTimeRange: summarizeRingHistoryTimeRangeForLog(records, true),
   l19SleepSegmentCount: countSleepSegmentRecordsForLog(records)
 });
+const getAwarenessHistoryRecordUploadWindowTimestamp = (record: Record<string, any>) =>
+  getRingHistoryRecordSyncUnixTime(record as any) || getRingHistoryRecordUnixTime(record as any) || 0;
+const filterAwarenessHistoryRecordsForUploadWindow = (records: Array<Record<string, any>> = [], uploadSinceTimestamp = 0) => {
+  const sinceTimestamp = Number(uploadSinceTimestamp);
+  if (!Number.isFinite(sinceTimestamp) || sinceTimestamp <= 0) return records || [];
+  return (records || []).filter((record) => {
+    if (!record || typeof record !== 'object') return false;
+    const timestamp = getAwarenessHistoryRecordUploadWindowTimestamp(record);
+    return timestamp > 0 && timestamp >= sinceTimestamp;
+  });
+};
 const summarizeLegacyHistoryPayloadsForLog = (payloads: Array<Record<string, any>> = []) => ({
   count: payloads.length,
   tail: payloads.slice(-3).map((payload) => {
@@ -1354,9 +1473,12 @@ const buildAwarenessHistoryRecordsFromPayloadsForUpload = (payloads: any[], devi
   );
 };
 
-const buildLegacyLocalDataRawFramesForUpload = (payloads: any[], deviceMac: string) => {
+const buildLegacyLocalDataRawFramesForUpload = (payloads: any[], deviceMac: string, uploadSinceTimestamp = 0) => {
   const keyedFrames = new Map<string, ReturnType<typeof buildRingRawHistoryFrames>[number]>();
   let skippedDeviceMismatchCount = 0;
+  let skippedStaleRecordCount = 0;
+  let skippedUnknownTimeRecordCount = 0;
+  let skippedStalePayloadCount = 0;
   for (const payload of payloads || []) {
     if (!payload || typeof payload !== 'object') continue;
     if (deviceMac && !isAwarenessHistoryPayloadForDevice(payload as Record<string, any>, deviceMac)) {
@@ -1364,8 +1486,18 @@ const buildLegacyLocalDataRawFramesForUpload = (payloads: any[], deviceMac: stri
       continue;
     }
     const parsed = payload.parsed && typeof payload.parsed === 'object' ? payload.parsed : payload;
-    const records = Array.isArray(payload.records) ? payload.records : [];
-    const frames = buildRingRawHistoryFrames(records, parsed, deviceMac);
+    const records = Array.isArray(payload.records) ? (payload.records as Array<Record<string, any>>) : [];
+    const filteredRecords = filterAwarenessHistoryRecordsForUploadWindow(records, uploadSinceTimestamp);
+    if (uploadSinceTimestamp > 0) {
+      const unknownTimeCount = records.filter((record) => !getAwarenessHistoryRecordUploadWindowTimestamp(record)).length;
+      skippedUnknownTimeRecordCount += unknownTimeCount;
+      skippedStaleRecordCount += Math.max(0, records.length - filteredRecords.length - unknownTimeCount);
+      if (records.length === 0 || filteredRecords.length === 0) {
+        skippedStalePayloadCount += 1;
+        continue;
+      }
+    }
+    const frames = buildRingRawHistoryFrames(filteredRecords, parsed, deviceMac);
     frames.forEach((frame) => {
       if (frame.rawHash) keyedFrames.set(frame.rawHash, frame);
     });
@@ -1375,6 +1507,20 @@ const buildLegacyLocalDataRawFramesForUpload = (payloads: any[], deviceMac: stri
       reason: 'device-mismatch',
       deviceMac,
       skippedDeviceMismatchCount,
+      totalPayloadCount: payloads?.length || 0,
+      rawFrameCount: keyedFrames.size,
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+  }
+  if (skippedStalePayloadCount > 0 || skippedStaleRecordCount > 0 || skippedUnknownTimeRecordCount > 0) {
+    appendAwarenessDiagnosticLog('legacy-local-raw-frame-window-skip', {
+      reason: 'before-upload-since',
+      deviceMac,
+      uploadSinceTimestamp,
+      uploadSinceTime: formatUnixTimestampForLog(uploadSinceTimestamp),
+      skippedStalePayloadCount,
+      skippedStaleRecordCount,
+      skippedUnknownTimeRecordCount,
       totalPayloadCount: payloads?.length || 0,
       rawFrameCount: keyedFrames.size,
       snapshot: getAwarenessConnectionSnapshot()
@@ -1391,10 +1537,31 @@ const buildLegacyLocalDataUploadBatch = (deviceMac: string, uploadSinceTimestamp
     Array.isArray(local.value) ? (local.value as Array<Record<string, any>>) : [],
     deviceMac
   );
-  const records = dedupeAwarenessHistoryRecordsForUpload([...cachedRecords, ...payloadRecords, ...historyReadRecords]).filter(
+  const mergedRecords = dedupeAwarenessHistoryRecordsForUpload([...cachedRecords, ...payloadRecords, ...historyReadRecords]).filter(
     (record) => !deviceMac || !hasAwarenessPayloadDeviceIdentity(record) || isAwarenessPayloadSourceForDevice(record, deviceMac)
   );
-  const rawFrames = buildLegacyLocalDataRawFramesForUpload(payloadScope.matchedPayloads, deviceMac);
+  const records = filterAwarenessHistoryRecordsForUploadWindow(mergedRecords, uploadSinceTimestamp);
+  const skippedWindowRecordCount = Math.max(0, mergedRecords.length - records.length);
+  if (skippedWindowRecordCount > 0) {
+    appendAwarenessDiagnosticLog('legacy-local-data-window-skip', {
+      reason: 'before-upload-since',
+      deviceMac,
+      uploadSinceTimestamp,
+      uploadSinceTime: formatUnixTimestampForLog(uploadSinceTimestamp),
+      skippedWindowRecordCount,
+      beforeRecordCount: mergedRecords.length,
+      afterRecordCount: records.length,
+      beforeSummary: summarizeLegacyUploadRecordsForLog(mergedRecords as Array<Record<string, any>>),
+      afterSummary: summarizeLegacyUploadRecordsForLog(records as Array<Record<string, any>>),
+      sourceCounts: {
+        payloadRecordCount: payloadRecords.length,
+        cachedRecordCount: cachedRecords.length,
+        historyReadRecordCount: historyReadRecords.length
+      },
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+  }
+  const rawFrames = buildLegacyLocalDataRawFramesForUpload(payloadScope.matchedPayloads, deviceMac, uploadSinceTimestamp);
   const rawMetricCounts = countRingHistoryRecordMetrics(records as Array<Record<string, any>>);
   const builtSubmitArray = buildRingHistorySubmitRecords(records, uploadSinceTimestamp);
   const uploadedRecordFilter = filterUploadedRingHistorySubmitRecordsForDevice(deviceMac, builtSubmitArray);
@@ -1457,7 +1624,7 @@ const getLegacyLocalDataStableSnapshot = () => {
   const historyReadTerminal = deviceMac ? getLegacyHomeHistoryReadTerminalForDevice(deviceMac) : null;
   const completed =
     isRingHistoryReadComplete(matchedPayloads as Array<Record<string, any>>) ||
-    Boolean(historyReadTerminal?.parsedComplete === true && historyReadTerminal?.status !== 'partial');
+    isLegacyHomeHistoryReadTerminalComplete(historyReadTerminal);
   const submitMetricCounts = countRingHistoryRecordMetrics(submitRecords as Array<Record<string, any>>);
   const uploadDedupKey = deviceMac ? getLegacyLocalDataUploadKey(deviceMac, uploadSinceTimestamp, submitRecords, submitMetricCounts) : '';
   const checkpointTimestamp = getAwarenessLastReadTimestamp();
@@ -1859,6 +2026,12 @@ const clearLegacyLocalDataIncompleteFlushTimer = () => {
   legacyLocalDataIncompleteFlushScheduledAt = 0;
 };
 
+const clearLegacyHomeDeviceInfoRetryDeferredTimer = () => {
+  if (!legacyHomeDeviceInfoRetryDeferredTimer) return;
+  clearTimeout(legacyHomeDeviceInfoRetryDeferredTimer);
+  legacyHomeDeviceInfoRetryDeferredTimer = null;
+};
+
 const clearLegacyLocalDataTimeoutFlush = () => {
   clearLegacyLocalDataIncompleteFlushTimer();
   legacyLocalDataTimeoutFlushDeviceMacNorm = '';
@@ -1977,7 +2150,12 @@ const requestLegacyLocalDataTimeoutFlush = (
   legacyLocalDataTimeoutFlushKey = flushKey;
   legacyLocalDataTimeoutFlushRequestedAt = now;
   legacyLocalDataTimeoutFlushTrigger = trigger;
+  legacyLocalDataStablePromise = null;
+  legacyLocalDataStableUploadScheduled = false;
+  legacyLocalDataStableWaitStartedAt = 0;
   legacyLocalDataStableReadyAt = now;
+  legacyLocalDataUploadWatcherActive = false;
+  legacyLocalDataUploadWatcherActiveAt = 0;
   legacyLocalDataUploadWatcherPending = false;
   appendAwarenessDiagnosticLog('legacy-local-data-timeout-flush-requested', {
     protocol,
@@ -2311,6 +2489,10 @@ const summarizeSubmitDataResponse = (response: unknown) => {
     'count',
     'healthCount',
     'sleepCount',
+    'sleepRawCount',
+    'sleepStateCount',
+    'healthSleepStateCount',
+    'sleepAcceptedCount',
     'sleepInputCount',
     'sleepDuplicateInputCount',
     'sleepOverlapDeletedCount',
@@ -2355,6 +2537,19 @@ const getSubmitDataResponseNumber = (response: unknown, field: string) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : undefined;
 };
+const getSubmitDataResponseSleepAcceptedCount = (response: unknown) => {
+  const acceptedCount = getSubmitDataResponseNumber(response, 'sleepAcceptedCount');
+  if (typeof acceptedCount === 'number') {
+    return acceptedCount;
+  }
+  const candidates = [
+    getSubmitDataResponseNumber(response, 'sleepRawCount'),
+    getSubmitDataResponseNumber(response, 'sleepStateCount'),
+    getSubmitDataResponseNumber(response, 'healthSleepStateCount'),
+    getSubmitDataResponseNumber(response, 'sleepCount')
+  ].filter((value): value is number => typeof value === 'number');
+  return candidates.length > 0 ? Math.max(...candidates) : undefined;
+};
 const isSubmitDataResponseSuccessful = (response: unknown) => {
   const payload = getSubmitDataResponsePayload(response);
   if (!payload) return true;
@@ -2365,8 +2560,8 @@ const isSubmitDataResponseSuccessful = (response: unknown) => {
 const shouldKeepLegacyLocalHistoryCacheAfterUpload = (submitMetricCounts: Record<string, number>, response: unknown) => {
   const submittedSleepCount = Number(submitMetricCounts.sleep || 0);
   if (submittedSleepCount <= 0) return false;
-  const responseSleepCount = getSubmitDataResponseNumber(response, 'sleepCount');
-  return responseSleepCount === 0;
+  const responseSleepAcceptedCount = getSubmitDataResponseSleepAcceptedCount(response);
+  return responseSleepAcceptedCount === 0;
 };
 const clearLegacyLocalHistoryCacheAfterUpload = (context: Record<string, unknown>) => {
   const receivedBefore = Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0;
@@ -2436,12 +2631,14 @@ const openHomeDetail = (key: keyof typeof homeDetailRoutes) => {
     uni.navigateTo({
       url,
       success: () => {
+        releaseAwarenessNavigationLock();
         appendAwarenessDiagnosticLog('home-detail-navigate-success', {
           key,
           elapsedMs: Date.now() - startedAt
         });
       },
       fail: (error) => {
+        releaseAwarenessNavigationLock();
         appendAwarenessDiagnosticLog('home-detail-navigate-fail', {
           key,
           elapsedMs: Date.now() - startedAt,
@@ -2450,9 +2647,11 @@ const openHomeDetail = (key: keyof typeof homeDetailRoutes) => {
         uni.showToast({ title: '页面加载失败，请稍后重试', icon: 'none' });
       },
       complete: () => {
-        setTimeout(() => {
-          homeDetailNavigating.value = false;
-        }, HOME_DETAIL_NAVIGATION_LOCK_MS);
+        if (HOME_DETAIL_NAVIGATION_LOCK_MS > 0) {
+          setTimeout(releaseAwarenessNavigationLock, HOME_DETAIL_NAVIGATION_LOCK_MS);
+        } else {
+          releaseAwarenessNavigationLock();
+        }
       }
     });
   }, 0);
@@ -2474,12 +2673,14 @@ const openPeriodPage = (url: string) => {
     uni.navigateTo({
       url: targetUrl,
       success: () => {
+        releaseAwarenessNavigationLock();
         appendAwarenessDiagnosticLog('period-navigate-success', {
           url: targetUrl,
           elapsedMs: Date.now() - startedAt
         });
       },
       fail: (error) => {
+        releaseAwarenessNavigationLock();
         appendAwarenessDiagnosticLog('period-navigate-fail', {
           url: targetUrl,
           elapsedMs: Date.now() - startedAt,
@@ -2488,9 +2689,11 @@ const openPeriodPage = (url: string) => {
         uni.showToast({ title: '页面加载失败，请稍后重试', icon: 'none' });
       },
       complete: () => {
-        setTimeout(() => {
-          homeDetailNavigating.value = false;
-        }, HOME_DETAIL_NAVIGATION_LOCK_MS);
+        if (HOME_DETAIL_NAVIGATION_LOCK_MS > 0) {
+          setTimeout(releaseAwarenessNavigationLock, HOME_DETAIL_NAVIGATION_LOCK_MS);
+        } else {
+          releaseAwarenessNavigationLock();
+        }
       }
     });
   }, 0);
@@ -2848,57 +3051,6 @@ const extractGirlHealthAdvice = (source: any): string => {
 };
 const getGirlHealthPhaseFallbackTip = () =>
   GIRL_HEALTH_PHASE_FALLBACK_TIPS[currentPhaseIndex.value] || GIRL_HEALTH_PHASE_FALLBACK_TIPS[3];
-const PRESSURE_LEVEL_STATUS_TEXTS = new Set([
-  '\u538b\u529b\u504f\u9ad8',
-  '\u504f\u9ad8',
-  '\u5f88\u9ad8',
-  '\u4e2d\u7b49',
-  '\u6b63\u5e38',
-  '\u538b\u529b\u6b63\u5e38',
-  '\u538b\u529b\u4e2d\u7b49',
-  '\u9ad8\u538b\u529b'
-]);
-const STRESS_ALGORITHM_EMOTION_KEYS = [
-  'stressEmotion',
-  'pressureEmotion',
-  'emotion',
-  'emotionLabel',
-  'emotionStatus',
-  'emotionalState',
-  'mood',
-  'moodLabel',
-  'moodStatus',
-  'mentalState',
-  'stressMood'
-];
-const compactPressureStatusText = (value: unknown) => normalizeHealthText(value, '').replace(/\s+/g, '');
-const isPressureLevelStatusText = (value: unknown) => {
-  const text = compactPressureStatusText(value);
-  return !!text && PRESSURE_LEVEL_STATUS_TEXTS.has(text);
-};
-const readStressAlgorithmEmotion = (payload: unknown): string => {
-  if (!payload || typeof payload !== 'object') return '';
-  const source = payload as Record<string, any>;
-  for (const key of STRESS_ALGORITHM_EMOTION_KEYS) {
-    const value = source[key];
-    const text =
-      typeof value === 'string'
-        ? value
-        : value && typeof value === 'object'
-          ? value.text || value.label || value.name || value.value || value.status || value.state || ''
-          : '';
-    const normalized = normalizeHealthText(text, '');
-    if (normalized && !isPressureLevelStatusText(normalized)) return normalized;
-  }
-  return readStressAlgorithmEmotion(source.algorithm);
-};
-const isPendingMetricStatus = (value: unknown) => /[\u91c7\u96c6\u4e2d\u6d4b\u91cf\u8bfb\u53d6\u8bf7\u6c42\u7b49\u5f85]/.test(String(value ?? ''));
-const getRelaxStatusByScore = (score: number) => {
-  if (score >= 80) return '\u5e73\u7a33\u72b6\u6001';
-  if (score >= 60) return '\u8f7b\u5fae\u7d27\u5f20';
-  if (score > 0) return '\u7d27\u5f20\u72b6\u6001';
-  return '';
-};
 const sleepDurationMinutes = computed(() => {
   const overview = sleepOverviewObj.value as Record<string, any> | null | undefined;
   const healthData = userStore.healthData as Record<string, any> | null | undefined;
@@ -2935,36 +3087,39 @@ const sleepQualityText = computed(() => {
   if (quality >= 81 && quality <= 100) return '\u4f18\u79c0';
 
   return '--';
-});const relaxStressNumber = computed(() =>
-  getPositiveMetricNumber(
-    stressDetailObj.value?.stressValue,
+});
+const relaxStressNumber = computed(() =>
+  getStressScoreNumber(
     stressDetailObj.value?.avgStressValue,
     stressSummaryObj.value?.todayStressScore,
     stressSummaryObj.value?.weekAvgStressScore,
     balanceScoreObj.value?.relaxScore,
     userStore.healthData?.stress,
     userStore.healthData?.stressIndex,
-    userStore.latestMetrics?.stress
+    userStore.latestMetrics?.stress,
+    stressDetailObj.value?.stressValue
+  )
+);
+const relaxStressLevel = computed(() =>
+  getStressLevelNumber(
+    stressDetailObj.value?.stressValue,
+    stressDetailObj.value?.stressLevel,
+    (stressSummaryObj.value as any)?.stressValue,
+    (stressSummaryObj.value as any)?.stressLevel,
+    userStore.healthData?.stressStatus,
+    userStore.latestMetrics?.stressStatus
   )
 );
 const relaxStressValue = computed(() => (relaxStressNumber.value > 0 ? `${relaxStressNumber.value}` : '00'));
 const relaxStressStatus = computed(() => {
-  const rawStatus =
-    readStressAlgorithmEmotion(stressDetailObj.value) ||
-    readStressAlgorithmEmotion(stressSummaryObj.value) ||
-    userStore.healthData?.stressStatus ||
-    userStore.latestMetrics?.stressStatus;
-  if (relaxStressNumber.value > 0 && isPendingMetricStatus(rawStatus)) {
-    return getRelaxStatusByScore(relaxStressNumber.value) || '\u5e73\u7a33\u72b6\u6001';
-  }
-  const normalized = normalizeHealthText(rawStatus, '');
-  if (isPressureLevelStatusText(normalized)) {
-    return getRelaxStatusByScore(relaxStressNumber.value) || '\u5e73\u7a33\u72b6\u6001';
-  }
-  if (/^\s*\d+\s*(?:级|等级)\s*$/.test(normalized) || normalized === '等级') {
-    return getRelaxStatusByScore(relaxStressNumber.value) || '\u5e73\u7a33\u72b6\u6001';
-  }
-  return normalized || getRelaxStatusByScore(relaxStressNumber.value) || '\u5e73\u7a33\u72b6\u6001';
+  return resolveStressDisplayStatus({
+    detail: stressDetailObj.value,
+    summary: stressSummaryObj.value,
+    fallbackStatus: userStore.healthData?.stressStatus || userStore.latestMetrics?.stressStatus,
+    score: relaxStressNumber.value,
+    level: relaxStressLevel.value,
+    fallbackText: '\u5e73\u7a33\u72b6\u6001'
+  });
 });
 const activityStepNumber = computed(() =>
   getPositiveMetricNumber(motionOverviewObj.value?.step)
@@ -3068,7 +3223,9 @@ const displayBatteryValue = computed(() => {
     ringStore.healthData?.chargingStatusText ??
     ringStore.latestMetrics?.chargingStatusText ??
     ringStore.healthData?.batteryStatus;
-  return formatBatteryStatusForDisplay(value, status, '');
+  const directDisplay = formatBatteryStatusForDisplay(value, status, '');
+  if (String(directDisplay || '').trim()) return directDisplay;
+  return getAwarenessBatteryCacheRecord()?.displayText || '';
 });
 const hasAwarenessBatteryDisplayValue = () => {
   const value = String(displayBatteryValue.value || '').trim();
@@ -3090,6 +3247,25 @@ const getAwarenessRawBatteryValue = () =>
   userStore.latestMetrics?.battery ??
   ringStore.healthData?.battery ??
   ringStore.latestMetrics?.battery;
+const getAwarenessRawBatteryStatusValue = () =>
+  getBatteryDisplayStatusValue(latestBattery.value as Record<string, any> | null) ??
+  getBatteryDisplayStatusValue(ringBleDeviceInfo.value as Record<string, any> | null) ??
+  getBatteryDisplayStatusValue(ringStore.deviceInfo as Record<string, any> | null) ??
+  getBatteryDisplayStatusValue(userStore.deviceInfo as Record<string, any> | null) ??
+  userStore.healthData?.chargingStatusText ??
+  userStore.latestMetrics?.chargingStatusText ??
+  userStore.healthData?.batteryStatus ??
+  ringStore.healthData?.chargingStatusText ??
+  ringStore.latestMetrics?.chargingStatusText ??
+  ringStore.healthData?.batteryStatus;
+const hasAwarenessFreshBatteryDisplayValue = () => {
+  const rawBattery = getAwarenessRawBatteryValue();
+  const rawStatus = getAwarenessRawBatteryStatusValue();
+  return getRawBatteryPercent(rawBattery) != null || isBatteryChargingLike(rawBattery, rawStatus);
+};
+function getAwarenessBatteryCacheRecord() {
+  return readBatteryDisplayCache(getAwarenessHomeSyncUserId(), getAwarenessBatteryLogMac());
+}
 watch(
   () => {
     const rawBattery = getRawBatteryPercent(getAwarenessRawBatteryValue());
@@ -3099,6 +3275,13 @@ watch(
   },
   (signature) => {
     if (!signature) return;
+    writeBatteryDisplayCache({
+      userId: getAwarenessHomeSyncUserId(),
+      mac: getAwarenessBatteryLogMac(),
+      battery: getAwarenessRawBatteryValue(),
+      status: getAwarenessRawBatteryStatusValue(),
+      source: 'awareness-latest-battery'
+    });
     void reportRealBatteryLog({
       userId: getAwarenessHomeSyncUserId(),
       mac: getAwarenessBatteryLogMac(),
@@ -3329,6 +3512,7 @@ watch(
       if (hasAwarenessCommunicationReady()) {
         userStore.updateIsConnected(true);
         userStore.updateReconnectingStatus('2');
+        clearLegacyHomeHistoryReadFailuresByDevice(getAwarenessCanonicalDeviceMac(), 'reconnect-result-ready');
         if (!isAwarenessRwRing()) {
           if (
             validateAwarenessHomeSyncContext('reconnect-result-ready-precheck', {
@@ -3547,13 +3731,45 @@ watch(
         Number(activeHistorySnapshot.builtSubmitCount || 0),
         Number(activeHistorySnapshot.rawFrameCount || 0)
       );
-      legacyLocalDataUploadWatcherPending = true;
-      appendAwarenessDiagnosticLog('legacy-local-data-upload-deferred-during-history-read', {
+      const timeoutFlushAllowed = isLegacyLocalDataTimeoutFlushAllowed(activeHistorySnapshot);
+      const earlyFlushAllowed = shouldFlushLegacyLocalDataDuringHistoryRead(activeHistorySnapshot, historyReadElapsedMs);
+      if (!timeoutFlushAllowed && earlyFlushAllowed) {
+        requestLegacyLocalDataActiveHistoryFlush(
+          'legacy-local-data-upload-watch',
+          protocol,
+          activeHistorySnapshot,
+          historyReadElapsedMs
+        );
+      }
+      const activeHistoryFlushAllowed = timeoutFlushAllowed || earlyFlushAllowed || isLegacyLocalDataTimeoutFlushAllowed(activeHistorySnapshot);
+      if (!activeHistoryFlushAllowed) {
+        legacyLocalDataUploadWatcherPending = true;
+        appendAwarenessDiagnosticLog('legacy-local-data-upload-deferred-during-history-read', {
+          protocol,
+          reason: 'history-read-active-wait-terminal-no-early-upload',
+          historyReadElapsedMs,
+          softWaitMs: LEGACY_HOME_HISTORY_UPLOAD_SOFT_WAIT_MS,
+          timeoutFlushAllowed,
+          earlyFlushAllowed,
+          activeUploadableCount,
+          localDataCount: localData.length,
+          localDataSummary: summarizeLegacyHistoryPayloadsForLog(localData as Array<Record<string, any>>),
+          localDataLength: Array.isArray(local.value) ? local.value.length : 0,
+          hasLegacyHomeHistoryReadPromise: Boolean(legacyHomeHistoryReadPromise),
+          legacyHomeHistoryReadInFlight: legacyHomeHistoryReadInFlight.value,
+          stableSnapshot: activeHistorySnapshot,
+          snapshot: getAwarenessConnectionSnapshot()
+        });
+        return;
+      }
+      legacyLocalDataUploadWatcherPending = false;
+      appendAwarenessDiagnosticLog('legacy-local-data-upload-continue-during-history-read', {
         protocol,
-        reason: 'history-read-active-wait-terminal-no-early-upload',
+        reason: timeoutFlushAllowed ? 'timeout-flush-allowed' : 'early-flush-large-snapshot',
         historyReadElapsedMs,
         softWaitMs: LEGACY_HOME_HISTORY_UPLOAD_SOFT_WAIT_MS,
-        timeoutFlushAllowed: isLegacyLocalDataTimeoutFlushAllowed(activeHistorySnapshot),
+        timeoutFlushAllowed,
+        earlyFlushAllowed,
         activeUploadableCount,
         localDataCount: localData.length,
         localDataSummary: summarizeLegacyHistoryPayloadsForLog(localData as Array<Record<string, any>>),
@@ -3563,7 +3779,6 @@ watch(
         stableSnapshot: activeHistorySnapshot,
         snapshot: getAwarenessConnectionSnapshot()
       });
-      return;
     }
 
     // if (userStore.localData.length > lastLocalDataLength) {
@@ -4218,16 +4433,18 @@ watch(
                 }
                 submitBatchResponses.push(batchResponse);
               }
-              const aggregateSleepCounts = submitBatchResponses
-                .map((response) => getSubmitDataResponseNumber(response, 'sleepCount'))
+              const aggregateSleepAcceptedCounts = submitBatchResponses
+                .map((response) => getSubmitDataResponseSleepAcceptedCount(response))
                 .filter((value): value is number => typeof value === 'number');
+              const aggregateSleepAcceptedCount = aggregateSleepAcceptedCounts.length > 0
+                ? aggregateSleepAcceptedCounts.reduce((sum, value) => sum + value, 0)
+                : undefined;
               return {
                 code: 200,
                 batchCount: submitBatches.length,
                 submitCount: submitRecords.length,
-                sleepCount: aggregateSleepCounts.length > 0
-                  ? aggregateSleepCounts.reduce((sum, value) => sum + value, 0)
-                  : undefined,
+                sleepCount: aggregateSleepAcceptedCount,
+                sleepAcceptedCount: aggregateSleepAcceptedCount,
                 responses: submitBatchResponses
               };
             })();
@@ -4362,8 +4579,7 @@ watch(
           });
           const historyReadTerminal = !isRwRing ? getLegacyHomeHistoryReadTerminalForDevice(deviceMac) : null;
           const historyReadTerminalComplete =
-            Boolean(historyReadTerminal?.parsedComplete === true && historyReadTerminal?.status !== 'partial') ||
-            uploadSignatureSnapshot.completed === true;
+            isLegacyHomeHistoryReadTerminalComplete(historyReadTerminal) || uploadSignatureSnapshot.completed === true;
           const maxReceivedTimestamp = getLegacyLocalDataSnapshotMaxTimestamp(uploadSignatureSnapshot);
           const alreadyUploadedOnlyAfterDedup =
             submitArray.length === 0 &&
@@ -4985,6 +5201,12 @@ const shouldSkipLegacyHomeHistoryByCloudCoverage = async (protocol: string, trig
     const ageSeconds = Number(data?.ageSeconds);
     const coverageStatus = String(data?.coverageStatus || '').trim();
     const backendFresh = data?.shouldSkipBle === true || coverageStatus === 'fresh';
+    rememberLegacyHomeCloudCoverageSnapshot(normalizedDeviceMac, date, {
+      recordCount: Number.isFinite(recordCount) ? recordCount : 0,
+      latestTimestamp: Number.isFinite(latestTimestamp) ? latestTimestamp : 0,
+      coverageStatus,
+      shouldSkipBle: data?.shouldSkipBle === true
+    });
     const checkpointCovered =
       checkpointTimestamp > 0 &&
       latestTimestamp > 0 &&
@@ -5756,25 +5978,13 @@ const scheduleAwarenessAfterDataProcessed = (
           legacyHomeHistoryReadPromise ||
           isLegacyLocalDataUploadWorkActive()
       );
+      const shouldForceRefreshAfterHardMax =
+        waitElapsedMs >= AWARENESS_PROCESSED_REFRESH_HARD_MAX_WAIT_MS;
       if (
         isAwarenessDataSyncInProgress() &&
-        (waitElapsedMs < AWARENESS_PROCESSED_REFRESH_IDLE_MAX_WAIT_MS || hasBlockingHistoryOrUploadWork)
+        (waitElapsedMs < AWARENESS_PROCESSED_REFRESH_IDLE_MAX_WAIT_MS || hasBlockingHistoryOrUploadWork) &&
+        !shouldForceRefreshAfterHardMax
       ) {
-        if (waitElapsedMs >= AWARENESS_PROCESSED_REFRESH_HARD_MAX_WAIT_MS && hasBlockingHistoryOrUploadWork) {
-          appendAwarenessDiagnosticLog('business-processed-refresh-skip-sync-still-active', {
-            trigger: reason,
-            date,
-            retryCount,
-            waitElapsedMs,
-            hardMaxWaitMs: AWARENESS_PROCESSED_REFRESH_HARD_MAX_WAIT_MS,
-            homeDataSyncing: homeDataSyncing.value,
-            legacyHomeHistoryReadInFlight: legacyHomeHistoryReadInFlight.value,
-            hasLegacyHomeHistoryReadPromise: Boolean(legacyHomeHistoryReadPromise),
-            hasLegacyLocalDataUploadPromise: Boolean(legacyLocalDataUploadPromise),
-            snapshot: getAwarenessConnectionSnapshot()
-          });
-          return;
-        }
         appendAwarenessDiagnosticLog('business-processed-refresh-deferred-sync-active', {
           trigger: reason,
           date,
@@ -5791,7 +6001,21 @@ const scheduleAwarenessAfterDataProcessed = (
         scheduleAwarenessAfterDataProcessed(reason, date, waitStartedAt, retryCount + 1);
         return;
       }
-      if (waitElapsedMs >= AWARENESS_PROCESSED_REFRESH_IDLE_MAX_WAIT_MS && isAwarenessDataSyncInProgress()) {
+      if (shouldForceRefreshAfterHardMax && isAwarenessDataSyncInProgress()) {
+        appendAwarenessDiagnosticLog('business-processed-refresh-force-after-hard-wait-timeout', {
+          trigger: reason,
+          date,
+          retryCount,
+          waitElapsedMs,
+          hardMaxWaitMs: AWARENESS_PROCESSED_REFRESH_HARD_MAX_WAIT_MS,
+          hasBlockingHistoryOrUploadWork,
+          homeDataSyncing: homeDataSyncing.value,
+          legacyHomeHistoryReadInFlight: legacyHomeHistoryReadInFlight.value,
+          hasLegacyHomeHistoryReadPromise: Boolean(legacyHomeHistoryReadPromise),
+          hasLegacyLocalDataUploadPromise: Boolean(legacyLocalDataUploadPromise),
+          snapshot: getAwarenessConnectionSnapshot()
+        });
+      } else if (waitElapsedMs >= AWARENESS_PROCESSED_REFRESH_IDLE_MAX_WAIT_MS && isAwarenessDataSyncInProgress()) {
         appendAwarenessDiagnosticLog('business-processed-refresh-force-after-idle-wait-timeout', {
           trigger: reason,
           date,
@@ -5816,16 +6040,20 @@ const scheduleAwarenessAfterDataProcessed = (
 
 const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string, options: { allowLegacy?: boolean } = {}) => {
   const isRwRing = isAwarenessRwRing();
-  if ((!isRwRing && !options.allowLegacy) || !hasAwarenessCommunicationReady()) return;
+  if (!hasAwarenessCommunicationReady()) return;
 
   const now = Date.now();
-  if (now - lastAwarenessDeviceTimeSyncAt < RW_AWARENESS_DEVICE_TIME_SYNC_DEDUP_MS) {
+  const syncIdentity = getAwarenessDeviceTimeSyncIdentity();
+  const lastSyncAt = awarenessDeviceTimeSyncAtByIdentity.get(syncIdentity) || 0;
+  const elapsedSinceSyncMs = lastSyncAt > 0 ? now - lastSyncAt : Number.POSITIVE_INFINITY;
+  if (elapsedSinceSyncMs >= 0 && elapsedSinceSyncMs < RW_AWARENESS_DEVICE_TIME_SYNC_DEDUP_MS) {
     appendAwarenessDiagnosticLog('device-time-sync-skip', {
       reason: 'dedup-recent',
       trigger,
       isRwRing,
       allowLegacy: options.allowLegacy === true,
-      elapsedMs: now - lastAwarenessDeviceTimeSyncAt,
+      syncIdentity,
+      elapsedMs: elapsedSinceSyncMs,
       snapshot: getAwarenessConnectionSnapshot()
     });
     return;
@@ -5837,6 +6065,7 @@ const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string, options: { all
     trigger,
     isRwRing,
     allowLegacy: options.allowLegacy === true,
+    syncIdentity,
     timestampMs: now,
     timezone,
     snapshot: getAwarenessConnectionSnapshot()
@@ -5844,11 +6073,12 @@ const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string, options: { all
 
   try {
     await updateDeviceTime(now, timezone);
-    lastAwarenessDeviceTimeSyncAt = Date.now();
+    awarenessDeviceTimeSyncAtByIdentity.set(syncIdentity, Date.now());
     appendAwarenessDiagnosticLog('device-time-sync-result', {
       trigger,
       isRwRing,
       allowLegacy: options.allowLegacy === true,
+      syncIdentity,
       elapsedMs: Date.now() - startedAt,
       timestampMs: now,
       timezone,
@@ -5859,6 +6089,7 @@ const syncRwHomeDeviceTimeBeforeHistory = async (trigger: string, options: { all
       trigger,
       isRwRing,
       allowLegacy: options.allowLegacy === true,
+      syncIdentity,
       elapsedMs: Date.now() - startedAt,
       timestampMs: now,
       timezone,
@@ -6243,26 +6474,6 @@ const refreshLegacyHomeDeviceInfoBeforeHistorySync = async (
     return false;
   }
 
-  if (!isAwarenessRwRing()) {
-    const hasBattery = hasAwarenessBatteryDisplayValue();
-    scheduleLegacyHomeDeviceInfoRetryAfterHistory(
-      protocol,
-      hasCachedSnapshot,
-      reason,
-      'defer-device-info-until-history-idle'
-    );
-    scheduleLegacyHomeDeviceInfoRetryFlush(`${reason}:device-info-deferred`, 1800);
-    appendAwarenessDiagnosticLog('legacy-home-device-info-before-history-deferred', {
-      protocol,
-      reason,
-      hasCachedSnapshot,
-      hasBattery,
-      battery: displayBatteryValue.value,
-      snapshot: getAwarenessConnectionSnapshot()
-    });
-    return hasBattery;
-  }
-
   if (legacyHomeDeviceInfoRefreshPromise) {
     const startedAt = Date.now();
     appendAwarenessDiagnosticLog('legacy-home-device-info-before-history-wait-existing', {
@@ -6284,7 +6495,7 @@ const refreshLegacyHomeDeviceInfoBeforeHistorySync = async (
         snapshot: getAwarenessConnectionSnapshot()
       });
     }
-    const hasBattery = hasAwarenessBatteryDisplayValue();
+    const hasBattery = hasAwarenessFreshBatteryDisplayValue();
     appendAwarenessDiagnosticLog('legacy-home-device-info-before-history-existing-result', {
       protocol,
       reason,
@@ -6322,7 +6533,7 @@ const refreshLegacyHomeDeviceInfoBeforeHistorySync = async (
 
   try {
     await legacyHomeDeviceInfoRefreshPromise;
-    const hasBattery = hasAwarenessBatteryDisplayValue();
+    const hasBattery = hasAwarenessFreshBatteryDisplayValue();
     appendAwarenessDiagnosticLog('legacy-home-device-info-before-history-result', {
       protocol,
       reason,
@@ -7008,26 +7219,49 @@ const startLegacyHomeHistoryReadInBackground = (
   }
 
   const failedAt = legacyHomeHistoryReadFailedAt.get(historyScopeKey) || legacyHomeHistoryReadFailedAt.get(historyReadKey) || 0;
-  if (!bypassRecentReadGate && failedAt > 0 && now - failedAt < LEGACY_HOME_HISTORY_READ_FAILURE_COOLDOWN_MS) {
-    appendAwarenessDiagnosticLog('legacy-home-history-read-skip', {
-      protocol,
-      reason,
-      skipReason: 'recent-read-failed',
-      historyReadKey,
-      historyScopeKey,
-      historyDate,
-      deviceMac: normalizedHistoryDeviceMac,
-      historySinceTimestamp,
-      historySinceText: formatUnixTimestampForLog(historySinceTimestamp),
-      elapsedSinceFailedMs: now - failedAt,
-      cooldownMs: LEGACY_HOME_HISTORY_READ_FAILURE_COOLDOWN_MS,
-      snapshot: getAwarenessConnectionSnapshot()
-    });
-    userStore.updateUploadingStatus('2');
-    userStore.updateIsSending(false);
-    homeDataSyncing.value = false;
-    releaseAwarenessHomeSyncSession('legacy-home-history-read-recent-failed-skip', 'failed', false);
-    return;
+  const failedReason =
+    legacyHomeHistoryReadFailedReason.get(historyScopeKey) ||
+    legacyHomeHistoryReadFailedReason.get(historyReadKey) ||
+    '';
+  const failureCooldownMs =
+    failedReason === 'communication-not-ready'
+      ? LEGACY_HOME_HISTORY_READ_COMMUNICATION_FAILURE_COOLDOWN_MS
+      : LEGACY_HOME_HISTORY_READ_FAILURE_COOLDOWN_MS;
+  if (!bypassRecentReadGate && failedAt > 0 && now - failedAt < failureCooldownMs) {
+    if (hasAwarenessCommunicationReady()) {
+      clearLegacyHomeHistoryReadFailureKeys(historyReadKey, historyScopeKey);
+      appendAwarenessDiagnosticLog('legacy-home-history-read-failure-cleared-by-ready', {
+        protocol,
+        reason,
+        failedReason,
+        historyReadKey,
+        historyScopeKey,
+        deviceMac: normalizedHistoryDeviceMac,
+        elapsedSinceFailedMs: now - failedAt,
+        snapshot: getAwarenessConnectionSnapshot()
+      });
+    } else {
+      appendAwarenessDiagnosticLog('legacy-home-history-read-skip', {
+        protocol,
+        reason,
+        skipReason: 'recent-read-failed',
+        failedReason,
+        historyReadKey,
+        historyScopeKey,
+        historyDate,
+        deviceMac: normalizedHistoryDeviceMac,
+        historySinceTimestamp,
+        historySinceText: formatUnixTimestampForLog(historySinceTimestamp),
+        elapsedSinceFailedMs: now - failedAt,
+        cooldownMs: failureCooldownMs,
+        snapshot: getAwarenessConnectionSnapshot()
+      });
+      userStore.updateUploadingStatus('2');
+      userStore.updateIsSending(false);
+      homeDataSyncing.value = false;
+      releaseAwarenessHomeSyncSession('legacy-home-history-read-recent-failed-skip', 'failed', false);
+      return;
+    }
   }
 
   const attemptedAt = Math.max(
@@ -7088,11 +7322,14 @@ const startLegacyHomeHistoryReadInBackground = (
   const markCurrentHistoryReadFailed = (
     trigger: string,
     startedAt = Date.now(),
-    details: { skipLongRetry?: boolean; skipLongRetryReason?: string; status?: string } = {}
+    details: { skipLongRetry?: boolean; skipLongRetryReason?: string; status?: string; failureReason?: string } = {}
   ) => {
     const failedAt = Date.now();
+    const failureReason = details.failureReason || trigger;
     legacyHomeHistoryReadFailedAt.set(historyReadKey, failedAt);
     legacyHomeHistoryReadFailedAt.set(historyScopeKey, failedAt);
+    legacyHomeHistoryReadFailedReason.set(historyReadKey, failureReason);
+    legacyHomeHistoryReadFailedReason.set(historyScopeKey, failureReason);
     appendAwarenessDiagnosticLog(trigger, {
       protocol,
       reason,
@@ -7107,6 +7344,7 @@ const startLegacyHomeHistoryReadInBackground = (
       receivedTail: summarizeAwarenessReceivedDataTailForLog(),
       localDataLength: Array.isArray(userStore.localData) ? userStore.localData.length : 0,
       status: details.status,
+      failureReason,
       skipLongRetry: Boolean(details.skipLongRetry),
       skipLongRetryReason: details.skipLongRetryReason,
       snapshot: getAwarenessConnectionSnapshot()
@@ -7175,7 +7413,8 @@ const startLegacyHomeHistoryReadInBackground = (
       }
       markCurrentHistoryReadFailed('legacy-home-history-read-watchdog-timeout', legacyHomeHistoryReadStartedAt || Date.now(), {
         skipLongRetry: true,
-        skipLongRetryReason: 'history-read-task-still-running'
+        skipLongRetryReason: 'history-read-task-still-running',
+        failureReason: 'history-timeout'
       });
       try {
         cancelReadLocalData?.();
@@ -7296,18 +7535,7 @@ const startLegacyHomeHistoryReadInBackground = (
         timeoutMs: historyReadTimeoutMs,
         snapshot: getAwarenessConnectionSnapshot()
       });
-      const shouldAwaitDeviceTimeSync = isAwarenessRwRing();
-      if (shouldAwaitDeviceTimeSync) {
-        await syncRwHomeDeviceTimeBeforeHistory('legacy-home-history-read');
-      } else {
-        appendAwarenessDiagnosticLog('device-time-sync-skipped-before-legacy-history', {
-          protocol,
-          reason: 'legacy-history-read-owns-ble-channel',
-          deviceMac: normalizedHistoryDeviceMac,
-          historyReadKey,
-          snapshot: getAwarenessConnectionSnapshot()
-        });
-      }
+      await syncRwHomeDeviceTimeBeforeHistory('legacy-home-history-read', { allowLegacy: true });
       legacyHomeHistoryReadInFlight.value = true;
       legacyHomeHistoryReadStartedAt = Date.now();
       appendAwarenessDiagnosticLog('legacy-home-history-read-start', {
@@ -7391,10 +7619,58 @@ const startLegacyHomeHistoryReadInBackground = (
         });
       }
 
-      const shouldRunEmptyFallback = options.force && records.length === 0 && !primaryHistoryReadError && historySinceTimestamp <= 0;
+      const historyDateStartTimestamp = getLegacyHomeHistoryDateStartTimestamp(historyDate);
+      const historySleepWindowStartTimestamp = getLegacyHomeHistorySleepWindowStartTimestamp(historyDate);
+      const cloudCoverageSnapshot = getLegacyHomeCloudCoverageSnapshot(normalizedHistoryDeviceMac, historyDate);
+      const cloudCoverageStatus = String(cloudCoverageSnapshot?.coverageStatus || '').trim().toLowerCase();
+      const cloudCoverageMissingForDate =
+        Boolean(cloudCoverageSnapshot) &&
+        cloudCoverageSnapshot?.shouldSkipBle !== true &&
+        (
+          cloudCoverageStatus === 'missing' ||
+          cloudCoverageStatus === 'empty' ||
+          Number(cloudCoverageSnapshot?.recordCount || 0) <= 0 ||
+          Number(cloudCoverageSnapshot?.latestTimestamp || 0) <= 0
+        );
+      const primaryHistoryReadReachedDateForFallback =
+        hasLegacyHomeHistoryReachedDate(legacyHistoryReadMaxTimestamp, historyDate);
+      const primaryHistoryStoppedBeforeTargetDate =
+        legacyHistoryReadSucceeded &&
+        !primaryHistoryReadError &&
+        legacyHistoryReadStatus !== 'partial' &&
+        legacyHistoryParsedComplete &&
+        historySinceTimestamp > 0 &&
+        historySleepWindowStartTimestamp > 0 &&
+        historySinceTimestamp !== historySleepWindowStartTimestamp &&
+        !primaryHistoryReadReachedDateForFallback;
+      const shouldRunCloudMissingIncrementalFallback =
+        !primaryHistoryReadError &&
+        legacyHistoryReadSucceeded &&
+        historySinceTimestamp > 0 &&
+        historySleepWindowStartTimestamp > 0 &&
+        historySinceTimestamp !== historySleepWindowStartTimestamp &&
+        (
+          (records.length === 0 && cloudCoverageMissingForDate) ||
+          primaryHistoryStoppedBeforeTargetDate
+        );
+      const shouldRunEmptyFallback =
+        !primaryHistoryReadError &&
+        (
+          (records.length === 0 && options.force && historySinceTimestamp <= 0) ||
+          shouldRunCloudMissingIncrementalFallback
+        );
       if (shouldRunEmptyFallback) {
         const fallbackStartedAt = Date.now();
         const fallbackReadAll = historySinceTimestamp <= 0;
+        const fallbackSinceTimestamp = shouldRunCloudMissingIncrementalFallback
+          ? historySleepWindowStartTimestamp
+          : historySinceTimestamp;
+        const fallbackReadArgument = fallbackReadAll ? historyDate : fallbackSinceTimestamp;
+        const fallbackReason = shouldRunCloudMissingIncrementalFallback
+          ? (primaryHistoryStoppedBeforeTargetDate
+              ? 'primary-history-before-target-date'
+              : 'cloud-coverage-missing-incremental-empty')
+          : 'empty-primary-history';
         appendAwarenessDiagnosticLog('legacy-home-history-empty-fallback-start', {
           protocol,
           reason,
@@ -7404,26 +7680,41 @@ const startLegacyHomeHistoryReadInBackground = (
           historyScopeKey,
           primarySinceTimestamp: historySinceTimestamp,
           primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
+          fallbackSinceTimestamp,
+          fallbackSinceText: formatUnixTimestampForLog(fallbackSinceTimestamp),
+          historySleepWindowStartTimestamp,
+          historySleepWindowStartText: formatUnixTimestampForLog(historySleepWindowStartTimestamp),
+          cloudCoverageStatus,
+          cloudCoverageRecordCount: cloudCoverageSnapshot?.recordCount,
+          cloudCoverageLatestTimestamp: cloudCoverageSnapshot?.latestTimestamp,
+          cloudCoverageLatestText: formatUnixTimestampForLog(Number(cloudCoverageSnapshot?.latestTimestamp || 0)),
           readAll: fallbackReadAll,
-          reasonDetail: primaryHistoryReadError ? 'primary-history-read-failed' : 'empty-primary-history',
+          reasonDetail: fallbackReason,
           primaryError: primaryHistoryReadError ? formatBleErrorMessage(primaryHistoryReadError, 'legacy history read failed') : undefined,
           primaryRawError: primaryHistoryReadError ? getAwarenessRawError(primaryHistoryReadError) : undefined,
           timeoutMs: LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS,
+          primaryRecordCount: records.length,
+          primaryMaxHistoryTimestamp: legacyHistoryReadMaxTimestamp,
+          primaryMaxHistoryText: formatUnixTimestampForLog(legacyHistoryReadMaxTimestamp),
+          primaryReachedDate: primaryHistoryReadReachedDateForFallback,
           snapshot: getAwarenessConnectionSnapshot()
         });
-        const fallbackResult = await readLocalData(fallbackReadAll, fallbackReadAll ? historyDate : historySinceTimestamp, undefined, {
+        const fallbackResult = await readLocalData(fallbackReadAll, fallbackReadArgument, undefined, {
           timeoutMs: LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS,
           silentUploadStatus: true,
           skipUpload: true
         });
-        const fallbackRecords = Array.isArray((fallbackResult as any)?.records) ? (fallbackResult as any).records : [];
+        let fallbackRecords = Array.isArray((fallbackResult as any)?.records) ? (fallbackResult as any).records : [];
         const fallbackStatus = `${(fallbackResult as any)?.status || ''}`;
         if (fallbackStatus) legacyHistoryReadStatus = fallbackStatus;
         legacyHistoryParsedComplete =
           (fallbackResult as any)?.complete !== false && (fallbackResult as any)?.parsed?.complete !== false;
         if (fallbackRecords.length > 0) {
-          historyReadRecordsForUpload = fallbackRecords;
-          legacyHistoryReadRecordCount = fallbackRecords.length;
+          historyReadRecordsForUpload = [
+            ...historyReadRecordsForUpload,
+            ...fallbackRecords
+          ];
+          legacyHistoryReadRecordCount = historyReadRecordsForUpload.length;
           legacyHomeHistoryReadHasUploadableRecords = true;
         }
         const fallbackRecordSummary = summarizeLegacyUploadRecordsForLog(fallbackRecords as Array<Record<string, any>>);
@@ -7438,6 +7729,19 @@ const startLegacyHomeHistoryReadInBackground = (
           readAll: fallbackReadAll,
           primarySinceTimestamp: historySinceTimestamp,
           primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
+          fallbackSinceTimestamp,
+          fallbackSinceText: formatUnixTimestampForLog(fallbackSinceTimestamp),
+          historySleepWindowStartTimestamp,
+          historySleepWindowStartText: formatUnixTimestampForLog(historySleepWindowStartTimestamp),
+          cloudCoverageStatus,
+          cloudCoverageRecordCount: cloudCoverageSnapshot?.recordCount,
+          cloudCoverageLatestTimestamp: cloudCoverageSnapshot?.latestTimestamp,
+          cloudCoverageLatestText: formatUnixTimestampForLog(Number(cloudCoverageSnapshot?.latestTimestamp || 0)),
+          reasonDetail: fallbackReason,
+          primaryRecordCount: records.length,
+          mergedRecordCount: historyReadRecordsForUpload.length,
+          primaryMaxHistoryTimestamp: legacyHistoryReadMaxTimestamp,
+          primaryReachedDate: primaryHistoryReadReachedDateForFallback,
           elapsedMs: Date.now() - fallbackStartedAt,
           status: (fallbackResult as any)?.status,
           complete: (fallbackResult as any)?.complete,
@@ -7454,6 +7758,123 @@ const startLegacyHomeHistoryReadInBackground = (
           sample: fallbackRecords.slice(0, 2),
           snapshot: getAwarenessConnectionSnapshot()
         });
+        if (
+          fallbackRecords.length === 0 &&
+          shouldRunCloudMissingIncrementalFallback &&
+          !fallbackReadAll
+        ) {
+          const fullFallbackStartedAt = Date.now();
+          appendAwarenessDiagnosticLog('legacy-home-history-empty-full-fallback-start', {
+            protocol,
+            reason,
+            date: historyDate,
+            deviceMac: normalizedHistoryDeviceMac,
+            historyReadKey,
+            historyScopeKey,
+            primarySinceTimestamp: historySinceTimestamp,
+            primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
+            previousFallbackSinceTimestamp: fallbackSinceTimestamp,
+            previousFallbackSinceText: formatUnixTimestampForLog(fallbackSinceTimestamp),
+            historySleepWindowStartTimestamp,
+            historySleepWindowStartText: formatUnixTimestampForLog(historySleepWindowStartTimestamp),
+            cloudCoverageStatus,
+            cloudCoverageRecordCount: cloudCoverageSnapshot?.recordCount,
+            cloudCoverageLatestTimestamp: cloudCoverageSnapshot?.latestTimestamp,
+            cloudCoverageLatestText: formatUnixTimestampForLog(Number(cloudCoverageSnapshot?.latestTimestamp || 0)),
+            readAll: true,
+            reasonDetail: 'cloud-coverage-missing-incremental-empty-full-read',
+            timeoutMs: LEGACY_HOME_EMPTY_HISTORY_FULL_FALLBACK_TIMEOUT_MS,
+            snapshot: getAwarenessConnectionSnapshot()
+          });
+          try {
+            const fullFallbackResult = await readLocalData(true, historyDate, undefined, {
+              timeoutMs: LEGACY_HOME_EMPTY_HISTORY_FULL_FALLBACK_TIMEOUT_MS,
+              silentUploadStatus: true,
+              skipUpload: true
+            });
+            const fullFallbackRecords = Array.isArray((fullFallbackResult as any)?.records)
+              ? (fullFallbackResult as any).records
+              : [];
+            const fullFallbackStatus = `${(fullFallbackResult as any)?.status || ''}`;
+            if (fullFallbackStatus) legacyHistoryReadStatus = fullFallbackStatus;
+            legacyHistoryParsedComplete =
+              (fullFallbackResult as any)?.complete !== false && (fullFallbackResult as any)?.parsed?.complete !== false;
+            if (fullFallbackRecords.length > 0) {
+              fallbackRecords = fullFallbackRecords;
+              historyReadRecordsForUpload = [
+                ...historyReadRecordsForUpload,
+                ...fullFallbackRecords
+              ];
+              legacyHistoryReadRecordCount = historyReadRecordsForUpload.length;
+              legacyHomeHistoryReadHasUploadableRecords = true;
+            }
+            const fullFallbackRecordSummary = summarizeLegacyUploadRecordsForLog(fullFallbackRecords as Array<Record<string, any>>);
+            updateLegacyHistoryReadMaxTimestamp(fullFallbackRecordSummary);
+            appendAwarenessDiagnosticLog('legacy-home-history-empty-full-fallback-result', {
+              protocol,
+              reason,
+              date: historyDate,
+              deviceMac: normalizedHistoryDeviceMac,
+              historyReadKey,
+              historyScopeKey,
+              readAll: true,
+              primarySinceTimestamp: historySinceTimestamp,
+              primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
+              previousFallbackSinceTimestamp: fallbackSinceTimestamp,
+              previousFallbackSinceText: formatUnixTimestampForLog(fallbackSinceTimestamp),
+              historySleepWindowStartTimestamp,
+              historySleepWindowStartText: formatUnixTimestampForLog(historySleepWindowStartTimestamp),
+              cloudCoverageStatus,
+              cloudCoverageRecordCount: cloudCoverageSnapshot?.recordCount,
+              cloudCoverageLatestTimestamp: cloudCoverageSnapshot?.latestTimestamp,
+              cloudCoverageLatestText: formatUnixTimestampForLog(Number(cloudCoverageSnapshot?.latestTimestamp || 0)),
+              reasonDetail: 'cloud-coverage-missing-incremental-empty-full-read',
+              primaryRecordCount: records.length,
+              mergedRecordCount: historyReadRecordsForUpload.length,
+              primaryMaxHistoryTimestamp: legacyHistoryReadMaxTimestamp,
+              primaryReachedDate: primaryHistoryReadReachedDateForFallback,
+              elapsedMs: Date.now() - fullFallbackStartedAt,
+              status: (fullFallbackResult as any)?.status,
+              complete: (fullFallbackResult as any)?.complete,
+              parsedComplete: (fullFallbackResult as any)?.parsed?.complete,
+              uploaded: (fullFallbackResult as any)?.uploaded,
+              recordCount: fullFallbackRecords.length,
+              recordSummary: fullFallbackRecordSummary,
+              maxHistoryTimestamp: legacyHistoryReadMaxTimestamp,
+              maxHistoryText: formatUnixTimestampForLog(legacyHistoryReadMaxTimestamp),
+              receivedCount: Array.isArray(userStore.receivedData) ? userStore.receivedData.length : 0,
+              receivedTail: summarizeAwarenessReceivedDataTailForLog(),
+              localDataLength: Array.isArray(userStore.localData) ? userStore.localData.length : 0,
+              rawMetricCounts: countRingHistoryRecordMetrics(fullFallbackRecords as Array<Record<string, any>>),
+              sample: fullFallbackRecords.slice(0, 2),
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+          } catch (fullFallbackError) {
+            appendAwarenessDiagnosticLog('legacy-home-history-empty-full-fallback-failed', {
+              protocol,
+              reason,
+              date: historyDate,
+              deviceMac: normalizedHistoryDeviceMac,
+              historyReadKey,
+              historyScopeKey,
+              primarySinceTimestamp: historySinceTimestamp,
+              primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
+              previousFallbackSinceTimestamp: fallbackSinceTimestamp,
+              previousFallbackSinceText: formatUnixTimestampForLog(fallbackSinceTimestamp),
+              historySleepWindowStartTimestamp,
+              historySleepWindowStartText: formatUnixTimestampForLog(historySleepWindowStartTimestamp),
+              cloudCoverageStatus,
+              cloudCoverageRecordCount: cloudCoverageSnapshot?.recordCount,
+              cloudCoverageLatestTimestamp: cloudCoverageSnapshot?.latestTimestamp,
+              cloudCoverageLatestText: formatUnixTimestampForLog(Number(cloudCoverageSnapshot?.latestTimestamp || 0)),
+              reasonDetail: 'cloud-coverage-missing-incremental-empty-full-read',
+              elapsedMs: Date.now() - fullFallbackStartedAt,
+              error: formatBleErrorMessage(fullFallbackError, 'legacy full history fallback failed'),
+              rawError: getAwarenessRawError(fullFallbackError),
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+          }
+        }
       } else if (records.length === 0) {
         appendAwarenessDiagnosticLog('legacy-home-history-empty-fallback-skip', {
           protocol,
@@ -7464,19 +7885,20 @@ const startLegacyHomeHistoryReadInBackground = (
           historyScopeKey,
           primarySinceTimestamp: historySinceTimestamp,
           primarySinceText: formatUnixTimestampForLog(historySinceTimestamp),
+          historySleepWindowStartTimestamp,
+          historySleepWindowStartText: formatUnixTimestampForLog(historySleepWindowStartTimestamp),
+          cloudCoverageStatus,
+          cloudCoverageRecordCount: cloudCoverageSnapshot?.recordCount,
+          cloudCoverageLatestTimestamp: cloudCoverageSnapshot?.latestTimestamp,
+          cloudCoverageLatestText: formatUnixTimestampForLog(Number(cloudCoverageSnapshot?.latestTimestamp || 0)),
           skipReason: primaryHistoryReadError ? 'primary-read-failed-or-timeout' : 'incremental-read-empty',
           primaryError: primaryHistoryReadError ? formatBleErrorMessage(primaryHistoryReadError, 'legacy history read failed') : undefined,
           snapshot: getAwarenessConnectionSnapshot()
         });
       }
-      const historyDateStartTimestamp = getLegacyHomeHistoryDateStartTimestamp(historyDate);
-      const legacyHistoryReadReachedDate =
-        hasLegacyHomeHistoryReachedDate(legacyHistoryReadMaxTimestamp, historyDate) ||
-        Boolean(
-          legacyHistoryReadRecordCount === 0 &&
-            historyDateStartTimestamp > 0 &&
-            historySinceTimestamp >= historyDateStartTimestamp
-        );
+      const legacyHistoryReadWasEmptyIncremental =
+        legacyHistoryReadSucceeded && legacyHistoryReadRecordCount === 0 && historySinceTimestamp > 0;
+      const legacyHistoryReadReachedDate = hasLegacyHomeHistoryReachedDate(legacyHistoryReadMaxTimestamp, historyDate);
       legacyHistoryReadCompleted =
         legacyHistoryReadSucceeded &&
         legacyHistoryReadStatus !== 'partial' &&
@@ -7502,6 +7924,7 @@ const startLegacyHomeHistoryReadInBackground = (
           historyDateStartTimestamp,
           historyDateStartText: formatUnixTimestampForLog(historyDateStartTimestamp),
           recordCount: legacyHistoryReadRecordCount,
+          emptyIncrementalNotCompleted: legacyHistoryReadWasEmptyIncremental,
           snapshot: getAwarenessConnectionSnapshot()
         });
       }
@@ -7569,8 +7992,7 @@ const startLegacyHomeHistoryReadInBackground = (
           'legacy-home-history-read-background-complete'
         );
         if (marked) {
-          legacyHomeHistoryReadFailedAt.delete(historyReadKey);
-          legacyHomeHistoryReadFailedAt.delete(historyScopeKey);
+          clearLegacyHomeHistoryReadFailureKeys(historyReadKey, historyScopeKey);
           legacyHomeHistoryReadCompletedTick.value = Date.now();
         }
       }
@@ -7633,6 +8055,8 @@ const startLegacyHomeHistoryReadInBackground = (
           const failedAt = Date.now();
           legacyHomeHistoryReadFailedAt.set(historyReadKey, failedAt);
           legacyHomeHistoryReadFailedAt.set(historyScopeKey, failedAt);
+          legacyHomeHistoryReadFailedReason.set(historyReadKey, 'upload-dispatch-incomplete');
+          legacyHomeHistoryReadFailedReason.set(historyScopeKey, 'upload-dispatch-incomplete');
         }
         appendAwarenessDiagnosticLog('legacy-home-history-read-upload-dispatch', {
           protocol,
@@ -7653,15 +8077,20 @@ const startLegacyHomeHistoryReadInBackground = (
           maxHistoryText: formatUnixTimestampForLog(legacyHistoryReadMaxTimestamp),
           snapshot: getAwarenessConnectionSnapshot()
         });
-        const historyUploadFlushQueued = requestLegacyLocalDataTimeoutFlush(
-          'legacy-home-history-read-upload-dispatch',
-          protocol,
-          finishedStableSnapshot
-        );
+        const shouldUseCompletedUploadFastPath =
+          legacyHistoryReadCompleted && legacyHistoryParsedComplete && finishedStableSnapshot.completed === true;
+        const historyUploadFlushQueued = shouldUseCompletedUploadFastPath
+          ? requestOrScheduleLegacyLocalDataIncompleteFlush('legacy-home-history-read-upload-dispatch', protocol)
+          : requestLegacyLocalDataTimeoutFlush(
+              'legacy-home-history-read-upload-dispatch',
+              protocol,
+              finishedStableSnapshot
+            );
         appendAwarenessDiagnosticLog('legacy-home-history-read-upload-flush', {
           protocol,
           reason,
           historyUploadFlushQueued,
+          flushStrategy: shouldUseCompletedUploadFastPath ? 'completed-fast-path' : 'timeout-flush',
           completed: legacyHistoryReadCompleted,
           status: legacyHistoryReadStatus,
           parsedComplete: legacyHistoryParsedComplete,
@@ -7698,12 +8127,32 @@ const startLegacyHomeHistoryReadInBackground = (
         markAwarenessHomeSyncCompleted('legacy-home-history-read-empty-complete');
         scheduleAwarenessAfterDataProcessed('legacy-home-history-read-empty-complete');
       } else if (!legacyHistoryReadCompleted) {
-        const skipLongRetryForTerminalAck = legacyHistoryReadSucceeded && legacyHistoryReadStatus === 'failed';
-        markCurrentHistoryReadFailed('legacy-home-history-read-timeout-cooldown-marked', historyStartedAt, {
-          status: legacyHistoryReadStatus,
-          skipLongRetry: skipLongRetryForTerminalAck,
-          skipLongRetryReason: skipLongRetryForTerminalAck ? 'terminal-local-data-ack-failed' : undefined
-        });
+        const isEmptyHistoryReadWithoutRecords =
+          legacyHistoryReadSucceeded && legacyHistoryReadStatus === 'empty' && legacyHistoryReadRecordCount === 0;
+        if (isEmptyHistoryReadWithoutRecords) {
+          clearLegacyHomeHistoryReadFailureKeys(historyReadKey, historyScopeKey);
+          appendAwarenessDiagnosticLog('legacy-home-history-read-empty-no-cooldown', {
+            protocol,
+            reason,
+            deviceMac: historyDeviceMac,
+            historyReadKey,
+            historyScopeKey,
+            historySinceTimestamp,
+            historySinceText: formatUnixTimestampForLog(historySinceTimestamp),
+            elapsedMs: Date.now() - historyStartedAt,
+            status: legacyHistoryReadStatus,
+            recordCount: legacyHistoryReadRecordCount,
+            snapshot: getAwarenessConnectionSnapshot()
+          });
+        } else {
+          const skipLongRetryForTerminalAck = legacyHistoryReadSucceeded && legacyHistoryReadStatus === 'failed';
+          markCurrentHistoryReadFailed('legacy-home-history-read-timeout-cooldown-marked', historyStartedAt, {
+            status: legacyHistoryReadStatus,
+            skipLongRetry: skipLongRetryForTerminalAck,
+            skipLongRetryReason: skipLongRetryForTerminalAck ? 'terminal-local-data-ack-failed' : undefined,
+            failureReason: legacyHistoryReadStatus === 'failed' ? 'communication-not-ready' : 'history-timeout'
+          });
+        }
       } else {
         userStore.updateUploadingStatus('2');
         userStore.updateIsSending(false);
@@ -7808,10 +8257,13 @@ const executeCommandsSequentially = async () => {
         (isRwRing
           ? now - lastAwarenessRefreshAt >= RW_AWARENESS_REFRESH_DEDUP_MS
           : now - lastAwarenessRefreshAt >= LEGACY_HOME_DEVICE_INFO_REFRESH_INTERVAL_MS);
-      const shouldReadDeviceInfoBeforeHistory = shouldRefreshDeviceInfo || !hasAwarenessBatteryDisplayValue();
-      let deviceInfoBeforeHistoryHasBattery = hasAwarenessBatteryDisplayValue();
+      const shouldReadDeviceInfoBeforeHistory = isRwRing && (
+        shouldRefreshDeviceInfo ||
+        !hasAwarenessFreshBatteryDisplayValue()
+      );
+      let deviceInfoBeforeHistoryHasBattery = hasAwarenessFreshBatteryDisplayValue();
       if (shouldReadDeviceInfoBeforeHistory) {
-        appendAwarenessDiagnosticLog('legacy-home-device-info-before-history-deferred-dispatch', {
+        appendAwarenessDiagnosticLog('legacy-home-device-info-before-history-dispatch', {
           protocol,
           reason: 'legacy-home-sync-before-history',
           hasCachedSnapshot,
@@ -7819,32 +8271,24 @@ const executeCommandsSequentially = async () => {
           battery: displayBatteryValue.value,
           snapshot: getAwarenessConnectionSnapshot()
         });
-        void refreshLegacyHomeDeviceInfoBeforeHistorySync(
-          protocol,
-          hasCachedSnapshot,
-          'legacy-home-sync-before-history'
-        )
-          .then((hasBattery) => {
-            appendAwarenessDiagnosticLog('legacy-home-device-info-before-history-deferred-result', {
-              protocol,
-              reason: 'legacy-home-sync-before-history',
-              hasCachedSnapshot,
-              hasBattery,
-              battery: displayBatteryValue.value,
-              snapshot: getAwarenessConnectionSnapshot()
-            });
-          })
-          .catch((error) => {
-            appendAwarenessDiagnosticLog('legacy-home-device-info-before-history-parallel-failed', {
-              protocol,
-              reason: 'legacy-home-sync-before-history',
-              hasCachedSnapshot,
-              battery: displayBatteryValue.value,
-              error: formatBleErrorMessage(error, 'legacy device info refresh failed'),
-              rawError: getAwarenessRawError(error),
-              snapshot: getAwarenessConnectionSnapshot()
-            });
+        try {
+          deviceInfoBeforeHistoryHasBattery = await refreshLegacyHomeDeviceInfoBeforeHistorySync(
+            protocol,
+            hasCachedSnapshot,
+            'legacy-home-sync-before-history'
+          );
+        } catch (error) {
+          appendAwarenessDiagnosticLog('legacy-home-device-info-before-history-failed-before-read', {
+            protocol,
+            reason: 'legacy-home-sync-before-history',
+            hasCachedSnapshot,
+            battery: displayBatteryValue.value,
+            error: formatBleErrorMessage(error, 'legacy device info refresh failed'),
+            rawError: getAwarenessRawError(error),
+            snapshot: getAwarenessConnectionSnapshot()
           });
+          deviceInfoBeforeHistoryHasBattery = hasAwarenessFreshBatteryDisplayValue();
+        }
         if (!deviceInfoBeforeHistoryHasBattery) {
           appendAwarenessDiagnosticLog('legacy-home-device-info-before-history-degraded', {
             protocol,
@@ -7859,7 +8303,10 @@ const executeCommandsSequentially = async () => {
         appendAwarenessDiagnosticLog('legacy-home-device-info-skip', {
           protocol,
           reason: 'legacy-home-sync',
-          skipReason: 'fresh-cached-device-info-before-history',
+          skipReason: isRwRing
+            ? 'fresh-cached-device-info-before-history'
+            : 'legacy-history-sync-prioritizes-history-read',
+          skipDeviceInfoBeforeHistory: !isRwRing,
           hasCachedSnapshot,
           elapsedSinceRefreshMs: Date.now() - lastAwarenessRefreshAt,
           battery: displayBatteryValue.value,
@@ -7931,6 +8378,8 @@ const clearTimer = () => {
     clearTimeout(sendTimer.value);
     sendTimer.value = null;
   }
+  clearLegacyLocalDataIncompleteFlushTimer();
+  clearLegacyHomeDeviceInfoRetryDeferredTimer();
 };
 const showStartGirlCard = ref(false);
 // 后台异步加载页面数据，不阻塞页面首次渲染
@@ -7981,6 +8430,7 @@ onLoad(async () => {
 });
 onShow(async () => {
   try {
+    resetAwarenessNavigationState('page-show');
     if (!userStore.token) {
       return;
     }
@@ -8164,7 +8614,7 @@ onShow(async () => {
       }
     }
     // 后台异步加载数据和图表，不阻塞页面首次渲染；同步中会自动排队到上传/解析完成后刷新一次。
-    void refreshPageDataAndCharts({ trigger: 'page-show-data-load', allowDuringSync: false });
+    void refreshPageDataAndCharts({ trigger: 'page-show-data-load', allowDuringSync: true });
     pullDownProgress.value = 100;
   } catch (error) {
     const typedError = error as { msg?: unknown; errMsg?: unknown; message?: unknown };

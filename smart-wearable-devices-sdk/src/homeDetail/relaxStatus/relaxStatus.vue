@@ -239,7 +239,7 @@ defineExpose({
     </view>
     <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
     <view v-for="cardId in listData" :key="cardId">
-      <relaxValue v-if="cardId === 'valueFirst'" :stressDetail="stressDetailObj" >
+      <relaxValue v-if="cardId === 'valueFirst'" :stressDetail="stressDetailObj" :stressSummaryObj="stressSummaryObj" >
         <DetailInfo id="stress" size="small" v-model:isPopupActive="isPopupActive" style="margin-left: 14rpx;"></DetailInfo>
       </relaxValue>
       <pressureRatio v-else-if="cardId === 'valueSecound'" :stressProportion="stressProportionObj" />

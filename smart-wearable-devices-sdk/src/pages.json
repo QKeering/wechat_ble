@@ -202,9 +202,25 @@
           }
         },
         {
+          "path": "bleCommandDebug",
+          "style": {
+            "navigationBarTitleText": "BLE命令测试",
+            "navigationBarBackgroundColor": "#f1f3f6"
+          }
+        },
+        {
           "path": "detail",
           "style": {
             "navigationBarTitleText": "详情"
+          }
+        },
+        {
+          "path": "onlineFeedback",
+          "style": {
+            "navigationBarTitleText": "在线反馈",
+            "navigationBarBackgroundColor": "#f1f3f6",
+            "navigationBarTextStyle": "black",
+            "backgroundColor": "#f1f3f6"
           }
         }
       ]

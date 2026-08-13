@@ -12,6 +12,8 @@ const LOCAL_RING_CONNECT_FAILED_FAQ = 'ring-connect-failed';
 const content = ref<string>('');
 const loading = ref(false);
 const localFaq = ref('');
+const faqId = ref('');
+const faqTitle = ref('');
 const selfCheckBusy = ref(false);
 const selfCheckResult = ref<{
   ok: boolean;
@@ -120,23 +122,42 @@ const runRingConnectionSelfCheck = async () => {
   }
 };
 
+const openOnlineFeedback = () => {
+  const params = [
+    'source=faq_detail',
+    faqId.value ? `faqId=${encodeURIComponent(faqId.value)}` : '',
+    faqTitle.value ? `faqTitle=${encodeURIComponent(faqTitle.value)}` : ''
+  ]
+    .filter(Boolean)
+    .join('&');
+  uni.navigateTo({
+    url: `/pagesA/mines/onlineFeedback?${params}`
+  });
+};
+
 onLoad(async (e) => {
   if (e?.title) {
+    faqTitle.value = decodeTitle(String(e.title));
     uni.setNavigationBarTitle({
-      title: decodeTitle(String(e.title))
+      title: faqTitle.value
     });
   }
 
   if (e?.local) {
     localFaq.value = String(e.local);
+    faqId.value = localFaq.value;
     return;
   }
 
   if (e?.id) {
+    faqId.value = String(e.id);
     loading.value = true;
     try {
       const res = await getfqaGuidDetail({ id: e.id });
       content.value = res?.content || '';
+      if (!faqTitle.value && res?.title) {
+        faqTitle.value = res.title;
+      }
     } catch {
       content.value = '';
     } finally {
@@ -177,6 +198,11 @@ onLoad(async (e) => {
 
     <uv-parse v-else-if="content" :content="content"></uv-parse>
     <view v-else-if="!loading" class="empty">暂无详情内容</view>
+
+    <view class="feedback-entry" @tap="openOnlineFeedback">
+      <text>仍未解决？</text>
+      <text class="feedback-link">提交问题反馈</text>
+    </view>
   </view>
 </template>
 
@@ -296,5 +322,23 @@ onLoad(async (e) => {
   color: #979797;
   font-size: 30rpx;
   text-align: center;
+}
+
+.feedback-entry {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14rpx;
+  margin-top: 28rpx;
+  padding: 30rpx 24rpx;
+  border-radius: 28rpx;
+  background: #fff;
+  color: #6b7280;
+  font-size: 28rpx;
+}
+
+.feedback-link {
+  color: #3176ff;
+  font-weight: 700;
 }
 </style>

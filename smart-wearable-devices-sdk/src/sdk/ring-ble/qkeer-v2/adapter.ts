@@ -7,6 +7,7 @@ import bleConfig from './vendor/common/ble_config.js';
 import { parseQkeerV2AdvertisInfo, resolveRingProtocol } from '../protocolRegistry';
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
+type BleConnectionStateCallback = Parameters<typeof uni.onBLEConnectionStateChange>[0];
 
 type Waiter = {
   predicate: (parsed: RingParsedData) => boolean;
@@ -24,12 +25,16 @@ const offBluetoothDeviceFound = (callback: BluetoothDeviceFoundCallback) => {
   (uni.offBluetoothDeviceFound as unknown as (callback: BluetoothDeviceFoundCallback) => void)(callback);
 };
 
+const offBleConnectionStateChange = (callback: BleConnectionStateCallback) => {
+  (uni.offBLEConnectionStateChange as unknown as (callback?: BleConnectionStateCallback) => void)(callback);
+};
+
 export const createQkeerV2RingAdapter = (state: RingBleState, runtime?: RingBleRuntime): LegacyRingAdapter => {
   const scannedDevices = new Map<string, QkeerV2ScanItem>();
   const waiters: Waiter[] = [];
   let scanTimeout: ReturnType<typeof setTimeout> | null = null;
   let genericScanCallback: BluetoothDeviceFoundCallback | null = null;
-  let connectionListenerRegistered = false;
+  let connectionStateCallback: BleConnectionStateCallback | null = null;
 
   const emitParsed = (parsed: RingParsedData | null | undefined) => {
     if (!parsed?.type) return;
@@ -123,16 +128,20 @@ export const createQkeerV2RingAdapter = (state: RingBleState, runtime?: RingBleR
     return result;
   };
 
+  const clearConnectionStateListener = () => {
+    if (!connectionStateCallback) return;
+    offBleConnectionStateChange(connectionStateCallback);
+    connectionStateCallback = null;
+  };
+
   const registerConnectionStateListener = () => {
-    if (connectionListenerRegistered) {
-      uni.offBLEConnectionStateChange();
-    }
-    connectionListenerRegistered = true;
-    uni.onBLEConnectionStateChange((res) => {
+    clearConnectionStateListener();
+    connectionStateCallback = (res) => {
       if (res.connected) return;
       if (bleManager.connectedDeviceId && res.deviceId !== bleManager.connectedDeviceId) return;
       runtime?.onDisconnected?.(res);
-    });
+    };
+    uni.onBLEConnectionStateChange(connectionStateCallback);
   };
 
   const startScan = async (options: LegacyScanOptions = {}) => {
@@ -273,7 +282,12 @@ export const createQkeerV2RingAdapter = (state: RingBleState, runtime?: RingBleR
 
   const clearDataListener = () => {
     clearParsedWaiters('QKeer V2 data listener was cleared.');
-    (bleManager as any).setReceiverListener({});
+    const managerWithClear = bleManager as any;
+    if (typeof managerWithClear.clearReceiverListener === 'function') {
+      managerWithClear.clearReceiverListener();
+    } else {
+      managerWithClear.setReceiverListener({});
+    }
   };
 
   const sendData = async (cmd: number, payload: unknown = {}) => {
@@ -315,10 +329,7 @@ export const createQkeerV2RingAdapter = (state: RingBleState, runtime?: RingBleR
     },
     cleanup: async () => {
       await stopScan();
-      if (connectionListenerRegistered) {
-        connectionListenerRegistered = false;
-        uni.offBLEConnectionStateChange();
-      }
+      clearConnectionStateListener();
       clearDataListener();
     },
     sendBytes: async () => {

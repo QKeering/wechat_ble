@@ -16,6 +16,9 @@ from app.api.rw_debug import initialize_rw_debug_schema
 from app.api.rw_debug import router as rw_debug_router
 from app.api.sleepfm import router as sleepfm_router
 from app.api.v1 import router as v1_router
+from app.api.h5_xiaoqing import auth_router as h5_auth_router
+from app.api.h5_xiaoqing import router as h5_xiaoqing_router
+from app.api.h5_xiaoqing_actions import router as h5_xiaoqing_actions_router
 from app.core.config import settings
 from app.core.responses import error
 from app.core.security import LOGIN_USER_CLAIM, decode_java_token, strip_token
@@ -26,6 +29,7 @@ from app.services.ai_lab import initialize_schema as initialize_ai_lab_schema
 from app.services.family import initialize_schema as initialize_family_schema
 from app.services.feedback import initialize_schema as initialize_feedback_schema
 from app.services.health import initialize_health_schema
+from app.services.h5_xiaoqing_actions import initialize_schema as initialize_h5_xiaoqing_schema
 from app.db.session import SessionLocal
 
 logger = logging.getLogger("qkeer.app")
@@ -63,6 +67,7 @@ def create_app() -> FastAPI:
             initialize_feedback_schema(db)
             initialize_family_schema(db)
             initialize_rw_debug_schema(db)
+            initialize_h5_xiaoqing_schema(db)
     except Exception as exc:
         logger.exception("startup schema initialization failed: %s", exc)
     app = FastAPI(title=settings.app_name)
@@ -118,7 +123,10 @@ def create_app() -> FastAPI:
     # Register concrete /app routes before app_router's /app/{path:path}
     # migration fallback, otherwise the fallback returns 501 first.
     app.include_router(rw_debug_router)
+    app.include_router(h5_auth_router)
     app.include_router(app_router)
+    app.include_router(h5_xiaoqing_router)
+    app.include_router(h5_xiaoqing_actions_router)
     app.include_router(v1_router)
     app.include_router(sleepfm_router)
 

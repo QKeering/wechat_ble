@@ -12,7 +12,8 @@ import { clearFrontendRingBindingState, getBoundRingIdentity, getBoundRingIdenti
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
-import { formatBatteryPercentForDisplay, formatBatteryStatusForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
+import { formatBatteryPercentForDisplay, formatBatteryStatusForDisplay, getRawBatteryPercent, isBatteryChargingLike } from '@/utils/batteryDisplay';
+import { readBatteryDisplayCache, writeBatteryDisplayCache } from '@/utils/batteryCache';
 import { reportRealBatteryLog } from '@/utils/deviceBatteryLog';
 import {
   applyDeviceIdentityCacheToDevice,
@@ -115,12 +116,10 @@ const batteryStatusRaw = computed(() =>
     latestBattery.value?.chargingStatusText
   )
 );
-const batteryText = computed(
-  () =>
-    normalizeDeviceInfoDisplayText(
-      singleReadResults.value.battery || formatBatteryStatusForDisplay(batteryValue.value, batteryStatusRaw.value, DEVICE_INFO_EMPTY_TEXT)
-    )
-);
+const batteryText = computed(() => {
+  const directDisplay = singleReadResults.value.battery || formatBatteryStatusForDisplay(batteryValue.value, batteryStatusRaw.value, '');
+  return normalizeDeviceInfoDisplayText(directDisplay || getDevicePageBatteryCacheRecord()?.displayText || DEVICE_INFO_EMPTY_TEXT);
+});
 const batteryStatusText = computed(() => normalizeDeviceInfoDisplayText(normalizeHealthText(batteryStatusRaw.value, DEVICE_INFO_EMPTY_TEXT)));
 const firmwareText = computed(
   () =>
@@ -383,6 +382,7 @@ const readBatteryOnly = async () => {
     const displayValue = formatBatteryStatusForDisplay(value, status, '-');
     if (value == null && displayValue === '-') throw new Error('设备返回的电量格式无效');
     singleReadResults.value = { ...singleReadResults.value, battery: displayValue };
+    writeDevicePageBatteryCache(value, status, 'device-manual-read');
     reportDevicePageBatteryLog(value, 'device-manual-read');
     lastActionText.value = `电量读取成功：${displayValue}`;
     appendDeviceDiagnosticLog('battery-read-result', {
@@ -724,6 +724,22 @@ const getDeviceMacFromInfo = (device: Record<string, any> | null | undefined) =>
 
 const getDevicePageUserId = () => String(userStore.userInfo?.id ?? userStore.userInfo?.userId ?? userStore.userInfo?.user_id ?? '').trim();
 
+const getDevicePageBatteryCacheMac = () => deviceMacText.value || getBoundRingIdentity(boundInfo.value) || userStore.normalMac || userStore.iosMacId || '';
+
+function getDevicePageBatteryCacheRecord() {
+  return readBatteryDisplayCache(getDevicePageUserId(), getDevicePageBatteryCacheMac());
+}
+
+const writeDevicePageBatteryCache = (battery: unknown, status: unknown, source: string) => {
+  writeBatteryDisplayCache({
+    userId: getDevicePageUserId(),
+    mac: getDevicePageBatteryCacheMac(),
+    battery,
+    status,
+    source
+  });
+};
+
 const reportDevicePageBatteryLog = (battery: unknown, source = 'device-info') => {
   void reportRealBatteryLog({
     userId: getDevicePageUserId(),
@@ -734,8 +750,14 @@ const reportDevicePageBatteryLog = (battery: unknown, source = 'device-info') =>
 };
 
 watch(
-  () => `${getDevicePageUserId()}|${deviceMacText.value}|${batteryValue.value ?? ''}`,
   () => {
+    const rawBattery = getRawBatteryPercent(batteryValue.value);
+    const mac = getDevicePageBatteryCacheMac();
+    return rawBattery == null ? '' : `${getDevicePageUserId()}|${mac}|${Math.round(rawBattery)}`;
+  },
+  (signature) => {
+    if (!signature) return;
+    writeDevicePageBatteryCache(batteryValue.value, batteryStatusRaw.value, 'device-info-display');
     reportDevicePageBatteryLog(batteryValue.value, 'device-info-display');
   }
 );

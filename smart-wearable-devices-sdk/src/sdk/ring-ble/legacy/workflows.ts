@@ -4,6 +4,12 @@ import { syncRwHistoryFiles } from '../rw/history';
 import { resolveRingProtocol } from '../protocolRegistry';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 
+type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
+
+const offBluetoothDeviceFound = (callback: BluetoothDeviceFoundCallback) => {
+  (uni.offBluetoothDeviceFound as unknown as (callback: BluetoothDeviceFoundCallback) => void)(callback);
+};
+
 export interface EnsureBluetoothOptions {
   showToastOnFail?: boolean;
 }
@@ -242,6 +248,7 @@ export const transformLegacyMacToUuid = (targetMac: string, timeoutMs = 10000) =
   return new Promise<string>((resolve, reject) => {
     let done = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let deviceFoundHandler: BluetoothDeviceFoundCallback | null = null;
 
     const cleanup = () => {
       if (timer) {
@@ -249,13 +256,16 @@ export const transformLegacyMacToUuid = (targetMac: string, timeoutMs = 10000) =
         timer = null;
       }
       uni.stopBluetoothDevicesDiscovery();
-      uni.offBluetoothDeviceFound();
+      if (deviceFoundHandler) {
+        offBluetoothDeviceFound(deviceFoundHandler);
+        deviceFoundHandler = null;
+      }
     };
 
     uni.startBluetoothDevicesDiscovery({
       allowDuplicatesKey: false,
       success: () => {
-        uni.onBluetoothDeviceFound((result) => {
+        deviceFoundHandler = (result) => {
           for (const device of result.devices || []) {
             const currentMac = getMacFromAdvertisData(device.advertisData);
             if (currentMac !== formattedMac) continue;
@@ -265,7 +275,8 @@ export const transformLegacyMacToUuid = (targetMac: string, timeoutMs = 10000) =
             resolve(device.deviceId);
             return;
           }
-        });
+        };
+        uni.onBluetoothDeviceFound(deviceFoundHandler);
       },
       fail: (error) => {
         cleanup();
@@ -829,7 +840,25 @@ export const refreshLegacyBusinessMetrics = async (
   const timeoutMs = options.timeoutMs ?? 12000;
   const ok: string[] = [];
   const failed: Array<{ step: string; message: string }> = [];
+  const hasTargetedRealtimeMetrics = Array.isArray(options.realtimeMetricNames) && options.realtimeMetricNames.length > 0;
+  const includeDeviceInfo = options.includeDeviceInfo ?? !hasTargetedRealtimeMetrics;
   const includeRealtimeMetrics = options.includeRealtimeMetrics ?? true;
+  const includeDeviceTime = options.includeDeviceTime ?? !hasTargetedRealtimeMetrics;
+  const includeCollectPeriod = options.includeCollectPeriod ?? !hasTargetedRealtimeMetrics;
+  const legacyRealtimeMetricNames = ['heart_rate', 'blood_oxygen', 'temperature'] as const;
+  type LegacyRealtimeMetricName = (typeof legacyRealtimeMetricNames)[number];
+  const isLegacyRealtimeMetricName = (name: string): name is LegacyRealtimeMetricName =>
+    legacyRealtimeMetricNames.includes(name as LegacyRealtimeMetricName);
+  const requestedRealtimeMetricNames = new Set<LegacyRealtimeMetricName>(
+    (options.realtimeMetricNames?.length ? options.realtimeMetricNames : legacyRealtimeMetricNames)
+      .map(normalizeRwWorkflowMetricName)
+      .filter(isLegacyRealtimeMetricName)
+  );
+  if (includeRealtimeMetrics && requestedRealtimeMetricNames.size === 0) {
+    legacyRealtimeMetricNames.forEach((name) => requestedRealtimeMetricNames.add(name));
+  }
+  const shouldReadRealtimeMetric = (name: LegacyRealtimeMetricName) =>
+    includeRealtimeMetrics && requestedRealtimeMetricNames.has(name);
 
   const runStep = async (step: string, task: () => Promise<unknown>, wait?: () => Promise<RingParsedData>) => {
     try {
@@ -846,33 +875,35 @@ export const refreshLegacyBusinessMetrics = async (
     }
   };
 
-  await runStep(
-    'battery',
-    () => adapter.sendBatteryCommand(),
-    () => adapter.waitForParsedData((parsed) => parsed.type === 'battery', timeoutMs)
-  );
+  if (includeDeviceInfo) {
+    await runStep(
+      'battery',
+      () => adapter.sendBatteryCommand(),
+      () => adapter.waitForParsedData((parsed) => parsed.type === 'battery', timeoutMs)
+    );
 
-  await runStep(
-    'firmware',
-    () => adapter.sendFirmwareVersion(),
-    () =>
-      adapter.waitForParsedData(
-        (parsed) => parsed.type === 'firmware_version' || parsed.type === 'hardwareVersion',
-        timeoutMs
-      )
-  );
+    await runStep(
+      'firmware',
+      () => adapter.sendFirmwareVersion(),
+      () =>
+        adapter.waitForParsedData(
+          (parsed) => parsed.type === 'firmware_version' || parsed.type === 'hardwareVersion',
+          timeoutMs
+        )
+    );
 
-  await runStep(
-    'software',
-    () => adapter.sendSoftwareVersion(),
-    () =>
-      adapter.waitForParsedData(
-        (parsed) => parsed.type === 'firmware_version' || parsed.type === 'softwareVersion',
-        timeoutMs
-      )
-  );
+    await runStep(
+      'software',
+      () => adapter.sendSoftwareVersion(),
+      () =>
+        adapter.waitForParsedData(
+          (parsed) => parsed.type === 'firmware_version' || parsed.type === 'softwareVersion',
+          timeoutMs
+        )
+    );
+  }
 
-  if (options.includeDeviceTime ?? true) {
+  if (includeDeviceTime) {
     await runStep(
       'device_time',
       () => adapter.readDeviceTime(),
@@ -880,7 +911,7 @@ export const refreshLegacyBusinessMetrics = async (
     );
   }
 
-  if (includeRealtimeMetrics) {
+  if (shouldReadRealtimeMetric('heart_rate')) {
     await runStep(
       'heart_rate',
       () => adapter.sendActiveMeasureCommand(),
@@ -892,19 +923,21 @@ export const refreshLegacyBusinessMetrics = async (
           timeoutMs
         )
     );
+  }
 
+  if (shouldReadRealtimeMetric('blood_oxygen')) {
     await runStep(
       'blood_oxygen',
       () => adapter.sendOxyGenCommand(),
       () =>
         adapter.waitForParsedData(
-          (parsed) =>
-            parsed.type === 'active_OxyGenMeasure' ||
-            isRwHealthDataValue(parsed, 'blood_oxygen'),
+          (parsed) => isRwHealthDataValue(parsed, 'blood_oxygen'),
           timeoutMs
         )
     );
+  }
 
+  if (shouldReadRealtimeMetric('temperature')) {
     await runStep(
       'temperature',
       () => adapter.sendBodyTemperatureCommand(),
@@ -912,7 +945,7 @@ export const refreshLegacyBusinessMetrics = async (
     );
   }
 
-  if (options.includeCollectPeriod ?? true) {
+  if (includeCollectPeriod) {
     await runStep(
       'collect_period',
       () => adapter.readCollectPeriodCommand(),
@@ -1662,12 +1695,47 @@ const getRwWorkflowTemperatureValue = (item: Record<string, any>) =>
   item.skinTemp ??
   item.skin_temp;
 
-const getFirstRwWorkflowMetricValue = (item: Record<string, any>, aliases: string[]) => {
+const RW_WORKFLOW_METRIC_CONTAINER_KEYS = ['metrics', 'data', 'raw', 'payload', 'detail', 'details', 'result', 'parsed', 'value'];
+
+const getFirstRwWorkflowMetricValue = (item: Record<string, any>, aliases: string[], depth = 0): unknown => {
+  if (item === undefined || item === null || depth > 4) return undefined;
+  if (typeof item !== 'object') return item;
+
   for (const alias of aliases) {
     const value = item[alias];
     if (value !== undefined && value !== null && value !== '') return value;
   }
+
+  for (const containerKey of RW_WORKFLOW_METRIC_CONTAINER_KEYS) {
+    const nested = item[containerKey];
+    if (nested === undefined || nested === null || nested === item) continue;
+    if (Array.isArray(nested)) {
+      for (const child of nested) {
+        const value = getFirstRwWorkflowMetricValue(child as Record<string, any>, aliases, depth + 1);
+        if (value !== undefined && value !== null && value !== '') return value;
+      }
+      continue;
+    }
+    if (typeof nested === 'object') {
+      const value = getFirstRwWorkflowMetricValue(nested as Record<string, any>, aliases, depth + 1);
+      if (value !== undefined && value !== null && value !== '') return value;
+    }
+  }
+
   return undefined;
+};
+
+const isRwWorkflowBloodOxygenRecord = (item: Record<string, any>) => {
+  const kind = String(item.type ?? item.name ?? item.metric ?? item.metricName ?? item.kind ?? '').trim();
+  const normalizedKind = normalizeRwWorkflowMetricName(kind);
+  const lowerKind = kind.toLowerCase();
+  return (
+    kind === 'active_OxyGenMeasure' ||
+    normalizedKind === 'blood_oxygen' ||
+    lowerKind.includes('oxygen') ||
+    lowerKind.includes('oxy') ||
+    lowerKind.includes('spo2')
+  );
 };
 
 const sendRwControlFallbacks = async (adapter: LegacyRingAdapter, names?: readonly string[]) => {
@@ -1706,7 +1774,7 @@ const isRwHealthDataValue = (parsed: RingParsedData, name: string) => {
     return isReturnedMetricValue(getFirstRwWorkflowMetricValue(item, ['heartRate', 'heart_rate', 'heartrate', 'hr']));
   }
 
-  if (metricName === 'blood_oxygen' && parsed.type === 'active_OxyGenMeasure') {
+  if (metricName === 'blood_oxygen' && isRwWorkflowBloodOxygenRecord(item)) {
     return isReturnedMetricValue(
       getFirstRwWorkflowMetricValue(item, ['bloodOxygen', 'blood_oxygen', 'bloodOxygenSaturation', 'bloodOxy', 'spo2', 'oxygen'])
     );

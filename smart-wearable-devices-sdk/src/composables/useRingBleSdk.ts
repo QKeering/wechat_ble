@@ -1687,14 +1687,59 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     }
 
     const reconnected = await reconnect();
-    if (reconnected) lastCommunicationReadyAt = Date.now();
-    if (protocol === 'rw') {
-      writeRwStoreLog('ensure-ready-reconnect-result', {
-        success: reconnected,
-        device: summarizeRingDeviceForStoreLog(deviceInfo.value)
-      });
+    let reconnectReady = false;
+    if (reconnected) {
+      const reconnectedDevice = deviceInfo.value as RingDeviceInfo;
+      const notifyServiceIdAfterReconnect = reconnectedDevice.dataServiceId || reconnectedDevice.serviceId;
+      if (reconnectedDevice.deviceId && notifyServiceIdAfterReconnect && reconnectedDevice.dataCharId) {
+        const notifyRestoreStartedAt = Date.now();
+        try {
+          targetAdapter.setupDataListener();
+          await targetAdapter.enableNotify(
+            reconnectedDevice.deviceId,
+            notifyServiceIdAfterReconnect,
+            reconnectedDevice.dataCharId
+          );
+          runtime?.onDeviceReady?.({
+            ...reconnectedDevice,
+            notifyEnabled: true,
+            notifyError: ''
+          });
+          reconnectReady = true;
+          lastCommunicationReadyAt = Date.now();
+          writeRwStoreLog('ensure-ready-reconnect-notify-restored', {
+            protocol,
+            elapsedMs: Date.now() - notifyRestoreStartedAt,
+            device: summarizeRingDeviceForStoreLog(deviceInfo.value)
+          });
+        } catch (error) {
+          reconnectReady = isCommunicationReadyDevice(deviceInfo.value as RingDeviceInfo);
+          if (reconnectReady) lastCommunicationReadyAt = Date.now();
+          writeRwStoreLog('ensure-ready-reconnect-notify-restore-failed', {
+            protocol,
+            readyAfterError: reconnectReady,
+            elapsedMs: Date.now() - notifyRestoreStartedAt,
+            device: summarizeRingDeviceForStoreLog(deviceInfo.value),
+            message: error instanceof Error ? error.message : String(error)
+          });
+        }
+      } else {
+        reconnectReady = isCommunicationReadyDevice(reconnectedDevice);
+        if (reconnectReady) lastCommunicationReadyAt = Date.now();
+        writeRwStoreLog('ensure-ready-reconnect-notify-missing-context', {
+          protocol,
+          readyAfterReconnect: reconnectReady,
+          device: summarizeRingDeviceForStoreLog(reconnectedDevice)
+        });
+      }
     }
-    return reconnected;
+    writeRwStoreLog('ensure-ready-reconnect-result', {
+      protocol,
+      success: reconnectReady,
+      rawSuccess: reconnected,
+      device: summarizeRingDeviceForStoreLog(deviceInfo.value)
+    });
+    return reconnectReady;
   };
 
   const cancelPendingConnection = (deviceId = '') => {

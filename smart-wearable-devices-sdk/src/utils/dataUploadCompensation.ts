@@ -487,6 +487,7 @@ export const buildParsedUploadSyncMeta = (session: PendingUploadSession) => {
 };
 
 const RAW_BACKGROUND_UPLOAD_DEDUP_MS = 10 * 60 * 1000;
+const RAW_BACKGROUND_UPLOAD_RECENT_SUCCESS_MAX_COUNT = 500;
 const rawUploadInflightByDevice = new Map<string, Promise<unknown>>();
 const rawUploadInflightBySignature = new Map<string, Promise<unknown>>();
 const rawUploadRecentSuccessAt = new Map<string, number>();
@@ -501,6 +502,19 @@ const buildRawUploadSignature = (session: PendingUploadSession) => {
   const firstKey = rawKeys[0] || '';
   const lastKey = rawKeys[rawKeys.length - 1] || '';
   return `${session.deviceMacNorm || normalizeUploadDeviceMac(session.deviceMac)}|${session.protocol || ''}|${rawKeys.length}|${firstKey}|${lastKey}`;
+};
+
+const pruneRawUploadRecentSuccessAt = (now = Date.now()) => {
+  for (const [signature, successAt] of rawUploadRecentSuccessAt) {
+    if (now - successAt > RAW_BACKGROUND_UPLOAD_DEDUP_MS) {
+      rawUploadRecentSuccessAt.delete(signature);
+    }
+  }
+  if (rawUploadRecentSuccessAt.size <= RAW_BACKGROUND_UPLOAD_RECENT_SUCCESS_MAX_COUNT) return;
+  const removeCount = rawUploadRecentSuccessAt.size - RAW_BACKGROUND_UPLOAD_RECENT_SUCCESS_MAX_COUNT;
+  Array.from(rawUploadRecentSuccessAt.keys())
+    .slice(0, removeCount)
+    .forEach((signature) => rawUploadRecentSuccessAt.delete(signature));
 };
 
 export const uploadPendingRawFramesInBackground = (
@@ -518,6 +532,7 @@ export const uploadPendingRawFramesInBackground = (
     return Promise.resolve(null);
   }
   const now = Date.now();
+  pruneRawUploadRecentSuccessAt(now);
   const deviceKey = session.deviceMacNorm || normalizeUploadDeviceMac(session.deviceMac) || session.deviceMac;
   const signature = buildRawUploadSignature(session);
   const sameSignatureUploading = rawUploadInflightBySignature.get(signature);
@@ -555,7 +570,9 @@ export const uploadPendingRawFramesInBackground = (
       frames: session.rawFrames
     })
       .then((response) => {
-        rawUploadRecentSuccessAt.set(signature, Date.now());
+        const finishedAt = Date.now();
+        rawUploadRecentSuccessAt.set(signature, finishedAt);
+        pruneRawUploadRecentSuccessAt(finishedAt);
         markPendingUploadRawDone(session.uploadSessionId, response);
         return response;
       })

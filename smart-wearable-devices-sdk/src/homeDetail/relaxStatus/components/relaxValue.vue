@@ -3,12 +3,17 @@
 import { computed, ref, watch } from 'vue';
 const echarts = require('../../../static/echarts.min.js');
 import { baseOption } from '@/homeDetail/relaxStatus/echartOptions';
-import type { Point, stressDetail } from '@/types/api/homeDetail';
+import type { Point, stressDetail, stressSummaryType } from '@/types/api/homeDetail';
+import { resolveStressDisplayStatus } from '@/utils/stressDisplay';
 import { cloneDeep } from 'lodash-es';
 
 const props = defineProps({
   stressDetail: {
     type: Object as () => stressDetail,
+    default: () => ({})
+  },
+  stressSummaryObj: {
+    type: Object as () => stressSummaryType,
     default: () => ({})
   }
 });
@@ -64,6 +69,15 @@ const readStressEmotionText = (payload: any): string => {
 const stressEmotionLevel = computed(() => {
   const fallback = String(stressLevel.value || '').trim();
   return readStressEmotionText(props.stressDetail) || (fallback && !PRESSURE_LEVEL_STATUS_TEXTS.has(fallback.replace(/\s+/g, '')) ? fallback : '\u538b\u529b');
+});
+const stressDisplayStatus = computed(() => {
+  return resolveStressDisplayStatus({
+    detail: props.stressDetail,
+    summary: props.stressSummaryObj,
+    fallbackStatus: props.stressDetail?.stressLevel,
+    score: Number(stressValue.value) || 0,
+    fallbackText: '\u538b\u529b'
+  });
 });
 const formatIntegerMetric = (value: unknown, fallback = '00') => {
   if (value == null || value === '') return fallback;
@@ -130,7 +144,7 @@ const initChart = async () => {
     <view class="p-20 r-50" style="background-color: #f5fdfb">
       <view class="ta-c">
         <text class="fs-72">{{ stressValue }}</text>
-        <text class="fs-28">{{ stressEmotionLevel }}</text>
+        <text class="fs-28">{{ stressDisplayStatus }}</text>
       </view>
       <view class="ta-c fs-28">压力值<slot></slot></view>
       <view class="flex ai-center jc-center">

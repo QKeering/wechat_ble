@@ -64,6 +64,13 @@ const otaState = ref({
 const otaBaseInfo = ref({});
 const bindInfo = ref({});
 const hasUpgradePackage = computed(() => Boolean(firmwareUrl.value && otaBaseInfo.value?.fileUrl));
+let otaScanDeviceFoundHandler = null;
+
+const clearOtaScanDeviceFoundHandler = () => {
+  if (!otaScanDeviceFoundHandler) return;
+  uni.offBluetoothDeviceFound(otaScanDeviceFoundHandler);
+  otaScanDeviceFoundHandler = null;
+};
 
 const pickText = (...values) => {
   for (const value of values) {
@@ -189,8 +196,7 @@ const buildFirmwareDownloadUrl = (url) => {
 /** 清理蓝牙监听器 */
 const cleanup = () => {
   // uni.offBLECharacteristicValueChange();
-  uni.offBLEConnectionStateChange();
-  uni.offBluetoothDeviceFound();
+  clearOtaScanDeviceFoundHandler();
   uni.stopBluetoothDevicesDiscovery();
 };
 
@@ -366,7 +372,7 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
     };
 
     const startScan = () => {
-      uni.offBluetoothDeviceFound();
+      clearOtaScanDeviceFoundHandler();
       uni.stopBluetoothDevicesDiscovery();
 
       uni.startBluetoothDevicesDiscovery({
@@ -377,7 +383,7 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
 
           const scanTimeout = setTimeout(() => {
             if (!found) {
-              uni.offBluetoothDeviceFound();
+              clearOtaScanDeviceFoundHandler();
               uni.stopBluetoothDevicesDiscovery();
 
               if (++retryCount < SCAN_CONFIG.maxRetries) {
@@ -391,7 +397,7 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
             }
           }, SCAN_CONFIG.timeout);
 
-          uni.onBluetoothDeviceFound((res) => {
+          otaScanDeviceFoundHandler = (res) => {
             if (found) return;
 
             for (const device of res.devices) {
@@ -401,7 +407,7 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
               if (isTargetDevice(device)) {
                 found = true;
                 clearTimeout(scanTimeout);
-                uni.offBluetoothDeviceFound();
+                clearOtaScanDeviceFoundHandler();
                 uni.stopBluetoothDevicesDiscovery();
 
                 console.log(`[BLE] ✅ 匹配 ${mode}:`, name, device.deviceId, JSON.stringify(device));
@@ -424,7 +430,8 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
                 return;
               }
             }
-          });
+          };
+          uni.onBluetoothDeviceFound(otaScanDeviceFoundHandler);
         },
         fail: (err) => {
           console.error('[BLE] 扫描失败:', err);

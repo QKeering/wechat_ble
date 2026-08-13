@@ -54,6 +54,9 @@ import { getRwHistoryDataType } from './history';
 import { enqueueRwDiagnosticUpload } from '@/utils/rwDiagnosticUpload';
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
+type BleConnectionStateCallback = Parameters<typeof uni.onBLEConnectionStateChange>[0];
+type BleCharacteristicValueCallback = Parameters<typeof uni.onBLECharacteristicValueChange>[0];
+type BluetoothAdapterStateCallback = Parameters<NonNullable<typeof uni.onBluetoothAdapterStateChange>>[0];
 type ParsedWaiter = {
   predicate: (parsed: RingParsedData) => boolean;
   resolve: (parsed: RingParsedData) => void;
@@ -349,6 +352,18 @@ const notSupported = (method: string) => async () => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const offBleConnectionStateChange = (callback: BleConnectionStateCallback) => {
+  (uni.offBLEConnectionStateChange as unknown as (callback: BleConnectionStateCallback) => void)(callback);
+};
+
+const offBleCharacteristicValueChange = (callback: BleCharacteristicValueCallback) => {
+  (uni.offBLECharacteristicValueChange as unknown as (callback: BleCharacteristicValueCallback) => void)(callback);
+};
+
+const offBluetoothAdapterStateChange = (callback: BluetoothAdapterStateCallback) => {
+  (uni.offBluetoothAdapterStateChange as unknown as (callback: BluetoothAdapterStateCallback) => void)(callback);
+};
+
 const normalizeCommandWrite = (command: RwCommandWrite) => {
   if (command instanceof Uint8Array) return { bytes: command, label: undefined };
   return command;
@@ -385,8 +400,9 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   let scanPollTimer: ReturnType<typeof setInterval> | null = null;
   const parsedWaiters: ParsedWaiter[] = [];
   const recentParsedData: RecentParsedEntry[] = [];
-  let listenerRegistered = false;
-  let connectionListenerRegistered = false;
+  let dataListenerCallback: BleCharacteristicValueCallback | null = null;
+  let connectionStateCallback: BleConnectionStateCallback | null = null;
+  let adapterStateCallback: BluetoothAdapterStateCallback | null = null;
   let lastLocalDataReadIntent: RwLocalDataReadIntent | null = null;
   let pendingDeleteAllLocalDataAlias: RwPendingAlias | null = null;
   const pendingFirmwareAliases: RwPendingFirmwareAlias[] = [];
@@ -2532,9 +2548,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   };
 
   const setupDataListener = () => {
-    if (listenerRegistered) return;
-    listenerRegistered = true;
-    uni.onBLECharacteristicValueChange((res) => {
+    if (dataListenerCallback) return;
+    dataListenerCallback = (res) => {
       const device = getRuntimeDevice();
       const notifyServiceId = (device as RingDeviceInfo).dataServiceId || device.serviceId;
       if (device.deviceId && res.deviceId !== device.deviceId) return;
@@ -2658,7 +2673,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       });
 
       resolveParsedWaiters(parsedVariants);
-    });
+    };
+    uni.onBLECharacteristicValueChange(dataListenerCallback);
   };
 
   const clearDataListener = () => {
@@ -2666,14 +2682,16 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       waiters: parsedWaiters.length,
       recentParsed: recentParsedData.length
     });
-    listenerRegistered = false;
     clearPendingAliases();
     recentParsedData.splice(0);
     parsedWaiters.splice(0).forEach((waiter) => {
       clearTimeout(waiter.timer);
       waiter.reject(new Error('RW adapter listener cleared.'));
     });
-    uni.offBLECharacteristicValueChange();
+    if (dataListenerCallback) {
+      offBleCharacteristicValueChange(dataListenerCallback);
+      dataListenerCallback = null;
+    }
   };
 
   const disconnect = (deviceId = getRuntimeDevice().deviceId) => {
@@ -2691,9 +2709,11 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   };
 
   const registerConnectionStateListener = (options?: LegacyConnectionStateOptions) => {
-    uni.offBLEConnectionStateChange();
-    connectionListenerRegistered = true;
-    uni.onBLEConnectionStateChange((res) => {
+    if (connectionStateCallback) {
+      offBleConnectionStateChange(connectionStateCallback);
+      connectionStateCallback = null;
+    }
+    connectionStateCallback = (res) => {
       rwBleLog('connection-state', {
         deviceId: res.deviceId,
         connected: res.connected
@@ -2730,10 +2750,14 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       currentDevice = {};
       options?.onDisconnected?.(res.deviceId);
       runtime?.onDisconnected?.(res);
-    });
+    };
+    uni.onBLEConnectionStateChange(connectionStateCallback);
 
-    (uni.offBluetoothAdapterStateChange as unknown as (() => void) | undefined)?.();
-    uni.onBluetoothAdapterStateChange?.((result) => {
+    if (adapterStateCallback) {
+      offBluetoothAdapterStateChange(adapterStateCallback);
+      adapterStateCallback = null;
+    }
+    adapterStateCallback = (result) => {
       rwBleLog('adapter-state', {
         available: result.available,
         discovering: result.discovering
@@ -2746,9 +2770,10 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       runtime?.onDisconnected?.({
         reason: 'bluetooth_adapter_unavailable',
         available: false,
-        discovering: result.discovering
-      });
-    });
+          discovering: result.discovering
+        });
+    };
+    uni.onBluetoothAdapterStateChange?.(adapterStateCallback);
   };
 
   return {
@@ -2773,9 +2798,14 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     cleanup: async () => {
       await stopScan();
       clearDataListener();
-      connectionListenerRegistered = false;
-      uni.offBLEConnectionStateChange();
-      (uni.offBluetoothAdapterStateChange as unknown as (() => void) | undefined)?.();
+      if (connectionStateCallback) {
+        offBleConnectionStateChange(connectionStateCallback);
+        connectionStateCallback = null;
+      }
+      if (adapterStateCallback) {
+        offBluetoothAdapterStateChange(adapterStateCallback);
+        adapterStateCallback = null;
+      }
     },
     sendBytes,
     sendCommand,

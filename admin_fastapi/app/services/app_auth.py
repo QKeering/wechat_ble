@@ -19,6 +19,8 @@ LOGIN_TOKEN_KEY = "qkeer:login_tokens:"
 PHONE_CODE_KEY = "qkeer:app_phone_code:"
 DEVICE_LINK_SERVICE_KEY = "qkeer:device_link_service:"
 DEVICE_NAME_KEY = "qkeer:device_name:"
+H5_TICKET_KEY = "qkeer:h5_ticket:"
+H5_SESSION_TTL_SECONDS = 30 * 60
 
 
 class AppAuthError(Exception):
@@ -119,6 +121,59 @@ def create_token(redis: Redis | None, user: dict[str, Any]) -> str:
     if redis:
         redis.setex(f"{LOGIN_TOKEN_KEY}{token_uuid}", settings.app_token_expire_minutes * 60, json.dumps(payload, ensure_ascii=False, default=str))
     return token
+
+
+def create_h5_ticket(redis: Redis | None, user: dict[str, Any], scene_id: str | None = None) -> dict[str, Any]:
+    if redis is None:
+        raise AppAuthError("H5 会话服务不可用")
+    ticket = uuid4().hex
+    expires_in = 5 * 60
+    redis.setex(
+        f"{H5_TICKET_KEY}{ticket}",
+        expires_in,
+        json.dumps({"userId": int(user["id"]), "sceneId": scene_id or "", "createdAt": int(time.time())}),
+    )
+    return {"ticket": ticket, "expiresIn": expires_in}
+
+
+def exchange_h5_ticket(db: Session, redis: Redis | None, ticket: str) -> dict[str, Any]:
+    if redis is None:
+        raise AppAuthError("H5 会话服务不可用")
+    key = f"{H5_TICKET_KEY}{ticket}"
+    raw = redis.get(key)
+    if raw is None:
+        raise AppAuthError("H5 ticket 无效或已过期")
+    # Ticket is single-use. Delete before issuing a session to prevent replay.
+    redis.delete(key)
+    try:
+        payload = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+        user_id = int(payload["userId"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise AppAuthError("H5 ticket 数据无效") from exc
+    user = user_by_id(db, user_id)
+    if not user:
+        raise AppAuthError("H5 用户不存在")
+    token_uuid = str(uuid4())
+    now_ms = int(time.time() * 1000)
+    expire_ms = now_ms + H5_SESSION_TTL_SECONDS * 1000
+    token = jwt.encode(
+        {"app_login_user_key": token_uuid, "sub": str(user_id), "tokenType": "qkeer-h5"},
+        settings.token_secret,
+        algorithm="HS512",
+    )
+    redis.setex(
+        f"{LOGIN_TOKEN_KEY}{token_uuid}",
+        H5_SESSION_TTL_SECONDS,
+        json.dumps({
+            "userId": user_id,
+            "token": token_uuid,
+            "loginTime": now_ms,
+            "expireTime": expire_ms,
+            "audience": "qkeer-h5",
+            "sceneId": payload.get("sceneId") or "",
+        }, ensure_ascii=False),
+    )
+    return {"sessionToken": token, "expiresIn": H5_SESSION_TTL_SECONDS, "sceneId": payload.get("sceneId") or ""}
 
 
 def record_login(db: Session, user_id: int, ip: str | None = None) -> None:

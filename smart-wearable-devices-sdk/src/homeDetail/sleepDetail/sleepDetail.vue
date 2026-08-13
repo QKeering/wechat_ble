@@ -2,7 +2,7 @@
 import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
 import homeHeartChart from '@/components/homeHeartChart.vue';
-import { getSleepDetail, getSleepSegment, getHeartRateDetail, getSleepOverview } from '@/common/api/homeDetail';
+import { getSleepDetail, getSleepSegment, getSleepHeartRateDetail, getSleepOverview } from '@/common/api/homeDetail';
 import { formatDate, calculateOffset, getPrevDate, getNextDate, formatLocalDate } from '@/utils/utils.js';
 import type { sleepDetail, sleepSegment, heartRateDetail, sleepOverview } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
@@ -95,7 +95,7 @@ const loadSleepDetailData = async (trigger = 'manual') => {
   const results = await Promise.allSettled([
     runSleepDetailEndpointTask('sleep-detail', date, loadId, () => getSleepDetailInfo(targetDate, loadId)),
     runSleepDetailEndpointTask('sleep-segment', date, loadId, () => getSleepSegmentInfo(targetDate, loadId)),
-    runSleepDetailEndpointTask('heart-rate-detail', date, loadId, () => getRatDetail(targetDate, loadId))
+    runSleepDetailEndpointTask('sleep-heart-rate-detail', date, loadId, () => getRatDetail(targetDate, loadId))
   ]);
   if (isCurrentSleepDetailLoad(loadId)) {
     applySleepSegmentNormalization();
@@ -222,11 +222,7 @@ const getSleepSegmentInfo = async (targetDate = new Date(), loadId?: number) => 
 // 获取心率详情
 const getRatDetail = async (targetDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(targetDate);
-  const res = await getHeartRateDetail({
-    date: isoDate,
-    type: currentName.value,
-    offset: offset.value
-  });
+  const res = await getSleepHeartRateDetail({ date: isoDate });
   if (res && isCurrentSleepDetailLoad(loadId)) {
     heartRateObj.value = res;
     heartRateList.value = [

@@ -54,10 +54,15 @@ import {
 import { submitData } from '@/common/api/homeDetail';
 import { scan, getBindInfo } from '@/common/api/device';
 import CustomSteps from '@/components/customSteps.vue';
-import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
+import { clearFrontendRingBindingState, getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
 import { clearRwDiagnosticCommandLock, setRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
-import { formatBatteryPercentForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
+import {
+  formatBatteryStatusForDisplay,
+  getRawBatteryPercent,
+  isBatteryChargingLike
+} from '@/utils/batteryDisplay';
+import { readBatteryDisplayCache, writeBatteryDisplayCache } from '@/utils/batteryCache';
 const {
   deviceInfo: ringDeviceInfo,
   isDeviceConnected,
@@ -223,8 +228,17 @@ const menuList: MineMenuItem[] = [
     path: '/pagesA/mines/question'
   }
 ];// const pullDownProgress// const pullDownProgress = ref(0);
-const MINE_PAGE_NAVIGATION_LOCK_MS = 1500;
 const minePageNavigating = ref(false);
+const releaseMinePageNavigationLock = () => {
+  minePageNavigating.value = false;
+};
+const resetMinePageNavigationState = (reason: string) => {
+  const wasNavigating = minePageNavigating.value;
+  minePageNavigating.value = false;
+  if (wasNavigating) {
+    appendMineDiagnosticLog('mine-page-navigation-reset', { reason });
+  }
+};
 const navigateMinePage = (path?: string) => {
   const targetPath = String(path || '').trim();
   if (!targetPath) return;
@@ -242,12 +256,14 @@ const navigateMinePage = (path?: string) => {
     uni.navigateTo({
       url: targetPath,
       success: () => {
+        releaseMinePageNavigationLock();
         appendMineDiagnosticLog('mine-page-navigate-success', {
           path: targetPath,
           elapsedMs: Date.now() - startedAt
         });
       },
       fail: (error) => {
+        releaseMinePageNavigationLock();
         appendMineDiagnosticLog('mine-page-navigate-fail', {
           path: targetPath,
           elapsedMs: Date.now() - startedAt,
@@ -256,9 +272,7 @@ const navigateMinePage = (path?: string) => {
         uni.showToast({ title: '页面加载失败，请稍后重试', icon: 'none' });
       },
       complete: () => {
-        setTimeout(() => {
-          minePageNavigating.value = false;
-        }, MINE_PAGE_NAVIGATION_LOCK_MS);
+        releaseMinePageNavigationLock();
       }
     });
   }, 0);
@@ -2769,7 +2783,36 @@ const hasMineFirmwareSnapshot = () =>
       userStore.latestMetrics?.softwareVersion
   );
 const displayBatteryValue = computed(() => {
-  const value = getFirstMetricValue(
+  const directDisplay = formatBatteryStatusForDisplay(getMineRawBatteryValue(), getMineRawBatteryStatusValue(), '');
+  if (String(directDisplay || '').trim()) return directDisplay;
+  return getMineBatteryCacheRecord()?.displayText || '--';
+});
+const getMineBatteryStatusValue = (item: Record<string, any> | null | undefined) =>
+  item?.metrics?.chargingStatusText ??
+  item?.metrics?.batteryStatus ??
+  item?.metrics?.chargingStatus ??
+  item?.chargingStatusText ??
+  item?.chargeStatusText ??
+  item?.batteryStatus ??
+  item?.chargingStatus ??
+  item?.status;
+const getMineBatteryCacheUserId = () => {
+  const userInfo = (userStore.userInfo || {}) as Record<string, any>;
+  return String(userInfo.id || userInfo.user_id || userInfo.userId || userInfo.uid || (userStore as any).userId || 'anonymous');
+};
+const getMineBatteryCacheMac = () =>
+  getBoundRingIdentity(ringDeviceInfo.value as Record<string, any> | null | undefined) ||
+  getBoundRingIdentity(ringStore.deviceInfo as Record<string, any> | null | undefined) ||
+  getBoundRingIdentity(userStore.deviceInfo as Record<string, any> | null | undefined) ||
+  getBoundRingIdentity(bindInfo.value as Record<string, any> | null | undefined) ||
+  userStore.normalMac ||
+  userStore.iosMacId ||
+  '';
+function getMineBatteryCacheRecord() {
+  return readBatteryDisplayCache(getMineBatteryCacheUserId(), getMineBatteryCacheMac());
+}
+const getMineRawBatteryValue = () =>
+  getFirstMetricValue(
     getMineBatterySourceValue(latestBattery.value as Record<string, any> | null),
     getMineBatterySourceValue(ringDeviceInfo.value as Record<string, any> | null),
     getMineBatterySourceValue(ringStore.deviceInfo as Record<string, any> | null),
@@ -2777,43 +2820,52 @@ const displayBatteryValue = computed(() => {
     userStore.healthData?.battery,
     userStore.latestMetrics?.battery
   );
-  return formatBatteryPercentForDisplay(value, '--');
-});
-const getMineBatteryStatusValue = (item: Record<string, any> | null | undefined) =>
-  item?.metrics?.batteryStatus ?? item?.metrics?.chargingStatusText ?? item?.metrics?.chargingStatus ?? item?.batteryStatus ?? item?.chargingStatusText ?? item?.chargingStatus;
-const isMineBatteryCharging = computed(() => {
+const getMineRawBatteryStatusValue = () => {
   const batteryItem = latestBattery.value as Record<string, any> | null;
-  const rawValue = getFirstMetricValue(
-    getMineBatterySourceValue(batteryItem),
-    getMineBatterySourceValue(ringDeviceInfo.value as Record<string, any> | null),
-    getMineBatterySourceValue(ringStore.deviceInfo as Record<string, any> | null),
-    getMineBatterySourceValue(userStore.deviceInfo as Record<string, any> | null)
-  );
-  const statusValue =
+  return (
     getMineBatteryStatusValue(batteryItem) ??
     getMineBatteryStatusValue(ringDeviceInfo.value as Record<string, any> | null) ??
     getMineBatteryStatusValue(ringStore.deviceInfo as Record<string, any> | null) ??
-    getMineBatteryStatusValue(userStore.deviceInfo as Record<string, any> | null);
-  const healthStatus =
+    getMineBatteryStatusValue(userStore.deviceInfo as Record<string, any> | null) ??
+    userStore.healthData?.chargingStatusText ??
+    userStore.latestMetrics?.chargingStatusText ??
     userStore.healthData?.batteryStatus ??
-    userStore.latestMetrics?.batteryStatus;
-  return isBatteryChargingLike(rawValue, statusValue ?? healthStatus);
+    userStore.latestMetrics?.batteryStatus ??
+    ringStore.healthData?.chargingStatusText ??
+    ringStore.latestMetrics?.chargingStatusText ??
+    ringStore.healthData?.batteryStatus ??
+    ringStore.latestMetrics?.batteryStatus
+  );
+};
+const isMineBatteryCharging = computed(() => {
+  return isBatteryChargingLike(getMineRawBatteryValue(), getMineRawBatteryStatusValue());
 });
 const batteryPercent = computed(() => {
   if (isMineBatteryCharging.value) return 100;
-  const value = getFirstMetricValue(
-    getMineBatterySourceValue(latestBattery.value as Record<string, any> | null),
-    getMineBatterySourceValue(ringDeviceInfo.value as Record<string, any> | null),
-    getMineBatterySourceValue(ringStore.deviceInfo as Record<string, any> | null),
-    getMineBatterySourceValue(userStore.deviceInfo as Record<string, any> | null),
-    userStore.healthData?.battery,
-    userStore.latestMetrics?.battery
-  );
+  const value = getMineRawBatteryValue() ?? getMineBatteryCacheRecord()?.rawBattery;
   if (value == null || value === '') return 0;
   const num = Number(String(value).replace('%', '').trim());
   if (!Number.isFinite(num)) return 0;
   return Math.min(Math.max(Math.round(num), 0), 100);
 });
+watch(
+  () => {
+    const rawBattery = getRawBatteryPercent(getMineRawBatteryValue());
+    const mac = getMineBatteryCacheMac();
+    const userId = getMineBatteryCacheUserId();
+    return rawBattery == null ? '' : `${userId}|${mac}|${Math.round(rawBattery)}`;
+  },
+  (signature) => {
+    if (!signature) return;
+    writeBatteryDisplayCache({
+      userId: getMineBatteryCacheUserId(),
+      mac: getMineBatteryCacheMac(),
+      battery: getMineRawBatteryValue(),
+      status: getMineRawBatteryStatusValue(),
+      source: 'mine-display'
+    });
+  }
+);
 // Whether cached battery info can be shown.
 const shouldShowBatteryInfo = computed(() => {
   if (isConnectedStatus.value) {
@@ -3263,6 +3315,7 @@ const connectAgain = async () => {
 };
 onShow(async () => {
   try {
+    resetMinePageNavigationState('page-show');
     if (!userStore.token) {
       clearMineSleepProbeIsolationLock('mine-page-show-no-token');
       userStore.updateDeviceInfo({});

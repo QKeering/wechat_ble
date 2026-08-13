@@ -543,16 +543,23 @@ def should_prefer_raw_sleep_values(record_values: dict[str, int], raw_values: di
     raw_total = sleep_stage_total(raw_values)
     if raw_total <= 0:
         return False
+    if record_total <= 0:
+        return True
     sample_minutes = int(getattr(health, "L19_SLEEP_DEFAULT_SAMPLE_MINUTES", 5) or 5)
-    return abs(raw_total - record_total) > sample_minutes
+    # health_raw.sleep_state is a compensation source. Do not switch to raw for
+    # small differences, otherwise dirty/pre-sleep state points can make detail
+    # pages diverge from sleep_record based summaries. Only use raw when the
+    # canonical sleep_record is clearly incomplete (typical legacy/L19 symptom:
+    # data_sync receives many sleep_state rows but sleep_record writes 0/few rows).
+    incomplete_threshold = max(30, int(raw_total * 0.6))
+    return (record_total + sample_minutes) < incomplete_threshold
 
 
 def resolved_sleep_values(db: Session, user_id: int, date_value: str | None, records=None) -> tuple[dict[str, int], bool]:
     records = records if records is not None else sleep_records(db, user_id, date_value)
     record_values = sleep_minutes_by_type(records)
-    record_total = sleep_stage_total(record_values)
     raw_values = sleep_minutes_from_raw(db, user_id, date_value)
-    if record_total <= 0 or should_prefer_raw_sleep_values(record_values, raw_values):
+    if should_prefer_raw_sleep_values(record_values, raw_values):
         return raw_values, True
     return record_values, False
 
@@ -4172,6 +4179,218 @@ async def upload_image(file: UploadFile, _: dict = Depends(app_user)):
     return data
 
 
+FEEDBACK_CATEGORIES = {
+    "connect_failed": "连接不上",
+    "sync_failed": "数据同步失败",
+    "data_abnormal": "数据异常",
+    "charge_failed": "设备充不上电",
+    "bind_failed": "无法绑定",
+    "wear_measure": "佩戴/测量问题",
+    "account_family": "账号/家人守护",
+    "other": "其他问题",
+}
+FEEDBACK_SCHEMA_READY = False
+
+
+def ensure_feedback_schema(db: Session) -> None:
+    global FEEDBACK_SCHEMA_READY
+    if FEEDBACK_SCHEMA_READY:
+        return
+    db.execute(
+        text(
+            """
+            create table if not exists user_feedback (
+              id bigint primary key auto_increment,
+              feedback_no varchar(64) not null unique,
+              user_id bigint null,
+              nickname varchar(100) null,
+              phone varchar(64) null,
+              category varchar(64) not null,
+              category_label varchar(100) not null,
+              description text not null,
+              images_json text null,
+              contact varchar(100) null,
+              device_mac varchar(64) null,
+              device_name varchar(128) null,
+              device_model varchar(128) null,
+              firmware_version varchar(128) null,
+              app_version varchar(64) null,
+              platform varchar(64) null,
+              system_info_json text null,
+              source_page varchar(128) null,
+              source_faq_id varchar(64) null,
+              source_faq_title varchar(255) null,
+              status varchar(32) not null default 'submitted',
+              create_time datetime not null default current_timestamp,
+              update_time datetime not null default current_timestamp on update current_timestamp,
+              key idx_user_feedback_user_time (user_id, create_time),
+              key idx_user_feedback_mac_time (device_mac, create_time),
+              key idx_user_feedback_status_time (status, create_time)
+            ) engine=InnoDB default charset=utf8mb4
+            """
+        )
+    )
+    db.commit()
+    FEEDBACK_SCHEMA_READY = True
+
+
+def _feedback_text(value, max_len: int | None = None) -> str:
+    text_value = str(value or "").strip()
+    if max_len and len(text_value) > max_len:
+        return text_value[:max_len]
+    return text_value
+
+
+def _feedback_user_id(user: dict | None, payload: dict) -> int | None:
+    value = None
+    if isinstance(user, dict):
+        value = user.get("id") or user.get("user_id") or user.get("userId")
+    value = value or payload.get("userId") or payload.get("user_id")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _customer_service_payload() -> dict:
+    qr = getattr(settings, "CUSTOMER_SERVICE_QR", "") or getattr(settings, "customer_service_qr", "")
+    wechat = getattr(settings, "CUSTOMER_SERVICE_WECHAT", "") or getattr(settings, "customer_service_wechat", "")
+    tips = getattr(settings, "CUSTOMER_SERVICE_TIPS", "") or getattr(
+        settings,
+        "customer_service_tips",
+        "长按识别二维码，添加客服",
+    )
+    return {
+        "customerServiceQr": qr,
+        "customerServiceWechat": wechat,
+        "qrUrl": qr,
+        "wechatId": wechat,
+        "tips": tips,
+    }
+
+
+@router.get("/config/customerService")
+def customer_service_config(_: dict = Depends(app_user)):
+    return success(_customer_service_payload())
+
+
+@router.post("/feedback/submit")
+async def submit_feedback(request: Request, db: Session = Depends(get_db), user: dict = Depends(app_user)):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        return error("反馈内容格式错误")
+
+    category = _feedback_text(payload.get("category"), 64)
+    if category not in FEEDBACK_CATEGORIES:
+        return error("请选择有效的问题类型")
+
+    description = _feedback_text(payload.get("description"))
+    if len(description) < 10:
+        return error("问题描述至少10个字")
+    if len(description) > 500:
+        return error("问题描述不能超过500个字")
+
+    contact = _feedback_text(payload.get("contact"), 50)
+    images = payload.get("images") or []
+    if not isinstance(images, list):
+        images = []
+    images = [_feedback_text(item, 500) for item in images if _feedback_text(item, 500)][:3]
+
+    user_id = _feedback_user_id(user if isinstance(user, dict) else None, payload)
+    device = payload.get("device") if isinstance(payload.get("device"), dict) else {}
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    system_info = payload.get("systemInfo") if isinstance(payload.get("systemInfo"), dict) else {}
+
+    feedback_no = f"FB{datetime.now(APP_TIMEZONE).strftime('%Y%m%d%H%M%S')}{random.randint(1000, 9999)}"
+    ensure_feedback_schema(db)
+    db.execute(
+        text(
+            """
+            insert into user_feedback (
+              feedback_no, user_id, nickname, phone, category, category_label,
+              description, images_json, contact, device_mac, device_name,
+              device_model, firmware_version, app_version, platform,
+              system_info_json, source_page, source_faq_id, source_faq_title
+            ) values (
+              :feedback_no, :user_id, :nickname, :phone, :category, :category_label,
+              :description, :images_json, :contact, :device_mac, :device_name,
+              :device_model, :firmware_version, :app_version, :platform,
+              :system_info_json, :source_page, :source_faq_id, :source_faq_title
+            )
+            """
+        ),
+        {
+            "feedback_no": feedback_no,
+            "user_id": user_id,
+            "nickname": _feedback_text(payload.get("nickname"), 100),
+            "phone": _feedback_text(payload.get("phone"), 64),
+            "category": category,
+            "category_label": FEEDBACK_CATEGORIES[category],
+            "description": description,
+            "images_json": json.dumps(images, ensure_ascii=False),
+            "contact": contact,
+            "device_mac": _feedback_text(
+                payload.get("deviceMac")
+                or payload.get("device_mac")
+                or device.get("mac")
+                or device.get("deviceMac")
+                or device.get("device_mac"),
+                64,
+            ),
+            "device_name": _feedback_text(
+                payload.get("deviceName")
+                or payload.get("device_name")
+                or device.get("name")
+                or device.get("deviceName")
+                or device.get("device_name"),
+                128,
+            ),
+            "device_model": _feedback_text(
+                payload.get("deviceModel")
+                or payload.get("device_model")
+                or device.get("model")
+                or device.get("deviceModel")
+                or device.get("device_model"),
+                128,
+            ),
+            "firmware_version": _feedback_text(
+                payload.get("firmwareVersion")
+                or payload.get("firmware_version")
+                or device.get("firmwareVersion")
+                or device.get("firmware_version"),
+                128,
+            ),
+            "app_version": _feedback_text(payload.get("appVersion") or payload.get("app_version") or system_info.get("appVersion"), 64),
+            "platform": _feedback_text(
+                payload.get("platform")
+                or system_info.get("uniPlatform")
+                or system_info.get("platform")
+                or system_info.get("system"),
+                64,
+            ),
+            "system_info_json": json.dumps(system_info, ensure_ascii=False, default=str),
+            "source_page": _feedback_text(payload.get("sourcePage") or payload.get("source_page") or source.get("page"), 128),
+            "source_faq_id": _feedback_text(payload.get("sourceFaqId") or payload.get("source_faq_id") or source.get("faqId") or source.get("faq_id"), 64),
+            "source_faq_title": _feedback_text(
+                payload.get("sourceFaqTitle")
+                or payload.get("source_faq_title")
+                or source.get("faqTitle")
+                or source.get("faq_title"),
+                255,
+            ),
+        },
+    )
+    db.commit()
+
+    result = {"feedbackId": feedback_no}
+    result.update(_customer_service_payload())
+    return success(result)
+
+
 def parse_sync_record_time(value):
     if value in (None, ""):
         return None
@@ -4528,19 +4747,23 @@ def health_raw_sleep_state_value(item):
             (
                 "sleepState",
                 "sleep_state",
+                "sleepStateValue",
+                "sleep_state_value",
                 "sleepStage",
                 "sleep_stage",
+                "sleepStageValue",
+                "sleep_stage_value",
             ),
         )
     )
     if explicit_state not in (None, 0):
         return explicit_state
 
-    rw_status = rw_sleep_status_to_l19_state(first_item_value(item, ("sleepStatus", "sleep_status")))
+    rw_status = rw_sleep_status_to_l19_state(first_item_value(item, ("sleepStatus", "sleep_status", "sleepStatusValue", "sleep_status_value")))
     if rw_status is not None:
         return rw_status
 
-    sleep_type = ring_sleep_state_value(first_item_value(item, ("sleepType", "sleep_type")))
+    sleep_type = ring_sleep_state_value(first_item_value(item, ("sleepType", "sleep_type", "sleepTypeValue", "sleep_type_value", "sleepValue", "sleep_value")))
     return sleep_type if sleep_type not in (None, 0) else None
 
 
@@ -4824,6 +5047,47 @@ def dedupe_sync_sleep_records(records: list[dict]) -> list[dict]:
     )
 
 
+def sync_l19_sleep_target_date(record_time: datetime) -> date:
+    try:
+        sleep_start_hour = int(getattr(health, "L19_SLEEP_WINDOW_START_HOUR", 21))
+    except (TypeError, ValueError):
+        sleep_start_hour = 21
+    if record_time.hour >= sleep_start_hour:
+        return record_time.date() + timedelta(days=1)
+    return record_time.date()
+
+
+def build_sync_sleep_records_from_health_raw_sleep_states(
+    sleep_table,
+    health_raw_values: list[dict],
+    user_id: int,
+) -> list[dict]:
+    grouped_items: dict[date, list[dict]] = {}
+    for values in health_raw_values:
+        record_time = values.get("record_time")
+        sleep_state = values.get("sleep_state")
+        if not isinstance(record_time, datetime) or sleep_state is None:
+            continue
+        target_date = sync_l19_sleep_target_date(record_time)
+        grouped_items.setdefault(target_date, []).append(
+            {
+                "recordTime": record_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "sleepState": sleep_state,
+                "sleepType": sleep_state,
+                "sourceType": "l19_sleep_state_sync_derived",
+                "rawDataType": "sleep_state",
+            }
+        )
+
+    derived_records: list[dict] = []
+    for target_date, items in sorted(grouped_items.items(), key=lambda pair: pair[0]):
+        for segment in health.build_l19_sleep_segment_records(items, target_date):
+            values = java_sync_sleep_record_values(sleep_table, segment, user_id)
+            if values:
+                derived_records.append(values)
+    return derived_records
+
+
 def delete_overlapping_sync_sleep_records(db: Session, table, values: dict) -> int:
     start_time = values.get("start_time")
     end_time = values.get("end_time")
@@ -4969,6 +5233,7 @@ def insert_sync_health_raw_record(db: Session, table, values: dict):
 
 def upsert_sync_health_raw_records(db: Session, table, records: list[dict]) -> dict:
     deduped_records = dedupe_sync_health_raw_records(records)
+    sleep_state_count = sum(1 for values in deduped_records if values.get("sleep_state") is not None)
     existing_ids = prefetch_sync_health_raw_ids(db, table, deduped_records)
     inserted_count = 0
     updated_count = 0
@@ -4989,6 +5254,7 @@ def upsert_sync_health_raw_records(db: Session, table, records: list[dict]) -> d
         "duplicateInputCount": max(len(records) - len(deduped_records), 0),
         "insertedCount": inserted_count,
         "updatedCount": updated_count,
+        "sleepStateCount": sleep_state_count,
     }
 
 
@@ -5064,6 +5330,8 @@ def sync_ring_data_records(
     touched_dates = set()
     sleep_record_values = []
     health_raw_values = []
+    health_sleep_state_input_count = 0
+    derived_sleep_record_values = []
     step_baseline_cache: dict[tuple[str, date], int | None] = {}
     parse_started_at = perf_counter()
     emit_phase("data_sync_records_parse_start", input_count=len(records))
@@ -5081,12 +5349,35 @@ def sync_ring_data_records(
                 fail_count += 1
             continue
         health_raw_values.append(values)
+        if values.get("sleep_state") is not None:
+            health_sleep_state_input_count += 1
         touched_dates.add(values["record_time"].date().isoformat())
+    if not sleep_record_values and health_sleep_state_input_count > 0:
+        derive_started_at = perf_counter()
+        derived_sleep_record_values = build_sync_sleep_records_from_health_raw_sleep_states(
+            sleep_table,
+            health_raw_values,
+            user_id,
+        )
+        sleep_record_values.extend(derived_sleep_record_values)
+        for values in derived_sleep_record_values:
+            date_ref = values.get("date_ref")
+            if date_ref:
+                touched_dates.add(date_ref.isoformat() if hasattr(date_ref, "isoformat") else str(date_ref))
+        emit_phase(
+            "data_sync_sleep_state_derive_result",
+            derive_started_at,
+            health_sleep_state_input_count=health_sleep_state_input_count,
+            derived_sleep_input_count=len(derived_sleep_record_values),
+            touched_dates=sorted(touched_dates),
+        )
     emit_phase(
         "data_sync_records_parse_result",
         parse_started_at,
         health_input_count=len(health_raw_values),
         sleep_input_count=len(sleep_record_values),
+        health_sleep_state_input_count=health_sleep_state_input_count,
+        derived_sleep_input_count=len(derived_sleep_record_values),
         fail_count=fail_count,
         touched_dates=sorted(touched_dates),
     )
@@ -5103,9 +5394,14 @@ def sync_ring_data_records(
         health_duplicate_input_count=health_write_result.get("duplicateInputCount"),
         health_inserted_count=health_write_result.get("insertedCount"),
         health_updated_count=health_write_result.get("updatedCount"),
+        health_sleep_state_count=health_write_result.get("sleepStateCount"),
     )
     sleep_write_started_at = perf_counter()
-    emit_phase("data_sync_sleep_write_start", sleep_input_count=len(sleep_record_values))
+    emit_phase(
+        "data_sync_sleep_write_start",
+        sleep_input_count=len(sleep_record_values),
+        derived_sleep_input_count=len(derived_sleep_record_values),
+    )
     sleep_write_result = upsert_sync_sleep_records(db, sleep_table, sleep_record_values)
     sleep_write_ms = round((perf_counter() - sleep_write_started_at) * 1000)
     emit_phase(
@@ -5117,6 +5413,7 @@ def sync_ring_data_records(
         sleep_overlap_deleted_count=sleep_write_result.get("deletedOverlapCount"),
         sleep_inserted_count=sleep_write_result.get("insertedCount"),
         sleep_updated_count=sleep_write_result.get("updatedCount"),
+        derived_sleep_input_count=len(derived_sleep_record_values),
     )
     device_update_started_at = perf_counter()
     emit_phase("data_sync_device_update_start", battery=battery)
@@ -5141,6 +5438,8 @@ def sync_ring_data_records(
                 })
         emit_phase("data_sync_summary_result", summary_all_started_at, summary_dates=summary_dates)
     sleep_count = int(sleep_write_result.get("dedupedCount") or 0)
+    health_sleep_state_count = int(health_write_result.get("sleepStateCount") or 0)
+    sleep_accepted_count = sleep_count + health_sleep_state_count
     total_count = health_count + sleep_count
     return {
         "success": total_count > 0,
@@ -5151,6 +5450,11 @@ def sync_ring_data_records(
         "healthInsertedCount": health_write_result.get("insertedCount", 0),
         "healthUpdatedCount": health_write_result.get("updatedCount", 0),
         "sleepCount": sleep_count,
+        "sleepRawCount": health_sleep_state_count,
+        "sleepStateCount": health_sleep_state_count,
+        "healthSleepStateCount": health_sleep_state_count,
+        "derivedSleepInputCount": len(derived_sleep_record_values),
+        "sleepAcceptedCount": sleep_accepted_count,
         "sleepInputCount": sleep_write_result.get("inputCount", len(sleep_record_values)),
         "sleepDuplicateInputCount": sleep_write_result.get("duplicateInputCount", 0),
         "sleepOverlapDeletedCount": sleep_write_result.get("deletedOverlapCount", 0),

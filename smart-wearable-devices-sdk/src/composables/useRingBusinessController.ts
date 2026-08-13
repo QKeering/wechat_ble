@@ -1,4 +1,4 @@
-import { computed, ref, watch } from 'vue';
+import { computed, getCurrentScope, onScopeDispose, ref, watch } from 'vue';
 import {
   getLegacyBleHistoryExclusiveSnapshot,
   isRingHistoryInProgress,
@@ -146,7 +146,11 @@ export const useRingBusinessController = (options: UseRingBusinessControllerOpti
     return defaultBusinessController;
   }
 
-  return createRingBusinessController(options);
+  const controller = createRingBusinessController(options);
+  if (getCurrentScope()) {
+    onScopeDispose(() => controller.dispose());
+  }
+  return controller;
 };
 
 const createRingBusinessController = (options: UseRingBusinessControllerOptions = {}) => {
@@ -179,7 +183,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
   let refreshRequestId = 0;
   let historyRequestId = 0;
   let lastRefreshAt = 0;
-  let lastRwDeviceTimeSyncAt = 0;
+  const deviceTimeSyncAtByIdentity = new Map<string, number>();
   let refreshPromise: Promise<RefreshLegacyBusinessMetricsResult> | null = null;
   let historyPromise: Promise<SyncLegacyHistoryResult> | null = null;
   let restorePromise: Promise<boolean> | null = null;
@@ -250,6 +254,13 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     if (scanFreshnessTimer) {
       clearInterval(scanFreshnessTimer);
       scanFreshnessTimer = null;
+    }
+  };
+
+  const clearBusinessDataFreshnessTimer = () => {
+    if (businessDataFreshnessTimer) {
+      clearInterval(businessDataFreshnessTimer);
+      businessDataFreshnessTimer = null;
     }
   };
 
@@ -716,7 +727,9 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         ...details,
         skipReason: diagnosticLock ? 'rw-diagnostic-command-lock' : 'auto-refresh-paused',
         lock: diagnosticLock || undefined,
-        deviceId: ble.deviceInfo.value.deviceId
+        protocol,
+        stableIdentity,
+        deviceId: device.deviceId
       });
       return;
     }
@@ -724,7 +737,9 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     appendRingDiagnosticLog('RW FLOW', 'post-connect-device-info-refresh-start', {
       reason,
       ...details,
-      deviceId: ble.deviceInfo.value.deviceId
+      protocol,
+      stableIdentity,
+      deviceId: device.deviceId
     });
     void refreshBusinessDataSafely(getPostConnectRefreshOptions()).then(() => {
       appendRingDiagnosticLog('RW FLOW', 'post-connect-device-info-refresh-result', {
@@ -1163,7 +1178,9 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 
     if (refreshPromise) {
       appendRingDiagnosticLog('RW FLOW', 'device-info-wait-active-refresh', {
-        deviceId: ble.deviceInfo.value.deviceId
+        protocol,
+        stableIdentity,
+        deviceId: device.deviceId
       });
       await refreshPromise.catch(() => undefined);
       if (getResolvedCurrentProtocol() === 'rw' && hasRwDeviceInfoCoreSnapshot()) {
@@ -1227,7 +1244,16 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 
   const syncRwDeviceTimeAfterReady = async (phase: 'ready' | 'history', details: Record<string, unknown>) => {
     if (isNodeRuntime()) return;
-    if (getResolvedCurrentProtocol() !== 'rw' || !isReady.value) return;
+    if (!isReady.value) return;
+
+    const device = ble.deviceInfo.value;
+    const protocol = getResolvedCurrentProtocol();
+    const stableIdentity =
+      getRingDeviceStableIdentity(device) ||
+      device.uniMacId ||
+      device.deviceId ||
+      protocol ||
+      'unknown-device';
 
     const diagnosticLock = getRwDiagnosticCommandLock();
     if (diagnosticLock) {
@@ -1235,18 +1261,23 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         ...details,
         reason: 'rw-diagnostic-command-lock',
         lock: diagnosticLock,
-        deviceId: ble.deviceInfo.value.deviceId
+        protocol,
+        stableIdentity,
+        deviceId: device.deviceId
       });
       return;
     }
 
     const now = Date.now();
-    const ageMs = lastRwDeviceTimeSyncAt > 0 ? now - lastRwDeviceTimeSyncAt : Number.POSITIVE_INFINITY;
+    const lastSyncAt = deviceTimeSyncAtByIdentity.get(stableIdentity) || 0;
+    const ageMs = lastSyncAt > 0 ? now - lastSyncAt : Number.POSITIVE_INFINITY;
     if (ageMs >= 0 && ageMs < RW_HISTORY_DEVICE_TIME_SYNC_DEDUP_MS) {
       appendRingDiagnosticLog('RW FLOW', `${phase}-device-time-sync-skip`, {
         ...details,
         ageMs,
-        deviceId: ble.deviceInfo.value.deviceId
+        protocol,
+        stableIdentity,
+        deviceId: device.deviceId
       });
       return;
     }
@@ -1256,22 +1287,28 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       ...details,
       timestampMs: now,
       timezone,
-      deviceId: ble.deviceInfo.value.deviceId
+      protocol,
+      stableIdentity,
+      deviceId: device.deviceId
     });
     try {
       await ble.updateDeviceTime(now, timezone);
-      lastRwDeviceTimeSyncAt = Date.now();
+      deviceTimeSyncAtByIdentity.set(stableIdentity, Date.now());
       appendRingDiagnosticLog('RW FLOW', `${phase}-device-time-sync-result`, {
         ...details,
         timestampMs: now,
         timezone,
-        deviceId: ble.deviceInfo.value.deviceId
+        protocol,
+        stableIdentity,
+        deviceId: device.deviceId
       });
     } catch (error) {
       appendRingDiagnosticLog('RW FLOW', `${phase}-device-time-sync-failed`, {
         ...details,
         error: formatBleErrorMessage(error, '设备时间校准失败'),
-        deviceId: ble.deviceInfo.value.deviceId
+        protocol,
+        stableIdentity,
+        deviceId: device.deviceId
       });
     }
   };
@@ -1685,7 +1722,13 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     clearBusinessData,
     enableHealthMonitoring,
     pauseBusinessAutoRefresh,
-    resumeBusinessAutoRefresh
+    resumeBusinessAutoRefresh,
+    dispose: () => {
+      isAutoRefreshPaused = true;
+      cancelBusinessRequests();
+      clearScanFreshnessTimer();
+      clearBusinessDataFreshnessTimer();
+    }
   };
 };
 

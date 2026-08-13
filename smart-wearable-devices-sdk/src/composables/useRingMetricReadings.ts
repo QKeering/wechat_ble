@@ -14,6 +14,7 @@ type RefreshMetricTask = (params?: Record<string, any>) => Promise<unknown>;
 type RequestMetricRefreshOptions = {
   expectedSteps?: string | string[];
   timeoutMs?: number;
+  acceptPending?: boolean;
 };
 
 type RwMetricKind = 'heart_rate' | 'blood_oxygen' | 'temperature' | 'hrv' | 'stress' | 'blood_sugar' | 'blood_pressure';
@@ -57,6 +58,25 @@ const TEMPERATURE_VALUE_KEYS = [
   'skin_temperature_value'
 ];
 
+const BLOOD_OXYGEN_VALUE_KEYS = [
+  'value',
+  'bloodOxygen',
+  'blood_oxygen',
+  'bloodOxygenValue',
+  'blood_oxygen_value',
+  'spo2',
+  'spO2',
+  'SpO2',
+  'SPO2',
+  'oxygen',
+  'oxygenValue',
+  'oxygen_value',
+  'oxygenSaturation',
+  'oxygen_saturation',
+  'oxygenSaturationValue',
+  'oxygen_saturation_value'
+];
+
 export const requestMetricRefresh = async (
   refreshHealthData: RefreshMetricTask,
   fallbackCommand: () => Promise<unknown>,
@@ -75,7 +95,7 @@ export const requestMetricRefresh = async (
       realtimeMetricNames,
       timeoutMs: options.timeoutMs ?? REALTIME_MEASURE_TIMEOUT_MS
     });
-    if (shouldFallbackMetricRefresh(result, options.expectedSteps)) {
+    if (shouldFallbackMetricRefresh(result, options.expectedSteps, options.acceptPending)) {
       await fallbackCommand();
     }
   } catch {
@@ -86,14 +106,18 @@ export const requestMetricRefresh = async (
 const normalizeExpectedRefreshSteps = (expectedSteps?: string | string[]) =>
   (Array.isArray(expectedSteps) ? expectedSteps : expectedSteps ? [expectedSteps] : []).filter(Boolean);
 
-const shouldFallbackMetricRefresh = (result: unknown, expectedSteps?: string | string[]) => {
+const shouldFallbackMetricRefresh = (
+  result: unknown,
+  expectedSteps?: string | string[],
+  acceptPending = true
+) => {
   const expected = normalizeExpectedRefreshSteps(expectedSteps);
   if (expected.length === 0) return isRefreshResultFailed(result);
   if (!result || typeof result !== 'object') return false;
 
   const record = result as Record<string, any>;
   const ok = Array.isArray(record.ok) ? record.ok.map((step) => String(step)) : [];
-  if (expected.some((step) => ok.includes(step) || ok.includes(`${step}_pending`))) return false;
+  if (expected.some((step) => ok.includes(step) || (acceptPending && ok.includes(`${step}_pending`)))) return false;
 
   const failed = Array.isArray(record.failed) ? record.failed : [];
   const failedExpected = failed.some((item: any) => expected.includes(String(item?.step || '')));
@@ -262,18 +286,52 @@ const getComparableMetricTime = (record: any, fallback = 0) => {
   return timestamp || fallback || 0;
 };
 
-const getMetricValue = (record: any, keys: string[]) => {
+const METRIC_VALUE_CONTAINER_KEYS = ['metrics', 'data', 'raw', 'payload', 'detail', 'details', 'result', 'parsed', 'value'];
+
+const getMetricValue = (record: any, keys: string[], depth = 0): number | null => {
+  if (record === undefined || record === null || depth > 4) return null;
+  if (typeof record !== 'object') return toMetricNumber(record);
+
   for (const key of keys) {
-    const value = toMetricNumber(record?.[key] ?? record?.metrics?.[key] ?? record?.data?.[key]);
+    const value = toMetricNumber(record?.[key]);
     if (value !== null) return value;
   }
+
+  for (const containerKey of METRIC_VALUE_CONTAINER_KEYS) {
+    const nested = record?.[containerKey];
+    if (nested === undefined || nested === null || nested === record) continue;
+    if (Array.isArray(nested)) {
+      for (const item of nested) {
+        const value = getMetricValue(item, keys, depth + 1);
+        if (value !== null) return value;
+      }
+      continue;
+    }
+    if (typeof nested === 'object') {
+      const value = getMetricValue(nested, keys, depth + 1);
+      if (value !== null) return value;
+    }
+  }
+
   return null;
 };
 
+const getMetricRecordKind = (record: Record<string, any> = {}) =>
+  String(record.type ?? record.name ?? record.metric ?? record.metricName ?? record.kind ?? '').trim();
+
+const isLegacyBloodOxygenMetricRecord = (record: Record<string, any> = {}) => {
+  const kind = getMetricRecordKind(record);
+  const lowerKind = kind.toLowerCase();
+  return kind === 'active_OxyGenMeasure' || lowerKind.includes('oxygen') || lowerKind.includes('oxy') || lowerKind.includes('spo2');
+};
+
 const getRawMetricValue = (record: any, keys: string[]) => {
+  const containers = [record, record?.metrics, record?.data, record?.raw];
   for (const key of keys) {
-    const value = record?.[key] ?? record?.metrics?.[key] ?? record?.data?.[key];
-    if (value !== undefined && value !== null && value !== '') return value;
+    for (const container of containers) {
+      const value = container?.[key];
+      if (value !== undefined && value !== null && value !== '') return value;
+    }
   }
   return undefined;
 };
@@ -333,10 +391,40 @@ const isMetricRecordForCurrentDevice = (store: RingStoreLike, record: Record<str
   return recordIds.some((id) => currentIds.includes(id)) || hasMatchingMetricIdentityTail(recordIds, currentIds);
 };
 
-const findLatestReceived = (store: RingStoreLike, predicate: (record: any) => boolean, since = 0) =>
-  [...(store.receivedData || [])]
-    .filter((record) => isMetricRecordForCurrentDevice(store, record) && predicate(record) && getComparableMetricTime(record) >= since)
-    .sort((a: any, b: any) => getComparableMetricTime(b) - getComparableMetricTime(a))[0];
+const findLatestReceived = (
+  store: RingStoreLike,
+  predicate: (record: any) => boolean,
+  since = 0,
+  afterIndex?: number
+) => {
+  const records = store.receivedData || [];
+  return records
+    .map((record, index) => ({ record, index, timestamp: getComparableMetricTime(record) }))
+    .filter(({ record, index, timestamp }) => {
+      if (!isMetricRecordForCurrentDevice(store, record) || !predicate(record)) return false;
+      if (since <= 0 || timestamp >= since) return true;
+      return typeof afterIndex === 'number' && index >= afterIndex;
+    })
+    .sort((a, b) => {
+      const timestampDiff = b.timestamp - a.timestamp;
+      return timestampDiff !== 0 ? timestampDiff : b.index - a.index;
+    })[0]?.record;
+};
+
+const findLatestReceivedAfterIndex = (
+  store: RingStoreLike,
+  predicate: (record: any) => boolean,
+  afterIndex?: number
+) => {
+  if (typeof afterIndex !== 'number' || afterIndex < 0) return undefined;
+  const records = store.receivedData || [];
+  const lowerBound = Math.max(0, afterIndex);
+  for (let index = records.length - 1; index >= lowerBound; index -= 1) {
+    const record = records[index];
+    if (isMetricRecordForCurrentDevice(store, record) && predicate(record)) return record;
+  }
+  return undefined;
+};
 
 const getRwMetricKey = (record: any) => {
   const value = record?.key ?? record?.metrics?.key ?? record?.raw?.key;
@@ -477,11 +565,19 @@ const getRwMetricValue = (record: any, keys: string[], kind: RwMetricKind) => {
   return getRwScalarDataValue(data);
 };
 
-const findLatestRwMetricReceived = (store: RingStoreLike, names: string[], keys: string[], kind: RwMetricKind, since = 0) =>
+const findLatestRwMetricReceived = (
+  store: RingStoreLike,
+  names: string[],
+  keys: string[],
+  kind: RwMetricKind,
+  since = 0,
+  afterIndex?: number
+) =>
   findLatestReceived(
     store,
     (record) => isRwHealthRecord(record, names, kind, since) && getRwMetricValue(record, keys, kind) !== null,
-    since
+    since,
+    afterIndex
   );
 
 const getHealthDataValue = (store: RingStoreLike, keys: string[]) => {
@@ -587,31 +683,34 @@ export const getLatestHeartRateReading = (store: RingStoreLike, since = 0) => {
   return reading;
 };
 
-export const getLatestSpo2Reading = (store: RingStoreLike, since = 0) => {
-  const legacyData: any = findLatestReceived(
-    store,
-    (record) => record.type === 'active_OxyGenMeasure' && normalizeBloodOxygenMetricValue(record.bloodOxygen) !== null,
-    since
-  );
+export const getLatestSpo2Reading = (store: RingStoreLike, since = 0, afterIndex?: number) => {
+  const isValidLegacySpo2Record = (record: any) =>
+    isLegacyBloodOxygenMetricRecord(record) &&
+    normalizeBloodOxygenMetricValue(getMetricValue(record, BLOOD_OXYGEN_VALUE_KEYS)) !== null;
+  const legacyData: any =
+    findLatestReceivedAfterIndex(store, isValidLegacySpo2Record, afterIndex) ||
+    findLatestReceived(store, isValidLegacySpo2Record, since, afterIndex);
   if (legacyData) {
-    const legacyValue = normalizeBloodOxygenMetricValue(legacyData.bloodOxygen);
+    const legacyValue = normalizeBloodOxygenMetricValue(getMetricValue(legacyData, BLOOD_OXYGEN_VALUE_KEYS));
     if (legacyValue === null) return undefined;
     return {
-      ...normalizeMetricRecordNumbers(legacyData, ['bloodOxygen']),
+      ...normalizeMetricRecordNumbers(legacyData, BLOOD_OXYGEN_VALUE_KEYS),
+      timestamp: getMetricRecordTime(legacyData, Date.now()),
       bloodOxygen: legacyValue
     };
   }
 
   const rwData: any = findLatestRwMetricReceived(
     store,
-    ['blood_oxygen', 'bloodOxygen', 'spo2', 'oxygen'],
-    ['value', 'bloodOxygen', 'blood_oxygen', 'spo2', 'oxygen'],
+    BLOOD_OXYGEN_VALUE_KEYS,
+    BLOOD_OXYGEN_VALUE_KEYS,
     'blood_oxygen',
-    since
+    since,
+    afterIndex
   );
-  const rwValue = getRwMetricValue(rwData, ['value', 'bloodOxygen', 'blood_oxygen', 'spo2', 'oxygen'], 'blood_oxygen');
+  const rwValue = getRwMetricValue(rwData, BLOOD_OXYGEN_VALUE_KEYS, 'blood_oxygen');
   const cachedValue = shouldUseCachedMetricFallback(store, since)
-    ? normalizeBloodOxygenMetricValue(getHealthDataValue(store, ['bloodOxygen', 'blood_oxygen', 'spo2', 'oxygen']))
+    ? normalizeBloodOxygenMetricValue(getHealthDataValue(store, BLOOD_OXYGEN_VALUE_KEYS))
     : null;
   const value = rwValue ?? cachedValue;
   if (!isValidBloodOxygenValue(value)) return undefined;

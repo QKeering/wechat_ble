@@ -1,7 +1,7 @@
 import qkeerV2VendorConsole from './debug_console.js';
 import ble_config from './ble_config.js';
 import ble_events from './ble_events.js';
-import ble_receive_data from './ble_receive_data.js';
+import enable_ble_notify, { clearBLENotifyListener } from './ble_receive_data.js';
 import ble_send_data from './ble_send_data.js';
 import sender_map from '../sender/ble_sender_map.js';
 import device_info from '../utils/util_device_info.js';
@@ -29,6 +29,8 @@ class BleManager {
 
     this.deviceFoundList = {}; // 搜索到的设备列表
     this.listenerMaps = {};
+    this.bluetoothDeviceFoundHandler = null;
+    this.connectionStateChangeHandler = null;
 
     // Sync initial values to shared state (see ble_device_state.js)
     device_state.deviceType = this.deviceType;
@@ -58,6 +60,12 @@ class BleManager {
     });
   }
 
+  offBluetoothDeviceFound() {
+    if (!this.bluetoothDeviceFoundHandler) return;
+    uni.offBluetoothDeviceFound(this.bluetoothDeviceFoundHandler);
+    this.bluetoothDeviceFoundHandler = null;
+  }
+
   // 关闭蓝牙模块
   async closeBluetoothAdapter() {
     return new Promise((resolve, reject) => {
@@ -67,6 +75,10 @@ class BleManager {
           this.isScanning = false;
           this.connectedDeviceId = '';
           device_state.connectedDeviceId = '';
+          this.offBluetoothDeviceFound();
+          this.offBleConnectionStateChange();
+          clearBLENotifyListener();
+          this.clearReceiverListener();
           resolve(res);
         },
         fail: (err) => {
@@ -187,7 +199,7 @@ class BleManager {
             let characteristic = await this.checkDeviceServices(device);
             if (characteristic) {
               // 开始监听蓝牙数据，接收设备返回的数据
-              await ble_receive_data(device.deviceId);
+              await enable_ble_notify(device.deviceId);
 
               ble_events.bleDisconnected(deviceInfo);
 
@@ -216,6 +228,8 @@ class BleManager {
         success: (res) => {
           this.connectedDeviceId = '';
           device_state.connectedDeviceId = '';
+          clearBLENotifyListener();
+          this.clearReceiverListener();
           resolve(res);
         },
         fail: (err) => {
@@ -361,7 +375,8 @@ class BleManager {
    * 		device.name: "Musleep_Ring3_0869"
    */
   onBluetoothDeviceFound(callback) {
-    uni.onBluetoothDeviceFound((res) => {
+    this.offBluetoothDeviceFound();
+    this.bluetoothDeviceFoundHandler = (res) => {
       if (res.devices && res.devices[0]) {
         const device = res.devices[0];
         if (device.advertisData) {
@@ -380,12 +395,14 @@ class BleManager {
           }
         }
       }
-    });
+    };
+    uni.onBluetoothDeviceFound(this.bluetoothDeviceFoundHandler);
   }
 
   // 初始化蓝牙监听
   onBleConnectionStateChange() {
-    uni.onBLEConnectionStateChange((res) => {
+    this.offBleConnectionStateChange();
+    this.connectionStateChangeHandler = (res) => {
       qkeerV2VendorConsole.log('设备连接状态变化：' + res.deviceId + ', connected: ' + res.connected);
       // 设备断开连接
       if (res.deviceId === this.connectedDeviceId) {
@@ -395,7 +412,14 @@ class BleManager {
           ble_events.bleDisconnected(res.deviceId);
         }
       }
-    });
+    };
+    uni.onBLEConnectionStateChange(this.connectionStateChangeHandler);
+  }
+
+  offBleConnectionStateChange() {
+    if (!this.connectionStateChangeHandler) return;
+    uni.offBLEConnectionStateChange(this.connectionStateChangeHandler);
+    this.connectionStateChangeHandler = null;
   }
 
   //-----------------------------------------------------------------------------------
@@ -415,6 +439,11 @@ class BleManager {
   setReceiverListener(listenerMap) {
     this.listenerMaps = listenerMap;
     device_state.listenerMaps = listenerMap;
+  }
+
+  clearReceiverListener() {
+    this.listenerMaps = {};
+    device_state.listenerMaps = this.listenerMaps;
   }
 
   // 发送数据到设备
