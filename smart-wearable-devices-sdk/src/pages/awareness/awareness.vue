@@ -201,6 +201,11 @@ let legacyLocalDataTimeoutFlushDeviceMacNorm = '';
 let legacyLocalDataTimeoutFlushKey = '';
 let legacyLocalDataTimeoutFlushRequestedAt = 0;
 let legacyLocalDataTimeoutFlushTrigger = '';
+let legacyLocalDataHttpRetryWindow: {
+  deviceMacNorm: string;
+  sinceTimestamp: number;
+  createdAt: number;
+} | null = null;
 let legacyLocalDataActiveHistoryFlushKey = '';
 let legacyLocalDataActiveHistoryFlushRequestedAt = 0;
 let awarenessBusinessRefreshPromise: Promise<void> | null = null;
@@ -318,8 +323,11 @@ const LEGACY_HOME_HISTORY_ACTIVE_FLUSH_DEDUP_MS = 10000;
 const LEGACY_LOCAL_DATA_TIMEOUT_FLUSH_TTL_MS = 30000;
 const LEGACY_LOCAL_DATA_TIMEOUT_FLUSH_DEDUP_MS = 30000;
 const LEGACY_HOME_HISTORY_UPLOAD_DISPATCH_DEDUP_MS = 30000;
-const LEGACY_LOCAL_DATA_SUBMIT_TIMEOUT_MS = 60000;
+// HTTP 历史上传不能无限占用首页同步会话。超时后保留原批次读取窗口，
+// 仅重试 HTTP，不重新读取 BLE，也不推进 checkpoint。
+const LEGACY_LOCAL_DATA_SUBMIT_TIMEOUT_MS = 30000;
 const LEGACY_LOCAL_DATA_SUBMIT_WATCHDOG_MS = LEGACY_LOCAL_DATA_SUBMIT_TIMEOUT_MS + 5000;
+const LEGACY_LOCAL_DATA_HTTP_RETRY_WINDOW_TTL_MS = 10 * 60 * 1000;
 // 前台只等待短链路提交；超过预算后走已有 HTTP retry/后台补偿，避免首页被上传锁定 60s+。
 const LEGACY_LOCAL_DATA_SUBMIT_FOREGROUND_BUDGET_MS = 12000;
 // 大批次会让单次 /app/data/sync 超过前台预算，超时后虽会转 HTTP-only 补偿，
@@ -573,6 +581,34 @@ const releaseAwarenessHomeSyncSession = (trigger: string, status = 'released', m
     runningForMs: Date.now() - releasedClaim.startedAt,
     snapshot: getAwarenessConnectionSnapshot()
   });
+};
+const rememberLegacyLocalDataHttpRetryWindow = (deviceMac: string, sinceTimestamp: number) => {
+  const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  if (!deviceMacNorm) return;
+  legacyLocalDataHttpRetryWindow = {
+    deviceMacNorm,
+    sinceTimestamp: Math.max(0, Math.floor(Number(sinceTimestamp) || 0)),
+    createdAt: Date.now()
+  };
+};
+const getLegacyLocalDataHttpRetrySinceTimestamp = (deviceMac: string, fallbackTimestamp: number) => {
+  const retryWindow = legacyLocalDataHttpRetryWindow;
+  if (!retryWindow) return fallbackTimestamp;
+  const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  const expired = Date.now() - retryWindow.createdAt > LEGACY_LOCAL_DATA_HTTP_RETRY_WINDOW_TTL_MS;
+  if (expired || !deviceMacNorm || retryWindow.deviceMacNorm !== deviceMacNorm) {
+    legacyLocalDataHttpRetryWindow = null;
+    return fallbackTimestamp;
+  }
+  return retryWindow.sinceTimestamp;
+};
+const clearLegacyLocalDataHttpRetryWindow = (deviceMac: string) => {
+  const retryWindow = legacyLocalDataHttpRetryWindow;
+  if (!retryWindow) return;
+  const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  if (!deviceMacNorm || retryWindow.deviceMacNorm === deviceMacNorm) {
+    legacyLocalDataHttpRetryWindow = null;
+  }
 };
 const pruneAwarenessHomeSyncCooldown = () => {
   const now = Date.now();
@@ -4173,7 +4209,21 @@ watch(
           });
           return;
         }
-        const uploadSinceTimestamp = getAwarenessHistoryUploadSinceTimestamp(isRwRing);
+        const defaultUploadSinceTimestamp = getAwarenessHistoryUploadSinceTimestamp(isRwRing);
+        const uploadSinceTimestamp = isRwRing
+          ? defaultUploadSinceTimestamp
+          : getLegacyLocalDataHttpRetrySinceTimestamp(deviceMac, defaultUploadSinceTimestamp);
+        if (!isRwRing && uploadSinceTimestamp !== defaultUploadSinceTimestamp) {
+          appendAwarenessDiagnosticLog('legacy-local-data-http-retry-window-applied', {
+            protocol,
+            deviceMac,
+            defaultUploadSinceTimestamp,
+            defaultUploadSinceText: formatUnixTimestampForLog(defaultUploadSinceTimestamp),
+            uploadSinceTimestamp,
+            uploadSinceText: formatUnixTimestampForLog(uploadSinceTimestamp),
+            snapshot: getAwarenessConnectionSnapshot()
+          });
+        }
         const uploadBatch = buildLegacyLocalDataUploadBatch(deviceMac, uploadSinceTimestamp);
         const filteredRecords = uploadBatch.records;
         const rawFrames = uploadBatch.rawFrames;
@@ -4658,6 +4708,9 @@ watch(
               throw new Error('历史数据提交失败');
             }
             markPendingUploadDataDone(uploadSession.uploadSessionId, submitResponse);
+            if (!isRwRing) {
+              clearLegacyLocalDataHttpRetryWindow(deviceMac);
+            }
           } catch (uploadError) {
             const uploadErrorText = formatAwarenessUploadRequestError(uploadError);
             appendAwarenessDiagnosticLog('upload-http-failed', {
@@ -4676,6 +4729,7 @@ watch(
             releaseLegacyLocalDataUploadSignature(uploadSignatureSnapshot);
             markPendingUploadDataFailed(uploadSession.uploadSessionId, uploadError);
             if (!isRwRing) {
+              rememberLegacyLocalDataHttpRetryWindow(deviceMac, uploadSinceTimestamp);
               const retrySnapshot = getLegacyLocalDataStableSnapshot();
               if (hasLegacyLocalDataUploadableSnapshot(retrySnapshot)) {
                 legacyLocalDataStablePromise = null;
@@ -4695,7 +4749,11 @@ watch(
                 userStore.updateUploadingStatus('2');
                 userStore.updateIsSending(false);
                 homeDataSyncing.value = false;
-                markAwarenessHomeSyncCompleted('legacy-local-data-upload-http-failed-background-retry');
+                releaseAwarenessHomeSyncSession(
+                  'legacy-local-data-upload-http-failed-background-retry',
+                  'failed',
+                  false
+                );
                 const httpRetryQueued = requestLegacyLocalDataTimeoutFlush(
                   'legacy-local-data-upload-http-failed-http-retry-only',
                   protocol,
@@ -5035,6 +5093,7 @@ watch(
               deviceMac,
               reason: 'all-submit-records-already-uploaded'
             });
+            clearLegacyLocalDataHttpRetryWindow(deviceMac);
             markAwarenessHomeSyncCompleted('legacy-local-data-already-uploaded');
             scheduleAwarenessAfterDataProcessed('legacy-local-data-already-uploaded');
             return;
@@ -5207,6 +5266,7 @@ watch(
             deviceMac,
             reason: 'empty-submit-array'
           });
+          clearLegacyLocalDataHttpRetryWindow(deviceMac);
           markAwarenessHomeSyncCompleted('legacy-local-data-no-submit');
           scheduleAwarenessAfterDataProcessed('legacy-local-data-no-submit');
         }
@@ -5231,6 +5291,9 @@ watch(
           isRwRing,
           error: formatBleErrorMessage(error, 'legacy local data upload failed')
         });
+        // 上传异常不能继续占用首页同步会话。失败批次的读取窗口已单独保留，
+        // 后续只重试 HTTP；这里不推进 checkpoint，也不重新读取 BLE。
+        releaseAwarenessHomeSyncSession('legacy-local-data-upload-failed', 'failed', false);
       }
       appendAwarenessDiagnosticLog('legacy-local-data-upload-failed', {
         protocol,
