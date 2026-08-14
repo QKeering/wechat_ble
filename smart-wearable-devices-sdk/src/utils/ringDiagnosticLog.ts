@@ -1,4 +1,5 @@
 import { enqueueRwDiagnosticUpload } from '@/utils/rwDiagnosticUpload';
+import { QKEER_BUILD_INFO, QKEER_BUILD_TAG } from '@/utils/buildInfo';
 
 export const RING_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 export const RING_DIAGNOSTIC_VERBOSE_STORAGE_KEY = 'qkeer:ring-diagnostic-verbose';
@@ -297,12 +298,16 @@ export const appendRingDiagnosticLog = (source: string, event: string, details?:
     const sampled = sampleDiagnosticLog(source, event, details);
     if (!sampled.keep) return;
     const logs = readDiagnosticLogCache();
+    const versionedDetails = sampled.details && typeof sampled.details === 'object' && !Array.isArray(sampled.details)
+      ? { ...(sampled.details as Record<string, unknown>), appBuild: QKEER_BUILD_INFO }
+      : { value: sampled.details, appBuild: QKEER_BUILD_INFO };
     const entry = {
       id: Date.now() * 1000 + Math.floor(Math.random() * 1000),
       time: formatDiagnosticTime(),
       source,
       event,
-      details: normalizeDiagnosticDetails(sampled.details)
+      details: normalizeDiagnosticDetails(versionedDetails),
+      buildTag: QKEER_BUILD_TAG
     };
     logs.push(entry);
     if (logs.length > RING_DIAGNOSTIC_LOG_MAX_COUNT) {

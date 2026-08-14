@@ -409,10 +409,16 @@ const commandRows = computed(() =>
 
 const runCommand = async (config: CommandConfig) => {
   if (runningKey.value) return;
+  // Keep an immutable identity for the whole command. A physical disconnect
+  // clears the stores, so recovery must not read its target from page state.
+  const commandTarget: AnyRecord = {
+    ...currentDevice.value,
+    advertis: currentDevice.value.advertis ? { ...currentDevice.value.advertis } : undefined
+  };
   const releaseCommandSession = tryClaimLegacyBleCommandSession(config.timeoutMs, {
     reason: `ble-command-debug:${config.key}`,
     caller: 'bleCommandDebug.runCommand',
-    deviceId: currentDevice.value.deviceId || currentDevice.value.mac || currentDevice.value.uniMacId || ''
+    deviceId: commandTarget.deviceId || commandTarget.mac || commandTarget.uniMacId || ''
   });
   if (!releaseCommandSession) {
     uni.showToast({ title: '设备正在同步，请稍后重试', icon: 'none' });
@@ -420,8 +426,8 @@ const runCommand = async (config: CommandConfig) => {
   }
   runningKey.value = config.key;
   pushLog(`${config.label} - 发送`, 'info', {
-    deviceId: currentDevice.value.deviceId || '-',
-    mac: currentDevice.value.mac || currentDevice.value.uniMacId || '-',
+    deviceId: commandTarget.deviceId || '-',
+    mac: commandTarget.mac || commandTarget.uniMacId || '-',
     expect: config.desc
   });
 
@@ -430,35 +436,51 @@ const runCommand = async (config: CommandConfig) => {
     const commandResult = await config.run();
     pushLog(`${config.label} - 命令返回`, 'success', commandResult ?? '命令已发出，等待设备通知回执');
   } catch (error) {
+    const errorText = stringify(error);
     pushLog(`${config.label} - 命令失败`, 'error', {
-      error: stringify(error),
+      error: errorText,
       device: {
-        deviceId: currentDevice.value.deviceId || '-',
-        mac: currentDevice.value.mac || currentDevice.value.uniMacId || '-',
-        serviceId: currentDevice.value.serviceId || '-',
-        dataCharId: currentDevice.value.dataCharId || '-',
+        deviceId: commandTarget.deviceId || '-',
+        mac: commandTarget.mac || commandTarget.uniMacId || '-',
+        serviceId: commandTarget.serviceId || '-',
+        dataCharId: commandTarget.dataCharId || '-',
         connected: connectedText.value
       }
     });
-    // A diagnostic history read must not leave the application disconnected.
-    // Recover the channel after a failed read, but never resend the command
-    // automatically because that could duplicate a long history operation.
-    shouldRecoverHistoryChannel = config.key === 'historyAll';
+    shouldRecoverHistoryChannel =
+      config.key === 'historyAll' &&
+      /Ring data listener was cleared|physical-disconnect|disconnected|not connected|未连接/i.test(errorText);
   }
 
   if (shouldRecoverHistoryChannel) {
     releaseCommandSession();
-    void Promise.resolve(ble.ensureCommunicationReady?.())
-      .then((ready) => {
-        pushLog(`${config.label} - 连接恢复`, ready ? 'success' : 'error', {
-          ready: Boolean(ready),
-          deviceId: currentDevice.value.deviceId || '-',
-          mac: currentDevice.value.mac || currentDevice.value.uniMacId || '-'
-        });
-      })
-      .catch((recoveryError) => {
-        pushLog(`${config.label} - 连接恢复失败`, 'error', stringify(recoveryError));
+    try {
+      const ready = await ble.recoverCommunicationForDevice?.(commandTarget);
+      pushLog(`${config.label} - 连接恢复`, ready ? 'success' : 'error', {
+        ready: Boolean(ready),
+        deviceId: commandTarget.deviceId || '-',
+        mac: commandTarget.mac || commandTarget.uniMacId || '-'
       });
+      if (ready) {
+        const releaseRetrySession = tryClaimLegacyBleCommandSession(config.timeoutMs, {
+          reason: `ble-command-debug:${config.key}:disconnect-retry`,
+          caller: 'bleCommandDebug.runCommand.retry',
+          deviceId: commandTarget.deviceId || commandTarget.mac || commandTarget.uniMacId || ''
+        });
+        if (releaseRetrySession) {
+          try {
+            const retryResult = await config.run();
+            pushLog(`${config.label} - 断连重试返回`, 'success', retryResult ?? '命令已重新发出');
+          } catch (retryError) {
+            pushLog(`${config.label} - 断连重试失败`, 'error', stringify(retryError));
+          } finally {
+            releaseRetrySession();
+          }
+        }
+      }
+    } catch (recoveryError) {
+      pushLog(`${config.label} - 连接恢复失败`, 'error', stringify(recoveryError));
+    }
     runningKey.value = '';
     return;
   }

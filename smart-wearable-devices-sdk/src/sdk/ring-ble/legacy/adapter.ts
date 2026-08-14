@@ -92,6 +92,11 @@ export interface LegacyDataListenerClearOptions {
   force?: boolean;
 }
 
+type PendingLegacyDataListenerClear = LegacyDataListenerClearOptions & {
+  listenerGeneration: number;
+  listenerIdentityKey: string;
+};
+
 export type RwHealthDataName =
   | 'heart_rate'
   | 'heartRate'
@@ -423,7 +428,8 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   let bluetoothAdapterStateHandler: BluetoothAdapterStateCallback | null = null;
   let dataListenerHandler: BleCharacteristicValueCallback | null = null;
   let dataListenerIdentityKey = '';
-  let pendingDataListenerClear: LegacyDataListenerClearOptions | null = null;
+  let dataListenerGeneration = 0;
+  let pendingDataListenerClear: PendingLegacyDataListenerClear | null = null;
   let historyWireTrace: {
     startedAt: number;
     sinceTimestamp: number;
@@ -432,6 +438,24 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     payloadHex: string;
     notifyCount: number;
   } | null = null;
+
+  // The command-session lease can expire while a large history response is still
+  // arriving.  Treat the actual wire read as authoritative as well, otherwise a
+  // page cleanup/recovery path may close the connection in the middle of history
+  // transfer (the B7 long-session failure).  The age cap prevents a lost terminal
+  // packet from protecting a dead connection forever.
+  const getActiveHistoryReadGuard = () => {
+    const session = getLegacyBleHistoryExclusiveSnapshot();
+    const wireElapsedMs = historyWireTrace ? Date.now() - historyWireTrace.startedAt : 0;
+    const wireActive = Boolean(historyWireTrace && wireElapsedMs <= 120000);
+    return {
+      ...session,
+      active: session.active || wireActive,
+      sessionId: session.sessionId || (wireActive ? `wire-${historyWireTrace?.startedAt}` : ''),
+      wireActive,
+      wireElapsedMs
+    };
+  };
 
   const appendHistoryWireNotifyLog = (
     event: string,
@@ -528,8 +552,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       clearDataListener({
         reason: 'physical-disconnect',
         caller: 'connection-state-listener',
-        deviceId: eventDeviceId,
-        force: true
+        deviceId: eventDeviceId
       });
       options.onDisconnected?.(eventDeviceId || result.deviceId);
       runtime?.onDisconnected?.(result);
@@ -993,18 +1016,22 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
   const disconnect = (targetDeviceId?: string) => {
     const deviceId = targetDeviceId || runtime?.getDeviceInfo().deviceId;
-    const session = getLegacyBleHistoryExclusiveSnapshot();
+    const session = getActiveHistoryReadGuard();
     if (session.active) {
       pendingDataListenerClear = {
         reason: 'disconnect-deferred',
         caller: 'disconnect',
         sessionId: session.sessionId,
-        deviceId
+        deviceId,
+        listenerGeneration: dataListenerGeneration,
+        listenerIdentityKey: dataListenerIdentityKey
       };
       appendRingDiagnosticLog('L19 BLE', 'legacy-disconnect-deferred-history-active', {
         deviceId,
         sessionId: session.sessionId,
-        remainingMs: session.remainingMs
+        remainingMs: session.remainingMs,
+        wireActive: session.wireActive,
+        wireElapsedMs: session.wireElapsedMs
       });
       return Promise.resolve({ deferred: true, reason: 'history-active', sessionId: session.sessionId });
     }
@@ -1023,7 +1050,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
   const cleanup = async () => {
     await stopScan();
-    const session = getLegacyBleHistoryExclusiveSnapshot();
+    const session = getActiveHistoryReadGuard();
     clearDataListener({
       reason: session.active ? 'cleanup-deferred' : 'cleanup-request',
       caller: 'cleanup',
@@ -1034,7 +1061,9 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       appendRingDiagnosticLog('L19 BLE', 'legacy-cleanup-deferred-history-active', {
         deviceId: runtime?.getDeviceInfo().deviceId,
         sessionId: session.sessionId,
-        remainingMs: session.remainingMs
+        remainingMs: session.remainingMs,
+        wireActive: session.wireActive,
+        wireElapsedMs: session.wireElapsedMs
       });
       return;
     }
@@ -1245,6 +1274,19 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
     const identityKey = `${deviceId}|${serviceId}|${dataCharId}`.toLowerCase();
     if (dataListenerHandler && dataListenerIdentityKey === identityKey) {
+      // Reusing the listener means a new/renewed communication lease. Any
+      // deferred clear created by an older disconnect must not remove it.
+      dataListenerGeneration += 1;
+      if (pendingDataListenerClear) {
+        appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-pending-clear-cancelled-on-reuse', {
+          deviceId,
+          identityKey,
+          listenerGeneration: dataListenerGeneration,
+          pendingReason: pendingDataListenerClear.reason,
+          pendingGeneration: pendingDataListenerClear.listenerGeneration
+        });
+        pendingDataListenerClear = null;
+      }
       appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-reuse', { deviceId, serviceId, dataCharId });
       return;
     }
@@ -1318,11 +1360,19 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     };
     uni.onBLECharacteristicValueChange(dataListenerHandler);
     dataListenerIdentityKey = identityKey;
-    appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-registered', { deviceId, serviceId, dataCharId, identityKey });
+    dataListenerGeneration += 1;
+    pendingDataListenerClear = null;
+    appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-registered', {
+      deviceId,
+      serviceId,
+      dataCharId,
+      identityKey,
+      listenerGeneration: dataListenerGeneration
+    });
   };
 
   const clearDataListener = (options: LegacyDataListenerClearOptions = {}) => {
-    const session = getLegacyBleHistoryExclusiveSnapshot();
+    const session = getActiveHistoryReadGuard();
     const metadata = {
       reason: options.reason || 'unspecified',
       caller: options.caller || 'unknown',
@@ -1330,12 +1380,20 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       deviceId: options.deviceId || runtime?.getDeviceInfo().deviceId,
       force: Boolean(options.force),
       historyActive: session.active,
+      historyWireActive: session.wireActive,
+      historyWireElapsedMs: session.wireElapsedMs,
       listenerIdentityKey: dataListenerIdentityKey,
       waiterCount: parsedWaiters.length
     };
     appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-clear-request', metadata);
     if (session.active && !options.force) {
-      pendingDataListenerClear = { ...options, sessionId: metadata.sessionId, deviceId: metadata.deviceId };
+      pendingDataListenerClear = {
+        ...options,
+        sessionId: metadata.sessionId,
+        deviceId: metadata.deviceId,
+        listenerGeneration: dataListenerGeneration,
+        listenerIdentityKey: dataListenerIdentityKey
+      };
       appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-clear-deferred', metadata);
       return;
     }
@@ -1356,6 +1414,21 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     if (!pendingDataListenerClear) return;
     const pending = pendingDataListenerClear;
     pendingDataListenerClear = null;
+    if (
+      pending.listenerGeneration !== dataListenerGeneration ||
+      pending.listenerIdentityKey !== dataListenerIdentityKey
+    ) {
+      appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-deferred-clear-skipped-stale', {
+        reason: pending.reason,
+        caller: pending.caller,
+        deviceId: pending.deviceId,
+        pendingGeneration: pending.listenerGeneration,
+        currentGeneration: dataListenerGeneration,
+        pendingIdentityKey: pending.listenerIdentityKey,
+        currentIdentityKey: dataListenerIdentityKey
+      });
+      return;
+    }
     clearDataListener({ ...pending, reason: pending.reason || 'deferred-session-idle', caller: pending.caller || 'session-idle' });
   });
 

@@ -15,3 +15,14 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+interface QKeerBuildInfo {
+  appVersion: string;
+  versionCode: string;
+  gitCommit: string;
+  gitBranch: string;
+  buildTime: string;
+  buildId: string;
+}
+
+declare const __QKEER_BUILD_INFO__: QKeerBuildInfo;

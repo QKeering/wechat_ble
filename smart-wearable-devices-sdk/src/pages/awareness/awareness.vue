@@ -130,9 +130,11 @@ const LEGACY_HOME_HISTORY_BACKGROUND_TIMEOUT_MS = 30000;
 const LEGACY_HOME_EMPTY_HISTORY_FALLBACK_TIMEOUT_MS = 5000;
 const LEGACY_HOME_EMPTY_HISTORY_FULL_FALLBACK_TIMEOUT_MS = 15000;
 const LEGACY_HOME_HISTORY_READ_WATCHDOG_EXTRA_MS = 5000;
-const AWARENESS_AUXILIARY_SYNC_IDLE_INITIAL_DELAY_MS = 1000;
-const AWARENESS_AUXILIARY_SYNC_IDLE_POLL_MS = 500;
-const AWARENESS_AUXILIARY_SYNC_IDLE_MAX_WAIT_MS = 2000;
+// 辅助业务（如女性健康）不能因为 BLE 后台同步让页面保持 1~2 秒的“未完成”状态。
+// 这里只做一次极短让步；仍在同步时由请求自身缓存/超时策略处理，不阻塞用户交互。
+const AWARENESS_AUXILIARY_SYNC_IDLE_INITIAL_DELAY_MS = 100;
+const AWARENESS_AUXILIARY_SYNC_IDLE_POLL_MS = 100;
+const AWARENESS_AUXILIARY_SYNC_IDLE_MAX_WAIT_MS = 400;
 const AWARENESS_PROCESSED_REFRESH_IDLE_POLL_MS = 500;
 const AWARENESS_PROCESSED_REFRESH_IDLE_MAX_WAIT_MS = 8000;
 const AWARENESS_PROCESSED_REFRESH_HARD_MAX_WAIT_MS = 30000;
@@ -151,6 +153,8 @@ const RW_HOME_HISTORY_DATA_TYPES: RwHistoryDataName[] = [
 ];
 
 const sleepOverviewObj = ref<sleepOverview>();
+const sleepOverviewConfirmedDate = ref('');
+let sleepOverviewRequestSeq = 0;
 const motionOverviewObj = ref<motionOverview>();
 const stressDetailObj = ref<stressDetail>();
 const heartRateDetailObj = ref<heartRateDetail>();
@@ -290,7 +294,10 @@ const AWARENESS_HOME_SYNC_COOLDOWN_MS = DEVICE_SYNC_AUTO_COOLDOWN_MS;
 const RW_AWARENESS_HISTORY_DEDUP_MS = AWARENESS_HOME_SYNC_COOLDOWN_MS;
 const RW_AWARENESS_DEVICE_TIME_SYNC_DEDUP_MS = 10 * 60 * 1000;
 const RW_AWARENESS_DEVICE_TIME_SYNC_STALE_MS = 6 * 60 * 60 * 1000;
-const RW_AWARENESS_DEVICE_TIME_SYNC_HISTORY_STALE_MS = 2 * 60 * 1000;
+// A successful calibration remains valid for the normal six-hour window. History reads
+// must not force another write/read cycle every two minutes; crossing a local date still
+// bypasses this window in syncRwHomeDeviceTimeBeforeHistory.
+const RW_AWARENESS_DEVICE_TIME_SYNC_HISTORY_STALE_MS = RW_AWARENESS_DEVICE_TIME_SYNC_STALE_MS;
 const LEGACY_LOCAL_DATA_UPLOAD_DEDUP_MS = 60 * 1000;
 const LEGACY_LOCAL_SLEEP_CACHE_PARK_MAX_MS = 6 * 60 * 60 * 1000;
 const LEGACY_LOCAL_SLEEP_CACHE_PARK_MAX_COUNT = 6;
@@ -315,7 +322,10 @@ const LEGACY_LOCAL_DATA_SUBMIT_TIMEOUT_MS = 60000;
 const LEGACY_LOCAL_DATA_SUBMIT_WATCHDOG_MS = LEGACY_LOCAL_DATA_SUBMIT_TIMEOUT_MS + 5000;
 // 前台只等待短链路提交；超过预算后走已有 HTTP retry/后台补偿，避免首页被上传锁定 60s+。
 const LEGACY_LOCAL_DATA_SUBMIT_FOREGROUND_BUDGET_MS = 12000;
-const LEGACY_LOCAL_DATA_SUBMIT_BATCH_SIZE = 500;
+// 大批次会让单次 /app/data/sync 超过前台预算，超时后虽会转 HTTP-only 补偿，
+// 但首批无法及时确认，页面仍会表现为长时间“同步中”。小批提交可让已成功数据
+// 立即落库并推进 checkpoint，剩余数据再由现有补偿机制续传，不触发 BLE 重读。
+const LEGACY_LOCAL_DATA_SUBMIT_BATCH_SIZE = 100;
 const LEGACY_RAW_FRAME_BACKGROUND_UPLOAD_DELAY_MS = 3000;
 const LEGACY_HISTORY_READ_CHECKPOINT_OVERLAP_SECONDS = DEVICE_SYNC_SLEEP_OVERLAP_SECONDS;
 const LEGACY_HOME_HISTORY_LONG_RETRY_TIMEOUT_MS = 30000;
@@ -1023,10 +1033,16 @@ const clearLegacyHomeHistoryReadFailureKeys = (historyReadKey = '', historyScope
   if (historyReadKey) {
     legacyHomeHistoryReadFailedAt.delete(historyReadKey);
     legacyHomeHistoryReadFailedReason.delete(historyReadKey);
+    // A recovered communication channel must be allowed to retry immediately.
+    // Keeping the attempt timestamp here made the following retry hit the
+    // five-minute `recent-same-window-attempt` gate even though the failure
+    // marker had just been cleared.
+    legacyHomeHistoryReadAttemptAt.delete(historyReadKey);
   }
   if (historyScopeKey) {
     legacyHomeHistoryReadFailedAt.delete(historyScopeKey);
     legacyHomeHistoryReadFailedReason.delete(historyScopeKey);
+    legacyHomeHistoryReadAttemptAt.delete(historyScopeKey);
   }
 };
 const clearLegacyHomeHistoryReadFailuresByDevice = (deviceMac: string, trigger = '') => {
@@ -1283,7 +1299,9 @@ const homeDetailRoutes = {
 } as const;
 const HOME_DETAIL_NAVIGATION_LOCK_MS = 0;
 const HOME_DETAIL_NAVIGATION_TARGET_DEDUP_MS = 0;
+const HOME_DETAIL_NAVIGATION_WATCHDOG_MS = 2000;
 const homeDetailNavigating = ref(false);
+let homeDetailNavigationWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
 const getAwarenessNavigationDedupeState = () => {
   const globalState = globalThis as typeof globalThis & {
     __qkeerAwarenessNavigationDedupe?: { key: string; at: number };
@@ -1309,12 +1327,34 @@ const claimAwarenessNavigationTarget = (key: string) => {
   return true;
 };
 const releaseAwarenessNavigationLock = () => {
+  if (homeDetailNavigationWatchdogTimer) {
+    clearTimeout(homeDetailNavigationWatchdogTimer);
+    homeDetailNavigationWatchdogTimer = null;
+  }
   homeDetailNavigating.value = false;
   const state = getAwarenessNavigationDedupeState();
   state.key = '';
   state.at = 0;
 };
+const armAwarenessNavigationWatchdog = (target: string) => {
+  if (homeDetailNavigationWatchdogTimer) {
+    clearTimeout(homeDetailNavigationWatchdogTimer);
+  }
+  homeDetailNavigationWatchdogTimer = setTimeout(() => {
+    homeDetailNavigationWatchdogTimer = null;
+    if (!homeDetailNavigating.value) return;
+    appendAwarenessDiagnosticLog('home-detail-navigation-watchdog-release', {
+      target,
+      timeoutMs: HOME_DETAIL_NAVIGATION_WATCHDOG_MS
+    });
+    resetAwarenessNavigationState('navigate-callback-timeout');
+  }, HOME_DETAIL_NAVIGATION_WATCHDOG_MS);
+};
 const resetAwarenessNavigationState = (reason: string) => {
+  if (homeDetailNavigationWatchdogTimer) {
+    clearTimeout(homeDetailNavigationWatchdogTimer);
+    homeDetailNavigationWatchdogTimer = null;
+  }
   const wasNavigating = homeDetailNavigating.value;
   const state = getAwarenessNavigationDedupeState();
   const hadDedupe = Boolean(state.key || state.at);
@@ -1863,6 +1903,14 @@ const closeLegacyLocalDataUploadSession = (deviceMac: string, uploadDedupKey: st
     completedAt: Date.now(),
     uploadSessionKey: getAwarenessHomeUploadSessionKey()
   });
+};
+const getClosedLegacyLocalDataUploadSessionForCurrentForeground = () => {
+  pruneClosedLegacyLocalDataUploadSessions();
+  const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(getAwarenessCanonicalDeviceMac());
+  if (!deviceMacNorm) return null;
+  const closed = closedLegacyLocalDataUploadSessions.get(deviceMacNorm);
+  if (!closed || closed.uploadSessionKey !== getAwarenessHomeUploadSessionKey()) return null;
+  return closed;
 };
 const closeLegacyLocalDataTerminalSkip = (snapshot: ReturnType<typeof getLegacyLocalDataStableSnapshot>, reason = '') => {
   clearLegacyLocalDataTimeoutFlush();
@@ -2734,9 +2782,15 @@ const dateList = computed(() => [
   return formatLocalDate(dateList.value[selectedDayIndex.value]?.date || today.value);
 };
 const openHomeDetail = (key: keyof typeof homeDetailRoutes) => {
+  const tapReceivedAt = Date.now();
   const route = homeDetailRoutes[key];
   const query = `selectedDayIndex=${selectedDayIndex.value}&selectedDate=${encodeURIComponent(getSelectedDetailDate())}`;
   const url = `${route}?${query}`;
+  appendAwarenessDiagnosticLog('home-detail-tap-received', {
+    key,
+    url,
+    navigating: homeDetailNavigating.value
+  });
   if (homeDetailNavigating.value || !claimAwarenessNavigationTarget(`home-detail:${url}`)) {
     appendAwarenessDiagnosticLog('home-detail-navigate-skip', {
       key,
@@ -2745,8 +2799,9 @@ const openHomeDetail = (key: keyof typeof homeDetailRoutes) => {
     });
     return;
   }
-  const startedAt = Date.now();
+  const startedAt = tapReceivedAt;
   homeDetailNavigating.value = true;
+  armAwarenessNavigationWatchdog(`home-detail:${url}`);
   appendAwarenessDiagnosticLog('home-detail-navigate-start', { key, url });
   setTimeout(() => {
     uni.navigateTo({
@@ -2789,6 +2844,7 @@ const openPeriodPage = (url: string) => {
   }
   const startedAt = Date.now();
   homeDetailNavigating.value = true;
+  armAwarenessNavigationWatchdog(`period:${targetUrl}`);
   appendAwarenessDiagnosticLog('period-navigate-start', { url: targetUrl });
   setTimeout(() => {
     uni.navigateTo({
@@ -3174,8 +3230,7 @@ const getGirlHealthPhaseFallbackTip = () =>
   GIRL_HEALTH_PHASE_FALLBACK_TIPS[currentPhaseIndex.value] || GIRL_HEALTH_PHASE_FALLBACK_TIPS[3];
 const sleepDurationMinutes = computed(() => {
   const overview = sleepOverviewObj.value as Record<string, any> | null | undefined;
-  const healthData = userStore.healthData as Record<string, any> | null | undefined;
-  const latestMetrics = userStore.latestMetrics as Record<string, any> | null | undefined;
+  if (!overview || !sleepOverviewConfirmedDate.value) return 0;
   return getPlausibleHomeSleepDurationNumber(
     overview?.sleepDuration,
     overview?.sleepMinutes,
@@ -3184,22 +3239,15 @@ const sleepDurationMinutes = computed(() => {
     overview?.totalMinutes,
     overview?.asleepMinutes,
     overview?.duration,
-    overview?.sleep_time,
-    healthData?.sleepTotalMinutes,
-    healthData?.sleep_total_minutes,
-    healthData?.sleepDuration,
-    healthData?.sleep_minutes,
-    healthData?.sleep,
-    latestMetrics?.sleepTotalMinutes,
-    latestMetrics?.sleepDuration,
-    latestMetrics?.sleepMinutes
+    overview?.sleep_time
   );
 });
-const sleepScoreNumber = computed(() => getPositiveMetricNumber(sleepOverviewObj.value?.sleepScore, balanceScoreObj.value?.sleepScore));
+const sleepScoreNumber = computed(() =>
+  sleepOverviewConfirmedDate.value ? getPositiveMetricNumber(sleepOverviewObj.value?.sleepScore) : 0
+);
 const sleepQualityText = computed(() => {
   const quality = sleepScoreNumber.value;
-  const status = userStore.healthData?.sleepStatus || userStore.latestMetrics?.sleepStatus;
-  if (!quality || quality < 0 || quality > 100) return normalizeHealthText(status, '--');
+  if (!quality || quality < 0 || quality > 100) return '--';
 
   if (quality >= 0 && quality <= 20) return '\u8f83\u5dee';
   if (quality >= 21 && quality <= 40) return '\u5f85\u6539\u5584';
@@ -3635,7 +3683,26 @@ watch(
         userStore.updateReconnectingStatus('2');
         clearLegacyHomeHistoryReadFailuresByDevice(getAwarenessCanonicalDeviceMac(), 'reconnect-result-ready');
         if (!isAwarenessRwRing()) {
-          if (
+          const closedUploadSession = getClosedLegacyLocalDataUploadSessionForCurrentForeground();
+          if (closedUploadSession) {
+            resetLegacyLocalDataUploadWatcherState(
+              'reconnect-result-ready-upload-session-closed',
+              userStore.deviceInfo?.protocol || ringStore.deviceInfo?.protocol || 'legacy',
+              {
+              deviceMac: getAwarenessCanonicalDeviceMac(),
+              uploadedUntil: closedUploadSession.uploadedUntil,
+              completedAt: closedUploadSession.completedAt,
+              uploadSessionKey: closedUploadSession.uploadSessionKey
+              }
+            );
+            appendAwarenessDiagnosticLog('reconnect-result-ready-sync-skip', {
+              reason: 'same-foreground-upload-session-closed',
+              deviceMac: getAwarenessCanonicalDeviceMac(),
+              uploadedUntil: closedUploadSession.uploadedUntil,
+              uploadSessionKey: closedUploadSession.uploadSessionKey,
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+          } else if (
             validateAwarenessHomeSyncContext('reconnect-result-ready-precheck', {
               requireReady: true,
               allowMissingCurrent: false
@@ -4528,10 +4595,15 @@ watch(
                       timeoutMs: batchSoftTimeoutMs,
                       requestTimeoutMs: batchRequestTimeoutMs,
                       hasRequestTask: !!batchRequestTask,
-                      willAbort: false,
-                      reason: 'keep-in-flight-to-avoid-dropping-already-written-sync',
+                      willAbort: true,
+                      reason: 'abort-client-request-and-preserve-snapshot-for-http-only-retry',
                       snapshot: getAwarenessConnectionSnapshot()
                     });
+                    try {
+                      batchRequestTask?.abort?.();
+                    } catch {
+                      // 请求中止失败仍按超时处理；稳定快照会保留给 HTTP-only 补偿。
+                    }
                   }
                 );
                 appendAwarenessDiagnosticLog('upload-http-batch-result', {
@@ -5561,12 +5633,17 @@ const getBalanceScoreData = async (currentDate = new Date()) => {
 
 const getSleepOverviewData = async (currentDate = new Date()) => {
   const date = formatLocalDate(currentDate);
+  const requestSeq = ++sleepOverviewRequestSeq;
+  if (sleepOverviewConfirmedDate.value !== date) {
+    sleepOverviewObj.value = undefined;
+    sleepOverviewConfirmedDate.value = '';
+  }
   const res = await requestAwarenessOverview('sleepOverview', currentDate, () =>
     getSleepOverview({ date }, getAwarenessSilentRequestConfig())
   );
-  if (res) {
-    sleepOverviewObj.value = res;
-  }
+  if (requestSeq !== sleepOverviewRequestSeq) return;
+  sleepOverviewObj.value = res || undefined;
+  sleepOverviewConfirmedDate.value = res ? date : '';
 };
 
 const getMotionOverviewData = async (currentDate = new Date()) => {
@@ -7342,6 +7419,9 @@ const startLegacyHomeHistoryReadInBackground = (
     requireReady: true,
     allowMissingCurrent: false
   })) {
+    userStore.updateUploadingStatus('2');
+    userStore.updateIsSending(false);
+    homeDataSyncing.value = false;
     releaseAwarenessHomeSyncSession('legacy-home-history-read-precheck-failed', 'failed', false);
     appendAwarenessDiagnosticLog('legacy-home-history-read-skip', {
       protocol,
@@ -8517,6 +8597,9 @@ const executeCommandsSequentially = async () => {
           elapsedMs: Date.now() - startedAt,
           snapshot: getAwarenessConnectionSnapshot()
         });
+        userStore.updateUploadingStatus('2');
+        userStore.updateIsSending(false);
+        homeDataSyncing.value = false;
         releaseAwarenessHomeSyncSession('legacy-home-sync-communication-not-ready', 'failed', false);
         return;
       }
@@ -8524,6 +8607,9 @@ const executeCommandsSequentially = async () => {
         requireReady: true,
         allowMissingCurrent: false
       })) {
+        userStore.updateUploadingStatus('2');
+        userStore.updateIsSending(false);
+        homeDataSyncing.value = false;
         releaseAwarenessHomeSyncSession('legacy-home-sync-ready-gate-failed', 'failed', false);
         return;
       }

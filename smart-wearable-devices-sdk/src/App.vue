@@ -4,8 +4,11 @@ import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingBusinessController } from '@/composables/useRingBusinessController';
 import { useUserStore } from '@/stores/user';
 import { refreshAppForegroundSessionId } from '@/utils/appForegroundSession';
+import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
+import { QKEER_BUILD_INFO } from '@/utils/buildInfo';
 
 onLaunch(() => {
+  appendRingDiagnosticLog('APP', 'build-version', QKEER_BUILD_INFO);
   // 使用 showErrorToast() 显式控制错误提示，不再需要全局 monkey-patch
 });
 

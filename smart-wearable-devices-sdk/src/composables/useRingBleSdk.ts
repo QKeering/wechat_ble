@@ -871,6 +871,10 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   let connectInFlightStartedAt = 0;
   let reconnectInFlight: Promise<boolean> | null = null;
   let reconnectInFlightStartedAt = 0;
+  let autoReconnectFailureCount = 0;
+  let autoReconnectRetryAfter = 0;
+  const AUTO_RECONNECT_BACKOFF_BASE_MS = 1000;
+  const AUTO_RECONNECT_BACKOFF_MAX_MS = 30000;
   let rwUploadDisconnectRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   let rwUploadDisconnectRecoveryToken = 0;
   let lastUploadingStatusChangedAt = 0;
@@ -937,6 +941,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     connectInFlight = null;
     connectInFlightKey = '';
     reconnectInFlight = null;
+    autoReconnectFailureCount = 0;
+    autoReconnectRetryAfter = 0;
     clearRwUploadDisconnectRecovery();
     lastCommunicationReadyAt = 0;
   };
@@ -2113,14 +2119,16 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     }
   };
 
-  const runReconnect = async () => {
+  const runReconnect = async (targetOverride?: RingDeviceInfo) => {
     const lifecycleToken = connectionLifecycleToken;
     const currentDevice = deviceInfo.value;
-    let boundDevice: RingDeviceInfo | null | undefined = null;
-    try {
-      boundDevice = await options.getBoundDevice?.();
-    } catch {
-      boundDevice = null;
+    let boundDevice: RingDeviceInfo | null | undefined = targetOverride || null;
+    if (!targetOverride) {
+      try {
+        boundDevice = await options.getBoundDevice?.();
+      } catch {
+        boundDevice = null;
+      }
     }
     const hasBoundReconnectTarget = hasRingReconnectTargetIdentity(boundDevice);
     const currentMatchesBound = hasBoundReconnectTarget ? isSameBoundReconnectDevice(boundDevice as RingDeviceInfo, currentDevice) : false;
@@ -2259,17 +2267,78 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       return reconnectInFlight;
     }
 
+    const now = Date.now();
+    if (autoReconnectRetryAfter > now) {
+      writeRwStoreLog('reconnect-backoff-skip', {
+        remainingMs: autoReconnectRetryAfter - now,
+        failureCount: autoReconnectFailureCount,
+        current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+        expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+      });
+      return false;
+    }
+
     reconnectInFlightStartedAt = Date.now();
     const currentReconnect = runReconnect();
     reconnectInFlight = currentReconnect;
     try {
-      return await currentReconnect;
+      const connected = await currentReconnect;
+      if (connected) {
+        autoReconnectFailureCount = 0;
+        autoReconnectRetryAfter = 0;
+      } else {
+        autoReconnectFailureCount += 1;
+        const retryDelayMs = Math.min(
+          AUTO_RECONNECT_BACKOFF_MAX_MS,
+          AUTO_RECONNECT_BACKOFF_BASE_MS * 2 ** Math.max(0, autoReconnectFailureCount - 1)
+        );
+        autoReconnectRetryAfter = Date.now() + retryDelayMs;
+        writeRwStoreLog('reconnect-backoff-scheduled', {
+          retryDelayMs,
+          failureCount: autoReconnectFailureCount,
+          current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+          expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+        });
+      }
+      return connected;
+    } catch (error) {
+      autoReconnectFailureCount += 1;
+      const retryDelayMs = Math.min(
+        AUTO_RECONNECT_BACKOFF_MAX_MS,
+        AUTO_RECONNECT_BACKOFF_BASE_MS * 2 ** Math.max(0, autoReconnectFailureCount - 1)
+      );
+      autoReconnectRetryAfter = Date.now() + retryDelayMs;
+      writeRwStoreLog('reconnect-backoff-scheduled', {
+        retryDelayMs,
+        failureCount: autoReconnectFailureCount,
+        error: error instanceof Error ? error.message : String(error),
+        current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+        expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+      });
+      throw error;
     } finally {
       if (reconnectInFlight === currentReconnect) {
         reconnectInFlight = null;
         reconnectInFlightStartedAt = 0;
       }
     }
+  };
+  const recoverCommunicationForDevice = async (target: RingDeviceInfo) => {
+    if (!hasRingReconnectTargetIdentity(target)) return false;
+    if (reconnectInFlight) {
+      await reconnectInFlight.catch(() => false);
+    }
+    const explicitTarget: RingDeviceInfo = {
+      ...target,
+      deviceName: target.deviceName || target.name,
+      protocol: resolveRingProtocol(target)
+    };
+    expectedConnectionDevice = explicitTarget;
+    deviceInfo.value = explicitTarget;
+    lastCommunicationReadyAt = 0;
+    autoReconnectFailureCount = 0;
+    autoReconnectRetryAfter = 0;
+    return runReconnect(explicitTarget);
   };
   const autoConnectLastDevice = reconnect;
   const registerGlobalListeners = async () => {
@@ -2475,6 +2544,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     enableNotify,
     disconnect,
     ensureCommunicationReady,
+    recoverCommunicationForDevice,
     reScan,
     reconnect,
     autoConnectLastDevice,
