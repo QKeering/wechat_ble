@@ -719,7 +719,15 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         };
 
   const schedulePostConnectDeviceInfoRefresh = (reason: string, details: Record<string, unknown>) => {
-    if (getResolvedCurrentProtocol() !== 'rw') return;
+    const device = ble.deviceInfo.value;
+    const protocol = getResolvedCurrentProtocol();
+    if (protocol !== 'rw') return;
+    const stableIdentity =
+      getRingDeviceStableIdentity(device) ||
+      device.uniMacId ||
+      device.deviceId ||
+      protocol ||
+      'unknown-device';
     const diagnosticLock = getRwDiagnosticCommandLock();
     if (diagnosticLock || isAutoRefreshPaused) {
       appendRingDiagnosticLog('RW FLOW', 'post-connect-device-info-refresh-skip', {
@@ -1177,6 +1185,14 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     }
 
     if (refreshPromise) {
+      const device = ble.deviceInfo.value;
+      const protocol = getResolvedCurrentProtocol();
+      const stableIdentity =
+        getRingDeviceStableIdentity(device) ||
+        device.uniMacId ||
+        device.deviceId ||
+        protocol ||
+        'unknown-device';
       appendRingDiagnosticLog('RW FLOW', 'device-info-wait-active-refresh', {
         protocol,
         stableIdentity,
@@ -1795,6 +1811,13 @@ function isFreshBusinessDevice(device: RingDeviceInfo, currentDevice: RingDevice
 function isSameBusinessRingDevice(left: RingDeviceInfo, right: RingDeviceInfo) {
   if (left.protocol && right.protocol && left.protocol !== right.protocol) return false;
 
+  const leftExplicitStableIds = getExplicitStableBusinessRingIdentityIds(left);
+  const rightExplicitStableIds = getExplicitStableBusinessRingIdentityIds(right);
+  if (leftExplicitStableIds.length > 0 && rightExplicitStableIds.length > 0) {
+    return hasMatchingBusinessRingIdentity(leftExplicitStableIds, rightExplicitStableIds);
+  }
+  if (leftExplicitStableIds.length > 0 || rightExplicitStableIds.length > 0) return false;
+
   const isRwScope = resolveRingProtocol(left) === 'rw' || resolveRingProtocol(right) === 'rw';
   if (!isRwScope) return isSameRingDevice(left, right);
 
@@ -1822,7 +1845,10 @@ function getStableBusinessRingIdentityIds(device: RingDeviceInfo | Record<string
     return getExplicitStableBusinessRingIdentityIds(device);
   }
 
-  return [device.deviceId, device.uniMacId, device.mac, device.advertis?.macInfo].filter(Boolean);
+  const explicitStableIds = getExplicitStableBusinessRingIdentityIds(device);
+  if (explicitStableIds.length > 0) return explicitStableIds;
+
+  return [device.deviceId, device.uniMacId].filter(Boolean);
 }
 
 function getExplicitStableBusinessRingIdentityIds(device: RingDeviceInfo | Record<string, any>) {
@@ -1957,6 +1983,33 @@ function getExplicitBusinessMac(device?: RingDeviceInfo | Record<string, any> | 
   return '';
 }
 
+function getTrustedBusinessStableMac(device?: RingDeviceInfo | Record<string, any> | null) {
+  if (!device) return '';
+  const source = device as Record<string, any>;
+  const candidates = [
+    getBusinessRawScannedAdvertisedMac(device),
+    source.__scanMatchedMac,
+    source.scanMac,
+    source.canonicalDeviceMac,
+    source.deviceMac,
+    source.device_mac,
+    source.bluetoothMac,
+    source.bleMac,
+    source.macAddr,
+    source.mac_addr,
+    source.advertis?.macInfo,
+    source.advertis?.mac,
+    source.advertis?.macAddress,
+    source.advertis?.deviceMac,
+    isFullColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : ''
+  ];
+  for (const candidate of candidates) {
+    const mac = normalizeBusinessFullBleMacKey(candidate);
+    if (mac) return mac;
+  }
+  return '';
+}
+
 function hasBusinessRawScanAdvertisEvidence(device?: RingDeviceInfo | Record<string, any> | null) {
   return Boolean(
     device?.advertisData ||
@@ -1982,21 +2035,25 @@ function isReadyBusinessDeviceMatchedBoundMac(
 ) {
   const expectedMacKey = normalizeBusinessFullBleMacKey(getExplicitBusinessMac(expectedDevice));
   if (!expectedMacKey) return true;
-  const currentMacKey = normalizeBusinessFullBleMacKey(getExplicitBusinessMac(currentDevice));
-  if (!currentMacKey || currentMacKey !== expectedMacKey) return false;
-
-  // A stale restored object can be polluted as `deviceId=D7 + mac=6E`.
-  // Communication must use the fresh scan record for the bound MAC. If the
-  // platform communication id itself looks like another full MAC, reject it
-  // even when the business mac field was overwritten to the bound MAC.
-  const currentCommunicationMacKey = normalizeBusinessFullBleMacKey(getBusinessCommunicationDeviceId(currentDevice));
-  if (currentCommunicationMacKey && currentCommunicationMacKey !== expectedMacKey) return false;
 
   const rawScanMacKey = normalizeBusinessFullBleMacKey(getBusinessRawScannedAdvertisedMac(currentDevice));
   if (rawScanMacKey && rawScanMacKey !== expectedMacKey) return false;
 
   const runtimeScanMacKey = normalizeBusinessFullBleMacKey((currentDevice as Record<string, any>).__scanMatchedMac);
   if (runtimeScanMacKey && runtimeScanMacKey !== expectedMacKey) return false;
+
+  const trustedCurrentMacKey = normalizeBusinessFullBleMacKey(getTrustedBusinessStableMac(currentDevice));
+  if (trustedCurrentMacKey) return trustedCurrentMacKey === expectedMacKey;
+
+  const currentMacKey = normalizeBusinessFullBleMacKey(getExplicitBusinessMac(currentDevice));
+  if (!currentMacKey || currentMacKey !== expectedMacKey) return false;
+
+  // A stale restored object can be polluted as `deviceId=D7 + mac=6E`.
+  // Communication must use the fresh scan record for the bound MAC. If the
+  // platform communication id itself looks like another full MAC, reject it
+  // only when no trusted stable MAC evidence was found above.
+  const currentCommunicationMacKey = normalizeBusinessFullBleMacKey(getBusinessCommunicationDeviceId(currentDevice));
+  if (currentCommunicationMacKey && currentCommunicationMacKey !== expectedMacKey) return false;
 
   if (hasBusinessScanEvidence(expectedDevice)) {
     const expectedCommunicationId = getBusinessCommunicationDeviceId(expectedDevice);

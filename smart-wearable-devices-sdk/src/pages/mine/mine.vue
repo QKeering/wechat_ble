@@ -252,8 +252,7 @@ const navigateMinePage = (path?: string) => {
   minePageNavigating.value = true;
   const startedAt = Date.now();
   appendMineDiagnosticLog('mine-page-navigate-start', { path: targetPath });
-  setTimeout(() => {
-    uni.navigateTo({
+  uni.navigateTo({
       url: targetPath,
       success: () => {
         releaseMinePageNavigationLock();
@@ -274,8 +273,7 @@ const navigateMinePage = (path?: string) => {
       complete: () => {
         releaseMinePageNavigationLock();
       }
-    });
-  }, 0);
+  });
 };
 const handleMineMenuTap = (item: { path?: string }) => navigateMinePage(item?.path);
 const scrollTop = ref(0);

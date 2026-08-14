@@ -63,6 +63,9 @@ const getStableDeviceMacFromSource = (source?: Record<string, any> | null) => {
   if (!source) return '';
   const deviceIdKey = normalizeRecordIdentity(source.deviceId || source.platformDeviceId);
   const preferredCandidates = [
+    source.__scanMatchedMac,
+    source.scanMac,
+    source.canonicalDeviceMac,
     source.deviceMac,
     source.device_mac,
     source.bluetoothMac,
@@ -81,6 +84,28 @@ const getStableDeviceMacFromSource = (source?: Record<string, any> | null) => {
   const macKey = normalizeRecordIdentity(source.mac);
   if (macKey && (!deviceIdKey || macKey !== deviceIdKey)) return String(source.mac || '').trim();
   return '';
+};
+
+const getTrustedStableDeviceMacFromSource = (source?: Record<string, any> | null) => {
+  if (!source) return '';
+  const candidates = [
+    source.__scanMatchedMac,
+    source.scanMac,
+    source.canonicalDeviceMac,
+    source.deviceMac,
+    source.device_mac,
+    source.bluetoothMac,
+    source.bleMac,
+    source.macAddr,
+    source.mac_addr,
+    source.advertis?.macInfo,
+    source.advertis?.mac,
+    source.advertis?.macAddress,
+    source.advertis?.deviceMac,
+    isColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : ''
+  ];
+  const trusted = candidates.find((value) => normalizeRecordIdentity(value));
+  return trusted ? String(trusted || '').trim() : '';
 };
 
 const getHistoryUploadStableDeviceMac = (
@@ -185,6 +210,14 @@ const isSdkDeviceInfoAllowedForBoundDevice = (
   if (!device?.deviceId) return true;
   const boundStableMac = getStableDeviceMacFromSource(boundDevice as Record<string, any> | null);
   if (!boundStableMac) return true;
+
+  const trustedDeviceStableMac = getTrustedStableDeviceMacFromSource(device as Record<string, any>);
+  if (trustedDeviceStableMac) {
+    return hasMatchingStableRecordIdentity([boundStableMac], [trustedDeviceStableMac]);
+  }
+
+  const precheckedDeviceStableMac = getStableDeviceMacFromSource(device as Record<string, any>);
+  if (precheckedDeviceStableMac && hasMatchingStableRecordIdentity([boundStableMac], [precheckedDeviceStableMac])) return true;
 
   // Android 场景下微信 deviceId 常直接是 MAC。若它与后端绑定 MAC 不一致，
   // 说明 SDK/store 当前运行态已经串号，不能再同步进 ringStore。

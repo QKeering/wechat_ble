@@ -30,6 +30,16 @@ export interface DeviceIdentityCacheInput {
 }
 
 const DEVICE_IDENTITY_CACHE_KEY = 'qkeer:device-identity-cache:v1';
+const DEVICE_IDENTITY_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DEVICE_IDENTITY_CACHE_MAX_FAILURES = 3;
+
+// Only these flows have direct identity evidence: the communication deviceId
+// and the parsed stable MAC came from the same scan/bind record.
+const DEVICE_IDENTITY_EVIDENCE_SOURCES = new Set<DeviceIdentityCacheSource>([
+  'first-bind',
+  'scan-match',
+  'reconnect-scan-match'
+]);
 
 const normalizeStorageObject = (value: unknown): Record<string, DeviceIdentityCacheRecord> => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -69,8 +79,30 @@ const isConflictingMacLikeDeviceIdForMac = (deviceId: unknown, mac: string) => {
   return Boolean(mac && normalizedDeviceIdAsMac && normalizedDeviceIdAsMac !== mac);
 };
 
-const isDeviceIdentityCacheRecordUsable = (record: DeviceIdentityCacheRecord | null | undefined, mac: string) =>
-  Boolean(record?.verified && record?.deviceId && record.mac === mac && !isConflictingMacLikeDeviceIdForMac(record.deviceId, mac));
+const isDeviceIdentityCacheRecordExpired = (record: DeviceIdentityCacheRecord | null | undefined, now = Date.now()) => {
+  const verifiedAt = Number(record?.verifiedAt || record?.lastConnectedAt || 0);
+  return !verifiedAt || now - verifiedAt > DEVICE_IDENTITY_CACHE_TTL_MS;
+};
+
+const isDeviceIdentityCacheRecordUsable = (
+  record: DeviceIdentityCacheRecord | null | undefined,
+  mac: string,
+  userId: string
+) => {
+  const hasIdentityEvidence = Boolean(
+    record &&
+      (DEVICE_IDENTITY_EVIDENCE_SOURCES.has(record.source) || normalizeDeviceIdentityMac(record.deviceId) === mac)
+  );
+  return Boolean(
+    record?.verified &&
+      record?.deviceId &&
+      record.mac === mac &&
+      record.userId === userId &&
+      hasIdentityEvidence &&
+      Number(record.failCount || 0) < DEVICE_IDENTITY_CACHE_MAX_FAILURES &&
+      !isDeviceIdentityCacheRecordExpired(record)
+  );
+};
 
 export const getDeviceIdentityPlatform = () => {
   try {
@@ -99,12 +131,15 @@ const getDeviceIdentityCacheKey = (input: DeviceIdentityCacheInput) => {
   return `${userId}:${platform}:${mac}`;
 };
 
-const findLatestDeviceIdentityCacheByMac = (mac: string, platform?: unknown) => {
+const findLatestDeviceIdentityCacheByMac = (mac: string, userId: unknown, platform?: unknown) => {
   const normalizedMac = normalizeDeviceIdentityMac(mac);
   if (!normalizedMac) return null;
+  const normalizedUserId = normalizeDeviceIdentityUserId(userId);
   const normalizedPlatform = normalizeDeviceIdentityPlatform(platform ?? getDeviceIdentityPlatform());
   const records = Object.values(getDeviceIdentityCache()).filter(
-    (record) => isDeviceIdentityCacheRecordUsable(record, normalizedMac) && (!normalizedPlatform || record.platform === normalizedPlatform)
+    (record) =>
+      isDeviceIdentityCacheRecordUsable(record, normalizedMac, normalizedUserId) &&
+      (!normalizedPlatform || record.platform === normalizedPlatform)
   );
   records.sort((left, right) => (right.verifiedAt || right.lastConnectedAt || 0) - (left.verifiedAt || left.lastConnectedAt || 0));
   return records[0] || null;
@@ -113,17 +148,18 @@ const findLatestDeviceIdentityCacheByMac = (mac: string, platform?: unknown) => 
 export const readDeviceIdentityCache = (input: DeviceIdentityCacheInput) => {
   const mac = normalizeDeviceIdentityMac(input.mac);
   if (!mac) return null;
+  const userId = normalizeDeviceIdentityUserId(input.userId ?? getCurrentDeviceIdentityUserId());
   const key = getDeviceIdentityCacheKey(input);
   const exactRecord = key ? getDeviceIdentityCache()[key] : null;
-  return isDeviceIdentityCacheRecordUsable(exactRecord, mac) ? exactRecord : findLatestDeviceIdentityCacheByMac(mac, input.platform);
+  return isDeviceIdentityCacheRecordUsable(exactRecord, mac, userId)
+    ? exactRecord
+    : findLatestDeviceIdentityCacheByMac(mac, userId, input.platform);
 };
 
 export const upsertDeviceIdentityCache = (input: DeviceIdentityCacheInput) => {
   const mac = normalizeDeviceIdentityMac(input.mac);
   const deviceId = String(input.deviceId || '').trim();
   if (!mac || !deviceId) return null;
-  if (isConflictingMacLikeDeviceIdForMac(deviceId, mac)) return null;
-
   const now = Date.now();
   const userId = normalizeDeviceIdentityUserId(input.userId ?? getCurrentDeviceIdentityUserId());
   const platform = normalizeDeviceIdentityPlatform(input.platform ?? getDeviceIdentityPlatform());
@@ -132,6 +168,20 @@ export const upsertDeviceIdentityCache = (input: DeviceIdentityCacheInput) => {
 
   const cache = getDeviceIdentityCache();
   const previous = cache[key];
+  const requestedSource = input.source || previous?.source || 'connect-verified';
+  const hasScanOrBindEvidence = DEVICE_IDENTITY_EVIDENCE_SOURCES.has(requestedSource);
+  const deviceIdIsStableMac = normalizeDeviceIdentityMac(deviceId) === mac;
+  const refreshesSameMapping = Boolean(previous?.verified && previous.deviceId === deviceId && previous.mac === mac);
+
+  // A successful connection alone cannot prove which physical ring was
+  // connected. It may refresh an existing mapping, but only scan/bind evidence
+  // (or Android's deviceId === MAC case) may create or replace one.
+  if (!hasScanOrBindEvidence && !deviceIdIsStableMac && !refreshesSameMapping) return null;
+
+  // A MAC-shaped platform id different from the stable MAC is valid on some
+  // systems only when it came from the same scan/bind record.
+  if (isConflictingMacLikeDeviceIdForMac(deviceId, mac) && !hasScanOrBindEvidence && !refreshesSameMapping) return null;
+
   const record: DeviceIdentityCacheRecord = {
     userId,
     mac,
@@ -142,7 +192,7 @@ export const upsertDeviceIdentityCache = (input: DeviceIdentityCacheInput) => {
     verifiedAt: now,
     lastConnectedAt: now,
     failCount: 0,
-    source: input.source || previous?.source || 'connect-verified'
+    source: hasScanOrBindEvidence ? requestedSource : previous?.source || requestedSource
   };
   cache[key] = record;
   setDeviceIdentityCache(cache);
@@ -160,7 +210,10 @@ export const markDeviceIdentityCacheFailed = (input: DeviceIdentityCacheInput) =
   const record: DeviceIdentityCacheRecord = {
     ...existing,
     failCount: (existing.failCount || 0) + 1,
-    source: input.source || existing.source
+    verified: (existing.failCount || 0) + 1 < DEVICE_IDENTITY_CACHE_MAX_FAILURES,
+    // Keep the original identity-evidence source. A reconnect failure describes
+    // connection health, not how the MAC/deviceId relationship was proven.
+    source: existing.source
   };
   cache[key] = record;
   setDeviceIdentityCache(cache);
