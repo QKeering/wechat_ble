@@ -1682,7 +1682,32 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
             message: error instanceof Error ? error.message : String(error)
           });
         }
-        // Fall through to a full reconnect when the platform cannot restore notify in place.
+        // Re-enabling an already enabled notification can fail even while the
+        // physical BLE link is healthy. Verify the OS connection before doing a
+        // destructive reconnect; history commands must reuse a healthy link.
+        const stillConnected = Boolean(
+          readyDevice.deviceId &&
+          notifyServiceId &&
+          await targetAdapter.isDeviceConnected?.(readyDevice.deviceId, notifyServiceId)
+        );
+        if (stillConnected) {
+          runtime?.onDeviceReady?.({
+            ...readyDevice,
+            notifyEnabled: true,
+            notifyError: ''
+          });
+          reconnectStatus.value = 'success';
+          reconnectResult.value = true;
+          lastCommunicationReadyAt = Date.now();
+          writeRwStoreLog('ensure-ready-keep-physical-connection', {
+            protocol,
+            device: summarizeRingDeviceForStoreLog(readyDevice),
+            notifyError: error instanceof Error ? error.message : String(error)
+          });
+          return true;
+        }
+        // Fall through only after the OS confirms that the physical connection
+        // is no longer available.
       }
     }
 

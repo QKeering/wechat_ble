@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingStore, useUserStore } from '@/stores';
+import { tryClaimLegacyBleCommandSession } from '@/sdk/ring-ble/legacy/commandSession';
 
 type AnyRecord = Record<string, any>;
 type DebugStatus = 'info' | 'success' | 'error';
@@ -58,6 +59,17 @@ const formatClock = (timestamp = Date.now()) => {
 const stringify = (value: unknown) => {
   if (value === undefined) return '-';
   if (typeof value === 'string') return value;
+  if (value instanceof Error) {
+    const details: Record<string, unknown> = {
+      name: value.name,
+      message: value.message,
+      stack: value.stack
+    };
+    Object.getOwnPropertyNames(value).forEach((key) => {
+      if (!(key in details)) details[key] = (value as unknown as Record<string, unknown>)[key];
+    });
+    return JSON.stringify(details, null, 2);
+  }
   try {
     return JSON.stringify(value, null, 2);
   } catch {
@@ -397,6 +409,15 @@ const commandRows = computed(() =>
 
 const runCommand = async (config: CommandConfig) => {
   if (runningKey.value) return;
+  const releaseCommandSession = tryClaimLegacyBleCommandSession(config.timeoutMs, {
+    reason: `ble-command-debug:${config.key}`,
+    caller: 'bleCommandDebug.runCommand',
+    deviceId: currentDevice.value.deviceId || currentDevice.value.mac || currentDevice.value.uniMacId || ''
+  });
+  if (!releaseCommandSession) {
+    uni.showToast({ title: '设备正在同步，请稍后重试', icon: 'none' });
+    return;
+  }
   runningKey.value = config.key;
   pushLog(`${config.label} - 发送`, 'info', {
     deviceId: currentDevice.value.deviceId || '-',
@@ -404,21 +425,52 @@ const runCommand = async (config: CommandConfig) => {
     expect: config.desc
   });
 
+  let shouldRecoverHistoryChannel = false;
   try {
     const commandResult = await config.run();
     pushLog(`${config.label} - 命令返回`, 'success', commandResult ?? '命令已发出，等待设备通知回执');
   } catch (error) {
-    pushLog(`${config.label} - 命令失败`, 'error', error);
+    pushLog(`${config.label} - 命令失败`, 'error', {
+      error: stringify(error),
+      device: {
+        deviceId: currentDevice.value.deviceId || '-',
+        mac: currentDevice.value.mac || currentDevice.value.uniMacId || '-',
+        serviceId: currentDevice.value.serviceId || '-',
+        dataCharId: currentDevice.value.dataCharId || '-',
+        connected: connectedText.value
+      }
+    });
+    // A diagnostic history read must not leave the application disconnected.
+    // Recover the channel after a failed read, but never resend the command
+    // automatically because that could duplicate a long history operation.
+    shouldRecoverHistoryChannel = config.key === 'historyAll';
+  }
+
+  if (shouldRecoverHistoryChannel) {
+    releaseCommandSession();
+    void Promise.resolve(ble.ensureCommunicationReady?.())
+      .then((ready) => {
+        pushLog(`${config.label} - 连接恢复`, ready ? 'success' : 'error', {
+          ready: Boolean(ready),
+          deviceId: currentDevice.value.deviceId || '-',
+          mac: currentDevice.value.mac || currentDevice.value.uniMacId || '-'
+        });
+      })
+      .catch((recoveryError) => {
+        pushLog(`${config.label} - 连接恢复失败`, 'error', stringify(recoveryError));
+      });
     runningKey.value = '';
     return;
   }
 
   if (config.skipWait) {
+    releaseCommandSession();
     runningKey.value = '';
     return;
   }
   if (!config.matcher) {
     pushLog(`${config.label} - 閰嶇疆閿欒`, 'error', 'matcher is required when skipWait is false');
+    releaseCommandSession();
     runningKey.value = '';
     return;
   }
@@ -428,6 +480,7 @@ const runCommand = async (config: CommandConfig) => {
   } else {
     pushLog(`${config.label} - 等待超时`, 'error', config.timeoutText);
   }
+  releaseCommandSession();
   runningKey.value = '';
 };
 

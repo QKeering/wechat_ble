@@ -5,6 +5,10 @@ import { LegacyRingCommand } from './commands';
 import { parseLegacyRingData } from './parser';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import {
+  getLegacyBleHistoryExclusiveSnapshot,
+  onLegacyBleCommandSessionIdle
+} from './commandSession';
+import {
   buildLegacyCommandByName,
   buildLegacyCommandBytes,
   concatBytes,
@@ -37,8 +41,8 @@ export interface LegacyRingAdapter extends RingBleAdapter {
   sendCommand: (cmd: number, subcmd: number, payload?: LegacyCommandPayload) => Promise<unknown>;
   sendNamedCommand: (command: LegacyRingCommand, payload?: LegacyCommandPayload) => Promise<unknown>;
   waitForParsedData: (predicate: (parsed: RingParsedData) => boolean, timeoutMs?: number, options?: { replayRecent?: boolean }) => Promise<RingParsedData>;
-  setupDataListener: () => void;
-  clearDataListener: () => void;
+  setupDataListener: (device?: RingDeviceInfo) => void;
+  clearDataListener: (options?: LegacyDataListenerClearOptions) => void;
   sendBatteryCommand: () => Promise<unknown>;
   sendActiveMeasureCommand: () => Promise<unknown>;
   sendOxyGenCommand: () => Promise<unknown>;
@@ -78,6 +82,14 @@ export interface LegacyRingAdapter extends RingBleAdapter {
   controlHealthDataJL?: (name: RwHealthDataName, enabled?: boolean) => Promise<unknown>;
   syncAllHealthData?: () => Promise<unknown>;
   syncHealthDataByType?: (name?: RwHistoryDataName) => Promise<unknown>;
+}
+
+export interface LegacyDataListenerClearOptions {
+  reason?: string;
+  caller?: string;
+  sessionId?: string;
+  deviceId?: string;
+  force?: boolean;
 }
 
 export type RwHealthDataName =
@@ -410,6 +422,8 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   let connectionStateHandler: BleConnectionStateCallback | null = null;
   let bluetoothAdapterStateHandler: BluetoothAdapterStateCallback | null = null;
   let dataListenerHandler: BleCharacteristicValueCallback | null = null;
+  let dataListenerIdentityKey = '';
+  let pendingDataListenerClear: LegacyDataListenerClearOptions | null = null;
   let historyWireTrace: {
     startedAt: number;
     sinceTimestamp: number;
@@ -511,7 +525,12 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         return;
       }
 
-      clearDataListener();
+      clearDataListener({
+        reason: 'physical-disconnect',
+        caller: 'connection-state-listener',
+        deviceId: eventDeviceId,
+        force: true
+      });
       options.onDisconnected?.(eventDeviceId || result.deviceId);
       runtime?.onDisconnected?.(result);
     };
@@ -523,7 +542,11 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       if (result.available) return;
 
       void stopScan();
-      clearDataListener();
+      clearDataListener({
+        reason: 'bluetooth-adapter-unavailable',
+        caller: 'bluetooth-adapter-state-listener',
+        force: true
+      });
       runtime?.onDisconnected?.({
         reason: 'bluetooth_adapter_unavailable',
         available: false,
@@ -970,7 +993,22 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
   const disconnect = (targetDeviceId?: string) => {
     const deviceId = targetDeviceId || runtime?.getDeviceInfo().deviceId;
-    clearDataListener();
+    const session = getLegacyBleHistoryExclusiveSnapshot();
+    if (session.active) {
+      pendingDataListenerClear = {
+        reason: 'disconnect-deferred',
+        caller: 'disconnect',
+        sessionId: session.sessionId,
+        deviceId
+      };
+      appendRingDiagnosticLog('L19 BLE', 'legacy-disconnect-deferred-history-active', {
+        deviceId,
+        sessionId: session.sessionId,
+        remainingMs: session.remainingMs
+      });
+      return Promise.resolve({ deferred: true, reason: 'history-active', sessionId: session.sessionId });
+    }
+    clearDataListener({ reason: 'disconnect-request', caller: 'disconnect', deviceId });
 
     if (!deviceId) return Promise.resolve(undefined);
 
@@ -985,7 +1023,21 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
   const cleanup = async () => {
     await stopScan();
-    clearDataListener();
+    const session = getLegacyBleHistoryExclusiveSnapshot();
+    clearDataListener({
+      reason: session.active ? 'cleanup-deferred' : 'cleanup-request',
+      caller: 'cleanup',
+      sessionId: session.sessionId,
+      deviceId: runtime?.getDeviceInfo().deviceId
+    });
+    if (session.active) {
+      appendRingDiagnosticLog('L19 BLE', 'legacy-cleanup-deferred-history-active', {
+        deviceId: runtime?.getDeviceInfo().deviceId,
+        sessionId: session.sessionId,
+        remainingMs: session.remainingMs
+      });
+      return;
+    }
     clearConnectionStateListener();
     clearBluetoothAdapterStateListener();
   };
@@ -1191,9 +1243,27 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     const { deviceId, serviceId, dataCharId } = device || runtime.getDeviceInfo();
     if (!deviceId || !serviceId || !dataCharId) return;
 
+    const identityKey = `${deviceId}|${serviceId}|${dataCharId}`.toLowerCase();
+    if (dataListenerHandler && dataListenerIdentityKey === identityKey) {
+      appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-reuse', { deviceId, serviceId, dataCharId });
+      return;
+    }
+
     if (dataListenerHandler) {
+      const session = getLegacyBleHistoryExclusiveSnapshot();
+      if (session.active) {
+        appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-replace-skipped-history-active', {
+          deviceId,
+          serviceId,
+          dataCharId,
+          currentIdentityKey: dataListenerIdentityKey,
+          sessionId: session.sessionId
+        });
+        return;
+      }
       offBleCharacteristicValueChange(dataListenerHandler);
       dataListenerHandler = null;
+      dataListenerIdentityKey = '';
     }
 
     dataListenerHandler = (result) => {
@@ -1247,9 +1317,28 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       }
     };
     uni.onBLECharacteristicValueChange(dataListenerHandler);
+    dataListenerIdentityKey = identityKey;
+    appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-registered', { deviceId, serviceId, dataCharId, identityKey });
   };
 
-  const clearDataListener = () => {
+  const clearDataListener = (options: LegacyDataListenerClearOptions = {}) => {
+    const session = getLegacyBleHistoryExclusiveSnapshot();
+    const metadata = {
+      reason: options.reason || 'unspecified',
+      caller: options.caller || 'unknown',
+      sessionId: options.sessionId || session.sessionId,
+      deviceId: options.deviceId || runtime?.getDeviceInfo().deviceId,
+      force: Boolean(options.force),
+      historyActive: session.active,
+      listenerIdentityKey: dataListenerIdentityKey,
+      waiterCount: parsedWaiters.length
+    };
+    appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-clear-request', metadata);
+    if (session.active && !options.force) {
+      pendingDataListenerClear = { ...options, sessionId: metadata.sessionId, deviceId: metadata.deviceId };
+      appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-clear-deferred', metadata);
+      return;
+    }
     for (const waiter of parsedWaiters.splice(0)) {
       clearTimeout(waiter.timer);
       waiter.reject(new Error('Ring data listener was cleared.'));
@@ -1258,7 +1347,17 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       offBleCharacteristicValueChange(dataListenerHandler);
       dataListenerHandler = null;
     }
+    dataListenerIdentityKey = '';
+    pendingDataListenerClear = null;
+    appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-clear-completed', metadata);
   };
+
+  onLegacyBleCommandSessionIdle(() => {
+    if (!pendingDataListenerClear) return;
+    const pending = pendingDataListenerClear;
+    pendingDataListenerClear = null;
+    clearDataListener({ ...pending, reason: pending.reason || 'deferred-session-idle', caller: pending.caller || 'session-idle' });
+  });
 
   return {
     protocol: 'legacy',

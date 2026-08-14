@@ -3,6 +3,13 @@ import type { LegacyRingAdapter } from './adapter';
 import { syncRwHistoryFiles } from '../rw/history';
 import { resolveRingProtocol } from '../protocolRegistry';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
+import {
+  claimLegacyBleHistoryExclusive,
+  getLegacyBleHistoryExclusiveSnapshot,
+  isLegacyBleHistoryExclusiveActive
+} from './commandSession';
+
+export { getLegacyBleHistoryExclusiveSnapshot, isLegacyBleHistoryExclusiveActive } from './commandSession';
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
 
@@ -139,51 +146,6 @@ const withTaskTimeout = async <T>(task: Promise<T>, timeoutMs: number, message: 
   } finally {
     if (timer) clearTimeout(timer);
   }
-};
-
-let legacyBleHistoryExclusiveUntil = 0;
-let legacyBleHistoryExclusiveSeq = 0;
-let legacyBleHistoryExclusiveContext: Record<string, unknown> | null = null;
-
-export const getLegacyBleHistoryExclusiveSnapshot = () => {
-  const remainingMs = Math.max(0, legacyBleHistoryExclusiveUntil - Date.now());
-  const hasActiveContext = legacyBleHistoryExclusiveContext != null;
-  return {
-    active: hasActiveContext || remainingMs > 0,
-    seq: legacyBleHistoryExclusiveSeq,
-    exclusiveUntil: legacyBleHistoryExclusiveUntil,
-    remainingMs,
-    context: legacyBleHistoryExclusiveContext || undefined
-  };
-};
-
-export const isLegacyBleHistoryExclusiveActive = () => getLegacyBleHistoryExclusiveSnapshot().active;
-
-const claimLegacyBleHistoryExclusive = (timeoutMs: number, context: Record<string, unknown> = {}) => {
-  const seq = ++legacyBleHistoryExclusiveSeq;
-  const startedAt = Date.now();
-  legacyBleHistoryExclusiveUntil = Math.max(legacyBleHistoryExclusiveUntil, startedAt + timeoutMs + 1000);
-  legacyBleHistoryExclusiveContext = context;
-  appendRingDiagnosticLog('L19 BLE', 'legacy-history-exclusive-start', {
-    seq,
-    timeoutMs,
-    exclusiveUntil: legacyBleHistoryExclusiveUntil,
-    ...context
-  });
-
-  return () => {
-    if (legacyBleHistoryExclusiveSeq === seq) {
-      legacyBleHistoryExclusiveUntil = 0;
-      legacyBleHistoryExclusiveContext = null;
-    }
-    appendRingDiagnosticLog('L19 BLE', 'legacy-history-exclusive-end', {
-      seq,
-      elapsedMs: Date.now() - startedAt,
-      activeSeq: legacyBleHistoryExclusiveSeq,
-      exclusiveUntil: legacyBleHistoryExclusiveUntil,
-      ...context
-    });
-  };
 };
 
 const showToast = (title: string) => {
@@ -814,12 +776,14 @@ export const refreshLegacyBusinessMetrics = async (
 ): Promise<RefreshLegacyBusinessMetricsResult> => {
   if (isLegacyBleHistoryExclusiveActive()) {
     const currentDevice = runtime?.getDeviceInfo?.() as RingDeviceInfo | undefined;
+    const exclusive = getLegacyBleHistoryExclusiveSnapshot();
     appendRingDiagnosticLog('L19 BLE', 'legacy-business-refresh-skip-history-exclusive', {
       protocol: adapter.protocol,
       deviceId: currentDevice?.deviceId,
       mac: currentDevice?.mac || currentDevice?.uniMacId,
-      exclusiveUntil: legacyBleHistoryExclusiveUntil,
-      remainingMs: Math.max(0, legacyBleHistoryExclusiveUntil - Date.now()),
+      exclusiveUntil: exclusive.exclusiveUntil,
+      remainingMs: exclusive.remainingMs,
+      sessionId: exclusive.sessionId,
       options
     });
     return {
