@@ -55,20 +55,26 @@ import { reportRealBatteryLog } from '@/utils/deviceBatteryLog';
 import { getAppForegroundSessionId } from '@/utils/appForegroundSession';
 import {
   assertBackendUploadBinding,
+  buildParsedUploadSyncMeta,
   buildUploadSyncMeta,
   createUploadSessionId,
+  listPendingUploadSessions,
   markPendingUploadDataDone,
   markPendingUploadDataFailed,
   stagePendingUploadSession,
   uploadPendingRawFramesInBackground
 } from '@/utils/dataUploadCompensation';
 import {
-  getDeviceHistoryCheckpoint,
+  getDeviceHistoryBackendAckCheckpoint,
+  getDeviceHistoryDurableCheckpoint,
   getDeviceHistoryEmptyReadCheckpoint,
   getDeviceHistoryCheckpointMeta,
+  getDeviceHistoryReadCheckpoint,
   normalizeHistoryCheckpointDeviceMac,
-  setDeviceHistoryCheckpoint,
-  setDeviceHistoryEmptyReadCheckpoint
+  setDeviceHistoryBackendAckCheckpoint,
+  setDeviceHistoryDurableCheckpoint,
+  setDeviceHistoryEmptyReadCheckpoint,
+  setDeviceHistoryReadCheckpoint,
 } from '@/utils/deviceHistoryCheckpoint';
 import {
   decideDeviceSync,
@@ -187,6 +193,9 @@ const sendTimer = ref<any>(null);
 let awarenessRefreshPromise: Promise<void> | null = null;
 let awarenessHistorySyncPromise: Promise<void> | null = null;
 let legacyLocalDataUploadPromise: Promise<unknown> | null = null;
+let pendingParsedUploadRetryPromise: Promise<void> | null = null;
+let pendingParsedUploadRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingParsedUploadRetryLastAt = 0;
 let legacyLocalDataStablePromise: Promise<void> | null = null;
 let legacyLocalDataStableUploadScheduled = false;
 let legacyLocalDataStableReadyAt = 0;
@@ -858,12 +867,25 @@ const formatUnixTimestampForLog = (timestamp?: number) => {
   const second = date.getSeconds().toString().padStart(2, '0');
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 };
-const getAwarenessLastReadTimestamp = () => {
+const getAwarenessReadCheckpointTimestamp = () => {
   const deviceMac = getAwarenessCheckpointDeviceMac();
   const protocol = getAwarenessCheckpointProtocol();
-  const timestamp = getDeviceHistoryCheckpoint(deviceMac, protocol);
+  const timestamp = getDeviceHistoryReadCheckpoint(deviceMac, protocol);
   return Number.isFinite(timestamp) && timestamp > 0 ? Math.floor(timestamp) : 0;
 };
+const getAwarenessDurableCheckpointTimestamp = () => {
+  const deviceMac = getAwarenessCheckpointDeviceMac();
+  const protocol = getAwarenessCheckpointProtocol();
+  const timestamp = getDeviceHistoryDurableCheckpoint(deviceMac, protocol);
+  return Number.isFinite(timestamp) && timestamp > 0 ? Math.floor(timestamp) : 0;
+};
+const getAwarenessBackendAckCheckpointTimestamp = () => {
+  const deviceMac = getAwarenessCheckpointDeviceMac();
+  const protocol = getAwarenessCheckpointProtocol();
+  const timestamp = getDeviceHistoryBackendAckCheckpoint(deviceMac, protocol);
+  return Number.isFinite(timestamp) && timestamp > 0 ? Math.floor(timestamp) : 0;
+};
+const getAwarenessLastReadTimestamp = getAwarenessDurableCheckpointTimestamp;
 const getAwarenessLastEmptyReadTimestamp = () => {
   const deviceMac = getAwarenessCheckpointDeviceMac();
   const protocol = getAwarenessCheckpointProtocol();
@@ -1003,12 +1025,22 @@ const getAwarenessHistoryPayloadsForDevice = (payloads: any[], deviceMac: string
 };
 const getAwarenessCurrentHistoryPayloadsForUpload = () =>
   getAwarenessHistoryPayloadsForDevice(Array.isArray(userStore.receivedData) ? userStore.receivedData : [], getAwarenessUploadDeviceMac());
-const updateAwarenessDeviceHistoryCheckpoint = (timestamp: number, reason: string) => {
+const updateAwarenessDeviceHistoryCheckpointStage = (
+  stage: 'read' | 'durable' | 'backend-ack',
+  timestamp: number,
+  reason: string
+) => {
   const deviceMac = getAwarenessCheckpointDeviceMac();
   const protocol = getAwarenessCheckpointProtocol();
-  const savedTimestamp = setDeviceHistoryCheckpoint(deviceMac, protocol, timestamp);
+  const setter = stage === 'read'
+    ? setDeviceHistoryReadCheckpoint
+    : stage === 'durable'
+      ? setDeviceHistoryDurableCheckpoint
+      : setDeviceHistoryBackendAckCheckpoint;
+  const savedTimestamp = setter(deviceMac, protocol, timestamp);
   if (savedTimestamp > 0) {
-    appendAwarenessDiagnosticLog('device-history-checkpoint-updated', {
+    appendAwarenessDiagnosticLog('device-history-checkpoint-stage-updated', {
+      stage,
       reason,
       protocol,
       deviceMac,
@@ -1017,7 +1049,8 @@ const updateAwarenessDeviceHistoryCheckpoint = (timestamp: number, reason: strin
       snapshot: getAwarenessConnectionSnapshot()
     });
   } else {
-    appendAwarenessDiagnosticLog('device-history-checkpoint-skip', {
+    appendAwarenessDiagnosticLog('device-history-checkpoint-stage-skip', {
+      stage,
       reason,
       protocol,
       deviceMac,
@@ -1028,9 +1061,17 @@ const updateAwarenessDeviceHistoryCheckpoint = (timestamp: number, reason: strin
     });
   }
   if (savedTimestamp > 0) {
-    userStore.updateLastReadTimestamp(savedTimestamp);
+    userStore.updateLastReadTimestamp(
+      Math.max(getAwarenessReadCheckpointTimestamp(), getAwarenessDurableCheckpointTimestamp())
+    );
   }
 };
+const updateAwarenessDeviceHistoryReadCheckpoint = (timestamp: number, reason: string) =>
+  updateAwarenessDeviceHistoryCheckpointStage('read', timestamp, reason);
+const updateAwarenessDeviceHistoryDurableCheckpoint = (timestamp: number, reason: string) =>
+  updateAwarenessDeviceHistoryCheckpointStage('durable', timestamp, reason);
+const updateAwarenessDeviceHistoryBackendAckCheckpoint = (timestamp: number, reason: string) =>
+  updateAwarenessDeviceHistoryCheckpointStage('backend-ack', timestamp, reason);
 const updateAwarenessDeviceHistoryEmptyReadCheckpoint = (
   timestamp: number,
   reason: string,
@@ -1061,17 +1102,17 @@ const updateAwarenessDeviceHistoryEmptyReadCheckpoint = (
   }
 };
 const getAwarenessHistoryUploadSinceTimestamp = (isRwRing: boolean) => {
-  const lastReadTimestamp = getAwarenessLastReadTimestamp();
-  if (lastReadTimestamp > 0) return lastReadTimestamp;
+  const backendAckTimestamp = getAwarenessBackendAckCheckpointTimestamp();
+  if (backendAckTimestamp > 0) return backendAckTimestamp;
   if (isRwRing) return 0;
   return Math.max(0, getLegacyDefaultSleepWindowStartUnixTimestamp(new Date()));
 };
 const getAwarenessHistoryReadSinceTimestamp = (isRwRing: boolean) => {
-  const uploadSinceTimestamp = getAwarenessHistoryUploadSinceTimestamp(isRwRing);
-  const lastReadTimestamp = getAwarenessLastReadTimestamp();
-  if (isRwRing) return uploadSinceTimestamp;
-  if (lastReadTimestamp <= 0) return uploadSinceTimestamp;
-  return Math.max(0, lastReadTimestamp - LEGACY_HISTORY_READ_CHECKPOINT_OVERLAP_SECONDS);
+  const durableTimestamp = getAwarenessDurableCheckpointTimestamp();
+  const fallbackTimestamp = getAwarenessHistoryUploadSinceTimestamp(isRwRing);
+  if (durableTimestamp <= 0) return fallbackTimestamp;
+  if (isRwRing) return durableTimestamp;
+  return Math.max(0, durableTimestamp - LEGACY_HISTORY_READ_CHECKPOINT_OVERLAP_SECONDS);
 };
 const getLegacyHomeHistoryReadScopeKey = (deviceMac: string, date: string) =>
   `${normalizeHistoryCheckpointDeviceMac(deviceMac) || 'unknown-device'}:${date}`;
@@ -1870,13 +1911,13 @@ const getLegacyLocalDataSnapshotMaxTimestamp = (snapshot: ReturnType<typeof getL
     .filter((timestamp) => Number.isFinite(timestamp) && timestamp > 0);
   return timestamps.length > 0 ? Math.max(...timestamps) : 0;
 };
-const advanceLegacyLocalDataCheckpointFromSnapshot = (
+const advanceLegacyLocalDataReadCheckpointFromSnapshot = (
   snapshot: ReturnType<typeof getLegacyLocalDataStableSnapshot>,
   reason: string
 ) => {
   const maxTimestamp = getLegacyLocalDataSnapshotMaxTimestamp(snapshot);
   if (maxTimestamp <= 0) return 0;
-  updateAwarenessDeviceHistoryCheckpoint(maxTimestamp, reason);
+  updateAwarenessDeviceHistoryReadCheckpoint(maxTimestamp, reason);
   return maxTimestamp;
 };
 const pruneClosedLegacyLocalDataUploadSessions = () => {
@@ -1993,7 +2034,7 @@ const closeLegacyLocalDataTerminalSkip = (snapshot: ReturnType<typeof getLegacyL
   const completedByTerminalSkip = Boolean(snapshot.deviceMac && !LEGACY_LOCAL_DATA_SKIP_WITHOUT_HISTORY_COMPLETE_REASONS.has(reason));
   if (completedByTerminalSkip) {
     if (terminalMaxTimestamp > 0) {
-      updateAwarenessDeviceHistoryCheckpoint(terminalMaxTimestamp, `legacy-local-data-terminal-skip:${reason}`);
+      updateAwarenessDeviceHistoryReadCheckpoint(terminalMaxTimestamp, `legacy-local-data-terminal-skip:${reason}`);
       appendAwarenessDiagnosticLog('legacy-local-data-terminal-skip-checkpoint-advanced', {
         reason,
         checkpointTimestamp: terminalMaxTimestamp,
@@ -2769,6 +2810,95 @@ const isSubmitDataResponseSuccessful = (response: unknown) => {
   const code = Number(payload.code);
   return !Number.isFinite(code) || code === 0 || code === 200;
 };
+const PENDING_PARSED_UPLOAD_RETRY_DELAY_MS = 1500;
+const PENDING_PARSED_UPLOAD_RETRY_THROTTLE_MS = 30000;
+const PENDING_PARSED_UPLOAD_RETRY_TIMEOUT_MS = 15000;
+const runPendingParsedUploadRetry = async (reason: string) => {
+  if (pendingParsedUploadRetryPromise) return pendingParsedUploadRetryPromise;
+  if (legacyLocalDataUploadPromise) {
+    schedulePendingParsedUploadRetry(`${reason}:active-upload`, PENDING_PARSED_UPLOAD_RETRY_DELAY_MS);
+    return;
+  }
+  const now = Date.now();
+  if (now - pendingParsedUploadRetryLastAt < PENDING_PARSED_UPLOAD_RETRY_THROTTLE_MS) return;
+  pendingParsedUploadRetryLastAt = now;
+  pendingParsedUploadRetryPromise = (async () => {
+    const currentUserId = getAwarenessHomeSyncUserId();
+    const sessions = listPendingUploadSessions<Record<string, any>>().filter((session) => {
+      const sessionUserId = String(session.dataUserId ?? session.userId ?? '');
+      return !sessionUserId || currentUserId === 'anonymous' || sessionUserId === currentUserId;
+    });
+    if (sessions.length === 0) return;
+    appendAwarenessDiagnosticLog('pending-parsed-upload-retry-start', {
+      reason,
+      sessionCount: sessions.length
+    });
+    for (const session of sessions) {
+      try {
+        const batches = chunkLegacySubmitData(session.dataList as SyncData[], LEGACY_LOCAL_DATA_SUBMIT_BATCH_SIZE);
+        const syncMeta = buildParsedUploadSyncMeta(session);
+        for (const batch of batches) {
+          const response = await submitData(
+            {
+              deviceMac: session.deviceMac,
+              dataList: batch,
+              ...syncMeta
+            },
+            {
+              timeout: PENDING_PARSED_UPLOAD_RETRY_TIMEOUT_MS,
+              custom: { toast: false, catch: true }
+            }
+          );
+          if (!isSubmitDataResponseSuccessful(response)) {
+            throw new Error('pending parsed upload rejected by backend');
+          }
+        }
+        markPendingUploadDataDone(session.uploadSessionId, {
+          code: 200,
+          backgroundRetry: true,
+          batchCount: batches.length
+        });
+        const maxReceivedTimestamp = session.dataList.reduce(
+          (maxTimestamp, item) => Math.max(maxTimestamp, getRingHistoryRecordUnixTime(item) || 0),
+          0
+        );
+        if (maxReceivedTimestamp > 0) {
+          setDeviceHistoryBackendAckCheckpoint(session.deviceMac, session.protocol || 'legacy', maxReceivedTimestamp);
+        }
+        appendAwarenessDiagnosticLog('pending-parsed-upload-retry-result', {
+          reason,
+          uploadSessionId: session.uploadSessionId,
+          deviceMac: session.deviceMac,
+          recordCount: session.dataList.length,
+          batchCount: batches.length,
+          backendAckTimestamp: maxReceivedTimestamp
+        });
+      } catch (error) {
+        markPendingUploadDataFailed(session.uploadSessionId, error);
+        appendAwarenessDiagnosticLog('pending-parsed-upload-retry-failed', {
+          reason,
+          uploadSessionId: session.uploadSessionId,
+          deviceMac: session.deviceMac,
+          error: error instanceof Error ? error.message : String(error || 'unknown error')
+        });
+        schedulePendingParsedUploadRetry(
+          `${reason}:http-retry`,
+          PENDING_PARSED_UPLOAD_RETRY_THROTTLE_MS
+        );
+      }
+    }
+  })().finally(() => {
+    pendingParsedUploadRetryPromise = null;
+  });
+  return pendingParsedUploadRetryPromise;
+};
+function schedulePendingParsedUploadRetry(reason: string, delayMs = PENDING_PARSED_UPLOAD_RETRY_DELAY_MS) {
+  if (pendingParsedUploadRetryTimer) return;
+  pendingParsedUploadRetryTimer = setTimeout(() => {
+    pendingParsedUploadRetryTimer = null;
+    void runPendingParsedUploadRetry(reason);
+  }, delayMs);
+}
 const getLegacySleepNotIngestedParkKey = (deviceMac?: string, uploadSinceTimestamp?: number) => {
   const normalizedMac = normalizeDeviceSyncMac(deviceMac || '') || 'unknown';
   const since = Number(uploadSinceTimestamp || 0);
@@ -4408,6 +4538,21 @@ watch(
             coverageStatus: uploadCoverageStatus,
             canDeleteDeviceBlocks: uploadDeviceReadDone
           });
+          const durableUploadTimestamp = Number(uploadSignatureSnapshot?.submitRange?.maxTimestamp || 0);
+          if (durableUploadTimestamp > 0 && uploadSession.dataPersisted === true) {
+            updateAwarenessDeviceHistoryDurableCheckpoint(
+              durableUploadTimestamp,
+              'legacy-local-data-upload-queued-durably'
+            );
+          } else if (durableUploadTimestamp > 0) {
+            appendAwarenessDiagnosticLog('legacy-local-data-persist-failed', {
+              protocol,
+              uploadSessionId: uploadSession.uploadSessionId,
+              submitCount: submitArray.length,
+              durableUploadTimestamp,
+              deviceMac
+            });
+          }
           homeDataSyncing.value = true;
           userStore.updateUploadingStatus('1');
           appendAwarenessDiagnosticLog('legacy-local-data-upload-start', {
@@ -4979,17 +5124,30 @@ watch(
           if (submittedTimestamps.length > 0) {
             maxSubmittedTimestamp = Math.max(...submittedTimestamps);
           }
-          const checkpointTimestampAfterUpload = legacyHistoryIncompleteAfterUpload
-            ? Math.max(maxSubmittedTimestamp, maxReceivedTimestamp)
-            : Math.max(maxSubmittedTimestamp, maxReceivedTimestamp, Number(historyReadTerminal?.maxTimestamp || 0));
-          if (checkpointTimestampAfterUpload > 0) {
-            updateAwarenessDeviceHistoryCheckpoint(
-              checkpointTimestampAfterUpload,
+          const readCheckpointTimestampAfterUpload = legacyHistoryIncompleteAfterUpload
+            ? maxReceivedTimestamp
+            : Math.max(maxReceivedTimestamp, Number(historyReadTerminal?.maxTimestamp || 0));
+          const backendAckCheckpointTimestamp = maxSubmittedTimestamp;
+          if (readCheckpointTimestampAfterUpload > 0) {
+            updateAwarenessDeviceHistoryReadCheckpoint(
+              readCheckpointTimestampAfterUpload,
               legacyHistoryIncompleteAfterUpload
-                ? 'legacy-local-data-upload-partial-submitted-checkpoint-advanced'
-                : 'legacy-local-data-upload-complete'
+                ? 'legacy-local-data-upload-partial-read-complete'
+                : 'legacy-local-data-upload-read-complete'
             );
           }
+          if (backendAckCheckpointTimestamp > 0) {
+            updateAwarenessDeviceHistoryBackendAckCheckpoint(
+              backendAckCheckpointTimestamp,
+              legacyHistoryIncompleteAfterUpload
+                ? 'legacy-local-data-upload-partial-backend-ack'
+                : 'legacy-local-data-upload-backend-ack'
+            );
+          }
+          const checkpointTimestampAfterUpload = Math.max(
+            readCheckpointTimestampAfterUpload,
+            backendAckCheckpointTimestamp
+          );
           completeLegacyLocalDataUploadSignature(uploadSignatureSnapshot, checkpointTimestampAfterUpload);
           closeLegacyLocalDataUploadSession(deviceMac, uploadDedupKey, checkpointTimestampAfterUpload);
           if (!legacyHistoryIncompleteAfterUpload) {
@@ -5098,13 +5256,13 @@ watch(
             const alreadyUploadedStableSnapshot = getLegacyLocalDataStableSnapshot();
             const alreadyUploadedMaxTimestamp =
               alreadyUploadedStableSnapshot.completed === true
-                ? advanceLegacyLocalDataCheckpointFromSnapshot(
+                ? advanceLegacyLocalDataReadCheckpointFromSnapshot(
                     alreadyUploadedStableSnapshot,
                     'legacy-local-data-already-uploaded'
                   )
                 : getLegacyLocalDataSnapshotMaxTimestamp(alreadyUploadedStableSnapshot);
             if (alreadyUploadedStableSnapshot.completed !== true && alreadyUploadedMaxTimestamp > 0) {
-              updateAwarenessDeviceHistoryCheckpoint(
+              updateAwarenessDeviceHistoryReadCheckpoint(
                 alreadyUploadedMaxTimestamp,
                 'legacy-local-data-already-uploaded-partial-submitted-checkpoint-advanced'
               );
@@ -5274,10 +5432,10 @@ watch(
           const noSubmitStableSnapshot = getLegacyLocalDataStableSnapshot();
           const noSubmitMaxTimestamp =
             noSubmitStableSnapshot.completed === true
-              ? advanceLegacyLocalDataCheckpointFromSnapshot(noSubmitStableSnapshot, 'legacy-local-data-no-submit')
+              ? advanceLegacyLocalDataReadCheckpointFromSnapshot(noSubmitStableSnapshot, 'legacy-local-data-no-submit')
               : getLegacyLocalDataSnapshotMaxTimestamp(noSubmitStableSnapshot);
           if (noSubmitStableSnapshot.completed !== true && noSubmitMaxTimestamp > 0) {
-            updateAwarenessDeviceHistoryCheckpoint(
+            updateAwarenessDeviceHistoryReadCheckpoint(
               noSubmitMaxTimestamp,
               'legacy-local-data-no-submit-partial-checkpoint-advanced'
             );
@@ -5564,7 +5722,9 @@ const shouldSkipLegacyHomeHistoryByCloudCoverage = async (protocol: string, trig
     });
 
     if (shouldSkip && latestTimestamp > checkpointTimestamp) {
-      updateAwarenessDeviceHistoryCheckpoint(latestTimestamp, 'legacy-home-cloud-coverage-skip');
+      updateAwarenessDeviceHistoryReadCheckpoint(latestTimestamp, 'legacy-home-cloud-coverage-skip');
+      updateAwarenessDeviceHistoryDurableCheckpoint(latestTimestamp, 'legacy-home-cloud-coverage-skip');
+      updateAwarenessDeviceHistoryBackendAckCheckpoint(latestTimestamp, 'legacy-home-cloud-coverage-skip');
     }
     return shouldSkip;
   } catch (error) {
@@ -7255,10 +7415,16 @@ const scheduleLegacyHomeHistoryLongRetry = (
       Number(stableSnapshot?.submitRange?.maxTimestamp || 0)
     );
     if (advancedTimestamp > 0) {
-      updateAwarenessDeviceHistoryCheckpoint(
+      updateAwarenessDeviceHistoryReadCheckpoint(
         advancedTimestamp,
         'legacy-home-history-long-retry-skip-partial-submitted-checkpoint-advance'
       );
+      if (stableSnapshot.alreadyUploadedCount > 0) {
+        updateAwarenessDeviceHistoryBackendAckCheckpoint(
+          advancedTimestamp,
+          'legacy-home-history-long-retry-skip-already-uploaded-backend-ack'
+        );
+      }
     }
     if (advancedTimestamp > 0) {
       completeLegacyLocalDataUploadSignature(stableSnapshot, advancedTimestamp);
@@ -9010,6 +9176,7 @@ onShow(async () => {
     if (!userStore.token) {
       return;
     }
+    schedulePendingParsedUploadRetry('page-show');
     appendAwarenessDiagnosticLog('page-show', {
       snapshot: getAwarenessConnectionSnapshot()
     });

@@ -19,6 +19,7 @@ export interface PendingUploadSession<T = Record<string, any>> {
   dataList: T[];
   rawFrames: RingRawHistoryFrame[];
   dataListCount?: number;
+  dataPersisted?: boolean;
   rawFrameCount?: number;
   rawFrameHashes?: string[];
   deviceBlockRefs?: unknown[];
@@ -57,7 +58,82 @@ const PENDING_UPLOAD_QUEUE_STORAGE_KEY = 'qkeer:pending_upload_queue:v1';
 const PENDING_UPLOAD_QUEUE_MAX_COUNT = 80;
 const PENDING_UPLOAD_QUEUE_STORAGE_MAX_COUNT = 40;
 const PENDING_UPLOAD_QUEUE_RAW_HASH_MAX_COUNT = 20;
+const PENDING_UPLOAD_PAYLOAD_PREFIX = 'qkeer:pending_upload_payload:v1';
+const PENDING_UPLOAD_PAYLOAD_CHUNK_SIZE = 40;
 const BACKEND_UPLOAD_BINDING_TIMEOUT_MS = 8000;
+
+interface PendingUploadPayloadManifest {
+  version: 1;
+  chunkCount: number;
+  dataListCount: number;
+  updatedAt: number;
+}
+
+const payloadManifestKey = (uploadSessionId: string) => `${PENDING_UPLOAD_PAYLOAD_PREFIX}:${uploadSessionId}:manifest`;
+const payloadChunkKey = (uploadSessionId: string, index: number) =>
+  `${PENDING_UPLOAD_PAYLOAD_PREFIX}:${uploadSessionId}:chunk:${index}`;
+
+const readPersistedDataList = <T = Record<string, any>>(uploadSessionId: string): T[] => {
+  try {
+    const manifest = uni.getStorageSync(payloadManifestKey(uploadSessionId)) as PendingUploadPayloadManifest | undefined;
+    if (!manifest || manifest.version !== 1 || !Number.isFinite(manifest.chunkCount)) return [];
+    const result: T[] = [];
+    for (let index = 0; index < manifest.chunkCount; index += 1) {
+      const chunk = uni.getStorageSync(payloadChunkKey(uploadSessionId, index));
+      if (Array.isArray(chunk)) result.push(...chunk);
+    }
+    return result.slice(0, Math.max(0, Number(manifest.dataListCount || result.length)));
+  } catch {
+    return [];
+  }
+};
+
+const removePersistedDataList = (uploadSessionId: string) => {
+  try {
+    const manifest = uni.getStorageSync(payloadManifestKey(uploadSessionId)) as PendingUploadPayloadManifest | undefined;
+    const chunkCount = Math.max(0, Number(manifest?.chunkCount || 0));
+    for (let index = 0; index < chunkCount; index += 1) {
+      uni.removeStorageSync(payloadChunkKey(uploadSessionId, index));
+    }
+    uni.removeStorageSync(payloadManifestKey(uploadSessionId));
+  } catch {
+    // Compensation cleanup must not interrupt the live upload path.
+  }
+};
+
+const persistDataList = <T = Record<string, any>>(uploadSessionId: string, dataList: T[]) => {
+  if (!dataList.length) {
+    removePersistedDataList(uploadSessionId);
+    return true;
+  }
+  try {
+    const previous = uni.getStorageSync(payloadManifestKey(uploadSessionId)) as PendingUploadPayloadManifest | undefined;
+    const chunks: T[][] = [];
+    for (let index = 0; index < dataList.length; index += PENDING_UPLOAD_PAYLOAD_CHUNK_SIZE) {
+      chunks.push(dataList.slice(index, index + PENDING_UPLOAD_PAYLOAD_CHUNK_SIZE));
+    }
+    chunks.forEach((chunk, index) => uni.setStorageSync(payloadChunkKey(uploadSessionId, index), chunk));
+    const manifest: PendingUploadPayloadManifest = {
+      version: 1,
+      chunkCount: chunks.length,
+      dataListCount: dataList.length,
+      updatedAt: Date.now()
+    };
+    uni.setStorageSync(payloadManifestKey(uploadSessionId), manifest);
+    const previousCount = Math.max(0, Number(previous?.chunkCount || 0));
+    for (let index = chunks.length; index < previousCount; index += 1) {
+      uni.removeStorageSync(payloadChunkKey(uploadSessionId, index));
+    }
+    return true;
+  } catch (error) {
+    appendRingDiagnosticLog('UPLOAD', 'pending-payload-persist-failed', {
+      uploadSessionId,
+      dataListCount: dataList.length,
+      error: error instanceof Error ? error.message : String(error || '')
+    });
+    return false;
+  }
+};
 
 export const normalizeUploadDeviceMac = (value: unknown) => String(value || '').replace(/[^0-9a-fA-F]/g, '').toLowerCase();
 
@@ -226,7 +302,16 @@ const readQueue = <T = Record<string, any>>(): PendingUploadSession<T>[] => {
   try {
     const stored = uni.getStorageSync(PENDING_UPLOAD_QUEUE_STORAGE_KEY);
     const list = Array.isArray(stored) ? stored : Array.isArray((stored as any)?.sessions) ? (stored as any).sessions : [];
-    return list.filter((item: any) => item && item.uploadSessionId && item.deviceMac);
+    return list
+      .filter((item: any) => item && item.uploadSessionId && item.deviceMac)
+      .map((item: PendingUploadSession<T>) => ({
+        ...item,
+        dataList:
+          item.dataStatus === 'done' || item.dataStatus === 'empty'
+            ? []
+            : readPersistedDataList<T>(item.uploadSessionId),
+        rawFrames: Array.isArray(item.rawFrames) ? item.rawFrames : []
+      }));
   } catch {
     return [];
   }
@@ -339,6 +424,7 @@ export const stagePendingUploadSession = <T = Record<string, any>>(
   const historyCompleted = input.historyCompleted ?? existing?.historyCompleted ?? deviceReadDone;
   const coverageStatus = (input.coverageStatus || existing?.coverageStatus || (historyCompleted ? 'complete' : 'partial')) as UploadCoverageStatus;
   const partialUpload = input.partialUpload ?? existing?.partialUpload ?? (!deviceReadDone || !historyCompleted || coverageStatus !== 'complete');
+  const dataPersisted = dataList.length > 0 ? persistDataList(uploadSessionId, dataList) : true;
   const next: PendingUploadSession<T> = {
     uploadSessionId,
     userId: input.userId ?? existing?.userId,
@@ -349,6 +435,7 @@ export const stagePendingUploadSession = <T = Record<string, any>>(
     deviceMacNorm: normalizeUploadDeviceMac(input.deviceMac),
     protocol: input.protocol || existing?.protocol,
     dataList,
+    dataPersisted,
     rawFrames,
     deviceBlockRefs: input.deviceBlockRefs || existing?.deviceBlockRefs,
     status: existing?.status || 'pending',
@@ -386,8 +473,8 @@ export const updatePendingUploadSession = (
   return next;
 };
 
-export const markPendingUploadDataDone = (uploadSessionId: string, response?: unknown) =>
-  updatePendingUploadSession(uploadSessionId, (session) => {
+export const markPendingUploadDataDone = (uploadSessionId: string, response?: unknown) => {
+  const updated = updatePendingUploadSession(uploadSessionId, (session) => {
     const payload = unwrapResponsePayload(response) as Record<string, any> | null;
     const nextDataStatus = ['done', 'partial', 'failed', 'empty'].includes(String(payload?.dataStatus))
       ? (String(payload?.dataStatus) as UploadDataStatus)
@@ -408,6 +495,20 @@ export const markPendingUploadDataDone = (uploadSessionId: string, response?: un
       canDeleteDeviceBlocks
     };
   });
+  if (updated && (updated.dataStatus === 'done' || updated.dataStatus === 'empty')) {
+    removePersistedDataList(uploadSessionId);
+  }
+  return updated;
+};
+
+export const listPendingUploadSessions = <T = Record<string, any>>() =>
+  readQueue<T>().filter(
+    (session) =>
+      session.dataPersisted !== false &&
+      Array.isArray(session.dataList) &&
+      session.dataList.length > 0 &&
+      (session.dataStatus === 'pending' || session.dataStatus === 'failed')
+  );
 
 export const markPendingUploadDataFailed = (uploadSessionId: string, error: unknown) =>
   updatePendingUploadSession(uploadSessionId, (session) => ({

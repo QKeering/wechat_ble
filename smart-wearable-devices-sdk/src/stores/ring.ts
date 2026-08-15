@@ -1068,14 +1068,18 @@ function getHistoryRecordKey(record: RingHistoricalRecord) {
 }
 
 function mergeHistoryRecords(existing: RingHistoricalRecord[], incoming: RingHistoricalRecord[]) {
-  const seen = new Set(existing.map(getHistoryRecordKey));
-  const next = [...existing];
+  const merged = new Map<string, RingHistoricalRecord>();
+  existing.forEach((record) => merged.set(getHistoryRecordKey(record), record));
   incoming.forEach((record) => {
     const key = getHistoryRecordKey(record);
-    if (seen.has(key)) return;
-    seen.add(key);
-    insertHistoryRecordSortedDescending(next, record);
+    const previous = merged.get(key);
+    // Later parser output is authoritative. Preserve fields that the incremental
+    // record omitted, while allowing corrected sleep/metric fields to replace
+    // the stale value already held by the store.
+    merged.set(key, previous ? ({ ...previous, ...record } as RingHistoricalRecord) : record);
   });
+  const next: RingHistoricalRecord[] = [];
+  merged.forEach((record) => insertHistoryRecordSortedDescending(next, record));
   return next;
 }
 
