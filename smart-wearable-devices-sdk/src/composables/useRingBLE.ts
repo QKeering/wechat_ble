@@ -367,7 +367,9 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const readBloodOxygen = () => runWithReady(() => sdk.sendOxyGenCommand());
   const readBodyTemperature = () => runWithReady(() => sdk.sendBodyTemperatureCommand());
   const readDeviceTime = () => runWithReady(() => sdk.readDeviceTime());
-  const updateDeviceTime = (...args: Parameters<typeof sdk.updateDeviceTime>) => runWithReady(() => sdk.updateDeviceTime(...args));
+  // SDK 已按协议处理校时所需的 ready 策略；不要在兼容层再包一层恢复，
+  // 否则 legacy 设备会在校时阶段重复恢复并阻塞历史读取。
+  const updateDeviceTime = (...args: Parameters<typeof sdk.updateDeviceTime>) => sdk.updateDeviceTime(...args);
   const sendDeleteAllLocalDataCommand = () => runWithReady(() => sdk.sendDeleteAllLocalDataCommand());
   const sendResetCommand = () => runWithReady(() => sdk.sendResetCommand());
   const sendFactoryResetWithTimeCommand = () => runWithReady(() => sdk.sendFactoryResetWithTimeCommand());

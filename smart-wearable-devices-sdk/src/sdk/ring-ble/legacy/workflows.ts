@@ -422,6 +422,26 @@ export const autoReconnectLegacyRing = async (
       adapter.registerConnectionStateListener?.();
       const connected = await adapter.connectAndDiscover(deviceId, deviceName, reconnectDevice);
       const readyProtocol = connected.protocol || reconnectDevice?.protocol || adapter.protocol;
+      if (readyProtocol === 'legacy') {
+        const appConnectStartedAt = Date.now();
+        appendRingDiagnosticLog('L19 BLE', 'legacy-reconnect-app-connect-start', {
+          attempt,
+          deviceId: connected.deviceId || deviceId
+        });
+        if (typeof adapter.establishAppConnectSession !== 'function') {
+          appendRingDiagnosticLog('L19 BLE', 'legacy-reconnect-app-connect-missing', {
+            attempt,
+            deviceId: connected.deviceId || deviceId
+          });
+          throw new Error('Legacy APP_CONNECT session gate is unavailable');
+        }
+        await adapter.establishAppConnectSession();
+        appendRingDiagnosticLog('L19 BLE', 'legacy-reconnect-app-connect-result', {
+          attempt,
+          elapsedMs: Date.now() - appConnectStartedAt,
+          deviceId: connected.deviceId || deviceId
+        });
+      }
       const rwReadyStableIdentity =
         readyProtocol === 'rw'
           ? getRingDeviceStableIdentity({
@@ -578,7 +598,14 @@ const readLegacyLocalDataUntilComplete = async (
     if (parsed.type !== 'local_data') return false;
     chunks.push(parsed);
     return isLegacyLocalDataChunkComplete(parsed);
-  }, timeoutMs);
+  }, timeoutMs, {
+    // The ring streams history in many chunks. A fixed wall-clock timeout can
+    // expire while valid chunks are still arriving, so the active session is
+    // sealed only after the stream has been quiet for a bounded period.
+    resetTimeoutOnData: true,
+    activityPredicate: parsed => parsed.type === 'local_data',
+    activityTimeoutMs: 6000
+  });
 
   await adapter.readLocalData(options);
 

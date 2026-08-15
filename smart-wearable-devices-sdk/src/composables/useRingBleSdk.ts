@@ -24,6 +24,10 @@ import {
   type RingUploadingStatus
 } from '@/sdk/ring-ble';
 import type { RwHealthDataName, RwHistoryDataName, RwMonitoringName } from '@/sdk/ring-ble/legacy/adapter';
+import {
+  getLegacyBleHistoryExclusiveSnapshot,
+  onLegacyBleCommandSessionIdle
+} from '@/sdk/ring-ble/legacy/commandSession';
 import type { RwHealthMonitoringConfig, RwUserProfile } from '@/sdk/ring-ble/rw/protocol';
 import {
   applyDeviceIdentityCacheToDevice,
@@ -871,6 +875,10 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   let connectInFlightStartedAt = 0;
   let reconnectInFlight: Promise<boolean> | null = null;
   let reconnectInFlightStartedAt = 0;
+  let legacyDisconnectRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let cancelLegacyDisconnectIdleWait: (() => void) | null = null;
+  let legacyDisconnectRecoveryToken = 0;
+  let scheduleLegacyDisconnectRecovery: (target: RingDeviceInfo, reason: unknown) => void = () => undefined;
   let autoReconnectFailureCount = 0;
   let autoReconnectRetryAfter = 0;
   const AUTO_RECONNECT_BACKOFF_BASE_MS = 1000;
@@ -1149,6 +1157,33 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           lifecycleTokenBefore: connectionLifecycleToken,
           attemptTokenBefore: connectionAttemptToken
         });
+      }
+      if (resolveRingProtocol(deviceInfo.value) === 'legacy' || resolveRingProtocol(expectedConnectionDevice || {}) === 'legacy') {
+        const isManualDisconnect = expectedConnectionDevice?.deviceId === '__cancelled_connection__';
+        const targetDevice = {
+          ...deviceInfo.value,
+          ...expectedConnectionDevice,
+          protocol: 'legacy' as const,
+          connected: false,
+          notifyEnabled: false
+        } as RingDeviceInfo;
+        const hasRecoverableTarget = Boolean(targetDevice.deviceId || targetDevice.mac || targetDevice.uniMacId);
+        if (!isManualDisconnect && hasRecoverableTarget) {
+          const exclusive = getLegacyBleHistoryExclusiveSnapshot();
+          expectedConnectionDevice = targetDevice;
+          deviceInfo.value = targetDevice;
+          lastCommunicationReadyAt = 0;
+          reconnectStatus.value = 'reconnecting';
+          reconnectResult.value = null;
+          writeRwStoreLog('legacy-physical-disconnect-recovery-scheduled', {
+            reason,
+            exclusive,
+            uploadingStatus: uploadingStatus.value,
+            target: summarizeRingDeviceForStoreLog(targetDevice)
+          });
+          scheduleLegacyDisconnectRecovery(targetDevice, reason);
+          return;
+        }
       }
       expirePendingConnectionAttempt();
       resetRingRuntimeState(bridgeTarget);
@@ -1559,6 +1594,13 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
   const disconnect = async () => {
     const currentDeviceId = deviceInfo.value.deviceId;
+    legacyDisconnectRecoveryToken += 1;
+    if (legacyDisconnectRecoveryTimer) {
+      clearTimeout(legacyDisconnectRecoveryTimer);
+      legacyDisconnectRecoveryTimer = null;
+    }
+    cancelLegacyDisconnectIdleWait?.();
+    cancelLegacyDisconnectIdleWait = null;
     expirePendingConnectionAttempt();
     const result = await disconnectLegacyRing(adapter, runtime, currentDeviceId);
     resetRingRuntimeState(bridgeTarget);
@@ -1593,7 +1635,52 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     targetAdapter.registerConnectionStateListener();
     let readyDevice = currentDevice;
     const shouldRefreshRwDiscovery = protocol === 'rw' && !hasRwNotifyDiscoverySnapshot(currentDevice);
-    const notifyServiceId = readyDevice.dataServiceId || readyDevice.serviceId;
+    let notifyServiceId = readyDevice.dataServiceId || readyDevice.serviceId;
+
+    // The Pinia/store snapshot may retain a deviceId after the SDK runtime has
+    // lost its service/characteristic discovery state. If the OS still owns the
+    // physical connection, rediscover on that same link. A destructive
+    // reconnect here clears the legacy data listener and can interrupt an
+    // active history read.
+    if (
+      readyDevice.deviceId &&
+      (!readyDevice.serviceId || !readyDevice.cmdCharId || !readyDevice.dataCharId)
+    ) {
+      const physicalLinkAlive = Boolean(await targetAdapter.checkByRSSI?.(readyDevice.deviceId));
+      if (physicalLinkAlive) {
+        writeRwStoreLog('ensure-ready-in-place-discovery-start', {
+          protocol,
+          device: summarizeRingDeviceForStoreLog(readyDevice)
+        });
+        try {
+          const discovered = await targetAdapter.discoverServicesAndChars(
+            readyDevice.deviceId,
+            readyDevice.deviceName || readyDevice.name || '',
+            readyDevice
+          );
+          if (!isConnectionLifecycleCurrent(lifecycleToken)) {
+            clearExpiredConnectionLifecycle();
+            return false;
+          }
+          readyDevice = {
+            ...readyDevice,
+            ...discovered
+          };
+          notifyServiceId = readyDevice.dataServiceId || readyDevice.serviceId;
+          runtime?.onDeviceReady?.(readyDevice);
+          writeRwStoreLog('ensure-ready-in-place-discovery-result', {
+            protocol,
+            device: summarizeRingDeviceForStoreLog(readyDevice)
+          });
+        } catch (error) {
+          writeRwStoreLog('ensure-ready-in-place-discovery-failed', {
+            protocol,
+            device: summarizeRingDeviceForStoreLog(readyDevice),
+            message: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    }
 
     if (
       readyDevice.deviceId &&
@@ -2323,6 +2410,78 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       }
     }
   };
+  const clearLegacyDisconnectRecoveryWait = () => {
+    if (legacyDisconnectRecoveryTimer) {
+      clearTimeout(legacyDisconnectRecoveryTimer);
+      legacyDisconnectRecoveryTimer = null;
+    }
+    cancelLegacyDisconnectIdleWait?.();
+    cancelLegacyDisconnectIdleWait = null;
+  };
+  scheduleLegacyDisconnectRecovery = (target, reason) => {
+    const recoveryToken = (legacyDisconnectRecoveryToken += 1);
+    clearLegacyDisconnectRecoveryWait();
+
+    const attemptRecovery = () => {
+      if (recoveryToken !== legacyDisconnectRecoveryToken) return;
+      const exclusive = getLegacyBleHistoryExclusiveSnapshot();
+      if (exclusive.active || uploadingStatus.value === 'uploading') {
+        writeRwStoreLog('legacy-physical-disconnect-recovery-wait', {
+          reason: exclusive.active ? 'history-exclusive-active' : 'upload-active',
+          exclusive,
+          uploadingStatus: uploadingStatus.value,
+          target: summarizeRingDeviceForStoreLog(target)
+        });
+        if (exclusive.active) {
+          cancelLegacyDisconnectIdleWait = onLegacyBleCommandSessionIdle(() => {
+            cancelLegacyDisconnectIdleWait?.();
+            cancelLegacyDisconnectIdleWait = null;
+            legacyDisconnectRecoveryTimer = setTimeout(attemptRecovery, 120);
+          });
+          // Avoid the release/register race: the session may have ended just before registration.
+          if (!getLegacyBleHistoryExclusiveSnapshot().active) {
+            cancelLegacyDisconnectIdleWait?.();
+            cancelLegacyDisconnectIdleWait = null;
+            legacyDisconnectRecoveryTimer = setTimeout(attemptRecovery, 120);
+          }
+        } else {
+          legacyDisconnectRecoveryTimer = setTimeout(attemptRecovery, 500);
+        }
+        return;
+      }
+
+      clearLegacyDisconnectRecoveryWait();
+      writeRwStoreLog('legacy-physical-disconnect-recovery-start', {
+        originalReason: reason,
+        target: summarizeRingDeviceForStoreLog(target)
+      });
+      void runReconnect(target)
+        .then((success) => {
+          if (recoveryToken !== legacyDisconnectRecoveryToken) return;
+          writeRwStoreLog('legacy-physical-disconnect-recovery-result', {
+            success,
+            target: summarizeRingDeviceForStoreLog(target),
+            current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+            communicationReady: isCommunicationReadyDevice(deviceInfo.value)
+          });
+          if (!success) {
+            reconnectStatus.value = 'failed';
+            reconnectResult.value = false;
+          }
+        })
+        .catch((error) => {
+          if (recoveryToken !== legacyDisconnectRecoveryToken) return;
+          reconnectStatus.value = 'failed';
+          reconnectResult.value = false;
+          writeRwStoreLog('legacy-physical-disconnect-recovery-failed', {
+            target: summarizeRingDeviceForStoreLog(target),
+            message: error instanceof Error ? error.message : String(error)
+          });
+        });
+    };
+
+    legacyDisconnectRecoveryTimer = setTimeout(attemptRecovery, 250);
+  };
   const recoverCommunicationForDevice = async (target: RingDeviceInfo) => {
     if (!hasRingReconnectTargetIdentity(target)) return false;
     if (reconnectInFlight) {
@@ -2569,7 +2728,13 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     readLocalData: (...args: Parameters<LegacyRingAdapter['readLocalData']>) => runWithReady(() => adapter.readLocalData(...args)),
     clearDataListener: () => adapter.clearDataListener(),
     readDeviceTime: () => runWithReady(() => adapter.readDeviceTime()),
-    updateDeviceTime: (...args: Parameters<LegacyRingAdapter['updateDeviceTime']>) => runWithReady(() => adapter.updateDeviceTime(...args)),
+    // Legacy 校时发生在连接 ready 之后，只做一次短写入。这里不能再次进入
+    // ensureCommunicationReady，否则链路异常时会把历史读取阻塞约 30 秒。
+    // RW 保留原有恢复流程，避免改变供应商协议的握手前置条件。
+    updateDeviceTime: (...args: Parameters<LegacyRingAdapter['updateDeviceTime']>) =>
+      adapter.protocol === 'rw'
+        ? runWithReady(() => adapter.updateDeviceTime(...args))
+        : adapter.updateDeviceTime(...args),
     sendCollectPeriodSettingCommand: (...args: Parameters<LegacyRingAdapter['sendCollectPeriodSettingCommand']>) =>
       runWithReady(() => adapter.sendCollectPeriodSettingCommand(...args)),
     readCollectPeriodCommand: () => runWithReady(() => adapter.readCollectPeriodCommand()),

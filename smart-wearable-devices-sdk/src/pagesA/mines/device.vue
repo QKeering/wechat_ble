@@ -249,7 +249,12 @@ const loadBoundInfo = async () => {
 
 const ensureDeviceReady = async () => {
   if (controller.isReady.value) return true;
-  return controller.restoreLastBusinessDevice({ refreshAfterRestore: false });
+  // The app-wide BLE orchestrator owns reconnect/restore. A page refresh must
+  // never disturb the active history listener or physical connection.
+  appendDeviceDiagnosticLog('device-info-ready-check-deferred-to-global-connection', {
+    snapshot: getDevicePageSnapshot()
+  });
+  return false;
 };
 
 const refreshDeviceInfo = async () => {
@@ -275,7 +280,13 @@ const refreshDeviceInfo = async () => {
       ready,
       snapshot: getDevicePageSnapshot()
     });
-    if (!ready) throw new Error('设备未连接，请重新连接后再试');
+    if (!ready) {
+      lastActionText.value = '设备连接恢复中，已保留上次设备信息';
+      appendDeviceDiagnosticLog('device-info-refresh-deferred-not-ready', {
+        reason: 'global-connection-orchestrator-owned'
+      });
+      return;
+    }
     const refreshResult = await controller.refreshDeviceInfoData();
     const skippedByHistoryExclusive = refreshResult.failed.some((item) => item.step === 'history-exclusive');
     if (skippedByHistoryExclusive) {

@@ -1178,10 +1178,27 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       return skippedResult;
     }
     if (!isReady.value) {
-      const restored = await restoreLastBusinessDevice({ refreshAfterRestore: false });
-      if (!restored) {
-        throw new Error('\u8bbe\u5907\u901a\u4fe1\u672a\u5c31\u7eea\uff0c\u8bf7\u91cd\u65b0\u8fde\u63a5\u540e\u518d\u8bfb\u53d6\u8bbe\u5907\u4fe1\u606f');
-      }
+      // Page-level device information refresh is read-only. Reconnection is
+      // owned by the app-wide connection orchestrator; restoring here used to
+      // clear/re-register listeners and could physically disconnect an active
+      // history read when users entered this page.
+      const skippedResult: RefreshLegacyBusinessMetricsResult = {
+        status: 'failed',
+        ok: lastRefreshResult.value?.ok || [],
+        failed: [
+          {
+            step: 'device_info',
+            message: '\u8bbe\u5907\u901a\u4fe1\u6062\u590d\u4e2d\uff0c\u5df2\u4fdd\u7559\u4e0a\u6b21\u8bbe\u5907\u4fe1\u606f'
+          }
+        ]
+      };
+      lastRefreshResult.value = createDeviceInfoVisibleRefreshResult(skippedResult, lastRefreshResult.value);
+      appendRingDiagnosticLog('RW FLOW', 'device-info-refresh-skip-not-ready-preserve-connection', {
+        ready: isReady.value,
+        deviceId: ble.deviceInfo.value.deviceId,
+        stableIdentity: getRingDeviceStableIdentity(ble.deviceInfo.value)
+      });
+      return lastRefreshResult.value;
     }
 
     if (refreshPromise) {

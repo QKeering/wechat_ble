@@ -12,6 +12,7 @@ import {
   buildLegacyCommandByName,
   buildLegacyCommandBytes,
   concatBytes,
+  createLegacyFrameId,
   getLegacyPlatformType,
   getTodayZeroTimestamp,
   type LegacyCommandPayload,
@@ -40,7 +41,16 @@ export interface LegacyRingAdapter extends RingBleAdapter {
   sendBytes: (bytes: Uint8Array, label?: string) => Promise<unknown>;
   sendCommand: (cmd: number, subcmd: number, payload?: LegacyCommandPayload) => Promise<unknown>;
   sendNamedCommand: (command: LegacyRingCommand, payload?: LegacyCommandPayload) => Promise<unknown>;
-  waitForParsedData: (predicate: (parsed: RingParsedData) => boolean, timeoutMs?: number, options?: { replayRecent?: boolean }) => Promise<RingParsedData>;
+  waitForParsedData: (
+    predicate: (parsed: RingParsedData) => boolean,
+    timeoutMs?: number,
+    options?: {
+      replayRecent?: boolean;
+      resetTimeoutOnData?: boolean;
+      activityPredicate?: (parsed: RingParsedData) => boolean;
+      activityTimeoutMs?: number;
+    }
+  ) => Promise<RingParsedData>;
   setupDataListener: (device?: RingDeviceInfo) => void;
   clearDataListener: (options?: LegacyDataListenerClearOptions) => void;
   sendBatteryCommand: () => Promise<unknown>;
@@ -53,6 +63,10 @@ export interface LegacyRingAdapter extends RingBleAdapter {
   readLocalData: (options?: LegacyReadLocalDataOptions) => Promise<unknown>;
   readDeviceTime: () => Promise<unknown>;
   updateDeviceTime: (timestampMs?: number, timezone?: number) => Promise<unknown>;
+  /** Legacy-only APP_CONNECT (0xA0/0x01) session handshake. */
+  sendAppConnectCommand?: (options?: { timeoutMs?: number }) => Promise<unknown>;
+  /** Establish the application session before issuing business commands. */
+  establishAppConnectSession?: () => Promise<unknown>;
   sendCollectPeriodSettingCommand: (seconds?: number) => Promise<unknown>;
   readCollectPeriodCommand: () => Promise<unknown>;
   sendResetCommand: () => Promise<unknown>;
@@ -421,13 +435,32 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     resolve: (parsed: RingParsedData) => void;
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
+    resetTimeoutOnData: boolean;
+    activityPredicate?: (parsed: RingParsedData) => boolean;
+    activityTimeoutMs: number;
+    resetTimer: (nextTimeoutMs?: number) => void;
+  }> = [];
+  const rawFrameWaiters: Array<{
+    predicate: (bytes: Uint8Array) => boolean;
+    resolve: (bytes: Uint8Array) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
   }> = [];
   let legacyCommandWriteQueue: Promise<unknown> = Promise.resolve();
   let legacyCommandWriteQueueSeq = 0;
+  let legacyCommandWriteQueueGeneration = 0;
+  let legacyLastCommandWriteAt = 0;
+  let lastAppConnectAt = 0;
+  let legacyPhysicalConnectedAt = 0;
+  let establishAppConnectSession: () => Promise<unknown> = async () => undefined;
   let connectionStateHandler: BleConnectionStateCallback | null = null;
   let bluetoothAdapterStateHandler: BluetoothAdapterStateCallback | null = null;
   let dataListenerHandler: BleCharacteristicValueCallback | null = null;
   let dataListenerIdentityKey = '';
+  let dataListenerDeviceId = '';
+  let dataListenerServiceId = '';
+  let dataListenerDataCharId = '';
+  let dataListenerDeviceName = '';
   let dataListenerGeneration = 0;
   let pendingDataListenerClear: PendingLegacyDataListenerClear | null = null;
   let historyWireTrace: {
@@ -438,6 +471,18 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     payloadHex: string;
     notifyCount: number;
   } | null = null;
+
+  const resetLegacyCommandWriteQueue = (reason: string, deviceId = '') => {
+    legacyCommandWriteQueueGeneration += 1;
+    legacyCommandWriteQueue = Promise.resolve();
+    legacyLastCommandWriteAt = 0;
+    historyWireTrace = null;
+    appendRingDiagnosticLog('L19 BLE', 'legacy-command-write-queue-reset', {
+      reason,
+      deviceId: deviceId || runtime?.getDeviceInfo?.().deviceId,
+      generation: legacyCommandWriteQueueGeneration
+    });
+  };
 
   // The command-session lease can expire while a large history response is still
   // arriving.  Treat the actual wire read as authoritative as well, otherwise a
@@ -474,11 +519,11 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     const parsedDataCount = Array.isArray((parsed as any)?.data) ? (parsed as any).data.length : undefined;
     const parsedStatus = (parsed as any)?.status;
     const shouldLog =
-      trace.notifyCount <= 20 ||
-      Number(parsedRecordCount || 0) > 0 ||
-      Number(parsedDataCount || 0) > 0 ||
+      trace.notifyCount <= 5 ||
+      trace.notifyCount % 50 === 0 ||
       parsedStatus === 'complete' ||
-      parsedStatus === 'empty';
+      parsedStatus === 'empty' ||
+      (!parsed && trace.notifyCount <= 10);
 
     if (!shouldLog) return;
 
@@ -545,9 +590,15 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       }
 
       if (result.connected) {
+        legacyPhysicalConnectedAt = Date.now();
+        lastAppConnectAt = 0;
         options.onConnected?.(eventDeviceId || result.deviceId);
         return;
       }
+
+      legacyPhysicalConnectedAt = 0;
+      lastAppConnectAt = 0;
+      resetLegacyCommandWriteQueue('physical-disconnect', eventDeviceId);
 
       clearDataListener({
         reason: 'physical-disconnect',
@@ -565,6 +616,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       if (result.available) return;
 
       void stopScan();
+      resetLegacyCommandWriteQueue('bluetooth-adapter-unavailable');
       clearDataListener({
         reason: 'bluetooth-adapter-unavailable',
         caller: 'bluetooth-adapter-state-listener',
@@ -854,6 +906,8 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         deviceId,
         timeout: 10000,
         success: () => {
+          legacyPhysicalConnectedAt = Date.now();
+          lastAppConnectAt = 0;
           const delay = /ios/i.test(uni.getSystemInfoSync().system || '') ? 1000 : 1500;
           setTimeout(() => resolve({ deviceId, name: deviceName, protocol: 'legacy' }), delay);
         },
@@ -983,6 +1037,11 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     cacheServiceId(deviceId, serviceId);
     setupDataListener(deviceInfo);
 
+    // APP_CONNECT is the common legacy session gate. Some reconnect paths call
+    // discoverServicesAndChars directly, so keeping it only in connectAndDiscover
+    // leaves those paths physically connected but without a protocol session.
+    await establishAppConnectSession();
+
     return deviceInfo;
   };
 
@@ -1073,16 +1132,34 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
   const sendBytes = (bytes: Uint8Array, label = '') => {
     const queueSeq = ++legacyCommandWriteQueueSeq;
+    const queueGeneration = legacyCommandWriteQueueGeneration;
     const queuedAt = Date.now();
     const frame = summarizeLegacyBleFrame(bytes, label);
     const run = legacyCommandWriteQueue
       .catch(() => undefined)
-      .then(() => {
+      .then(async () => {
+        if (queueGeneration !== legacyCommandWriteQueueGeneration) {
+          const error = new Error('Legacy BLE command was discarded because the connection session changed.');
+          appendRingDiagnosticLog('L19 BLE', 'legacy-command-write-discarded-stale-session', {
+            queueSeq,
+            queuedMs: Date.now() - queuedAt,
+            queuedGeneration: queueGeneration,
+            currentGeneration: legacyCommandWriteQueueGeneration,
+            ...frame,
+            error: formatLegacyBleError(error)
+          });
+          throw error;
+        }
         if (!runtime) {
           throw new Error('Legacy ring adapter runtime is not configured.');
         }
 
         const { deviceId, serviceId, cmdCharId } = ensureWriteDevice(runtime);
+        const commandIntervalWaitMs = Math.max(0, 300 - (Date.now() - legacyLastCommandWriteAt));
+        if (commandIntervalWaitMs > 0) {
+          await sleep(commandIntervalWaitMs);
+        }
+        legacyLastCommandWriteAt = Date.now();
         const startedAt = Date.now();
         appendRingDiagnosticLog('L19 BLE', 'legacy-command-write-start', {
           queueSeq,
@@ -1113,7 +1190,6 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
               ...frame,
               error: formatLegacyBleError(error)
             });
-            runtime.onDisconnected?.(error);
             reject(error);
           }, LEGACY_COMMAND_WRITE_TIMEOUT_MS);
 
@@ -1151,7 +1227,6 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
               if (settled) return;
               settled = true;
               clearTimeout(writeTimeout);
-              runtime.onDisconnected?.(error);
               reject(error);
             }
           });
@@ -1231,7 +1306,112 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     return sendCommand(0x10, 0x01);
   };
 
+  const waitForRawFrame = (predicate: (bytes: Uint8Array) => boolean, timeoutMs = 8000) => {
+    const promise = new Promise<Uint8Array>((resolve, reject) => {
+      const waiter = {
+        predicate,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          const index = rawFrameWaiters.indexOf(waiter);
+          if (index >= 0) rawFrameWaiters.splice(index, 1);
+          reject(new Error('Timed out waiting for legacy raw frame.'));
+        }, timeoutMs)
+      };
+      rawFrameWaiters.push(waiter);
+    });
+    promise.catch(() => undefined);
+    return promise;
+  };
+
+  const sendAppConnectCommand = async (options: { timeoutMs?: number } = {}) => {
+    const timeoutMs = Math.max(3000, Number(options.timeoutMs) || 8000);
+    const frameId = createLegacyFrameId();
+    const timestampMs = Date.now();
+    const timezone = 8;
+    const payload = concatBytes(
+      numberToUint64LE(timestampMs),
+      new Uint8Array([timezone, getLegacyPlatformType()])
+    );
+    const bytes = buildLegacyCommandBytes(0xa0, 0x01, {
+      frameType: 0x00,
+      frameId,
+      payload
+    });
+    const startedAt = Date.now();
+    appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-start', {
+      deviceId: runtime?.getDeviceInfo().deviceId,
+      cmd: 0xa0,
+      subcmd: 0x01,
+      frameId,
+      timestampMs,
+      timezone,
+      platform: getLegacyPlatformType(),
+      payloadHex: Array.from(payload).map((value) => value.toString(16).padStart(2, '0')).join('').toUpperCase(),
+      timeoutMs
+    });
+    const ackPromise = waitForRawFrame(
+      (value) => value.length >= 4 && value[1] === frameId && value[2] === 0xa0 && value[3] === 0x01,
+      timeoutMs
+    );
+    try {
+      const writeResult = await sendBytes(bytes, 'app-connect:A0:01');
+      appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-write-result', {
+        deviceId: runtime?.getDeviceInfo().deviceId,
+        frameId,
+        elapsedMs: Date.now() - startedAt,
+        result: writeResult
+      });
+      const ack = await ackPromise;
+      lastAppConnectAt = Date.now();
+      appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-result', {
+        deviceId: runtime?.getDeviceInfo().deviceId,
+        frameId,
+        elapsedMs: Date.now() - startedAt,
+        ackHex: Array.from(ack).map((value) => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+      });
+      return { writeResult, ack, frameId };
+    } catch (error) {
+      appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-failed', {
+        deviceId: runtime?.getDeviceInfo().deviceId,
+        frameId,
+        elapsedMs: Date.now() - startedAt,
+        error: formatLegacyBleError(error)
+      });
+      throw error;
+    }
+  };
+  establishAppConnectSession = async () => {
+    const appConnectElapsedMs = lastAppConnectAt > 0 ? Date.now() - lastAppConnectAt : Number.POSITIVE_INFINITY;
+    if (appConnectElapsedMs < 60_000) {
+      appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-skipped', {
+        reason: 'session-already-established',
+        appConnectElapsedMs
+      });
+      return { skipped: true, reason: 'session-already-established' };
+    }
+
+    const connectedElapsedMs = legacyPhysicalConnectedAt > 0 ? Date.now() - legacyPhysicalConnectedAt : 0;
+    const waitMs = Math.max(0, 3000 - connectedElapsedMs);
+    if (waitMs > 0) {
+      appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-post-physical-wait-start', {
+        deviceId: runtime?.getDeviceInfo().deviceId,
+        connectedElapsedMs,
+        waitMs
+      });
+      await sleep(waitMs);
+    }
+    return sendAppConnectCommand();
+  };
+
   const updateDeviceTime = async (timestampMs = Date.now(), timezone = 8) => {
+    if (lastAppConnectAt > 0 && Date.now() - lastAppConnectAt < 60_000) {
+      appendRingDiagnosticLog('L19 BLE', 'legacy-device-time-write-skipped', {
+        reason: 'app-connect-already-synced-time',
+        appConnectElapsedMs: Date.now() - lastAppConnectAt
+      });
+      return { skipped: true, reason: 'app-connect-already-synced-time' };
+    }
     const payload = concatBytes(numberToUint64LE(timestampMs), new Uint8Array([timezone & 0xff]));
     const result = await sendBytes(buildLegacyCommandBytes(0x10, 0x00, { frameType: 0x01, payload }), 'device-time-write');
     appendRingDiagnosticLog('L19 BLE', 'legacy-device-time-write-only', {
@@ -1247,18 +1427,35 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     return sendCommand(0xa0, 0x00, payload);
   };
 
-  const waitForParsedData = (predicate: (parsed: RingParsedData) => boolean, timeoutMs = 15000) => {
+  const waitForParsedData = (
+    predicate: (parsed: RingParsedData) => boolean,
+    timeoutMs = 15000,
+    options: {
+      replayRecent?: boolean;
+      resetTimeoutOnData?: boolean;
+      activityPredicate?: (parsed: RingParsedData) => boolean;
+      activityTimeoutMs?: number;
+    } = {}
+  ) => {
     const promise = new Promise<RingParsedData>((resolve, reject) => {
       const waiter = {
         predicate,
         resolve,
         reject,
-        timer: setTimeout(() => {
-          const index = parsedWaiters.indexOf(waiter);
-          if (index >= 0) parsedWaiters.splice(index, 1);
-          reject(new Error('Timed out waiting for ring data.'));
-        }, timeoutMs)
+        timer: null as unknown as ReturnType<typeof setTimeout>,
+        resetTimeoutOnData: options.resetTimeoutOnData === true,
+        activityPredicate: options.activityPredicate,
+        activityTimeoutMs: Math.max(1000, Number(options.activityTimeoutMs) || timeoutMs),
+        resetTimer: (nextTimeoutMs = timeoutMs) => {
+          if (waiter.timer) clearTimeout(waiter.timer);
+          waiter.timer = setTimeout(() => {
+            const index = parsedWaiters.indexOf(waiter);
+            if (index >= 0) parsedWaiters.splice(index, 1);
+            reject(new Error('Timed out waiting for ring data.'));
+          }, nextTimeoutMs);
+        }
       };
+      waiter.resetTimer();
 
       parsedWaiters.push(waiter);
     });
@@ -1269,11 +1466,28 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   const setupDataListener = (device?: RingDeviceInfo) => {
     if (!runtime) return;
 
-    const { deviceId, serviceId, dataCharId } = device || runtime.getDeviceInfo();
+    const resolvedDevice = device || runtime.getDeviceInfo();
+    const { deviceId, serviceId, dataCharId } = resolvedDevice;
     if (!deviceId || !serviceId || !dataCharId) return;
+    const identityDevice = resolvedDevice as typeof resolvedDevice & {
+      uniMacId?: string;
+      mac?: string;
+      name?: string;
+      advertis?: { macInfo?: string };
+    };
 
-    const identityKey = `${deviceId}|${serviceId}|${dataCharId}`.toLowerCase();
+    // deviceId may be regenerated by WeChat on iOS/Harmony.  The listener
+    // belongs to the physical ring, so use the advertised/backend MAC as the
+    // stable identity and keep the current transport deviceId mutable.
+    const physicalIdentity = `${
+      identityDevice.uniMacId || identityDevice.mac || identityDevice.advertis?.macInfo || deviceId
+    }`.toLowerCase();
+    const identityKey = `${physicalIdentity}|${serviceId}|${dataCharId}`.toLowerCase();
     if (dataListenerHandler && dataListenerIdentityKey === identityKey) {
+      dataListenerDeviceId = deviceId;
+      dataListenerServiceId = serviceId;
+      dataListenerDataCharId = dataCharId;
+      dataListenerDeviceName = identityDevice.name || '';
       // Reusing the listener means a new/renewed communication lease. Any
       // deferred clear created by an older disconnect must not remove it.
       dataListenerGeneration += 1;
@@ -1308,38 +1522,63 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       dataListenerIdentityKey = '';
     }
 
+    dataListenerDeviceId = deviceId;
+    dataListenerServiceId = serviceId;
+    dataListenerDataCharId = dataCharId;
+    dataListenerDeviceName = identityDevice.name || '';
     dataListenerHandler = (result) => {
-      if (result.deviceId !== deviceId || result.serviceId !== serviceId || result.characteristicId !== dataCharId) return;
+      if (
+        result.deviceId !== dataListenerDeviceId ||
+        result.serviceId !== dataListenerServiceId ||
+        result.characteristicId !== dataListenerDataCharId
+      ) return;
 
       const notifyBytes = new Uint8Array(result.value);
+      for (const waiter of [...rawFrameWaiters]) {
+        if (!waiter.predicate(notifyBytes)) continue;
+        clearTimeout(waiter.timer);
+        const index = rawFrameWaiters.indexOf(waiter);
+        if (index >= 0) rawFrameWaiters.splice(index, 1);
+        waiter.resolve(notifyBytes);
+      }
       const notifyFrame = summarizeLegacyBleFrame(notifyBytes);
-      appendRingDiagnosticLog('L19 BLE', 'legacy-notify-received', {
-        deviceId: result.deviceId,
-        serviceId: result.serviceId,
-        characteristicId: result.characteristicId,
-        ...notifyFrame
-      });
+      const isHistoryWireNotify = Boolean(historyWireTrace);
+      if (!isHistoryWireNotify) {
+        appendRingDiagnosticLog('L19 BLE', 'legacy-notify-received', {
+          deviceId: result.deviceId,
+          serviceId: result.serviceId,
+          characteristicId: result.characteristicId,
+          ...notifyFrame
+        });
+      }
 
       const parsed = parseLegacyRingData(notifyBytes);
       if (parsed) {
         appendHistoryWireNotifyLog('legacy-history-wire-notify-parsed', result, notifyFrame, parsed);
-        appendRingDiagnosticLog('L19 BLE', 'legacy-notify-parsed', {
-          deviceId: result.deviceId,
-          serviceId: result.serviceId,
-          characteristicId: result.characteristicId,
-          ...notifyFrame,
-          parsedType: parsed.type,
-          status: (parsed as any).status,
-          recordCount: Array.isArray((parsed as any).records) ? (parsed as any).records.length : undefined
-        });
+        if (!isHistoryWireNotify) {
+          appendRingDiagnosticLog('L19 BLE', 'legacy-notify-parsed', {
+            deviceId: result.deviceId,
+            serviceId: result.serviceId,
+            characteristicId: result.characteristicId,
+            ...notifyFrame,
+            parsedType: parsed.type,
+            status: (parsed as any).status,
+            recordCount: Array.isArray((parsed as any).records) ? (parsed as any).records.length : undefined
+          });
+        }
         const parsedWithDevice = {
           ...parsed,
           protocol: 'legacy' as const,
-          deviceId,
-          deviceName: device?.name
+          deviceId: dataListenerDeviceId,
+          deviceName: dataListenerDeviceName
         };
 
         for (const waiter of [...parsedWaiters]) {
+          const hasMatchingActivity = waiter.resetTimeoutOnData
+            && (waiter.activityPredicate?.(parsedWithDevice) ?? true);
+          if (hasMatchingActivity) {
+            waiter.resetTimer(waiter.activityTimeoutMs);
+          }
           if (!waiter.predicate(parsedWithDevice)) continue;
 
           clearTimeout(waiter.timer);
@@ -1350,12 +1589,14 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         runtime.onParsedData?.(parsedWithDevice);
       } else {
         appendHistoryWireNotifyLog('legacy-history-wire-notify-unparsed', result, notifyFrame, null);
-        appendRingDiagnosticLog('L19 BLE', 'legacy-notify-unparsed', {
-          deviceId: result.deviceId,
-          serviceId: result.serviceId,
-          characteristicId: result.characteristicId,
-          ...notifyFrame
-        });
+        if (!isHistoryWireNotify) {
+          appendRingDiagnosticLog('L19 BLE', 'legacy-notify-unparsed', {
+            deviceId: result.deviceId,
+            serviceId: result.serviceId,
+            characteristicId: result.characteristicId,
+            ...notifyFrame
+          });
+        }
       }
     };
     uni.onBLECharacteristicValueChange(dataListenerHandler);
@@ -1401,11 +1642,19 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       clearTimeout(waiter.timer);
       waiter.reject(new Error('Ring data listener was cleared.'));
     }
+    for (const waiter of rawFrameWaiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error('Ring data listener was cleared.'));
+    }
     if (dataListenerHandler) {
       offBleCharacteristicValueChange(dataListenerHandler);
       dataListenerHandler = null;
     }
     dataListenerIdentityKey = '';
+    dataListenerDeviceId = '';
+    dataListenerServiceId = '';
+    dataListenerDataCharId = '';
+    dataListenerDeviceName = '';
     pendingDataListenerClear = null;
     appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-clear-completed', metadata);
   };
@@ -1468,6 +1717,8 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     readLocalData,
     readDeviceTime,
     updateDeviceTime,
+    sendAppConnectCommand,
+    establishAppConnectSession,
     sendCollectPeriodSettingCommand: (seconds = 1200) => sendNamedCommand(LegacyRingCommand.SetCollectPeriod, numberToUint32LE(seconds)),
     readCollectPeriodCommand: () => sendNamedCommand(LegacyRingCommand.ReadCollectPeriod),
     sendResetCommand: () => sendNamedCommand(LegacyRingCommand.FactoryReset),

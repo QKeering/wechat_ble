@@ -51,6 +51,7 @@ if (qkeerFirstKeys.some((key) => qkeerSecondKeys.includes(key))) {
 const discoveredCallbacks: Array<(result: { devices: any[] }) => void> = [];
 const adapterStateCallbacks: Array<(result: { available: boolean; discovering: boolean }) => void> = [];
 let mtuFailureCount = 0;
+let writeFailure: unknown = null;
 const serviceCache: Record<string, string> = {};
 (globalThis as any).uni = {
   getSystemInfoSync: () => ({ platform: 'android', system: 'Android 14', uniPlatform: 'mp-weixin' }),
@@ -87,6 +88,13 @@ const serviceCache: Record<string, string> = {};
       ]
     }),
   notifyBLECharacteristicValueChange: ({ success }: { success: (result: unknown) => void }) => success({}),
+  writeBLECharacteristicValue: ({ success, fail }: { success: (result: unknown) => void; fail: (error: unknown) => void }) => {
+    if (writeFailure) {
+      fail(writeFailure);
+      return;
+    }
+    success({ errMsg: 'writeBLECharacteristicValue:ok' });
+  },
   getStorageSync: (key: string) => serviceCache[key] || {},
   setStorageSync: (key: string, value: unknown) => {
     serviceCache[key] = value as any;
@@ -146,6 +154,27 @@ if (bluetoothReady !== false || disconnectedReason !== 'bluetooth_adapter_unavai
       disconnectedReason
     })}`
   );
+}
+
+let commandFailureDisconnectedCount = 0;
+const commandFailureAdapter = createLegacyRingAdapter(
+  {
+    devices: { value: [] as any[] },
+    isScanning: { value: false }
+  } as any,
+  {
+    getDeviceInfo: () => ({ deviceId: 'command-fail-id', serviceId: 'service', cmdCharId: 'write' }),
+    onDisconnected: () => {
+      commandFailureDisconnectedCount += 1;
+    }
+  }
+);
+writeFailure = { errMsg: 'writeBLECharacteristicValue:fail:system error' };
+await commandFailureAdapter.sendBatteryCommand().catch(() => undefined);
+writeFailure = null;
+
+if (commandFailureDisconnectedCount !== 0) {
+  throw new Error('A command write failure must not be treated as a physical BLE disconnection.');
 }
 
 const mtuFailureAdapter = createLegacyRingAdapter({

@@ -17,6 +17,7 @@ type RingDiagnosticLogEntry = {
 
 let diagnosticLogCache: RingDiagnosticLogEntry[] | null = null;
 let diagnosticLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let diagnosticVerboseLoggingCache: boolean | null = null;
 
 export const isRingDiagnosticNodeRuntime = () => Boolean((globalThis as any).process?.versions?.node);
 const padDiagnosticNumber = (value: number, length: number) => `${value}`.padStart(length, '0');
@@ -119,16 +120,20 @@ const diagnosticNoiseStates = new Map<string, DiagnosticNoiseState>();
 
 export const isRingDiagnosticVerboseLoggingEnabled = () => {
   if (isRingDiagnosticNodeRuntime()) return false;
+  if (diagnosticVerboseLoggingCache !== null) return diagnosticVerboseLoggingCache;
   try {
     const value = uni.getStorageSync?.(RING_DIAGNOSTIC_VERBOSE_STORAGE_KEY);
-    return value === true || value === 1 || value === '1' || value === 'true' || value === 'verbose';
+    diagnosticVerboseLoggingCache = value === true || value === 1 || value === '1' || value === 'true' || value === 'verbose';
+    return diagnosticVerboseLoggingCache;
   } catch {
+    diagnosticVerboseLoggingCache = false;
     return false;
   }
 };
 
 export const setRingDiagnosticVerboseLogging = (enabled: boolean) => {
   if (isRingDiagnosticNodeRuntime()) return;
+  diagnosticVerboseLoggingCache = enabled;
   try {
     if (enabled) {
       uni.setStorageSync?.(RING_DIAGNOSTIC_VERBOSE_STORAGE_KEY, '1');
