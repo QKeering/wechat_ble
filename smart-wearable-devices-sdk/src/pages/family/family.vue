@@ -144,7 +144,7 @@ onPullDownRefresh(async () => {
 
 <template>
   <view class="family-page">
-    <uv-navbar placeholder leftIcon="" title="家人守护" bgColor="#f1f3f6"></uv-navbar>
+    <uv-navbar placeholder leftIcon="" title="亲友共享" bgColor="#f1f3f6"></uv-navbar>
 
     <view class="hero">
       <view>

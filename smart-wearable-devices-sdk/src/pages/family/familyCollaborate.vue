@@ -26,7 +26,7 @@ const relationOptions = computed(() =>
   members.value
     .filter((item) => item.relationId)
     .map((item) => ({
-      label: `${item.name || '家人'} · ${item.cardSummary || '家庭守护对象'}`,
+      label: `${item.name || '家人'} · ${item.cardSummary || '亲友共享对象'}`,
       value: Number(item.relationId),
       memberId: Number(item.id)
     }))

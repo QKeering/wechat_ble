@@ -1169,7 +1169,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         } as RingDeviceInfo;
         const hasRecoverableTarget = Boolean(targetDevice.deviceId || targetDevice.mac || targetDevice.uniMacId);
         if (!isManualDisconnect && hasRecoverableTarget) {
-          const exclusive = getLegacyBleHistoryExclusiveSnapshot();
+          const exclusive = getLegacyBleHistoryExclusiveSnapshot(targetDevice);
           expectedConnectionDevice = targetDevice;
           deviceInfo.value = targetDevice;
           lastCommunicationReadyAt = 0;
@@ -2424,7 +2424,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
     const attemptRecovery = () => {
       if (recoveryToken !== legacyDisconnectRecoveryToken) return;
-      const exclusive = getLegacyBleHistoryExclusiveSnapshot();
+      const exclusive = getLegacyBleHistoryExclusiveSnapshot(target);
       if (exclusive.active || uploadingStatus.value === 'uploading') {
         writeRwStoreLog('legacy-physical-disconnect-recovery-wait', {
           reason: exclusive.active ? 'history-exclusive-active' : 'upload-active',
@@ -2437,9 +2437,9 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
             cancelLegacyDisconnectIdleWait?.();
             cancelLegacyDisconnectIdleWait = null;
             legacyDisconnectRecoveryTimer = setTimeout(attemptRecovery, 120);
-          });
+          }, target);
           // Avoid the release/register race: the session may have ended just before registration.
-          if (!getLegacyBleHistoryExclusiveSnapshot().active) {
+          if (!getLegacyBleHistoryExclusiveSnapshot(target).active) {
             cancelLegacyDisconnectIdleWait?.();
             cancelLegacyDisconnectIdleWait = null;
             legacyDisconnectRecoveryTimer = setTimeout(attemptRecovery, 120);

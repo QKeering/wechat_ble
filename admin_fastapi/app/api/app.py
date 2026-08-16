@@ -920,9 +920,9 @@ def stress_records(db: Session, user_id: int, date_value: str | None = None, day
     else:
         date_clause = "1=1"
     metric_clause = (
-        "((stress is not null and stress >= 0 and stress <= 100) or (hrv is not null and hrv >= 1 and hrv <= 300))"
+        "((stress is not null and stress >= 1 and stress <= 100) or (hrv is not null and hrv >= 1 and hrv <= 300))"
         if include_hrv_only
-        else "(stress is not null and stress >= 0 and stress <= 100)"
+        else "(stress is not null and stress >= 1 and stress <= 100)"
     )
     return db.execute(
         text(
@@ -986,7 +986,7 @@ def stress_value_from_row(row) -> int | None:
     mapping = row_mapping(row)
     raw_stress = mapping.get("stress")
     if raw_stress is not None and raw_stress != "":
-        stress = valid_range(raw_stress, 0, 100)
+        stress = valid_range(raw_stress, 1, 100)
         if stress is not None:
             return int(round(stress))
     return health.estimate_stress_from_hrv(mapping.get("hrv"))

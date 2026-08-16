@@ -194,6 +194,19 @@ const parseLocalDataErrorAck = (bytes: Uint8Array, frameId: number): RingParsedD
   };
 };
 
+const deriveHrvFromRrIntervals = (values: number[]): number | null => {
+  const plausible = values.filter((value) => Number.isFinite(value) && value >= 300 && value <= 2000);
+  if (plausible.length < 2) return null;
+
+  let squaredDiffSum = 0;
+  for (let index = 1; index < plausible.length; index += 1) {
+    const diff = plausible[index] - plausible[index - 1];
+    squaredDiffSum += diff * diff;
+  }
+  const rmssd = Math.round(Math.sqrt(squaredDiffSum / (plausible.length - 1)));
+  return rmssd >= 1 && rmssd <= 300 ? rmssd : null;
+};
+
 const parseLocalData = (bytes: Uint8Array, frameId: number): RingParsedData => {
   const totalNum = readUint32LE(bytes, 4);
 
@@ -227,6 +240,7 @@ const parseLocalData = (bytes: Uint8Array, frameId: number): RingParsedData => {
     for (let i = 0; i < rrCount && rrStart + i * 2 + 1 < bytes.length; i += 1) {
       rrIntervals.push(bytes[rrStart + i * 2] | (bytes[rrStart + i * 2 + 1] << 8));
     }
+    const effectiveHrv = hrv > 0 && hrv <= 300 ? hrv : deriveHrvFromRrIntervals(rrIntervals);
 
     records.push({
       seq,
@@ -236,8 +250,9 @@ const parseLocalData = (bytes: Uint8Array, frameId: number): RingParsedData => {
       stepCount,
       heartRate: heartRate > 0 ? heartRate : null,
       spo2: spo2 > 0 ? spo2 : null,
-      hrv: hrv > 0 ? hrv : null,
-      stress: stress >= 0 && stress <= 100 ? stress : null,
+      hrv: effectiveHrv,
+      // L19 uses zero when pressure is not supplied. Keep it missing so HRV fallback can run.
+      stress: stress > 0 && stress <= 100 ? stress : null,
       temperature,
       activityLevel,
       sleepType,

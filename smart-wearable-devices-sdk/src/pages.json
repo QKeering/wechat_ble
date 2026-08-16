@@ -26,14 +26,21 @@
     {
       "path": "pages/health/growth-girlfriend",
       "style": {
-        "navigationBarTitleText": "AI Label",
+        "navigationBarTitleText": "Ai lab",
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/awareness/aiApply",
+      "style": {
+        "navigationBarTitleText": "AI Lab申请",
         "navigationStyle": "custom"
       }
     },
     {
       "path": "pages/family/family",
       "style": {
-        "navigationBarTitleText": "家人守护",
+        "navigationBarTitleText": "亲友共享",
         "navigationStyle": "custom",
         "enablePullDownRefresh": true
       }

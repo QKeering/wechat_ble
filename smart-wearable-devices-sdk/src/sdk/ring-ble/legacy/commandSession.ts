@@ -2,46 +2,113 @@ import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 
 type IdleCallback = () => void;
 
-let activeUntil = 0;
-let sessionSeq = 0;
-let activeContext: Record<string, unknown> | null = null;
-const idleCallbacks = new Set<IdleCallback>();
+type SessionState = {
+  activeUntil: number;
+  seq: number;
+  context: Record<string, unknown>;
+};
 
-export const getLegacyBleHistoryExclusiveSnapshot = () => {
-  const remainingMs = Math.max(0, activeUntil - Date.now());
-  const hasActiveContext = activeContext != null;
+type IdleSubscription = {
+  getDeviceKey?: () => string;
+  callback: IdleCallback;
+};
+
+const FALLBACK_DEVICE_KEY = '__legacy_unknown_device__';
+let sessionSeq = 0;
+const sessions = new Map<string, SessionState>();
+const idleCallbacks = new Set<IdleSubscription>();
+
+const normalizeDeviceIdentity = (value: unknown) =>
+  `${value || ''}`.trim().toUpperCase().replace(/-/g, ':');
+
+const resolveDeviceKey = (identity?: unknown): string => {
+  if (typeof identity === 'string') return normalizeDeviceIdentity(identity) || FALLBACK_DEVICE_KEY;
+  if (!identity || typeof identity !== 'object') return FALLBACK_DEVICE_KEY;
+  const source = identity as Record<string, unknown>;
+  return normalizeDeviceIdentity(
+    source.mac || source.uniMacId || source.deviceMac || source.deviceId
+  ) || FALLBACK_DEVICE_KEY;
+};
+
+const notifyIdle = (deviceKey: string) => {
+  for (const subscription of [...idleCallbacks]) {
+    const subscribedDeviceKey = subscription.getDeviceKey?.();
+    if (!subscribedDeviceKey || subscribedDeviceKey === deviceKey) subscription.callback();
+  }
+};
+
+const pruneExpiredSession = (deviceKey: string, now = Date.now()) => {
+  const state = sessions.get(deviceKey);
+  if (!state || state.activeUntil > now) return state;
+  sessions.delete(deviceKey);
+  appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-expired-recovered', {
+    deviceKey,
+    seq: state.seq,
+    sessionId: `legacy-command-${state.seq}`,
+    expiredByMs: now - state.activeUntil,
+    ...state.context
+  });
+  notifyIdle(deviceKey);
+  return undefined;
+};
+
+const createSnapshot = (deviceKey: string, state?: SessionState) => {
+  const now = Date.now();
+  const remainingMs = state ? Math.max(0, state.activeUntil - now) : 0;
   return {
-    active: hasActiveContext || remainingMs > 0,
-    seq: sessionSeq,
-    sessionId: hasActiveContext ? `legacy-command-${sessionSeq}` : undefined,
-    exclusiveUntil: activeUntil,
+    active: Boolean(state && remainingMs > 0),
+    seq: state?.seq || sessionSeq,
+    sessionId: state ? `legacy-command-${state.seq}` : undefined,
+    deviceKey,
+    exclusiveUntil: state?.activeUntil || 0,
     remainingMs,
-    context: activeContext || undefined
+    context: state?.context
   };
 };
 
-export const isLegacyBleHistoryExclusiveActive = () => getLegacyBleHistoryExclusiveSnapshot().active;
+export const getLegacyBleHistoryExclusiveSnapshot = (deviceIdentity?: unknown) => {
+  if (deviceIdentity != null) {
+    const deviceKey = resolveDeviceKey(deviceIdentity);
+    return createSnapshot(deviceKey, pruneExpiredSession(deviceKey));
+  }
 
-const createRelease = (seq: number, startedAt: number, context: Record<string, unknown>) => {
+  const now = Date.now();
+  let activeEntry: [string, SessionState] | undefined;
+  for (const [deviceKey] of sessions) {
+    const state = pruneExpiredSession(deviceKey, now);
+    if (!state) continue;
+    if (!activeEntry || state.activeUntil > activeEntry[1].activeUntil) activeEntry = [deviceKey, state];
+  }
+  return activeEntry
+    ? createSnapshot(activeEntry[0], activeEntry[1])
+    : createSnapshot(FALLBACK_DEVICE_KEY);
+};
+
+export const isLegacyBleHistoryExclusiveActive = (deviceIdentity?: unknown) =>
+  getLegacyBleHistoryExclusiveSnapshot(deviceIdentity).active;
+
+const createRelease = (
+  deviceKey: string,
+  seq: number,
+  startedAt: number,
+  context: Record<string, unknown>
+) => {
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    if (sessionSeq === seq) {
-      activeUntil = 0;
-      activeContext = null;
-    }
+    const current = sessions.get(deviceKey);
+    if (current?.seq === seq) sessions.delete(deviceKey);
     appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-end', {
       seq,
       sessionId: `legacy-command-${seq}`,
+      deviceKey,
       elapsedMs: Date.now() - startedAt,
-      activeSeq: sessionSeq,
-      exclusiveUntil: activeUntil,
+      activeSeq: sessions.get(deviceKey)?.seq || 0,
+      exclusiveUntil: sessions.get(deviceKey)?.activeUntil || 0,
       ...context
     });
-    if (!getLegacyBleHistoryExclusiveSnapshot().active) {
-      for (const callback of [...idleCallbacks]) callback();
-    }
+    if (!getLegacyBleHistoryExclusiveSnapshot(deviceKey).active) notifyIdle(deviceKey);
   };
 };
 
@@ -49,40 +116,55 @@ export const tryClaimLegacyBleCommandSession = (
   timeoutMs: number,
   context: Record<string, unknown> = {}
 ) => {
-  const snapshot = getLegacyBleHistoryExclusiveSnapshot();
+  const deviceKey = resolveDeviceKey(context);
+  const snapshot = getLegacyBleHistoryExclusiveSnapshot(deviceKey);
   if (snapshot.active) return null;
 
   const seq = ++sessionSeq;
   const startedAt = Date.now();
-  activeUntil = startedAt + timeoutMs + 1000;
-  activeContext = context;
+  const activeUntil = startedAt + timeoutMs + 1000;
+  sessions.set(deviceKey, { activeUntil, seq, context });
   appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-start', {
     seq,
     sessionId: `legacy-command-${seq}`,
+    deviceKey,
     timeoutMs,
     exclusiveUntil: activeUntil,
     ...context
   });
-  return createRelease(seq, startedAt, context);
+  return createRelease(deviceKey, seq, startedAt, context);
 };
 
 export const claimLegacyBleHistoryExclusive = (
   timeoutMs: number,
   context: Record<string, unknown> = {}
 ) => {
-  const release = tryClaimLegacyBleCommandSession(timeoutMs, { sessionType: 'history', ...context });
+  const claimContext = { sessionType: 'history', ...context };
+  const release = tryClaimLegacyBleCommandSession(timeoutMs, claimContext);
   if (release) return release;
-  const snapshot = getLegacyBleHistoryExclusiveSnapshot();
+  const snapshot = getLegacyBleHistoryExclusiveSnapshot(claimContext);
   appendRingDiagnosticLog('L19 BLE', 'legacy-history-exclusive-reuse-active', {
     timeoutMs,
     activeSessionId: snapshot.sessionId,
     activeContext: snapshot.context,
+    deviceKey: snapshot.deviceKey,
     ...context
   });
   return () => undefined;
 };
 
-export const onLegacyBleCommandSessionIdle = (callback: IdleCallback) => {
-  idleCallbacks.add(callback);
-  return () => idleCallbacks.delete(callback);
+export const onLegacyBleCommandSessionIdle = (
+  callback: IdleCallback,
+  deviceIdentity?: unknown | (() => unknown)
+) => {
+  const subscription: IdleSubscription = {
+    callback,
+    getDeviceKey: deviceIdentity == null
+      ? undefined
+      : () => resolveDeviceKey(
+          typeof deviceIdentity === 'function' ? deviceIdentity() : deviceIdentity
+        )
+  };
+  idleCallbacks.add(subscription);
+  return () => idleCallbacks.delete(subscription);
 };

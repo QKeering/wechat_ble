@@ -129,7 +129,7 @@ const openMeasure = () => {
   if (!hasDeviceBinding.value) {
     uni.showModal({
       title: '还没有绑定设备',
-      content: '请让子女先在家人守护中为您绑定设备。设备绑定后，您只需要佩戴设备并点这里同步。',
+        content: '请让子女先在亲友共享中为您绑定设备。设备绑定后，您只需要佩戴设备并点这里同步。',
       confirmText: '查看邀请',
       cancelText: '知道了',
       success: (res) => {

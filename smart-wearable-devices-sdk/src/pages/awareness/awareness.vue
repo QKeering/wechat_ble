@@ -5959,7 +5959,7 @@ const getHomeGoalInfoData = async (currentDate = new Date()) => {
 };
 
 
-const getStressInfo = async (currentDate = new Date()) => {
+const getStressInfo = async (currentDate = new Date(), forceRefresh = false) => {
 
   const localDate = formatLocalDate(new Date());
   const dateKey = formatLocalDate(currentDate);
@@ -5976,7 +5976,7 @@ const getStressInfo = async (currentDate = new Date()) => {
   const refreshKey = `${getAwarenessHomeUploadDeviceKey()}:${dateKey}:${selectedDayIndex.value}:${offset}`;
   const now = Date.now();
   const lastAt = awarenessStressInfoRefreshAt.get(refreshKey) || 0;
-  if (lastAt && now - lastAt < AWARENESS_STRESS_INFO_REFRESH_TTL_MS) {
+  if (!forceRefresh && lastAt && now - lastAt < AWARENESS_STRESS_INFO_REFRESH_TTL_MS) {
     appendAwarenessDiagnosticLog('business-overview-stress-cache-skip', {
       key: refreshKey,
       date: dateKey,
@@ -6042,6 +6042,7 @@ type AwarenessBusinessRefreshOptions = {
   allowDuringSync?: boolean;
   trigger?: string;
   sourceTrigger?: string;
+  forceStressRefresh?: boolean;
 };
 
 const isAwarenessBackgroundDataSyncInProgress = () =>
@@ -6246,10 +6247,17 @@ const runAwarenessBusinessOverviewRefresh = async (date: string, options: Awaren
     queueKey: runningAwarenessBusinessRefreshKey,
     snapshot: getAwarenessConnectionSnapshot()
   });
-  void (async () => {
-    await runAwarenessBusinessRefreshStage('stressInfo', date, options, () => getStressInfo(currentDate));
+  const stressRefreshTask = (async () => {
+    await runAwarenessBusinessRefreshStage('stressInfo', date, options, () =>
+      getStressInfo(currentDate, options.forceStressRefresh === true)
+    );
     await runAwarenessBusinessRefreshStage('chart.relax', date, options, () => initRelaxChart());
   })();
+  if (options.forceStressRefresh) {
+    await stressRefreshTask;
+  } else {
+    void stressRefreshTask;
+  }
   await Promise.all([
     runAwarenessBusinessRefreshStage('goalInfo', date, options, () => getHomeGoalInfoData(currentDate)),
     runAwarenessBusinessRefreshStage('balanceScore', date, options, () => getBalanceScoreData(currentDate)),
@@ -6443,7 +6451,11 @@ const refreshAwarenessAfterDataProcessed = async (reason: string, date = getSele
       finalRefreshKey,
       snapshot: getAwarenessConnectionSnapshot()
     });
-    await refreshAwarenessBusinessOverview(refreshDate, { allowDuringSync: true, trigger: reason });
+    await refreshAwarenessBusinessOverview(refreshDate, {
+      allowDuringSync: true,
+      trigger: reason,
+      forceStressRefresh: true
+    });
     const chartRefreshPromise = awarenessBusinessChartRefreshPromise;
     if (chartRefreshPromise) {
       appendAwarenessDiagnosticLog('business-processed-chart-refresh-detached', {
@@ -6487,6 +6499,25 @@ const scheduleAwarenessAfterDataProcessed = (
   waitStartedAt = Date.now(),
   retryCount = 0
 ) => {
+  // The parsed-data upload has already been acknowledged by the backend for a
+  // final trigger.  Do not keep the visible business refresh behind raw-frame
+  // backup, watcher cleanup, or another BLE history task: those jobs are
+  // compensating/background work and may remain active for tens of seconds.
+  // refreshAwarenessAfterDataProcessed owns the final-refresh deduplication, so
+  // this remains exactly one refresh for the current device/date.
+  if (isAwarenessFinalBusinessRefreshTrigger(reason)) {
+    void refreshAwarenessAfterDataProcessed(reason, date).catch((error) => {
+      appendAwarenessDiagnosticLog('business-processed-refresh-schedule-failed', {
+        trigger: reason,
+        date,
+        immediateFinalRefresh: true,
+        error: formatBleErrorMessage(error, 'business overview refresh failed'),
+        rawError: getAwarenessRawError(error),
+        snapshot: getAwarenessConnectionSnapshot()
+      });
+    });
+    return;
+  }
   setTimeout(
     () => {
       const waitElapsedMs = Date.now() - waitStartedAt;
@@ -7199,7 +7230,7 @@ const refreshLegacyHomeDeviceInfoInBackground = (protocol: string, hasCachedSnap
       });
       return;
     }
-    const historyExclusive = getLegacyBleHistoryExclusiveSnapshot();
+    const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(getAwarenessCanonicalDeviceMac());
     if (historyExclusive.active) {
       scheduleLegacyHomeDeviceInfoRetryAfterHistory(protocol, hasCachedSnapshot, reason, 'history-exclusive');
       appendAwarenessDiagnosticLog('legacy-home-device-info-skip', {
@@ -7516,7 +7547,7 @@ const scheduleLegacyHomeHistoryLongRetry = (
     snapshot: getAwarenessConnectionSnapshot()
   });
   setTimeout(() => {
-    const historyExclusive = getLegacyBleHistoryExclusiveSnapshot();
+    const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(getAwarenessCanonicalDeviceMac());
     const hasRunningHistoryRead = Boolean(legacyHomeHistoryReadPromise || legacyHomeHistoryReadInFlight.value);
     if (hasRunningHistoryRead || historyExclusive.active) {
       appendAwarenessDiagnosticLog('legacy-home-history-long-retry-skip', {
@@ -7566,7 +7597,7 @@ const scheduleLegacyHomeHistoryLongRetryAfterPartialUpload = (
     });
     return false;
   }
-  const activeHistoryExclusiveSnapshot = getLegacyBleHistoryExclusiveSnapshot();
+  const activeHistoryExclusiveSnapshot = getLegacyBleHistoryExclusiveSnapshot(getAwarenessCanonicalDeviceMac());
   const activeHistoryReadStillRunning = Boolean(
     legacyHomeHistoryReadInFlight.value || legacyHomeHistoryReadPromise || activeHistoryExclusiveSnapshot.active
   );
@@ -7766,7 +7797,7 @@ const startLegacyHomeHistoryReadInBackground = (
     return;
   }
 
-  const historyExclusive = getLegacyBleHistoryExclusiveSnapshot();
+  const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(getAwarenessCanonicalDeviceMac());
   if (historyExclusive.active) {
     appendAwarenessDiagnosticLog('legacy-home-history-read-skip', {
       protocol,

@@ -167,7 +167,7 @@ const syncDevice = () => {
   if (!hasDevice.value) {
     uni.showModal({
       title: '还没有绑定设备',
-      content: '请让子女先在家人守护里帮您绑定设备。绑定后，您只需要佩戴设备并打开小程序同步。',
+        content: '请让子女先在亲友共享里帮您绑定设备。绑定后，您只需要佩戴设备并打开小程序同步。',
       confirmText: '联系家人',
       cancelText: '知道了',
       success: (res) => {
@@ -208,7 +208,7 @@ onPullDownRefresh(async () => {
 
     <view class="device-card">
       <view class="device-name">{{ hasDevice ? deviceName : '暂未绑定设备' }}</view>
-      <view class="device-id">{{ hasDevice ? deviceIdentity : '请让子女在家人守护中完成绑定' }}</view>
+          <view class="device-id">{{ hasDevice ? deviceIdentity : '请让子女在亲友共享中完成绑定' }}</view>
       <view class="info-row">
         <view class="info-label">最近同步</view>
         <view class="info-value">{{ lastSyncText }}</view>

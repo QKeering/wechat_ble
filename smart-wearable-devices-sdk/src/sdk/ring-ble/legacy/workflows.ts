@@ -801,9 +801,10 @@ export const refreshLegacyBusinessMetrics = async (
   runtime?: RingBleRuntime,
   options: RefreshLegacyBusinessMetricsOptions = {}
 ): Promise<RefreshLegacyBusinessMetricsResult> => {
-  if (isLegacyBleHistoryExclusiveActive()) {
-    const currentDevice = runtime?.getDeviceInfo?.() as RingDeviceInfo | undefined;
-    const exclusive = getLegacyBleHistoryExclusiveSnapshot();
+  const currentDevice = runtime?.getDeviceInfo?.() as RingDeviceInfo | undefined;
+  const currentDeviceIdentity = currentDevice?.mac || currentDevice?.uniMacId || currentDevice?.deviceId;
+  if (isLegacyBleHistoryExclusiveActive(currentDeviceIdentity)) {
+    const exclusive = getLegacyBleHistoryExclusiveSnapshot(currentDeviceIdentity);
     appendRingDiagnosticLog('L19 BLE', 'legacy-business-refresh-skip-history-exclusive', {
       protocol: adapter.protocol,
       deviceId: currentDevice?.deviceId,

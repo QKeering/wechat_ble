@@ -26,7 +26,7 @@ const userStore = useUserStore();
 const ringStore = useRingStore();
 const ring = useRingBusinessData();
 const controller = useRingBusinessController();
-const DEVICE_INFO_SNAPSHOT_WAIT_MS = 12000;
+const DEVICE_INFO_SNAPSHOT_WAIT_MS = 2000;
 const DEVICE_INFO_EMPTY_TEXT = '-';
 const content = '你确定要解除绑定吗？';
 const FIND_RING_RED_LIGHT_DURATION_MS = 10000;
@@ -43,6 +43,7 @@ const isFindingRing = ref(false);
 let findRingStopTimer: ReturnType<typeof setTimeout> | null = null;
 let findRingHintTimer: ReturnType<typeof setTimeout> | null = null;
 let activeFindRingCommandMode: FindRingCommandMode | null = null;
+let refreshDeviceInfoPromise: Promise<void> | null = null;
 
 type FindRingCommandMode = 'rw-health-control' | 'oxygen-measure';
 
@@ -257,9 +258,11 @@ const ensureDeviceReady = async () => {
   return false;
 };
 
-const refreshDeviceInfo = async () => {
+const runDeviceInfoRefresh = async () => {
   if (isBusy.value) return;
-  const activeHistoryExclusive = getLegacyBleHistoryExclusiveSnapshot();
+  const activeHistoryExclusive = getLegacyBleHistoryExclusiveSnapshot(
+    (ring.deviceInfo.value as Record<string, any> | null | undefined) || boundInfo.value
+  );
   if (activeHistoryExclusive.active) {
     lastActionText.value = '同步中，设备信息稍后刷新';
     appendDeviceDiagnosticLog('device-info-refresh-skip-history-exclusive', {
@@ -318,6 +321,19 @@ const refreshDeviceInfo = async () => {
     busyText.value = '';
     await loadBoundInfo();
   }
+};
+
+const refreshDeviceInfo = () => {
+  if (refreshDeviceInfoPromise) {
+    appendDeviceDiagnosticLog('device-info-refresh-single-flight-reuse', {
+      snapshot: getDevicePageSnapshot()
+    });
+    return refreshDeviceInfoPromise;
+  }
+  refreshDeviceInfoPromise = runDeviceInfoRefresh().finally(() => {
+    refreshDeviceInfoPromise = null;
+  });
+  return refreshDeviceInfoPromise;
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

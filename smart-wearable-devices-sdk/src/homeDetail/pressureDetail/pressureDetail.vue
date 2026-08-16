@@ -15,7 +15,9 @@ import {
 } from '@/utils/stressDisplay';
 import { cloneDeep } from 'lodash-es';
 const echarts = require('../../static/echarts.min.js');
-const PRESSURE_DETAIL_REQUEST_SOFT_TIMEOUT_MS = 3500;
+// 压力算法接口在并发场景下可能超过 3 秒。详情页允许稍长等待，但详情与总结必须独立失败，
+// 避免其中一路超时把另一路已经返回的有效数据一起丢掉。
+const PRESSURE_DETAIL_REQUEST_SOFT_TIMEOUT_MS = 6000;
 
 // 滑动日期相关
 const list = ref<string[]>(['日', '周', '月']);
@@ -222,43 +224,85 @@ const updatePressureChart = () => {
 const getStressDetail = async () => {
   const requestSeq = ++stressDetailRequestSeq;
   const isoDate = formatLocalDate(currentDate.value);
-  try {
-    const [res, summaryRes] = await withPressureDetailSoftTimeout(() =>
-      Promise.all([
-        getStressData(
-          {
-            date: isoDate,
-            type: currentName.value,
-            offset: offset.value
-          },
-          getPressureDetailSilentRequestConfig()
-        ),
-        getStressSummary({ date: isoDate }, getPressureDetailSilentRequestConfig())
-      ])
-    );
-    if (requestSeq !== stressDetailRequestSeq) return false;
-    if (summaryRes) {
-      stressSummaryObj.value = summaryRes;
+  const detailTask = withPressureDetailSoftTimeout(() =>
+    getStressData(
+      {
+        date: isoDate,
+        type: currentName.value,
+        offset: offset.value
+      },
+      getPressureDetailSilentRequestConfig()
+    )
+  )
+    .then((data) => ({ data, error: undefined }))
+    .catch((error) => ({ data: undefined, error }));
+  const summaryTask = withPressureDetailSoftTimeout(() =>
+    getStressSummary({ date: isoDate }, getPressureDetailSilentRequestConfig())
+  )
+    .then((data) => ({ data, error: undefined }))
+    .catch((error) => ({ data: undefined, error }));
+
+  const [detailResult, summaryResult] = await Promise.all([detailTask, summaryTask]);
+  if (requestSeq !== stressDetailRequestSeq) return false;
+
+  const res = detailResult.data as stressDetail | undefined;
+  const summaryRes = summaryResult.data as stressSummaryType | undefined;
+  if (summaryRes) {
+    stressSummaryObj.value = summaryRes;
+  } else if (summaryResult.error) {
+    console.warn('[pressureDetail] getStressSummary failed', summaryResult.error);
+  }
+
+  const summaryScore = getStressScoreNumber(
+    (summaryRes as any)?.todayStressScore,
+    (summaryRes as any)?.weekAvgStressScore
+  );
+  const summaryChart = Array.isArray((summaryRes as any)?.todayStressChart)
+    ? (summaryRes as any).todayStressChart
+    : [];
+
+  if (!res) {
+    if (detailResult.error) {
+      console.warn('[pressureDetail] getStressData failed', detailResult.error);
     }
-    if (res) {
-      stressDetailObj.value = res;
-      const backendScore = getStressScoreNumber(
-        (res as any).avgStressValue,
-        (summaryRes as any)?.todayStressScore,
-        (summaryRes as any)?.weekAvgStressScore,
-        (res as any).stressValue
-      );
-      if (backendScore > 0) {
-        pressureScore.value = backendScore;
-      }
+    /* Remove the stale inline declaration left by an earlier merge.
+    // 详情接口异常时保留页面上已有数据；总结接口仍可独立更新状态和分数。
+    */
+    const fallbackSummaryScore = getStressScoreNumber(
+      (summaryRes as any)?.todayStressScore,
+      (summaryRes as any)?.avgStressValue,
+      (summaryRes as any)?.stressValue,
+      (summaryRes as any)?.score
+    );
+    if (fallbackSummaryScore > 0) pressureScore.value = fallbackSummaryScore;
+    if (summaryChart.length > 0) {
+      stressDetailObj.value = {
+        ...stressDetailObj.value,
+        stressChart: summaryChart
+      } as stressDetail;
       return true;
     }
-  } catch (error) {
-    if (requestSeq === stressDetailRequestSeq) {
-      console.warn('[pressureDetail] getStressDetail failed', error);
-    }
+    return false;
   }
-  return false;
+
+  /* Stale declaration from an earlier merge; kept commented for safe cleanup.
+  // 当详情接口暂时没有曲线、但总结接口已经返回今日曲线时，用同源后端数据兜底。
+  */
+  const detailChart = Array.isArray((res as any).stressChart) ? (res as any).stressChart : [];
+  stressDetailObj.value = {
+    ...res,
+    stressChart: detailChart.length > 0 ? detailChart : summaryChart
+  } as stressDetail;
+  const backendScore = getStressScoreNumber(
+    (res as any).avgStressValue,
+    (summaryRes as any)?.todayStressScore,
+    (summaryRes as any)?.weekAvgStressScore,
+    (res as any).stressValue
+  );
+  if (backendScore > 0) {
+    pressureScore.value = backendScore;
+  }
+  return true;
 };
 const refreshPressureDetailChart = async () => {
   const changed = await getStressDetail();

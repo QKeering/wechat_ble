@@ -196,9 +196,9 @@ type MineMenuItem = {
 
 const menuList: MineMenuItem[] = [
   {
-    iconText: '护',
+    iconText: '友',
     iconClass: 'menu-icon-family',
-    title: '\u5bb6\u4eba\u5b88\u62a4',
+    title: '\u4eb2\u53cb\u5171\u4eab',
     path: '/pages/family/family'
   },
   {
@@ -3096,7 +3096,7 @@ async function refreshMineDeviceSnapshot(options: MineSnapshotRefreshOptions = {
   const hasCachedSnapshot = hasMineCachedSnapshot();
   const needsDeviceInfoRefresh = !hasMineBatterySnapshot() || !hasMineFirmwareSnapshot();
   if (!options.force && hasCachedSnapshot && !needsDeviceInfoRefresh) return;
-  const historyExclusive = getLegacyBleHistoryExclusiveSnapshot();
+  const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(ringDeviceInfo.value);
   if (historyExclusive.active) {
     appendMineDiagnosticLog('device-snapshot-skip-history-exclusive', {
       options,
@@ -3125,7 +3125,7 @@ async function refreshMineDeviceSnapshot(options: MineSnapshotRefreshOptions = {
 
 const refreshMineRwDeviceInfoSnapshotInBackground = (reason: string) => {
   if (!isMineRwRing()) return;
-  const historyExclusive = getLegacyBleHistoryExclusiveSnapshot();
+  const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(ringDeviceInfo.value);
   if (historyExclusive.active) {
     appendMineDiagnosticLog('rw-device-info-background-refresh-skip', {
       reason,
@@ -4505,7 +4505,7 @@ const handleMineRwL19Acceptance = async () => {
   line-height: 1;
 }
 .menu-icon-family {
-  background: linear-gradient(135deg, #35d7c7 0%, #2f7cff 100%);
+  background: linear-gradient(135deg, #ff8da1 0%, #7c6cff 100%);
 }
 .menu-icon-elder {
   background: linear-gradient(135deg, #8b5cf6 0%, #4c76f1 100%);

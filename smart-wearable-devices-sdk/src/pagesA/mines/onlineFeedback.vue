@@ -26,7 +26,7 @@ const categoryOptions: FeedbackCategoryOption[] = [
   { value: 'charge_failed', label: '设备充不上电' },
   { value: 'bind_failed', label: '无法绑定' },
   { value: 'wear_measure', label: '佩戴/测量问题' },
-  { value: 'account_family', label: '账号/家人守护' },
+  { value: 'account_family', label: '账号/亲友共享' },
   { value: 'other', label: '其他问题' }
 ];
 

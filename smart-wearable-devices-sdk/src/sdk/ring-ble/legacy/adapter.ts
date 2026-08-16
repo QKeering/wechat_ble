@@ -490,7 +490,9 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   // transfer (the B7 long-session failure).  The age cap prevents a lost terminal
   // packet from protecting a dead connection forever.
   const getActiveHistoryReadGuard = () => {
-    const session = getLegacyBleHistoryExclusiveSnapshot();
+    const session = getLegacyBleHistoryExclusiveSnapshot(
+      runtime?.getDeviceInfo?.() || dataListenerDeviceId
+    );
     const wireElapsedMs = historyWireTrace ? Date.now() - historyWireTrace.startedAt : 0;
     const wireActive = Boolean(historyWireTrace && wireElapsedMs <= 120000);
     return {
@@ -1506,7 +1508,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     }
 
     if (dataListenerHandler) {
-      const session = getLegacyBleHistoryExclusiveSnapshot();
+      const session = getLegacyBleHistoryExclusiveSnapshot(runtime?.getDeviceInfo?.() || deviceId);
       if (session.active) {
         appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-replace-skipped-history-active', {
           deviceId,
@@ -1679,7 +1681,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       return;
     }
     clearDataListener({ ...pending, reason: pending.reason || 'deferred-session-idle', caller: pending.caller || 'session-idle' });
-  });
+  }, () => runtime?.getDeviceInfo?.() || dataListenerDeviceId);
 
   return {
     protocol: 'legacy',

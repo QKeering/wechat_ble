@@ -1021,7 +1021,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       return refreshPromise;
     }
 
-    const historyExclusive = getLegacyBleHistoryExclusiveSnapshot();
+    const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(ble.deviceInfo.value);
     if (historyExclusive.active) {
       const skippedResult = createHistoryExclusiveRefreshResult(lastRefreshResult.value);
       lastRefreshResult.value = silent
@@ -1162,7 +1162,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       ready: isReady.value,
       deviceId: ble.deviceInfo.value.deviceId
     });
-    const historyExclusive = getLegacyBleHistoryExclusiveSnapshot();
+    const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(ble.deviceInfo.value);
     if (historyExclusive.active) {
       const skippedResult = createDeviceInfoVisibleRefreshResult(
         createHistoryExclusiveRefreshResult(lastRefreshResult.value),

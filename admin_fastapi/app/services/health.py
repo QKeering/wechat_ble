@@ -731,6 +731,19 @@ def _visible_l19_record_time(unix_time: int) -> datetime | None:
     return record_time
 
 
+def _derive_hrv_from_rr_intervals(values: list[int]) -> int | None:
+    """Derive RMSSD HRV when an L19 history record only carries RR intervals."""
+    plausible = [int(value) for value in values if 300 <= int(value) <= 2000]
+    if len(plausible) < 2:
+        return None
+    squared_diffs = [
+        (plausible[index] - plausible[index - 1]) ** 2
+        for index in range(1, len(plausible))
+    ]
+    rmssd = round(math.sqrt(sum(squared_diffs) / len(squared_diffs)))
+    return rmssd if 1 <= rmssd <= 300 else None
+
+
 def parse_l19_raw_history_frame(frame: dict[str, Any]) -> list[dict[str, Any]]:
     data = _bytes_from_hex(frame.get("raw_hex") or frame.get("rawHex") or "")
     if len(data) < 8:
@@ -761,6 +774,7 @@ def parse_l19_raw_history_frame(frame: dict[str, Any]) -> list[dict[str, Any]]:
             if rr_offset + 1 >= len(data):
                 break
             rr_intervals.append(_read_uint16_le(data, rr_offset))
+        effective_hrv = hrv if 1 <= hrv <= 300 else _derive_hrv_from_rr_intervals(rr_intervals)
         if record_time is not None:
             item: dict[str, Any] = {
                 "recordTime": record_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -778,9 +792,10 @@ def parse_l19_raw_history_frame(frame: dict[str, Any]) -> list[dict[str, Any]]:
                 item["heartRate"] = heart_rate
             if 70 <= spo2 <= 100:
                 item["spo2"] = spo2
-            if 1 <= hrv <= 300:
-                item["hrv"] = hrv
-            if 0 <= stress <= 100:
+            if effective_hrv is not None:
+                item["hrv"] = effective_hrv
+            # L19 uses zero when pressure is absent; do not suppress the HRV fallback.
+            if 1 <= stress <= 100:
                 item["stress"] = stress
             if 25.0 <= temperature <= 45.0:
                 item["temperature"] = temperature
@@ -1642,9 +1657,9 @@ def calculate_daily_summary(db: Session, user_id: int, record_date: str | date) 
               {avg_expr("temperature")} as temperature_avg,
               {min_expr("temperature")} as temperature_min,
               {max_expr("temperature")} as temperature_max,
-              avg(case when stress is not null and stress >= 0 and stress <= 100 then stress end) as stress_avg,
-              min(case when stress is not null and stress >= 0 and stress <= 100 then stress end) as stress_min,
-              max(case when stress is not null and stress >= 0 and stress <= 100 then stress end) as stress_max,
+              avg(case when stress is not null and stress >= 1 and stress <= 100 then stress end) as stress_avg,
+              min(case when stress is not null and stress >= 1 and stress <= 100 then stress end) as stress_min,
+              max(case when stress is not null and stress >= 1 and stress <= 100 then stress end) as stress_max,
               {avg_expr("blood_sugar")} as blood_sugar_avg,
               {min_expr("blood_sugar")} as blood_sugar_min,
               {max_expr("blood_sugar")} as blood_sugar_max,
@@ -1654,7 +1669,7 @@ def calculate_daily_summary(db: Session, user_id: int, record_date: str | date) 
               {avg_expr("diastolic")} as diastolic_avg,
               {min_expr("diastolic")} as diastolic_min,
               {max_expr("diastolic")} as diastolic_max,
-              sum(case when stress between 0 and 29 then 1 else 0 end) as stress_relaxed_time,
+              sum(case when stress between 1 and 29 then 1 else 0 end) as stress_relaxed_time,
               sum(case when stress between 30 and 49 then 1 else 0 end) as stress_normal_time,
               sum(case when stress between 50 and 69 then 1 else 0 end) as stress_medium_time,
               sum(case when stress between 70 and 100 then 1 else 0 end) as stress_high_time,
@@ -1695,7 +1710,11 @@ def calculate_daily_summary(db: Session, user_id: int, record_date: str | date) 
     spo2_score = calculate_spo2_score(spo2_values)
     temp_score = calculate_temperature_score(temp_values)
     effective_stress_avg = data.get("stress_avg")
-    if effective_stress_avg is None:
+    try:
+        has_direct_stress = effective_stress_avg is not None and float(effective_stress_avg) > 0
+    except (TypeError, ValueError):
+        has_direct_stress = False
+    if not has_direct_stress:
         effective_stress_avg = estimate_stress_from_hrv(data.get("hrv_avg"))
     stress_score = max(0, 100 - int(float(effective_stress_avg))) if effective_stress_avg is not None else None
     sleep_data = sleep_summary_from_records(db, user_id, record_date)
