@@ -4,7 +4,7 @@ import { QKEER_BUILD_INFO, QKEER_BUILD_TAG } from '@/utils/buildInfo';
 export const RING_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 export const RING_DIAGNOSTIC_VERBOSE_STORAGE_KEY = 'qkeer:ring-diagnostic-verbose';
 const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
-const RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH = 4000;
+const RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH = 2400;
 const RING_DIAGNOSTIC_LOG_FLUSH_DELAY_MS = 2500;
 
 type RingDiagnosticLogEntry = {
@@ -18,6 +18,10 @@ type RingDiagnosticLogEntry = {
 let diagnosticLogCache: RingDiagnosticLogEntry[] | null = null;
 let diagnosticLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let diagnosticVerboseLoggingCache: boolean | null = null;
+// A new value is created for every JavaScript runtime. Unlike the persisted
+// diagnostic session id, this can reveal two mini-program runtimes competing
+// for the same device without confusing a feature tag with an application build.
+const APP_RUNTIME_INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
 export const isRingDiagnosticNodeRuntime = () => Boolean((globalThis as any).process?.versions?.node);
 const padDiagnosticNumber = (value: number, length: number) => `${value}`.padStart(length, '0');
@@ -84,6 +88,10 @@ const DIAGNOSTIC_DEFAULT_HIDDEN_EVENTS = new Set([
   'legacy-local-data-incomplete-flush-immediate',
   'legacy-local-data-incomplete-flush-early',
   'legacy-local-data-upload-pending',
+  'legacy-local-data-window-overlap-preserved',
+  'legacy-local-raw-frame-compensation-preserved',
+  'upload-http-batch-request-timing',
+  'business-aux-request-cache-skip',
   'legacy-home-history-read-completed-skip',
   'legacy-home-history-read-completed-marked',
   'legacy-home-history-long-retry-skip',
@@ -304,8 +312,18 @@ export const appendRingDiagnosticLog = (source: string, event: string, details?:
     if (!sampled.keep) return;
     const logs = readDiagnosticLogCache();
     const versionedDetails = sampled.details && typeof sampled.details === 'object' && !Array.isArray(sampled.details)
-      ? { ...(sampled.details as Record<string, unknown>), appBuild: QKEER_BUILD_INFO }
-      : { value: sampled.details, appBuild: QKEER_BUILD_INFO };
+      ? {
+          ...(sampled.details as Record<string, unknown>),
+          appBuild: QKEER_BUILD_INFO,
+          buildId: QKEER_BUILD_TAG,
+          appInstanceId: APP_RUNTIME_INSTANCE_ID
+        }
+      : {
+          value: sampled.details,
+          appBuild: QKEER_BUILD_INFO,
+          buildId: QKEER_BUILD_TAG,
+          appInstanceId: APP_RUNTIME_INSTANCE_ID
+        };
     const entry = {
       id: Date.now() * 1000 + Math.floor(Math.random() * 1000),
       time: formatDiagnosticTime(),

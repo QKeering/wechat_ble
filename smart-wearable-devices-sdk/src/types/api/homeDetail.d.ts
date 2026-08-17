@@ -57,6 +57,8 @@ export type submitDataType = {
   deviceMac: string;
   // 上传会话ID，用于后端幂等、rawFrames 补偿和问题追踪
   uploadSessionId?: string;
+  // 单批唯一标识：设备、时间范围与内容哈希组合，用于幂等确认
+  batchId?: string;
   // 后端绑定快照，上传前以 /app/device/current 为准
   bindingId?: string | number;
   bindingVersion?: string;

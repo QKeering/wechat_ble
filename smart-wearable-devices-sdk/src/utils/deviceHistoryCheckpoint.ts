@@ -32,8 +32,13 @@ const readDeviceHistoryCheckpoints = (): DeviceHistoryCheckpoint[] => {
     return list
       .filter((item: any) => item && item.key && (Number(item.timestamp) > 0 || Number(item.readTimestamp) > 0 || Number(item.emptyReadTimestamp) > 0))
       .map((item: any) => {
-        const backendAckTimestamp = Math.floor(Number(item.backendAckTimestamp || item.timestamp || 0));
-        const durableTimestamp = Math.max(backendAckTimestamp, Math.floor(Number(item.durableTimestamp || 0)));
+        const storedBackendAckTimestamp = Math.floor(Number(item.backendAckTimestamp || item.timestamp || 0));
+        const storedDurableTimestamp = Math.floor(Number(item.durableTimestamp || 0));
+        // Old v1 records only had `timestamp`; treat that legacy value as both
+        // durable and acknowledged. For staged records, never repair an invalid
+        // ACK by moving durable forward: clamp ACK back to the durable fact.
+        const durableTimestamp = storedDurableTimestamp > 0 ? storedDurableTimestamp : storedBackendAckTimestamp;
+        const backendAckTimestamp = Math.min(storedBackendAckTimestamp, durableTimestamp);
         const readTimestamp = Math.max(durableTimestamp, Math.floor(Number(item.readTimestamp || 0)));
         return ({
         key: String(item.key),
@@ -118,10 +123,13 @@ const setCheckpointStage = (
   const existingItems = readDeviceHistoryCheckpoints();
   const existing = existingItems.find((item) => item.key === key);
   const existingEmptyReadTimestamp = existing?.emptyReadTimestamp || 0;
-  const backendAckTimestamp = stage === 'backendAck' ? Math.max(existing?.backendAckTimestamp || 0, numericTimestamp) : existing?.backendAckTimestamp || 0;
-  const durableTimestamp = stage === 'durable' || stage === 'backendAck'
+  const durableTimestamp = stage === 'durable'
     ? Math.max(existing?.durableTimestamp || 0, numericTimestamp)
     : existing?.durableTimestamp || 0;
+  const requestedBackendAckTimestamp = stage === 'backendAck'
+    ? Math.max(existing?.backendAckTimestamp || 0, numericTimestamp)
+    : existing?.backendAckTimestamp || 0;
+  const backendAckTimestamp = Math.min(requestedBackendAckTimestamp, durableTimestamp);
   const readTimestamp = Math.max(existing?.readTimestamp || 0, stage === 'read' ? numericTimestamp : 0, durableTimestamp);
   const nextEmptyReadTimestamp = existingEmptyReadTimestamp > numericTimestamp ? existingEmptyReadTimestamp : 0;
   const deviceMacText = String(deviceMac || '');
@@ -139,7 +147,9 @@ const setCheckpointStage = (
     emptyReadUpdatedAt: nextEmptyReadTimestamp > 0 ? existing?.emptyReadUpdatedAt || existing?.updatedAt || 0 : 0
   };
   writeDeviceHistoryCheckpoints([nextItem, ...existingItems.filter((item) => item.key !== key)]);
-  return numericTimestamp;
+  if (stage === 'backendAck') return backendAckTimestamp;
+  if (stage === 'durable') return durableTimestamp;
+  return readTimestamp;
 };
 
 export const setDeviceHistoryReadCheckpoint = (deviceMac: unknown, protocol: unknown, timestamp: unknown) =>

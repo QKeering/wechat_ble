@@ -40,7 +40,7 @@
     {
       "path": "pages/family/family",
       "style": {
-        "navigationBarTitleText": "亲友共享",
+        "navigationBarTitleText": "亲友关怀",
         "navigationStyle": "custom",
         "enablePullDownRefresh": true
       }
@@ -93,7 +93,7 @@
     {
       "path": "pages/family/shareManage",
       "style": {
-        "navigationBarTitleText": "共享管理",
+        "navigationBarTitleText": "分享我的数据",
         "navigationStyle": "custom",
         "enablePullDownRefresh": true
       }
@@ -101,9 +101,16 @@
     {
       "path": "pages/family/inviteList",
       "style": {
-        "navigationBarTitleText": "家人邀请",
+        "navigationBarTitleText": "亲友邀请",
         "navigationStyle": "custom",
         "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/family/acceptInvite",
+      "style": {
+        "navigationBarTitleText": "确认邀请",
+        "navigationStyle": "custom"
       }
     },
     {

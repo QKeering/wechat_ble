@@ -673,6 +673,10 @@ export const syncLegacyHistory = async (
             dataTypes: options.dataTypes,
             timeoutMs
           });
+        // The BLE receive lease ends as soon as the device stream is complete.
+        // Identity attachment, local persistence and network upload must not
+        // keep ordinary device-info commands blocked.
+        releaseClaimedHistoryExclusive();
         const recordsWithDevice = records.map((record) => attachDeviceIdentityToRecord(record, currentDevice));
         const parsedWithDevice = attachDeviceIdentityToParsed(
           {
@@ -698,10 +702,17 @@ export const syncLegacyHistory = async (
           parsedWithDevice.status !== 'partial' &&
           isLegacyHistoryUploadSafeToDelete(uploadResult)
         ) {
+          releaseHistoryExclusive = claimLegacyBleHistoryExclusive(timeoutMs, {
+            protocol: adapter.protocol,
+            deviceId: currentDevice?.deviceId,
+            mac: currentDevice?.mac || currentDevice?.uniMacId,
+            dataType: 'delete-after-upload'
+          });
           const pendingDelete = adapter.waitForParsedData((item) => item.type === 'delete_all_local_data', timeoutMs);
           await adapter.sendDeleteAllLocalDataCommand();
           const deleteParsed = await pendingDelete;
           deleted = deleteParsed.status !== 'failed' && deleteParsed.success !== false;
+          releaseClaimedHistoryExclusive();
         }
 
         releaseClaimedHistoryExclusive();
@@ -741,6 +752,9 @@ export const syncLegacyHistory = async (
       sinceTimestamp,
       readAll: options.readAll
     }, timeoutMs);
+    // Only the on-air receive phase owns the history lease. CPU work and HTTP
+    // upload continue after it is released, keeping the BLE session responsive.
+    releaseClaimedHistoryExclusive();
     const recordsWithDevice = getLegacyLocalDataChunkRecords(parsedLocalData).map((record) =>
       attachDeviceIdentityToRecord(record, currentDevice)
     );
@@ -773,10 +787,17 @@ export const syncLegacyHistory = async (
 
     let deleted = false;
     if (deleteAfterUpload && parsed.status !== 'partial' && isLegacyHistoryUploadSafeToDelete(uploadResult)) {
+      releaseHistoryExclusive = claimLegacyBleHistoryExclusive(timeoutMs, {
+        protocol: adapter.protocol,
+        deviceId: currentDevice?.deviceId,
+        mac: currentDevice?.mac || currentDevice?.uniMacId,
+        dataType: 'delete-after-upload'
+      });
       const pendingDelete = adapter.waitForParsedData((item) => item.type === 'delete_all_local_data', timeoutMs);
       await adapter.sendDeleteAllLocalDataCommand();
       const deleteParsed = await pendingDelete;
       deleted = deleteParsed.status !== 'failed' && deleteParsed.success !== false;
+      releaseClaimedHistoryExclusive();
     }
 
     if (options.skipUpload !== true) notifyUploadStatus('success');

@@ -20,7 +20,7 @@ from urllib.parse import urlencode
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from redis import Redis
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
@@ -2511,6 +2511,34 @@ def wechat_access_token() -> str:
     return token
 
 
+def wechat_mini_program_code(invite_code: str) -> bytes:
+    token = wechat_access_token()
+    payload = json.dumps({
+        "scene": f"i={str(invite_code or '').strip().upper()}",
+        "page": "pages/family/family",
+        "check_path": False,
+        "env_version": "release",
+        "width": 430,
+    }, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        f"https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={token}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            content = response.read()
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise app_auth.AppAuthError(f"微信小程序码生成失败: {exc}") from exc
+    if content.lstrip().startswith(b"{"):
+        data = json.loads(content.decode("utf-8", errors="replace"))
+        raise app_auth.AppAuthError(
+            f"微信小程序码生成失败: {data.get('errmsg') or data.get('errcode') or '未知错误'}"
+        )
+    return content
+
+
 def wechat_phone_number(phone_code: str) -> str:
     token = wechat_access_token()
     data = post_json(
@@ -3384,6 +3412,140 @@ def upsert_device_upload_session(db: Session, **values) -> None:
         db.rollback()
 
 
+def ensure_device_upload_batch_receipt_schema(db: Session) -> bool:
+    try:
+        db.execute(
+            text(
+                """
+                create table if not exists device_upload_batch_receipt (
+                  id bigint primary key auto_increment,
+                  operator_user_id bigint not null,
+                  batch_id varchar(191) not null,
+                  request_hash char(64) not null,
+                  upload_session_id varchar(96) null,
+                  device_mac_norm varchar(64) null,
+                  accepted_count int not null default 0,
+                  duplicate_count int not null default 0,
+                  accepted_through bigint null,
+                  has_gap tinyint(1) not null default 0,
+                  response_snapshot longtext not null,
+                  create_time datetime not null,
+                  update_time datetime not null,
+                  unique key uk_upload_batch_operator (operator_user_id, batch_id),
+                  key idx_upload_batch_device (device_mac_norm, create_time),
+                  key idx_upload_batch_session (upload_session_id, create_time)
+                ) engine=InnoDB default charset=utf8mb4
+                """
+            )
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        return False
+
+
+def build_device_upload_batch_request_hash(payload: dict) -> str:
+    canonical = {
+        "deviceMac": normalize_device_mac_norm(payload.get("deviceMac") or payload.get("device_mac")),
+        "records": payload.get("dataList") or payload.get("records") or payload.get("data") or payload.get("list") or [],
+        "rawFrames": payload.get("rawFrames") or payload.get("raw_frames") or payload.get("frames") or [],
+        "protocol": payload.get("protocol"),
+        "deviceReadDone": payload.get("deviceReadDone") or payload.get("device_read_done"),
+        "historyCompleted": payload.get("historyCompleted") or payload.get("history_completed"),
+        "partialUpload": payload.get("partialUpload") or payload.get("partial_upload"),
+        "coverageStatus": payload.get("coverageStatus") or payload.get("coverage_status"),
+    }
+    encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def get_device_upload_batch_receipt(
+    db: Session,
+    *,
+    operator_user_id: int,
+    batch_id: str,
+    request_hash: str,
+) -> dict | None:
+    if not batch_id or not ensure_device_upload_batch_receipt_schema(db):
+        return None
+    row = db.execute(
+        text(
+            """
+            select request_hash, response_snapshot
+            from device_upload_batch_receipt
+            where operator_user_id=:operator_user_id and batch_id=:batch_id
+            limit 1
+            """
+        ),
+        {"operator_user_id": operator_user_id, "batch_id": batch_id},
+    ).mappings().first()
+    if not row:
+        return None
+    if str(row.get("request_hash") or "") != request_hash:
+        raise ValueError("batchId 已被不同内容使用，请重新生成批次编号")
+    try:
+        snapshot = json.loads(str(row.get("response_snapshot") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    return snapshot
+
+
+def save_device_upload_batch_receipt(
+    db: Session,
+    *,
+    operator_user_id: int,
+    batch_id: str,
+    request_hash: str,
+    upload_session_id: str,
+    device_mac: str | None,
+    response_snapshot: dict,
+) -> dict:
+    if not batch_id or not ensure_device_upload_batch_receipt_schema(db):
+        return response_snapshot
+    now = datetime.now()
+    payload = {
+        "operator_user_id": operator_user_id,
+        "batch_id": batch_id,
+        "request_hash": request_hash,
+        "upload_session_id": upload_session_id,
+        "device_mac_norm": normalize_device_mac_norm(device_mac),
+        "accepted_count": int(response_snapshot.get("acceptedCount") or 0),
+        "duplicate_count": int(response_snapshot.get("duplicateCount") or 0),
+        "accepted_through": response_snapshot.get("acceptedThrough"),
+        "has_gap": 1 if response_snapshot.get("hasGap") else 0,
+        "response_snapshot": json.dumps(response_snapshot, ensure_ascii=False, default=str),
+        "create_time": now,
+        "update_time": now,
+    }
+    db.execute(
+        text(
+            """
+            insert ignore into device_upload_batch_receipt (
+              operator_user_id, batch_id, request_hash, upload_session_id, device_mac_norm,
+              accepted_count, duplicate_count, accepted_through, has_gap, response_snapshot,
+              create_time, update_time
+            ) values (
+              :operator_user_id, :batch_id, :request_hash, :upload_session_id, :device_mac_norm,
+              :accepted_count, :duplicate_count, :accepted_through, :has_gap, :response_snapshot,
+              :create_time, :update_time
+            )
+            """
+        ),
+        payload,
+    )
+    db.commit()
+    saved = get_device_upload_batch_receipt(
+        db,
+        operator_user_id=operator_user_id,
+        batch_id=batch_id,
+        request_hash=request_hash,
+    )
+    return saved or response_snapshot
+
+
 def ensure_health_upload_exception_schema(db: Session) -> bool:
     try:
         db.execute(
@@ -3871,8 +4033,36 @@ def family_invite_list(user: dict = Depends(app_user), db: Session = Depends(get
 async def family_invite_create(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
     payload = await request.json()
     try:
-        return success(family.create_invite(db, int(user["id"]), payload))
+        result = family.create_invite(db, int(user["id"]), payload)
+        result["miniProgramCodeUrl"] = (
+            f"{str(request.base_url).rstrip('/')}"
+            f"/app/family/invite/{result['inviteCode']}/mini-code"
+        )
+        return success(result)
     except ValueError as exc:
+        db.rollback()
+        return error(str(exc))
+
+
+@router.get("/family/invite/{inviteCode}/preview")
+def family_invite_preview(inviteCode: str, user: dict = Depends(app_user), db: Session = Depends(get_db)):
+    try:
+        return success(family.get_invite_preview(db, inviteCode, int(user["id"])))
+    except ValueError as exc:
+        db.rollback()
+        return error(str(exc))
+
+
+@router.get("/family/invite/{inviteCode}/mini-code")
+def family_invite_mini_code(inviteCode: str, db: Session = Depends(get_db)):
+    try:
+        family.require_pending_invite(db, inviteCode)
+        return Response(
+            content=wechat_mini_program_code(inviteCode),
+            media_type="image/png",
+            headers={"Cache-Control": "no-store"},
+        )
+    except (ValueError, app_auth.AppAuthError) as exc:
         db.rollback()
         return error(str(exc))
 
@@ -3895,11 +4085,22 @@ def family_invite_reject(inviteCode: str, user: dict = Depends(app_user), db: Se
         return error(str(exc))
 
 
+def family_member_dashboard_payload(db: Session, member: dict) -> dict:
+    """Build a shared dashboard with the same resolved sleep total as the owner home page."""
+    dashboard = family.member_dashboard(db, member, health_index_payload)
+    if family.has_permission(member, "sleep"):
+        data_user_id = int(member["dataUserId"])
+        values = effective_sleep_values(db, data_user_id, date.today().isoformat())
+        sleep_duration = values["REM"] + values["LIGHT"] + values["DEEP"] + values["NAP"]
+        dashboard.setdefault("summary", {})["sleepDuration"] = sleep_duration
+    return dashboard
+
+
 @router.get("/family/elders/{relationId}/health/overview")
 def family_relation_health_overview(relationId: int, user: dict = Depends(app_user), db: Session = Depends(get_db)):
     try:
         member = family.member_for_relation(db, int(user["id"]), relationId)
-        return localized_success(family.member_dashboard(db, member, health_index_payload))
+        return localized_success(family_member_dashboard_payload(db, member))
     except ValueError as exc:
         return error(str(exc))
 
@@ -4041,7 +4242,7 @@ async def family_device_bind(request: Request, user: dict = Depends(app_user), d
 @router.get("/family/health/dashboard")
 def family_health_dashboard(memberId: int, user: dict = Depends(app_user), db: Session = Depends(get_db)):
     member = family.require_member(db, int(user["id"]), memberId)
-    return localized_success(family.member_dashboard(db, member, health_index_payload))
+    return localized_success(family_member_dashboard_payload(db, member))
 
 
 @router.get("/family/health/index")
@@ -4109,7 +4310,7 @@ def family_sleep_overview(memberId: int, request: Request, user: dict = Depends(
 def family_alert_list(memberId: int, user: dict = Depends(app_user), db: Session = Depends(get_db)):
     member = family.require_member(db, int(user["id"]), memberId)
     family.require_permission(member, "alerts")
-    dashboard = family.member_dashboard(db, member, health_index_payload)
+    dashboard = family_member_dashboard_payload(db, member)
     return success(dashboard["alerts"])
 
 
@@ -4117,7 +4318,7 @@ def family_alert_list(memberId: int, user: dict = Depends(app_user), db: Session
 def family_ai_daily_summary(memberId: int, user: dict = Depends(app_user), db: Session = Depends(get_db)):
     member = family.require_member(db, int(user["id"]), memberId)
     family.require_permission(member, "aiSummary")
-    dashboard = family.member_dashboard(db, member, health_index_payload)
+    dashboard = family_member_dashboard_payload(db, member)
     return success(dashboard["aiSummary"])
 
 
@@ -5235,17 +5436,47 @@ def upsert_sync_health_raw_records(db: Session, table, records: list[dict]) -> d
     deduped_records = dedupe_sync_health_raw_records(records)
     sleep_state_count = sum(1 for values in deduped_records if values.get("sleep_state") is not None)
     existing_ids = prefetch_sync_health_raw_ids(db, table, deduped_records)
-    inserted_count = 0
-    updated_count = 0
+    inserted_count = sum(
+        1 for values in deduped_records if sync_health_raw_identity_key(values) not in existing_ids
+    )
+    updated_count = len(deduped_records) - inserted_count
+    grouped_inserts: dict[tuple[str, ...], list[dict]] = {}
+    grouped_updates: dict[tuple[str, ...], list[dict]] = {}
     for values in deduped_records:
-        existing_id = existing_ids.get(sync_health_raw_identity_key(values))
-        if existing_id:
-            update_values = {key: value for key, value in values.items() if key != "create_time"}
-            db.execute(table.update().where(table.c.id == existing_id).values(**update_values))
-            updated_count += 1
+        columns = tuple(sorted(key for key in values.keys() if key in table.c and key != "id"))
+        if not columns:
             continue
-        insert_sync_health_raw_record(db, table, values)
-        inserted_count += 1
+        existing_id = existing_ids.get(sync_health_raw_identity_key(values))
+        payload = {key: values.get(key) for key in columns}
+        if existing_id:
+            update_columns = tuple(key for key in columns if key != "create_time")
+            if update_columns:
+                grouped_updates.setdefault(update_columns, []).append(
+                    {**{key: values.get(key) for key in update_columns}, "_row_id": existing_id}
+                )
+        else:
+            grouped_inserts.setdefault(columns, []).append(payload)
+    for columns, payloads in grouped_updates.items():
+        assignments = ", ".join(f"`{column}`=:{column}" for column in columns)
+        db.execute(
+            text(f"update `{table.name}` set {assignments} where `id`=:_row_id"),
+            payloads,
+        )
+    for columns, payloads in grouped_inserts.items():
+        update_columns = [key for key in columns if key != "create_time"]
+        insert_columns = ", ".join(f"`{column}`" for column in columns)
+        insert_values = ", ".join(f":{column}" for column in columns)
+        if update_columns:
+            update_values = ", ".join(f"`{column}`=values(`{column}`)" for column in update_columns)
+            statement = text(
+                f"insert into `{table.name}` ({insert_columns}) values ({insert_values}) "
+                f"on duplicate key update {update_values}"
+            )
+        else:
+            statement = text(f"insert into `{table.name}` ({insert_columns}) values ({insert_values})")
+        # Passing a list lets SQLAlchemy/driver use executemany instead of one
+        # database round trip per health point.
+        db.execute(statement, payloads)
     if deduped_records:
         db.commit()
     return {
@@ -5935,6 +6166,28 @@ async def data_sync(
         raise
     payload_parse_ms = round((perf_counter() - payload_parse_started_at) * 1000)
     upload_session_id = str(payload.get("uploadSessionId") or payload.get("upload_session_id") or uuid4())
+    batch_id = str(payload.get("batchId") or payload.get("batch_id") or "").strip()
+    if len(batch_id) > 191:
+        return error("batchId 长度不能超过 191 个字符")
+    batch_request_hash = build_device_upload_batch_request_hash(payload) if batch_id else ""
+    if batch_id:
+        try:
+            cached_batch_result = get_device_upload_batch_receipt(
+                db,
+                operator_user_id=operator_user_id,
+                batch_id=batch_id,
+                request_hash=batch_request_hash,
+            )
+        except ValueError as exc:
+            return error(str(exc))
+        if cached_batch_result is not None:
+            write_algorithm_log(
+                "data_sync_batch_idempotent_replay",
+                user_id=operator_user_id,
+                upload_session_id=upload_session_id,
+                batch_id=batch_id,
+            )
+            return success(cached_batch_result, "批次已接收")
     records = payload.get("dataList") or payload.get("records") or payload.get("data") or payload.get("list") or []
     if isinstance(records, dict):
         records = [records]
@@ -6018,6 +6271,7 @@ async def data_sync(
     if not records:
         result = {
             "uploadSessionId": upload_session_id,
+            "batchId": batch_id or None,
             "success": False,
             "dataStatus": "empty",
             "coverageStatus": "missing",
@@ -6026,6 +6280,10 @@ async def data_sync(
             "healthCount": 0,
             "sleepCount": 0,
             "failCount": 0,
+            "acceptedCount": 0,
+            "duplicateCount": 0,
+            "acceptedThrough": None,
+            "hasGap": False,
             "canDeleteDeviceBlocks": False,
             "elapsedMs": round((perf_counter() - started_at) * 1000),
         }
@@ -6042,6 +6300,16 @@ async def data_sync(
             request_snapshot={"inputCount": 0},
             response_snapshot=result,
         )
+        if batch_id:
+            result = save_device_upload_batch_receipt(
+                db,
+                operator_user_id=operator_user_id,
+                batch_id=batch_id,
+                request_hash=batch_request_hash,
+                upload_session_id=upload_session_id,
+                device_mac=device_mac,
+                response_snapshot=result,
+            )
         log_data_sync_phase("data_sync_empty", data_status="empty")
         return success(result, "没有可同步数据")
 
@@ -6221,6 +6489,23 @@ async def data_sync(
     result["summarySkipped"] = not summary_inline
     success_count = int(result.get("count") or 0)
     fail_count = int(result.get("failCount") or 0)
+    accepted_count = max(0, len(records) - fail_count)
+    record_timestamps: list[int] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        parsed_record_time = parse_sync_record_time(
+            record.get("recordTime")
+            or record.get("record_time")
+            or record.get("time")
+            or record.get("timestamp")
+        )
+        if parsed_record_time:
+            record_timestamps.append(int(parsed_record_time.timestamp()))
+    has_gap = fail_count > 0 or accepted_count != len(records) or len(record_timestamps) != len(records)
+    accepted_through = max(record_timestamps) if record_timestamps and not has_gap else None
+    duplicate_count = int(result.get("healthDuplicateInputCount") or 0) + int(result.get("sleepDuplicateInputCount") or 0)
+    duplicate_count += int(result.get("healthUpdatedCount") or 0) + int(result.get("sleepUpdatedCount") or 0)
     data_status = "done" if success_count > 0 and fail_count == 0 else ("partial" if success_count > 0 else "failed")
     if partial_upload and data_status == "done":
         data_status = "partial"
@@ -6251,6 +6536,11 @@ async def data_sync(
         raw_local_status = "done" if raw_durable else "failed"
     can_delete_device_blocks = (not partial_upload) and device_read_done and history_completed and data_status == "done" and raw_local_status == "done"
     result["uploadSessionId"] = upload_session_id
+    result["batchId"] = batch_id or None
+    result["acceptedCount"] = accepted_count
+    result["duplicateCount"] = max(0, duplicate_count)
+    result["acceptedThrough"] = accepted_through
+    result["hasGap"] = has_gap
     result["dataUserId"] = target_user_id
     result["deviceMac"] = resolved_device_mac
     result["deviceMacNorm"] = binding.get("deviceMacNorm")
@@ -6265,6 +6555,16 @@ async def data_sync(
     result["rawFrameCount"] = raw_frame_count
     result["canDeleteDeviceBlocks"] = can_delete_device_blocks
     result["elapsedMs"] = round((perf_counter() - started_at) * 1000)
+    if batch_id:
+        result = save_device_upload_batch_receipt(
+            db,
+            operator_user_id=operator_user_id,
+            batch_id=batch_id,
+            request_hash=batch_request_hash,
+            upload_session_id=upload_session_id,
+            device_mac=resolved_device_mac,
+            response_snapshot=result,
+        )
     session_started_at = perf_counter()
     log_data_sync_phase(
         "data_sync_session_upsert_start",
@@ -6304,6 +6604,7 @@ async def data_sync(
                 "historyCompleted": history_completed,
                 "partialUpload": partial_upload,
                 "coverageStatus": coverage_status,
+                "batchId": batch_id or None,
             },
             response_snapshot=result,
         )

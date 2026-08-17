@@ -33,6 +33,7 @@ export interface PendingUploadSession<T = Record<string, any>> {
   partialUpload: boolean;
   coverageStatus: UploadCoverageStatus;
   retryCount: number;
+  nextDataRetryAt?: number;
   rawRetryCount: number;
   lastError?: string;
   dataResponse?: unknown;
@@ -61,6 +62,13 @@ const PENDING_UPLOAD_QUEUE_RAW_HASH_MAX_COUNT = 20;
 const PENDING_UPLOAD_PAYLOAD_PREFIX = 'qkeer:pending_upload_payload:v1';
 const PENDING_UPLOAD_PAYLOAD_CHUNK_SIZE = 40;
 const BACKEND_UPLOAD_BINDING_TIMEOUT_MS = 8000;
+const PENDING_UPLOAD_RETRY_BASE_DELAY_MS = 5 * 1000;
+const PENDING_UPLOAD_RETRY_MAX_DELAY_MS = 5 * 60 * 1000;
+
+const getPendingUploadRetryDelayMs = (retryCount: number) => {
+  const exponent = Math.max(0, Math.min(6, Math.floor(retryCount) - 1));
+  return Math.min(PENDING_UPLOAD_RETRY_MAX_DELAY_MS, PENDING_UPLOAD_RETRY_BASE_DELAY_MS * 2 ** exponent);
+};
 
 interface PendingUploadPayloadManifest {
   version: 1;
@@ -448,6 +456,7 @@ export const stagePendingUploadSession = <T = Record<string, any>>(
     partialUpload,
     coverageStatus,
     retryCount: Number(existing?.retryCount || 0),
+    nextDataRetryAt: Number(existing?.nextDataRetryAt || 0) || undefined,
     rawRetryCount: Number(existing?.rawRetryCount || 0),
     lastError: input.lastError || existing?.lastError,
     dataResponse: existing?.dataResponse,
@@ -491,6 +500,7 @@ export const markPendingUploadDataDone = (uploadSessionId: string, response?: un
             : 'data_done',
       dataStatus: nextDataStatus,
       dataResponse: response,
+      nextDataRetryAt: nextDataStatus === 'failed' ? session.nextDataRetryAt : undefined,
       lastError: nextDataStatus === 'failed' ? session.lastError : undefined,
       canDeleteDeviceBlocks
     };
@@ -501,24 +511,66 @@ export const markPendingUploadDataDone = (uploadSessionId: string, response?: un
   return updated;
 };
 
-export const listPendingUploadSessions = <T = Record<string, any>>() =>
-  readQueue<T>().filter(
+export const listPendingUploadSessions = <T = Record<string, any>>(options: { includeDeferred?: boolean } = {}) => {
+  const now = Date.now();
+  return readQueue<T>().filter(
     (session) =>
       session.dataPersisted !== false &&
       Array.isArray(session.dataList) &&
       session.dataList.length > 0 &&
-      (session.dataStatus === 'pending' || session.dataStatus === 'failed')
+      (session.dataStatus === 'pending' || session.dataStatus === 'failed') &&
+      (options.includeDeferred === true || Number(session.nextDataRetryAt || 0) <= now)
   );
+};
 
 export const markPendingUploadDataFailed = (uploadSessionId: string, error: unknown) =>
-  updatePendingUploadSession(uploadSessionId, (session) => ({
+  updatePendingUploadSession(uploadSessionId, (session) => {
+    const retryCount = Number(session.retryCount || 0) + 1;
+    return {
+      ...session,
+      status: 'data_failed',
+      dataStatus: 'failed',
+      retryCount,
+      nextDataRetryAt: Date.now() + getPendingUploadRetryDelayMs(retryCount),
+      lastError: error instanceof Error ? error.message : String((error as any)?.errMsg || error || 'data upload failed'),
+      canDeleteDeviceBlocks: false
+    };
+  });
+
+export const acknowledgePendingUploadBatch = <T = Record<string, any>>(
+  uploadSessionId: string,
+  acceptedCount: number,
+  response?: unknown
+) => {
+  const queue = readQueue<T>();
+  const index = queue.findIndex((item) => item.uploadSessionId === uploadSessionId);
+  if (index < 0) return null;
+  const session = queue[index];
+  const count = Math.max(0, Math.min(session.dataList.length, Math.floor(acceptedCount)));
+  if (count <= 0) return session;
+  const remaining = session.dataList.slice(count);
+  const dataPersisted = persistDataList(uploadSessionId, remaining);
+  const dataDone = remaining.length === 0;
+  const next: PendingUploadSession<T> = {
     ...session,
-    status: 'data_failed',
-    dataStatus: 'failed',
-    retryCount: Number(session.retryCount || 0) + 1,
-    lastError: error instanceof Error ? error.message : String((error as any)?.errMsg || error || 'data upload failed'),
-    canDeleteDeviceBlocks: false
-  }));
+    dataList: remaining,
+    dataListCount: remaining.length,
+    dataPersisted,
+    dataStatus: dataDone ? 'done' : 'pending',
+    nextDataRetryAt: undefined,
+    status: dataDone
+      ? session.rawStatus === 'done' || session.rawStatus === 'none'
+        ? 'done'
+        : 'data_done'
+      : 'pending',
+    dataResponse: response,
+    lastError: undefined,
+    updatedAt: Date.now()
+  };
+  queue[index] = next;
+  writeQueue(queue as PendingUploadSession[]);
+  return next;
+};
 
 export const markPendingUploadRawDone = (uploadSessionId: string, response?: unknown) =>
   updatePendingUploadSession(uploadSessionId, (session) => {

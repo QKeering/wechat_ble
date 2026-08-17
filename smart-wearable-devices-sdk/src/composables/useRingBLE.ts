@@ -1,9 +1,10 @@
-import { computed } from 'vue';
+import { computed, watch } from 'vue';
 import { useRingBleStoreSdk } from './useRingBleStoreSdk';
 import type { UseRingBleSdkOptions } from './useRingBleSdk';
 import { resolveRingProtocol, type RefreshLegacyBusinessMetricsResult, type RingDeviceInfo, type RwHealthDataName, type RwHistoryDataName } from '@/sdk/ring-ble';
 import type { RwHealthMonitoringConfig, RwUserProfile } from '@/sdk/ring-ble/rw/protocol';
 import { getRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
+import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 
 export interface UseRingBLEOptions extends UseRingBleSdkOptions {
   rwCompatScanTimeoutMs?: number;
@@ -60,6 +61,8 @@ const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
 
 let rwCompatHistoryQueue: Promise<unknown> = Promise.resolve();
 let rwCompatHistoryQueueDepth = 0;
+const communicationReadyPromiseByDevice = new Map<string, Promise<boolean>>();
+const deviceInfoCommandQueueByDevice = new Map<string, Promise<unknown>>();
 
 const isNodeRuntime = () => Boolean((globalThis as any).process?.versions?.node);
 
@@ -217,6 +220,36 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const lastMetricUpdateAt = computed(() => sdk.ringStore.lastMetricUpdateAt || sdk.ringStore.healthData.lastMetricUpdateAt || 0);
   const localData = computed(() => sdk.ringStore.localData || []);
   const historyRecords = computed(() => sdk.ringStore.historyRecords || []);
+  const getCommunicationDeviceKey = () => {
+    const current = sdk.deviceInfo.value;
+    return String(current.mac || current.advertis?.macInfo || current.uniMacId || current.deviceId || '').toUpperCase();
+  };
+  watch(
+    () => [sdk.isConnected.value, sdk.deviceInfo.value.deviceId, sdk.deviceInfo.value.notifyEnabled] as const,
+    ([connected, deviceId, notifyEnabled], previous) => {
+      const deviceChanged = Boolean(previous?.[1] && previous[1] !== deviceId);
+      if (!connected || !deviceId || notifyEnabled === false || deviceChanged) {
+        const previousKey = String(previous?.[1] || deviceId || '').toUpperCase();
+        const currentKey = getCommunicationDeviceKey();
+        const previousCleared = communicationReadyPromiseByDevice.delete(previousKey);
+        const currentCleared = currentKey !== previousKey
+          ? communicationReadyPromiseByDevice.delete(currentKey)
+          : false;
+        const cleared = previousCleared || currentCleared;
+        deviceInfoCommandQueueByDevice.delete(previousKey);
+        if (currentKey !== previousKey) deviceInfoCommandQueueByDevice.delete(currentKey);
+        if (cleared) {
+          appendRingDiagnosticLog('L19 BLE', 'communication-ready-cache-cleared', {
+            connected,
+            deviceId,
+            notifyEnabled,
+            deviceChanged,
+            deviceKey: currentKey || previousKey
+          });
+        }
+      }
+    }
+  );
 
   const normalizeScanInput = (input?: CompatScanInput) => {
     if (!input) return undefined;
@@ -225,12 +258,102 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     return input;
   };
 
+  const ensureCommunicationReadyShared = () => {
+    const deviceKey = getCommunicationDeviceKey() || 'unknown-device';
+    const existing = communicationReadyPromiseByDevice.get(deviceKey);
+    if (existing) return existing;
+    const task = sdk.ensureCommunicationReady();
+    communicationReadyPromiseByDevice.set(deviceKey, task);
+    task.finally(() => {
+      if (communicationReadyPromiseByDevice.get(deviceKey) === task) {
+        communicationReadyPromiseByDevice.delete(deviceKey);
+      }
+    }).catch(() => undefined);
+    return task;
+  };
+
   const runWithReady = async <T>(task: () => Promise<T>) => {
-    const ready = await sdk.ensureCommunicationReady();
+    const ready = await ensureCommunicationReadyShared();
     if (!ready) {
       throw new Error('Ring BLE communication is not ready.');
     }
     return task();
+  };
+
+  const hasDeviceInfoFastPath = () => {
+    const current = sdk.deviceInfo.value;
+    return Boolean(
+      sdk.isConnected.value &&
+      current.deviceId &&
+      current.serviceId &&
+      current.cmdCharId &&
+      current.dataCharId &&
+      current.notifyEnabled !== false
+    );
+  };
+
+  const enqueueDeviceInfoCommand = <T>(command: string, task: () => Promise<T>) => {
+    const queuedAt = Date.now();
+    const run = async () => {
+      const startedAt = Date.now();
+      const fastPath = hasDeviceInfoFastPath();
+      const commandDeviceId = sdk.deviceInfo.value.deviceId;
+      appendRingDiagnosticLog('L19 BLE', 'device-info-command-start', {
+        command,
+        deviceId: sdk.deviceInfo.value.deviceId,
+        queueWaitMs: startedAt - queuedAt,
+        fastPath
+      });
+      try {
+        let result: T;
+        try {
+          result = await (fastPath ? task() : runWithReady(task));
+        } catch (directError) {
+          if (!fastPath) throw directError;
+          communicationReadyPromiseByDevice.delete(getCommunicationDeviceKey() || 'unknown-device');
+          appendRingDiagnosticLog('L19 BLE', 'device-info-command-ready-retry', {
+            command,
+            deviceId: commandDeviceId,
+            elapsedMs: Date.now() - startedAt,
+            message: directError instanceof Error ? directError.message : String(directError)
+          });
+          const ready = await ensureCommunicationReadyShared();
+          if (!ready || sdk.deviceInfo.value.deviceId !== commandDeviceId) {
+            throw directError;
+          }
+          result = await task();
+        }
+        appendRingDiagnosticLog('L19 BLE', 'device-info-command-result', {
+          command,
+          deviceId: sdk.deviceInfo.value.deviceId,
+          queueWaitMs: startedAt - queuedAt,
+          elapsedMs: Date.now() - startedAt,
+          fastPath
+        });
+        return result;
+      } catch (error) {
+        appendRingDiagnosticLog('L19 BLE', 'device-info-command-failed', {
+          command,
+          deviceId: sdk.deviceInfo.value.deviceId,
+          queueWaitMs: startedAt - queuedAt,
+          elapsedMs: Date.now() - startedAt,
+          fastPath,
+          message: error instanceof Error ? error.message : String(error)
+        });
+        throw error;
+      }
+    };
+    const deviceKey = getCommunicationDeviceKey() || 'unknown-device';
+    const previousQueue = deviceInfoCommandQueueByDevice.get(deviceKey) || Promise.resolve();
+    const queued = previousQueue.then(run, run);
+    const settledQueue = queued.then(() => undefined, () => undefined);
+    deviceInfoCommandQueueByDevice.set(deviceKey, settledQueue);
+    settledQueue.finally(() => {
+      if (deviceInfoCommandQueueByDevice.get(deviceKey) === settledQueue) {
+        deviceInfoCommandQueueByDevice.delete(deviceKey);
+      }
+    }).catch(() => undefined);
+    return queued;
   };
 
   const readLocalData = (
@@ -360,13 +483,13 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const setTimedTemperatureJL = (config: RwHealthMonitoringConfig) => runWithReady(() => sdk.setTimedTemperatureJL(config));
   const controlHealthDataJL = (name: CompatRwHealthDataName, enabled = true) =>
     runWithReady(() => sdk.controlHealthDataJL(normalizeCompatRwHealthDataName(name), enabled));
-  const readBattery = () => runWithReady(() => sdk.sendBatteryCommand());
-  const readFirmwareVersion = () => runWithReady(() => sdk.sendFirmwareVersion());
-  const readSoftwareVersion = () => runWithReady(() => sdk.sendSoftwareVersion());
+  const readBattery = () => enqueueDeviceInfoCommand('battery', () => sdk.sendBatteryCommand());
+  const readFirmwareVersion = () => enqueueDeviceInfoCommand('firmware-version', () => sdk.sendFirmwareVersion());
+  const readSoftwareVersion = () => enqueueDeviceInfoCommand('software-version', () => sdk.sendSoftwareVersion());
   const readHeartRate = () => runWithReady(() => sdk.sendActiveMeasureCommand());
   const readBloodOxygen = () => runWithReady(() => sdk.sendOxyGenCommand());
   const readBodyTemperature = () => runWithReady(() => sdk.sendBodyTemperatureCommand());
-  const readDeviceTime = () => runWithReady(() => sdk.readDeviceTime());
+  const readDeviceTime = () => enqueueDeviceInfoCommand('device-time', () => sdk.readDeviceTime());
   // SDK 已按协议处理校时所需的 ready 策略；不要在兼容层再包一层恢复，
   // 否则 legacy 设备会在校时阶段重复恢复并阻塞历史读取。
   const updateDeviceTime = (...args: Parameters<typeof sdk.updateDeviceTime>) => sdk.updateDeviceTime(...args);

@@ -1609,9 +1609,36 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
   const ensureCommunicationReady = async () => {
     const lifecycleToken = connectionLifecycleToken;
-    await initBluetooth();
     const currentDevice = deviceInfo.value as RingDeviceInfo;
     const protocol = resolveRingProtocol(currentDevice);
+    // History sync commonly follows a successful reconnect immediately. Reopening
+    // the Bluetooth adapter here can spend tens of seconds waiting even though the
+    // discovered command channel and notifications are already usable. Reuse the
+    // recent ready lease and let the command's normal error path recover if the OS
+    // link disappeared between the two calls.
+    const canProbeRecentReadyLink =
+      isCommunicationReadyDevice(currentDevice) &&
+      currentDevice.notifyEnabled !== false &&
+      isConnected.value === true &&
+      lastCommunicationReadyAt > 0 &&
+      Date.now() - lastCommunicationReadyAt < 8000;
+    if (canProbeRecentReadyLink) {
+      const recentAdapter = await switchAdapter(protocol);
+      const physicalLinkAlive = Boolean(
+        currentDevice.deviceId && await recentAdapter.checkByRSSI?.(currentDevice.deviceId)
+      );
+      writeRwStoreLog('ensure-ready-recent-link-probe', {
+        protocol,
+        physicalLinkAlive,
+        lastCommunicationAgeMs: Date.now() - lastCommunicationReadyAt,
+        device: summarizeRingDeviceForStoreLog(currentDevice)
+      });
+      if (physicalLinkAlive) return true;
+      // Store fields can outlive the OS BLE link. Do not let that stale snapshot
+      // enter history/device-info commands as an apparent ready connection.
+      lastCommunicationReadyAt = 0;
+    }
+    await initBluetooth();
     const targetAdapter = await switchAdapter(protocol);
     if (protocol === 'rw') {
       writeRwStoreLog('ensure-ready-start', {

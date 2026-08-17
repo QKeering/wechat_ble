@@ -1,309 +1,150 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { onShow, onPullDownRefresh } from '@dcloudio/uni-app';
-import {
-  createFamilyInvite,
-  deleteFamilyRelation,
-  getFamilyGuardians,
-  type FamilyGuardian
-} from '@/common/api/family';
+import { onPullDownRefresh, onShow } from '@dcloudio/uni-app';
+import { createFamilyInvite, deleteFamilyRelation, getFamilyGuardians, type FamilyGuardian } from '@/common/api/family';
 
 const loading = ref(false);
-const guardians = ref<FamilyGuardian[]>([]);
-const invitePhone = ref('');
 const inviting = ref(false);
-const generatedInvite = ref('');
-const inviteExpireTime = ref('');
-const invitedPhone = ref('');
+const guardians = ref<FamilyGuardian[]>([]);
+const inviteCode = ref('');
+const expireTime = ref('');
+const miniProgramCodeUrl = ref('');
 
 const hasGuardians = computed(() => guardians.value.length > 0);
 
-const relationText = (relation?: string) => {
-  const map: Record<string, string> = {
-    father: '父亲',
-    mother: '母亲',
-    grandpa: '爷爷',
-    grandma: '奶奶',
-    parent: '父母',
-    other: '家人'
-  };
-  return map[relation || ''] || '家人';
-};
+const guardianName = (item: FamilyGuardian) => item.guardianName || item.guardianPhoneMasked || item.name || '亲友';
 
-const shareStatusText = (guardian: FamilyGuardian) => {
-  if (guardian.statusText) return guardian.statusText;
-  return '共享中';
-};
+function goFamilyHome() {
+  uni.redirectTo({
+    url: '/pages/family/family',
+    fail: () => uni.reLaunch({ url: '/pages/family/family' })
+  });
+}
 
-const fetchGuardians = async () => {
+function goBack() {
+  const pages = getCurrentPages();
+  if (pages.length > 1) {
+    uni.navigateBack({ delta: 1, fail: goFamilyHome });
+    return;
+  }
+  goFamilyHome();
+}
+
+async function loadGuardians() {
   loading.value = true;
   try {
     guardians.value = await getFamilyGuardians();
+  } catch (error) {
+    console.warn('[family-share] load guardians failed', error);
+    uni.showToast({ title: '共享关系加载失败', icon: 'none' });
   } finally {
     loading.value = false;
   }
-};
+}
 
-const cancelShare = (guardian: FamilyGuardian) => {
-  if (!guardian.relationId) {
-    uni.showToast({ title: '缺少共享关系编号', icon: 'none' });
-    return;
-  }
-  const guardianName = guardian.guardianName || guardian.guardianPhoneMasked || '该家人';
-  uni.showModal({
-    title: '取消共享',
-    content: `取消后，${guardianName} 将不能再查看您的历史和最新健康数据；如需再次共享，必须重新申请。`,
-    confirmText: '继续取消',
-    confirmColor: '#DC2626',
-    success: async (res) => {
-      if (!res.confirm) return;
-      uni.showModal({
-        title: '再次确认',
-        content: `请确认要取消 ${guardianName} 的共享关系。取消后不能直接恢复，需要重新发起申请并确认。`,
-        confirmText: '确定关闭',
-        confirmColor: '#DC2626',
-        success: async (second) => {
-          if (!second.confirm) return;
-          await deleteFamilyRelation(Number(guardian.relationId));
-          uni.showToast({ title: '已取消共享', icon: 'success' });
-          fetchGuardians();
-        }
-      });
-    }
-  });
-};
-
-const inviteShareText = computed(() => {
-  if (!generatedInvite.value) return '';
-  const phoneText = invitedPhone.value ? `，仅限手机号 ${invitedPhone.value} 使用` : '';
-  return `我在智能穿戴小程序中邀请你查看我的健康数据。邀请码：${generatedInvite.value}${phoneText}，有效期至 ${inviteExpireTime.value}。请打开小程序进入“家人邀请”处理。`;
-});
-
-const copyInvite = () => {
-  if (!inviteShareText.value) {
-    uni.showToast({ title: '请先生成邀请', icon: 'none' });
-    return;
-  }
-  uni.setClipboardData({
-    data: inviteShareText.value,
-    success: () => {
-      uni.showToast({ title: '邀请信息已复制', icon: 'success' });
-    }
-  });
-};
-
-const inviteGuardian = async () => {
-  const phone = invitePhone.value.trim();
-  if (!/^1\d{10}$/.test(phone)) {
-    uni.showToast({ title: '请输入正确的家人手机号', icon: 'none' });
-    return;
-  }
+async function createInvite() {
+  if (inviting.value) return;
   inviting.value = true;
   try {
-    const result = await createFamilyInvite({ inviteType: 1, targetPhone: phone });
-    generatedInvite.value = result.inviteCode;
-    inviteExpireTime.value = result.expireTime;
-    invitedPhone.value = phone;
-    uni.showModal({
-      title: '邀请已生成',
-      content: `邀请码 ${result.inviteCode}，7 天内有效。可复制后发送给家人。`,
-      showCancel: false,
-      confirmText: '知道了'
-    });
-    invitePhone.value = '';
+    const result = await createFamilyInvite({ inviteType: 1 });
+    inviteCode.value = result.inviteCode;
+    expireTime.value = result.expireTime;
+    miniProgramCodeUrl.value = result.miniProgramCodeUrl;
+  } catch (error) {
+    console.warn('[family-share] create invite failed', error);
+    uni.showToast({ title: '邀请生成失败，请稍后重试', icon: 'none' });
   } finally {
     inviting.value = false;
   }
-};
+}
 
-onShow(fetchGuardians);
+function copyInvite() {
+  if (!inviteCode.value) return;
+  uni.setClipboardData({
+    data: inviteCode.value,
+    success: () => uni.showToast({ title: '邀请码已复制', icon: 'success' })
+  });
+}
 
-onPullDownRefresh(async () => {
-  try {
-    await fetchGuardians();
-  } finally {
-    uni.stopPullDownRefresh();
+function cancelShare(item: FamilyGuardian) {
+  const relationId = Number(item.relationId || item.memberId);
+  if (!relationId) {
+    uni.showToast({ title: '共享关系信息缺失', icon: 'none' });
+    return;
   }
+  uni.showModal({
+    title: '取消共享',
+    content: `取消后，${guardianName(item)} 将不能继续查看你的健康数据；如需再次共享，需要重新申请。`,
+    confirmText: '确认取消',
+    confirmColor: '#ef4444',
+    success: async ({ confirm }) => {
+      if (!confirm) return;
+      try {
+        await deleteFamilyRelation(relationId);
+        uni.showToast({ title: '已取消共享', icon: 'success' });
+        await loadGuardians();
+      } catch (error) {
+        console.warn('[family-share] cancel relation failed', error);
+        uni.showToast({ title: '取消失败，请稍后重试', icon: 'none' });
+      }
+    }
+  });
+}
+
+onShow(loadGuardians);
+onPullDownRefresh(async () => {
+  await loadGuardians();
+  uni.stopPullDownRefresh();
 });
 </script>
 
 <template>
   <view class="page">
-    <uv-navbar placeholder title="共享管理" bgColor="#f1f3f6"></uv-navbar>
+    <uv-navbar placeholder title="分享我的数据" bgColor="transparent" @leftClick="goBack" />
 
-    <view class="header">
-      <view class="title">谁在查看我的数据</view>
-      <view class="desc">这里展示正在查看您健康数据的家人。取消后不能直接恢复，需要重新申请。</view>
-    </view>
-
-    <view class="invite-card">
-      <view class="section-title">邀请家人</view>
-      <view class="desc compact">填写子女手机号，生成 7 天有效的邀请码。对方登录后接受，即可查看您授权的数据。</view>
-      <uv-input
-        v-model="invitePhone"
-        type="number"
-        maxlength="11"
-        placeholder="请输入家人手机号"
-        fontSize="32rpx"
-        :customStyle="{ marginTop: '24rpx', height: '92rpx', background: '#F8FAFC', borderRadius: '18rpx', padding: '0 22rpx' }"
-      />
-      <uv-button
-        text="生成邀请"
-        color="#2E70FC"
-        :loading="inviting"
-        :customStyle="{ height: '92rpx', marginTop: '22rpx' }"
-        :customTextStyle="{ fontSize: '34rpx', fontWeight: 800 }"
-        @click="inviteGuardian"
-      />
-      <view v-if="generatedInvite" class="invite-result">
-        <view class="invite-label">已生成邀请码</view>
-        <view class="invite-code">{{ generatedInvite }}</view>
-        <view class="invite-desc">有效期至 {{ inviteExpireTime }}。复制后发送给家人，对方登录小程序后即可接受。</view>
-        <uv-button
-          text="复制邀请信息"
-          color="#E8F0FF"
-          :customStyle="{ height: '82rpx', marginTop: '18rpx' }"
-          :customTextStyle="{ color: '#2E70FC', fontSize: '32rpx', fontWeight: 800 }"
-          @click="copyInvite"
-        />
+    <view class="section-card">
+      <view class="section-title">我的共享</view>
+      <view class="section-desc">正在查看你健康数据的亲友。取消后需要重新申请才能恢复。</view>
+      <view v-if="loading" class="state-text">正在加载...</view>
+      <view v-else-if="!hasGuardians" class="empty-row">暂未分享给任何亲友</view>
+      <view v-else class="guardian-list">
+        <view v-for="item in guardians" :key="item.relationId || item.memberId" class="guardian-row">
+          <view class="avatar">{{ guardianName(item).slice(0, 1) }}</view>
+          <view class="guardian-info">
+            <view class="guardian-name">{{ guardianName(item) }}</view>
+            <view class="guardian-status">健康数据共享中</view>
+          </view>
+          <view class="cancel-action" @click="cancelShare(item)">取消</view>
+        </view>
       </view>
     </view>
 
-    <view v-if="loading" class="empty">正在加载共享关系...</view>
-
-    <view v-else-if="!hasGuardians" class="empty-card">
-      <view class="empty-title">当前没有共享给家人</view>
-      <view class="empty-desc">当您授权家人后，这里会显示正在查看您健康数据的人。</view>
-    </view>
-
-    <view v-else class="guardian-list">
-      <view v-for="guardian in guardians" :key="guardian.memberId" class="guardian-card">
-        <view class="guardian-top">
-          <view class="avatar">{{ (guardian.guardianName || guardian.guardianPhoneMasked || '家').slice(0, 1) }}</view>
-          <view class="info">
-            <view class="name">{{ guardian.guardianName || guardian.guardianPhoneMasked || '家人' }}</view>
-            <view class="relation">{{ relationText(guardian.relation) }} · {{ shareStatusText(guardian) }}</view>
-          </view>
-          <view class="status-pill">{{ shareStatusText(guardian) }}</view>
+    <view class="invite-card">
+      <view class="invite-icon">邀</view>
+      <view class="invite-title">邀请亲友关注你</view>
+      <view class="invite-desc">一键生成 7 天有效的邀请。对方接受后即可查看你的健康概览。</view>
+      <button v-if="!inviteCode" class="primary-button" :loading="inviting" @click="createInvite">生成邀请</button>
+      <view v-else class="result-panel">
+        <view class="result-label">方式一：微信扫码进入小程序</view>
+        <view class="qr-box">
+          <image v-if="miniProgramCodeUrl" class="mini-code" :src="miniProgramCodeUrl" mode="aspectFit" />
+          <view v-else class="code-loading">小程序码生成中...</view>
         </view>
-        <view class="action-row">
-          <uv-button
-            text="取消共享"
-            color="#FFF0F0"
-            :customStyle="{ width: '100%', height: '86rpx' }"
-            :customTextStyle="{ color: '#DC2626', fontSize: '32rpx' }"
-            @click="cancelShare(guardian)"
-          />
-        </view>
+        <view class="result-expire">小程序码有效期至 {{ expireTime || '7 天后' }}</view>
+        <view class="result-label manual-label">方式二：输入邀请码</view>
+        <view class="result-code">{{ inviteCode }}</view>
+        <button class="primary-button" @click="copyInvite">复制邀请码</button>
+        <view class="new-invite" @click="createInvite">重新生成</view>
       </view>
     </view>
   </view>
 </template>
 
 <style lang="scss" scoped>
-.page {
-  min-height: 100vh;
-  background: #f1f3f6;
-  padding: 0 30rpx 60rpx;
-  box-sizing: border-box;
-}
-.header,
-.invite-card,
-.guardian-card,
-.empty,
-.empty-card {
-  margin-top: 28rpx;
-  padding: 34rpx;
-  border-radius: 24rpx;
-  background: #ffffff;
-}
-.title {
-  font-size: 42rpx;
-  font-weight: 900;
-  color: #111827;
-}
-.section-title {
-  font-size: 36rpx;
-  font-weight: 900;
-  color: #111827;
-}
-.desc,
-.empty-desc,
-.relation {
-  margin-top: 14rpx;
-  color: #6b7280;
-  font-size: 30rpx;
-  line-height: 1.6;
-}
-.compact {
-  margin-top: 10rpx;
-}
-.invite-result {
-  margin-top: 24rpx;
-  padding: 24rpx;
-  border-radius: 20rpx;
-  background: #f8fafc;
-}
-.invite-label {
-  color: #6b7280;
-  font-size: 26rpx;
-}
-.invite-code {
-  margin-top: 8rpx;
-  color: #111827;
-  font-size: 44rpx;
-  font-weight: 900;
-  letter-spacing: 0;
-}
-.invite-desc {
-  margin-top: 10rpx;
-  color: #6b7280;
-  font-size: 28rpx;
-  line-height: 1.55;
-}
-.guardian-top {
-  display: flex;
-  align-items: center;
-}
-.avatar {
-  width: 92rpx;
-  height: 92rpx;
-  border-radius: 50%;
-  background: #e8f0ff;
-  color: #2e70fc;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 40rpx;
-  font-weight: 900;
-  margin-right: 24rpx;
-}
-.info {
-  flex: 1;
-  min-width: 0;
-}
-.name,
-.empty-title {
-  color: #111827;
-  font-size: 36rpx;
-  font-weight: 800;
-}
-.status-pill {
-  flex-shrink: 0;
-  padding: 10rpx 18rpx;
-  border-radius: 999rpx;
-  background: #e8f0ff;
-  color: #2563eb;
-  font-size: 26rpx;
-  font-weight: 800;
-}
-.action-row {
-  display: flex;
-  align-items: center;
-  margin-top: 24rpx;
-}
-.empty,
-.empty-card {
-  text-align: center;
-}
+.page{min-height:100vh;box-sizing:border-box;padding:0 28rpx 64rpx;background:linear-gradient(180deg,#eef4ff 0,#f3f5f8 360rpx)}
+.section-card,.invite-card{margin-top:26rpx;padding:34rpx;border-radius:30rpx;background:#fff;box-shadow:0 12rpx 36rpx rgba(42,73,128,.07)}
+.section-title,.invite-title{font-size:38rpx;font-weight:800;color:#172033}.section-desc,.invite-desc{margin-top:12rpx;font-size:28rpx;line-height:1.6;color:#7b8495}
+.state-text,.empty-row{padding:48rpx 0 18rpx;text-align:center;font-size:28rpx;color:#9aa2af}.guardian-list{margin-top:20rpx}.guardian-row{display:flex;align-items:center;padding:24rpx 0;border-top:1rpx solid #edf0f4}.avatar{display:flex;align-items:center;justify-content:center;width:84rpx;height:84rpx;border-radius:50%;background:#e8f0ff;color:#2e70fc;font-size:34rpx;font-weight:800}.guardian-info{flex:1;margin-left:20rpx}.guardian-name{font-size:31rpx;font-weight:700;color:#1c2434}.guardian-status{margin-top:7rpx;font-size:25rpx;color:#929aa7}.cancel-action{padding:14rpx 22rpx;border-radius:999rpx;background:#fff0f1;color:#e44952;font-size:27rpx}
+.invite-card{text-align:center}.invite-icon{display:flex;align-items:center;justify-content:center;width:98rpx;height:98rpx;margin:4rpx auto 22rpx;border-radius:30rpx;background:linear-gradient(135deg,#4e87ff,#2767f2);color:#fff;font-size:38rpx;font-weight:800}.primary-button{height:92rpx;margin-top:30rpx;border:0;border-radius:24rpx;background:#2e70fc;color:#fff;font-size:32rpx;font-weight:700;line-height:92rpx}.primary-button::after{border:0}.result-panel{margin-top:28rpx;padding:26rpx;border-radius:24rpx;background:#f6f8fc}.result-label{font-size:25rpx;color:#9098a6}.result-code{margin-top:8rpx;font-size:52rpx;font-weight:800;letter-spacing:6rpx;color:#172033}.result-expire{margin-top:8rpx;font-size:25rpx;color:#929aa7}.link-box{margin-top:22rpx;padding:20rpx;border-radius:16rpx;background:#fff;color:#6d7686;font-size:24rpx;line-height:1.5;word-break:break-all}.new-invite{padding-top:24rpx;color:#2e70fc;font-size:27rpx}
+.manual-label{margin-top:28rpx}.qr-box{display:flex;align-items:center;justify-content:center;width:420rpx;min-height:420rpx;margin:18rpx auto 10rpx;border-radius:22rpx;background:#fff}.mini-code{width:390rpx;height:390rpx}.code-loading{font-size:25rpx;color:#929aa7}
 </style>

@@ -7,13 +7,49 @@ import { refreshAppForegroundSessionId } from '@/utils/appForegroundSession';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import { QKEER_BUILD_INFO } from '@/utils/buildInfo';
 
-onLaunch(() => {
+let launchedFromFamilyEntry = false;
+
+const isFamilyLaunchOptions = (entry: any) => {
+  const entryPath = String(entry?.path || entry?.route || '').replace(/^\//, '');
+  if (entryPath.startsWith('pages/family/')) return true;
+  const query = entry?.query || {};
+  const scene = (() => {
+    try {
+      return decodeURIComponent(String(query.scene || entry?.sceneValue || ''));
+    } catch {
+      return String(query.scene || entry?.sceneValue || '');
+    }
+  })();
+  // Family mini-program codes use scene=i=INVITECODE. Device QR entries do
+  // not use this shape, so this does not suppress BLE for device binding.
+  return /(?:^|[?&])i=[a-z0-9]{6,16}(?:$|[&#])/i.test(scene);
+};
+
+const isFamilyEntry = (hookOptions?: any) => {
+  try {
+    const runtime = uni as any;
+    if (isFamilyLaunchOptions(hookOptions)) return true;
+    const entry = runtime.getEnterOptionsSync?.() || runtime.getLaunchOptionsSync?.() || {};
+    if (isFamilyLaunchOptions(entry)) return true;
+    const pages = runtime.getCurrentPages?.() || [];
+    const currentRoute = String(pages[pages.length - 1]?.route || '').replace(/^\//, '');
+    return currentRoute.startsWith('pages/family/');
+  } catch {
+    return false;
+  }
+};
+
+onLaunch((options: any) => {
+  launchedFromFamilyEntry = isFamilyEntry(options);
   appendRingDiagnosticLog('APP', 'build-version', QKEER_BUILD_INFO);
   // 使用 showErrorToast() 显式控制错误提示，不再需要全局 monkey-patch
 });
 
-onShow(() => {
+onShow((options: any) => {
   refreshAppForegroundSessionId();
+  // Family invitation and care pages are pure network flows. They must never
+  // request Bluetooth/privacy authorization just because the mini program opened.
+  if (launchedFromFamilyEntry || isFamilyEntry(options)) return;
   setTimeout(() => {
     try {
       const { initBluetooth, registerGlobalListeners } = useRingBLE();

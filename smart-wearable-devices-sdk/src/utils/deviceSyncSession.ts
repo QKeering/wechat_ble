@@ -22,6 +22,25 @@ interface ClaimDeviceSyncSessionOptions {
   staleMs?: number;
 }
 
+export interface DeviceSyncGateInput {
+  homeSyncing?: boolean;
+  businessRefreshRunning?: boolean;
+  historySyncRunning?: boolean;
+  historyReadRunning?: boolean;
+  historyReadPromiseRunning?: boolean;
+  stableSnapshotRunning?: boolean;
+  stableUploadScheduled?: boolean;
+  uploadRunning?: boolean;
+  finalRefreshRunning?: boolean;
+}
+
+export interface DeviceSyncGateSnapshot {
+  backgroundSyncing: boolean;
+  dataSyncing: boolean;
+  deferBusinessRefresh: boolean;
+  reasons: string[];
+}
+
 type ClaimDeviceSyncSessionResult =
   | { claimed: true; claim: DeviceSyncSessionClaim }
   | {
@@ -81,7 +100,10 @@ export const claimDeviceSyncSession = (options: ClaimDeviceSyncSessionOptions): 
   }
 
   const running = activeDeviceSyncSessions.get(key);
-  if (!options.force && running) {
+  // `force` means bypass the completed-session cooldown (for example a manual
+  // pull-down), never start a second session while the same device is running.
+  // Page-show, reconnect and pull-down must all reuse/skip the active flight.
+  if (running) {
     return {
       claimed: false,
       key,
@@ -136,4 +158,32 @@ export const finishDeviceSyncSession = (
 export const isDeviceSyncSessionRunning = (userId?: unknown, mac?: unknown) => {
   const key = getDeviceSyncSessionKey(userId, mac);
   return activeDeviceSyncSessions.has(key);
+};
+
+/**
+ * The single source of truth for UI/business gates during a device sync.
+ * Keep protocol/session state out of page-specific boolean expressions so a
+ * new sync phase cannot accidentally bypass one gate but block another.
+ */
+export const buildDeviceSyncGateSnapshot = (input: DeviceSyncGateInput): DeviceSyncGateSnapshot => {
+  const backgroundReasons: string[] = [];
+  if (input.historySyncRunning) backgroundReasons.push('history-sync');
+  if (input.historyReadRunning) backgroundReasons.push('history-read');
+  if (input.historyReadPromiseRunning) backgroundReasons.push('history-read-promise');
+  if (input.stableSnapshotRunning) backgroundReasons.push('stable-snapshot');
+  if (input.stableUploadScheduled) backgroundReasons.push('stable-upload-scheduled');
+  if (input.uploadRunning) backgroundReasons.push('upload');
+  if (input.finalRefreshRunning) backgroundReasons.push('final-refresh');
+
+  const backgroundSyncing = backgroundReasons.length > 0;
+  const reasons = [...backgroundReasons];
+  if (input.homeSyncing) reasons.push('home-sync');
+  if (input.businessRefreshRunning) reasons.push('business-refresh');
+
+  return {
+    backgroundSyncing,
+    dataSyncing: Boolean(input.homeSyncing || input.businessRefreshRunning || backgroundSyncing),
+    deferBusinessRefresh: Boolean(input.businessRefreshRunning || backgroundSyncing),
+    reasons
+  };
 };

@@ -52,8 +52,10 @@ import { MOTION_CALORIE_DISPLAY_UNIT, normalizeMotionCalorieKcal } from '@/utils
 import { formatBatteryStatusForDisplay, getRawBatteryPercent, isBatteryChargingLike } from '@/utils/batteryDisplay';
 import { readBatteryDisplayCache, writeBatteryDisplayCache } from '@/utils/batteryCache';
 import { reportRealBatteryLog } from '@/utils/deviceBatteryLog';
+import { setRwDiagnosticBusinessUploadActive } from '@/utils/rwDiagnosticUpload';
 import { getAppForegroundSessionId } from '@/utils/appForegroundSession';
 import {
+  acknowledgePendingUploadBatch,
   assertBackendUploadBinding,
   buildParsedUploadSyncMeta,
   buildUploadSyncMeta,
@@ -82,6 +84,7 @@ import {
   DEVICE_SYNC_SLEEP_OVERLAP_SECONDS
 } from '@/utils/deviceSyncPlanner';
 import {
+  buildDeviceSyncGateSnapshot,
   claimDeviceSyncSession,
   finishDeviceSyncSession,
   normalizeDeviceSyncMac,
@@ -144,6 +147,7 @@ const AWARENESS_AUXILIARY_SYNC_IDLE_MAX_WAIT_MS = 400;
 const AWARENESS_PROCESSED_REFRESH_IDLE_POLL_MS = 500;
 const AWARENESS_PROCESSED_REFRESH_IDLE_MAX_WAIT_MS = 8000;
 const AWARENESS_PROCESSED_REFRESH_HARD_MAX_WAIT_MS = 30000;
+const AWARENESS_FOREGROUND_SYNC_BUDGET_MS = 12000;
 const RW_HOME_HISTORY_DATA_TYPES: RwHistoryDataName[] = [
   'lastData',
   'sleepData',
@@ -338,11 +342,11 @@ const LEGACY_LOCAL_DATA_SUBMIT_TIMEOUT_MS = 30000;
 const LEGACY_LOCAL_DATA_SUBMIT_WATCHDOG_MS = LEGACY_LOCAL_DATA_SUBMIT_TIMEOUT_MS + 5000;
 const LEGACY_LOCAL_DATA_HTTP_RETRY_WINDOW_TTL_MS = 10 * 60 * 1000;
 // 前台只等待短链路提交；超过预算后走已有 HTTP retry/后台补偿，避免首页被上传锁定 60s+。
-const LEGACY_LOCAL_DATA_SUBMIT_FOREGROUND_BUDGET_MS = 12000;
+const LEGACY_LOCAL_DATA_SUBMIT_FOREGROUND_BUDGET_MS = 6000;
 // 大批次会让单次 /app/data/sync 超过前台预算，超时后虽会转 HTTP-only 补偿，
 // 但首批无法及时确认，页面仍会表现为长时间“同步中”。小批提交可让已成功数据
 // 立即落库并推进 checkpoint，剩余数据再由现有补偿机制续传，不触发 BLE 重读。
-const LEGACY_LOCAL_DATA_SUBMIT_BATCH_SIZE = 100;
+const LEGACY_LOCAL_DATA_SUBMIT_BATCH_SIZE = 50;
 const LEGACY_RAW_FRAME_BACKGROUND_UPLOAD_DELAY_MS = 3000;
 const LEGACY_HISTORY_READ_CHECKPOINT_OVERLAP_SECONDS = DEVICE_SYNC_SLEEP_OVERLAP_SECONDS;
 const LEGACY_HOME_HISTORY_LONG_RETRY_TIMEOUT_MS = 30000;
@@ -367,6 +371,8 @@ const AWARENESS_AUXILIARY_REFRESH_TTL_MS = 5 * 60 * 1000;
 const AWARENESS_STRONG_AUXILIARY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const AWARENESS_GIRL_HEALTH_BACKGROUND_DELAY_MS = 3000;
 const GIRL_HEALTH_PROFILE_UPDATED_STORAGE_KEY = 'qkeer_girl_health_profile_updated_at';
+const POST_BINDING_REFRESH_STORAGE_KEY = 'qkeer_post_binding_refresh_at';
+const POST_BINDING_REFRESH_MAX_AGE_MS = 2 * 60 * 1000;
 const GIRL_HEALTH_PROFILE_EXISTS_STORAGE_KEY_PREFIX = 'qkeer_girl_health_profile_exists';
 const GIRL_HEALTH_PROFILE_STORAGE_KEY_PREFIX = 'qkeer_girl_health_profile';
 const AWARENESS_BUSINESS_REQUEST_SOFT_TIMEOUT_MS = 8000;
@@ -447,10 +453,60 @@ const chunkLegacySubmitData = <T,>(items: T[], size: number): T[][] => {
   }
   return chunks;
 };
+const hashUploadBatchContent = (items: unknown[]) => {
+  const source = JSON.stringify(items);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+};
+const buildUploadBatchId = (uploadSessionId: string, deviceMac: string, batchIndex: number, batch: SyncData[]) => {
+  const timestamps = batch.map((item) => getRingHistoryRecordUnixTime(item) || 0).filter(Boolean);
+  const fromTimestamp = timestamps.length ? Math.min(...timestamps) : 0;
+  const toTimestamp = timestamps.length ? Math.max(...timestamps) : 0;
+  const normalizedDeviceMac = normalizeDeviceSyncMac(deviceMac) || 'unknown';
+  return `${normalizedDeviceMac}:${uploadSessionId}:${batchIndex + 1}:${fromTimestamp}-${toTimestamp}:${hashUploadBatchContent(batch)}`;
+};
 const hasAwarenessCommunicationReady = () =>
   hasAnyRingCommunicationReady(ringBleDeviceInfo.value, userStore.deviceInfo, ringStore.deviceInfo);
 const awarenessPageActive = ref(false);
 const awarenessCommunicationReadySignal = computed(() => hasAwarenessCommunicationReady());
+let awarenessInitialOverviewGate: Promise<void> = Promise.resolve();
+let releaseAwarenessInitialOverviewGate: (() => void) | null = null;
+let awarenessInitialOverviewGateSeq = 0;
+const beginAwarenessInitialOverviewGate = (trigger: string) => {
+  releaseAwarenessInitialOverviewGate?.();
+  const seq = ++awarenessInitialOverviewGateSeq;
+  awarenessInitialOverviewGate = new Promise<void>((resolve) => {
+    releaseAwarenessInitialOverviewGate = () => {
+      if (seq !== awarenessInitialOverviewGateSeq) return;
+      releaseAwarenessInitialOverviewGate = null;
+      resolve();
+      appendAwarenessDiagnosticLog('initial-overview-gate-released', {
+        trigger,
+        seq,
+        snapshot: getAwarenessConnectionSnapshot()
+      });
+    };
+  });
+  appendAwarenessDiagnosticLog('initial-overview-gate-start', {
+    trigger,
+    seq,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+  return { seq, promise: awarenessInitialOverviewGate };
+};
+const waitForAwarenessInitialOverview = async (trigger: string) => {
+  const startedAt = Date.now();
+  await awarenessInitialOverviewGate;
+  appendAwarenessDiagnosticLog('history-wait-initial-overview-result', {
+    trigger,
+    elapsedMs: Date.now() - startedAt,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+};
 // Store snapshots are useful for displaying connection state, but they may
 // outlive the SDK runtime that owns the writable characteristics. BLE commands
 // and history reads must only trust the active SDK runtime context.
@@ -656,6 +712,13 @@ const isAwarenessHomeSyncInCooldown = (trigger: string, options: { force?: boole
   return false;
 };
 const markAwarenessHomeSyncCompleted = (trigger: string) => {
+  const girlHealthBundleKey = `${getAwarenessHomeUploadDeviceKey()}:girlHealthBundle:${formatLocalDate(new Date())}`;
+  awarenessAuxiliaryRefreshAt.delete(girlHealthBundleKey);
+  appendAwarenessDiagnosticLog('business-aux-cache-invalidated', {
+    key: 'girlHealthBundle',
+    trigger,
+    cacheKey: girlHealthBundleKey
+  });
   const cooldownKey = getAwarenessHomeSyncCooldownKey();
   if (!cooldownKey || cooldownKey === 'unknown-device') {
     releaseAwarenessHomeSyncSession(trigger, 'completed', true);
@@ -1358,7 +1421,50 @@ const markLegacyHomeHistoryReadFetchedForWindow = (params: {
 const pullDownRefresh = ref(false);
 const pullDownProgress = ref(0);
 const homeDataSyncing = ref(false);
+const homeSyncRunningInBackground = ref(false);
 const homeDataRefreshingAfterSync = ref(false);
+let homeSyncForegroundBudgetTimer: ReturnType<typeof setTimeout> | null = null;
+watch(homeDataSyncing, (syncing) => {
+  if (homeSyncForegroundBudgetTimer) {
+    clearTimeout(homeSyncForegroundBudgetTimer);
+    homeSyncForegroundBudgetTimer = null;
+  }
+  if (!syncing) {
+    homeSyncRunningInBackground.value = false;
+    return;
+  }
+  homeSyncRunningInBackground.value = false;
+  homeSyncForegroundBudgetTimer = setTimeout(() => {
+    homeSyncForegroundBudgetTimer = null;
+    if (!homeDataSyncing.value) return;
+    homeSyncRunningInBackground.value = true;
+    // The foreground budget is a real UI boundary, not only a wording change.
+    // Keep the underlying history/upload promises alive, while releasing all
+    // visible sending state so cards and detail navigation remain interactive.
+    userStore.updateIsSending(false);
+    if (userStore.uploadingStatus === 'uploading') {
+      userStore.updateUploadingStatus('2');
+    }
+    appendAwarenessDiagnosticLog('home-sync-foreground-budget-released', {
+      budgetMs: AWARENESS_FOREGROUND_SYNC_BUDGET_MS,
+      deviceMac: getAwarenessCanonicalDeviceMac(),
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+    // Refresh from the backend independently of BLE. Existing card data is
+    // retained when this request fails; a later upload completion refreshes it
+    // once more with newly uploaded records.
+    void refreshAwarenessBusinessOverview(getAwarenessSelectedDateString(), {
+      trigger: 'home-sync-foreground-budget-overview',
+      allowDuringSync: true
+    }).catch((error) => {
+      appendAwarenessDiagnosticLog('home-sync-foreground-budget-overview-failed', {
+        error: formatBleErrorMessage(error, 'foreground budget overview refresh failed'),
+        rawError: getAwarenessRawError(error),
+        snapshot: getAwarenessConnectionSnapshot()
+      });
+    });
+  }, AWARENESS_FOREGROUND_SYNC_BUDGET_MS);
+});
 // const showProgress = ref(false);
 
 
@@ -1395,74 +1501,24 @@ const homeDetailRoutes = {
   relax: '/homeDetail/relaxStatus/relaxStatus',
   vitalSigns: '/homeDetail/vitalSigns/vitalSigns'
 } as const;
-const HOME_DETAIL_NAVIGATION_LOCK_MS = 0;
-// Suppress only duplicate bubbling from one gesture. A delayed navigateTo
-// callback must never keep later navigation attempts locked.
-const HOME_DETAIL_NAVIGATION_TARGET_DEDUP_MS = 300;
-const HOME_DETAIL_NAVIGATION_WATCHDOG_MS = 2000;
-const homeDetailNavigating = ref(false);
-let homeDetailNavigationWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
-const getAwarenessNavigationDedupeState = () => {
-  const globalState = globalThis as typeof globalThis & {
-    __qkeerAwarenessNavigationDedupe?: { key: string; at: number };
-  };
-  if (!globalState.__qkeerAwarenessNavigationDedupe) {
-    globalState.__qkeerAwarenessNavigationDedupe = { key: '', at: 0 };
-  }
-  return globalState.__qkeerAwarenessNavigationDedupe;
-};
+const awarenessNavigationInFlightTargets = new Set<string>();
 const claimAwarenessNavigationTarget = (key: string) => {
-  const state = getAwarenessNavigationDedupeState();
-  const now = Date.now();
-  if (
-    HOME_DETAIL_NAVIGATION_TARGET_DEDUP_MS > 0 &&
-    state.key === key &&
-    state.at > 0 &&
-    now - state.at < HOME_DETAIL_NAVIGATION_TARGET_DEDUP_MS
-  ) {
+  if (awarenessNavigationInFlightTargets.has(key)) {
     return false;
   }
-  state.key = key;
-  state.at = now;
+  awarenessNavigationInFlightTargets.add(key);
   return true;
 };
-const releaseAwarenessNavigationLock = () => {
-  if (homeDetailNavigationWatchdogTimer) {
-    clearTimeout(homeDetailNavigationWatchdogTimer);
-    homeDetailNavigationWatchdogTimer = null;
-  }
-  homeDetailNavigating.value = false;
-};
-const armAwarenessNavigationWatchdog = (target: string) => {
-  if (homeDetailNavigationWatchdogTimer) {
-    clearTimeout(homeDetailNavigationWatchdogTimer);
-  }
-  homeDetailNavigationWatchdogTimer = setTimeout(() => {
-    homeDetailNavigationWatchdogTimer = null;
-    if (!homeDetailNavigating.value) return;
-    appendAwarenessDiagnosticLog('home-detail-navigation-watchdog-release', {
-      target,
-      timeoutMs: HOME_DETAIL_NAVIGATION_WATCHDOG_MS
-    });
-    resetAwarenessNavigationState('navigate-callback-timeout');
-  }, HOME_DETAIL_NAVIGATION_WATCHDOG_MS);
+const releaseAwarenessNavigationTarget = (key: string) => {
+  awarenessNavigationInFlightTargets.delete(key);
 };
 const resetAwarenessNavigationState = (reason: string) => {
-  if (homeDetailNavigationWatchdogTimer) {
-    clearTimeout(homeDetailNavigationWatchdogTimer);
-    homeDetailNavigationWatchdogTimer = null;
-  }
-  const wasNavigating = homeDetailNavigating.value;
-  const state = getAwarenessNavigationDedupeState();
-  const hadDedupe = Boolean(state.key || state.at);
-  homeDetailNavigating.value = false;
-  state.key = '';
-  state.at = 0;
-  if (wasNavigating || hadDedupe) {
+  const previousTargets = [...awarenessNavigationInFlightTargets];
+  awarenessNavigationInFlightTargets.clear();
+  if (previousTargets.length > 0) {
     appendAwarenessDiagnosticLog('home-detail-navigation-reset', {
       reason,
-      wasNavigating,
-      hadDedupe
+      previousTargets
     });
   }
 };
@@ -1683,12 +1739,12 @@ const buildAwarenessHistoryRecordsFromPayloadsForUpload = (payloads: any[], devi
   );
 };
 
-const buildLegacyLocalDataRawFramesForUpload = (payloads: any[], deviceMac: string, uploadSinceTimestamp = 0) => {
+const buildLegacyLocalDataRawFramesForCompensation = (payloads: any[], deviceMac: string, uploadSinceTimestamp = 0) => {
   const keyedFrames = new Map<string, ReturnType<typeof buildRingRawHistoryFrames>[number]>();
   let skippedDeviceMismatchCount = 0;
-  let skippedStaleRecordCount = 0;
-  let skippedUnknownTimeRecordCount = 0;
-  let skippedStalePayloadCount = 0;
+  let preservedStaleRecordCount = 0;
+  let preservedUnknownTimeRecordCount = 0;
+  let preservedPayloadCount = 0;
   for (const payload of payloads || []) {
     if (!payload || typeof payload !== 'object') continue;
     if (deviceMac && !isAwarenessHistoryPayloadForDevice(payload as Record<string, any>, deviceMac)) {
@@ -1699,17 +1755,18 @@ const buildLegacyLocalDataRawFramesForUpload = (payloads: any[], deviceMac: stri
     const records = Array.isArray(payload.records) ? (payload.records as Array<Record<string, any>>) : [];
     const deviceRecords = deviceMac ? filterAwarenessHistoryRecordsForDevice(records, deviceMac) : records;
     skippedDeviceMismatchCount += Math.max(0, records.length - deviceRecords.length);
-    const filteredRecords = filterAwarenessHistoryRecordsForUploadWindow(deviceRecords, uploadSinceTimestamp);
+    // Raw evidence is staged before any backendAck/checkpoint filtering. The
+    // parsed business upload below still owns type-aware filtering and dedup,
+    // while these frames remain available for repair/compensation.
     if (uploadSinceTimestamp > 0) {
       const unknownTimeCount = deviceRecords.filter((record) => !getAwarenessHistoryRecordUploadWindowTimestamp(record)).length;
-      skippedUnknownTimeRecordCount += unknownTimeCount;
-      skippedStaleRecordCount += Math.max(0, deviceRecords.length - filteredRecords.length - unknownTimeCount);
-      if (deviceRecords.length === 0 || filteredRecords.length === 0) {
-        skippedStalePayloadCount += 1;
-        continue;
-      }
+      const uploadWindowRecords = filterAwarenessHistoryRecordsForUploadWindow(deviceRecords, uploadSinceTimestamp);
+      const staleCount = Math.max(0, deviceRecords.length - uploadWindowRecords.length - unknownTimeCount);
+      preservedUnknownTimeRecordCount += unknownTimeCount;
+      preservedStaleRecordCount += staleCount;
+      if (staleCount > 0 || unknownTimeCount > 0) preservedPayloadCount += 1;
     }
-    const frames = buildRingRawHistoryFrames(filteredRecords, parsed, deviceMac);
+    const frames = buildRingRawHistoryFrames(deviceRecords, parsed, deviceMac);
     frames.forEach((frame) => {
       if (frame.rawHash) keyedFrames.set(frame.rawHash, frame);
     });
@@ -1724,15 +1781,15 @@ const buildLegacyLocalDataRawFramesForUpload = (payloads: any[], deviceMac: stri
       snapshot: getAwarenessConnectionSnapshot()
     });
   }
-  if (skippedStalePayloadCount > 0 || skippedStaleRecordCount > 0 || skippedUnknownTimeRecordCount > 0) {
-    appendAwarenessDiagnosticLog('legacy-local-raw-frame-window-skip', {
-      reason: 'before-upload-since',
+  if (preservedPayloadCount > 0 || preservedStaleRecordCount > 0 || preservedUnknownTimeRecordCount > 0) {
+    appendAwarenessDiagnosticLog('legacy-local-raw-frame-compensation-preserved', {
+      reason: 'stage-before-upload-filter',
       deviceMac,
       uploadSinceTimestamp,
       uploadSinceTime: formatUnixTimestampForLog(uploadSinceTimestamp),
-      skippedStalePayloadCount,
-      skippedStaleRecordCount,
-      skippedUnknownTimeRecordCount,
+      preservedPayloadCount,
+      preservedStaleRecordCount,
+      preservedUnknownTimeRecordCount,
       totalPayloadCount: payloads?.length || 0,
       rawFrameCount: keyedFrames.size,
       snapshot: getAwarenessConnectionSnapshot()
@@ -1759,14 +1816,14 @@ const buildLegacyLocalDataUploadBatch = (deviceMac: string, uploadSinceTimestamp
   // here first silently discarded valid overlap records required for repair.
   const records = mergedRecords;
   const genericWindowRecords = filterAwarenessHistoryRecordsForUploadWindow(mergedRecords, uploadSinceTimestamp);
-  const skippedWindowRecordCount = Math.max(0, mergedRecords.length - genericWindowRecords.length);
-  if (skippedWindowRecordCount > 0) {
-    appendAwarenessDiagnosticLog('legacy-local-data-window-skip', {
-      reason: 'before-upload-since',
+  const preservedOverlapRecordCount = Math.max(0, mergedRecords.length - genericWindowRecords.length);
+  if (preservedOverlapRecordCount > 0) {
+    appendAwarenessDiagnosticLog('legacy-local-data-window-overlap-preserved', {
+      reason: 'idempotent-upload-instead-of-time-window-skip',
       deviceMac,
       uploadSinceTimestamp,
       uploadSinceTime: formatUnixTimestampForLog(uploadSinceTimestamp),
-      skippedWindowRecordCount,
+      preservedOverlapRecordCount,
       beforeRecordCount: mergedRecords.length,
       afterRecordCount: genericWindowRecords.length,
       beforeSummary: summarizeLegacyUploadRecordsForLog(mergedRecords as Array<Record<string, any>>),
@@ -1779,9 +1836,14 @@ const buildLegacyLocalDataUploadBatch = (deviceMac: string, uploadSinceTimestamp
       snapshot: getAwarenessConnectionSnapshot()
     });
   }
-  const rawFrames = buildLegacyLocalDataRawFramesForUpload(payloadScope.matchedPayloads, deviceMac, uploadSinceTimestamp);
+  const rawFrames = buildLegacyLocalDataRawFramesForCompensation(payloadScope.matchedPayloads, deviceMac, uploadSinceTimestamp);
   const rawMetricCounts = countRingHistoryRecordMetrics(records as Array<Record<string, any>>);
-  const builtSubmitArray = buildRingHistorySubmitRecords(records, uploadSinceTimestamp);
+  // Do not use backendAck as a destructive record filter. A historical ACK
+  // can legitimately sit after a locally durable gap (old client timeout,
+  // interrupted migration, or repaired sleep overlap). Keep every parseable
+  // record here; the per-device uploaded-key filter removes known successes,
+  // while backend batchId/raw unique constraints make retransmission safe.
+  const builtSubmitArray = buildRingHistorySubmitRecords(records, 0);
   const uploadedRecordFilter = filterUploadedRingHistorySubmitRecordsForDevice(deviceMac, builtSubmitArray);
   const submitArray = uploadedRecordFilter.submitRecords;
   const submitMetricCounts = countRingHistoryRecordMetrics(submitArray as Array<Record<string, any>>);
@@ -1802,7 +1864,7 @@ const buildLegacyLocalDataUploadBatch = (deviceMac: string, uploadSinceTimestamp
     skippedCachedDeviceMismatchCount,
     historyReadRecordCount: historyReadRecords.length,
     mergedRecordCount: mergedRecords.length,
-    skippedWindowRecordCount,
+    preservedOverlapRecordCount,
     records,
     rawFrames,
     rawMetricCounts,
@@ -2057,6 +2119,7 @@ const closeLegacyLocalDataTerminalSkip = (snapshot: ReturnType<typeof getLegacyL
   legacyLocalDataUploadWatcherPending = false;
   userStore.updateUploadingStatus('2');
   userStore.updateIsSending(false);
+  scheduleAwarenessVisibleSyncReconcile(`legacy-local-data-terminal-skip:${reason || 'unknown'}`);
   if (completedByTerminalSkip) {
     markAwarenessHomeSyncCompleted('legacy-local-data-terminal-skip');
   } else {
@@ -2824,10 +2887,22 @@ const runPendingParsedUploadRetry = async (reason: string) => {
   pendingParsedUploadRetryLastAt = now;
   pendingParsedUploadRetryPromise = (async () => {
     const currentUserId = getAwarenessHomeSyncUserId();
-    const sessions = listPendingUploadSessions<Record<string, any>>().filter((session) => {
+    const allSessions = listPendingUploadSessions<Record<string, any>>({ includeDeferred: true }).filter((session) => {
       const sessionUserId = String(session.dataUserId ?? session.userId ?? '');
       return !sessionUserId || currentUserId === 'anonymous' || sessionUserId === currentUserId;
     });
+    const now = Date.now();
+    const sessions = allSessions.filter((session) => Number(session.nextDataRetryAt || 0) <= now);
+    if (sessions.length === 0 && allSessions.length > 0) {
+      const nextRetryAt = Math.min(...allSessions.map((session) => Number(session.nextDataRetryAt || now)));
+      appendAwarenessDiagnosticLog('pending-parsed-upload-retry-deferred', {
+        reason,
+        deferredSessionCount: allSessions.length,
+        nextRetryAt,
+        remainingMs: Math.max(0, nextRetryAt - now)
+      });
+      return;
+    }
     if (sessions.length === 0) return;
     appendAwarenessDiagnosticLog('pending-parsed-upload-retry-start', {
       reason,
@@ -2837,10 +2912,15 @@ const runPendingParsedUploadRetry = async (reason: string) => {
       try {
         const batches = chunkLegacySubmitData(session.dataList as SyncData[], LEGACY_LOCAL_DATA_SUBMIT_BATCH_SIZE);
         const syncMeta = buildParsedUploadSyncMeta(session);
-        for (const batch of batches) {
+        let acceptedRecordCount = 0;
+        let latestBackendAckTimestamp = 0;
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+          const batch = batches[batchIndex];
+          const batchId = buildUploadBatchId(session.uploadSessionId, session.deviceMac, batchIndex, batch);
           const response = await submitData(
             {
               deviceMac: session.deviceMac,
+              batchId,
               dataList: batch,
               ...syncMeta
             },
@@ -2852,27 +2932,50 @@ const runPendingParsedUploadRetry = async (reason: string) => {
           if (!isSubmitDataResponseSuccessful(response)) {
             throw new Error('pending parsed upload rejected by backend');
           }
+          const batchAck = requireSubmitDataBatchAck(response, batchId, batch.length);
+          acknowledgePendingUploadBatch(session.uploadSessionId, batchAck.acceptedCount, response);
+          markUploadedRingHistorySubmitRecordsForDevice(session.deviceMac, batch);
+          acceptedRecordCount += batchAck.acceptedCount;
+          latestBackendAckTimestamp = Math.max(latestBackendAckTimestamp, batchAck.acceptedThrough);
+          if (batchAck.acceptedThrough > 0) {
+            setDeviceHistoryBackendAckCheckpoint(
+              session.deviceMac,
+              session.protocol || 'legacy',
+              batchAck.acceptedThrough
+            );
+          }
+          appendAwarenessDiagnosticLog('pending-parsed-upload-retry-batch-result', {
+            reason,
+            uploadSessionId: session.uploadSessionId,
+            deviceMac: session.deviceMac,
+            batchIndex: batchIndex + 1,
+            batchCount: batches.length,
+            batchId,
+            batchSize: batch.length,
+            acceptedRecordCount,
+            remainingRecordCount: Math.max(0, session.dataList.length - acceptedRecordCount),
+            backendAckTimestamp: batchAck.acceptedThrough
+          });
         }
         markPendingUploadDataDone(session.uploadSessionId, {
           code: 200,
           backgroundRetry: true,
           batchCount: batches.length
         });
-        const maxReceivedTimestamp = session.dataList.reduce(
-          (maxTimestamp, item) => Math.max(maxTimestamp, getRingHistoryRecordUnixTime(item) || 0),
-          0
-        );
-        if (maxReceivedTimestamp > 0) {
-          setDeviceHistoryBackendAckCheckpoint(session.deviceMac, session.protocol || 'legacy', maxReceivedTimestamp);
-        }
         appendAwarenessDiagnosticLog('pending-parsed-upload-retry-result', {
           reason,
           uploadSessionId: session.uploadSessionId,
           deviceMac: session.deviceMac,
           recordCount: session.dataList.length,
           batchCount: batches.length,
-          backendAckTimestamp: maxReceivedTimestamp
+          backendAckTimestamp: latestBackendAckTimestamp
         });
+        // The foreground request may have timed out while the backend still
+        // completed the idempotent batch. A successful compensation retry is
+        // therefore the real data-ready edge and must refresh the visible home
+        // cards even if an earlier refresh failed or occupied the normal dedupe
+        // window.
+        scheduleAwarenessAfterDataProcessed('pending-parsed-upload-retry-upload-complete');
       } catch (error) {
         markPendingUploadDataFailed(session.uploadSessionId, error);
         appendAwarenessDiagnosticLog('pending-parsed-upload-retry-failed', {
@@ -2889,6 +2992,7 @@ const runPendingParsedUploadRetry = async (reason: string) => {
     }
   })().finally(() => {
     pendingParsedUploadRetryPromise = null;
+    scheduleAwarenessVisibleSyncReconcile(`pending-parsed-upload-retry-finished:${reason}`);
   });
   return pendingParsedUploadRetryPromise;
 };
@@ -3008,83 +3112,102 @@ const openHomeDetail = (key: keyof typeof homeDetailRoutes) => {
   const route = homeDetailRoutes[key];
   const query = `selectedDayIndex=${selectedDayIndex.value}&selectedDate=${encodeURIComponent(getSelectedDetailDate())}`;
   const url = `${route}?${query}`;
+  const navigationTarget = `home-detail:${url}`;
   appendAwarenessDiagnosticLog('home-detail-tap-received', {
     key,
     url,
-    navigating: homeDetailNavigating.value
+    sameTargetInFlight: awarenessNavigationInFlightTargets.has(navigationTarget)
   });
-  if (!claimAwarenessNavigationTarget(`home-detail:${url}`)) {
+  if (!claimAwarenessNavigationTarget(navigationTarget)) {
     appendAwarenessDiagnosticLog('home-detail-navigate-skip', {
       key,
       url,
-      reason: 'same-target-recently-requested'
+      reason: 'same-target-navigation-in-flight'
     });
     return;
   }
   const startedAt = tapReceivedAt;
-  homeDetailNavigating.value = true;
-  armAwarenessNavigationWatchdog(`home-detail:${url}`);
-  appendAwarenessDiagnosticLog('home-detail-navigate-start', { key, url });
-  setTimeout(() => {
+  const duplicateRetryDelays = [180, 420, 800];
+  const dispatchNavigation = (attempt: number) => {
+    let success = false;
+    let failError = '';
+    appendAwarenessDiagnosticLog('home-detail-navigate-start', { key, url, attempt });
     uni.navigateTo({
       url,
       success: () => {
-        releaseAwarenessNavigationLock();
+        success = true;
         appendAwarenessDiagnosticLog('home-detail-navigate-success', {
           key,
+          attempt,
           elapsedMs: Date.now() - startedAt
         });
       },
       fail: (error) => {
-        releaseAwarenessNavigationLock();
-        appendAwarenessDiagnosticLog('home-detail-navigate-fail', {
-          key,
-          elapsedMs: Date.now() - startedAt,
-          error: String((error as any)?.errMsg || error || '')
-        });
-        uni.showToast({ title: '页面加载失败，请稍后重试', icon: 'none' });
+        failError = String((error as any)?.errMsg || error || '');
       },
       complete: (result) => {
+        const resultText = String((result as any)?.errMsg || failError || '');
         appendAwarenessDiagnosticLog('home-detail-navigate-complete', {
           key,
+          attempt,
           elapsedMs: Date.now() - startedAt,
-          result: String((result as any)?.errMsg || '')
+          result: resultText
         });
-        if (HOME_DETAIL_NAVIGATION_LOCK_MS > 0) {
-          setTimeout(releaseAwarenessNavigationLock, HOME_DETAIL_NAVIGATION_LOCK_MS);
-        } else {
-          releaseAwarenessNavigationLock();
+        if (success || /navigateTo:ok/i.test(resultText)) {
+          releaseAwarenessNavigationTarget(navigationTarget);
+          return;
         }
+        const duplicateIgnored = /duplicate navigation ignored/i.test(resultText);
+        const retryDelayMs = duplicateRetryDelays[attempt];
+        if (duplicateIgnored && retryDelayMs != null) {
+          appendAwarenessDiagnosticLog('home-detail-navigate-retry-scheduled', {
+            key,
+            url,
+            attempt,
+            nextAttempt: attempt + 1,
+            retryDelayMs,
+            elapsedMs: Date.now() - startedAt
+          });
+          setTimeout(() => dispatchNavigation(attempt + 1), retryDelayMs);
+          return;
+        }
+        releaseAwarenessNavigationTarget(navigationTarget);
+        appendAwarenessDiagnosticLog('home-detail-navigate-fail', {
+          key,
+          attempt,
+          elapsedMs: Date.now() - startedAt,
+          error: resultText || 'navigateTo failed'
+        });
+        uni.showToast({ title: '页面加载失败，请稍后重试', icon: 'none' });
       }
     });
-  }, 0);
+  };
+  dispatchNavigation(0);
 };
 const openPeriodPage = (url: string) => {
   const targetUrl = String(url || '').trim();
   if (!targetUrl) return;
-  if (!claimAwarenessNavigationTarget(`period:${targetUrl}`)) {
+  const navigationTarget = `period:${targetUrl}`;
+  if (!claimAwarenessNavigationTarget(navigationTarget)) {
     appendAwarenessDiagnosticLog('period-navigate-skip', {
       url: targetUrl,
-      reason: 'same-target-recently-requested'
+      reason: 'same-target-navigation-in-flight'
     });
     return;
   }
   const startedAt = Date.now();
-  homeDetailNavigating.value = true;
-  armAwarenessNavigationWatchdog(`period:${targetUrl}`);
   appendAwarenessDiagnosticLog('period-navigate-start', { url: targetUrl });
-  setTimeout(() => {
-    uni.navigateTo({
+  uni.navigateTo({
       url: targetUrl,
       success: () => {
-        releaseAwarenessNavigationLock();
+        releaseAwarenessNavigationTarget(navigationTarget);
         appendAwarenessDiagnosticLog('period-navigate-success', {
           url: targetUrl,
           elapsedMs: Date.now() - startedAt
         });
       },
       fail: (error) => {
-        releaseAwarenessNavigationLock();
+        releaseAwarenessNavigationTarget(navigationTarget);
         appendAwarenessDiagnosticLog('period-navigate-fail', {
           url: targetUrl,
           elapsedMs: Date.now() - startedAt,
@@ -3093,14 +3216,33 @@ const openPeriodPage = (url: string) => {
         uni.showToast({ title: '页面加载失败，请稍后重试', icon: 'none' });
       },
       complete: () => {
-        if (HOME_DETAIL_NAVIGATION_LOCK_MS > 0) {
-          setTimeout(releaseAwarenessNavigationLock, HOME_DETAIL_NAVIGATION_LOCK_MS);
-        } else {
-          releaseAwarenessNavigationLock();
-        }
+        releaseAwarenessNavigationTarget(navigationTarget);
       }
     });
-  }, 0);
+};
+const getSubmitDataResponseBoolean = (response: unknown, field: string) => {
+  const payload = getSubmitDataResponsePayload(response);
+  const value = payload?.[field] ?? (response && typeof response === 'object' ? (response as Record<string, any>)[field] : undefined);
+  if (typeof value === 'boolean') return value;
+  if (value === 1 || value === '1' || value === 'true') return true;
+  if (value === 0 || value === '0' || value === 'false') return false;
+  return undefined;
+};
+const requireSubmitDataBatchAck = (response: unknown, expectedBatchId: string, expectedCount: number) => {
+  const payload = getSubmitDataResponsePayload(response);
+  const responseBatchId = String(payload?.batchId || '').trim();
+  const acceptedCount = getSubmitDataResponseNumber(response, 'acceptedCount');
+  const acceptedThrough = getSubmitDataResponseNumber(response, 'acceptedThrough');
+  const hasGap = getSubmitDataResponseBoolean(response, 'hasGap');
+  if (
+    responseBatchId !== expectedBatchId ||
+    acceptedCount !== expectedCount ||
+    !acceptedThrough ||
+    hasGap !== false
+  ) {
+    throw new Error(`data sync batch ack invalid: ${responseBatchId || 'missing'} ${acceptedCount ?? 'missing'}/${expectedCount}`);
+  }
+  return { acceptedCount, acceptedThrough, hasGap };
 };
 const getPositiveMetricNumber = (...values: unknown[]) => {
   for (const value of values) {
@@ -3800,6 +3942,7 @@ const bluetoothStatus = computed(() => {
     );
   const isSyncing =
     isConnected &&
+    !homeSyncRunningInBackground.value &&
     (isVisibleUploadSyncing || isBackgroundSyncing);
 
   return {
@@ -3810,7 +3953,7 @@ const bluetoothStatus = computed(() => {
 
 
     statusText: isConnecting ? '\u8fde\u63a5\u4e2d' : '',
-    syncingText: isSyncing ? '\u540c\u6b65\u4e2d' : '',
+    syncingText: isSyncing ? (homeSyncRunningInBackground.value ? '后台同步中' : '\u540c\u6b65\u4e2d') : '',
     batteryText: isConnected ? displayBatteryValue.value : '',
 
 
@@ -4178,6 +4321,11 @@ watch(
       // The history terminal path increments legacyHomeHistoryReadCompletedTick and
       // wakes this watcher once, so serialize the two phases instead of early-flush.
       legacyLocalDataUploadWatcherPending = true;
+      // No HTTP/stable-wait task owns the watcher yet. Releasing this provisional
+      // ownership lets the terminal tick start upload immediately; otherwise it
+      // waits for the 15s stale-owner recovery even though BLE has already ended.
+      legacyLocalDataUploadWatcherActive = false;
+      legacyLocalDataUploadWatcherActiveAt = 0;
       appendAwarenessDiagnosticLog('legacy-local-data-upload-deferred-during-history-read', {
         protocol,
         reason: 'history-read-active-serialize-http-after-terminal',
@@ -4436,7 +4584,7 @@ watch(
           // mismatch, which made valid D7 history look like cross-device data.
           skippedPayloadDeviceMismatchCount: uploadBatch.payloadScope.skippedDeviceMismatchCount,
           skippedCachedDeviceMismatchCount: uploadBatch.skippedCachedDeviceMismatchCount,
-          skippedWindowRecordCount: uploadBatch.skippedWindowRecordCount,
+          preservedOverlapRecordCount: uploadBatch.preservedOverlapRecordCount,
           mergedRecordCount: uploadBatch.mergedRecordCount,
           filteredRecordCount: filteredRecords.length,
           rawFrameCount: rawFrames.length,
@@ -4526,6 +4674,13 @@ watch(
             deviceMac,
             snapshot: getAwarenessConnectionSnapshot()
           });
+          // Persist and upload oldest-first so each successful batch advances a
+          // contiguous device watermark instead of jumping over a failed gap.
+          submitArray.sort((left, right) => {
+            const leftTimestamp = getRingHistoryRecordUnixTime(left) || 0;
+            const rightTimestamp = getRingHistoryRecordUnixTime(right) || 0;
+            return leftTimestamp - rightTimestamp;
+          });
           const uploadSession = stagePendingUploadSession({
             uploadSessionId: createUploadSessionId(protocol || 'legacy'),
             deviceMac,
@@ -4592,6 +4747,7 @@ watch(
           let submitHttpStartedAt = 0;
           let submitHttpWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
           let rawUploadStarted = false;
+          let foregroundBudgetExpired = false;
           const getSubmitForegroundElapsedMs = () => (submitHttpStartedAt > 0 ? Date.now() - submitHttpStartedAt : 0);
           const getSubmitForegroundRemainingMs = () =>
             Math.max(0, LEGACY_LOCAL_DATA_SUBMIT_FOREGROUND_BUDGET_MS - getSubmitForegroundElapsedMs());
@@ -4625,6 +4781,7 @@ watch(
               rawFrameCount: rawFrames.length,
               snapshot: getAwarenessConnectionSnapshot()
             });
+            setRwDiagnosticBusinessUploadActive(true);
             void uploadPendingRawFramesInBackground(uploadSession, (params) => submitRingHistoryRawFrames(params))
               .then((rawUploadResponse) => {
                 appendAwarenessDiagnosticLog('upload-http-result', {
@@ -4688,7 +4845,8 @@ watch(
                   rawError: getAwarenessRawError(rawUploadError),
                   snapshot: getAwarenessConnectionSnapshot()
                 });
-              });
+              })
+              .finally(() => setRwDiagnosticBusinessUploadActive(false));
           };
           const scheduleRawFrameBackgroundUpload = (reason: string) => {
             if (rawUploadStarted || rawFrames.length <= 0) return;
@@ -4712,6 +4870,7 @@ watch(
               startRawFrameBackgroundUpload(reason);
             }, LEGACY_RAW_FRAME_BACKGROUND_UPLOAD_DELAY_MS);
           };
+          setRwDiagnosticBusinessUploadActive(true);
           try {
             submitHttpStartedAt = Date.now();
             appendAwarenessDiagnosticLog('upload-http-start', {
@@ -4758,9 +4917,11 @@ watch(
               });
               for (let batchIndex = 0; batchIndex < submitBatches.length; batchIndex += 1) {
                 const batch = submitBatches[batchIndex];
+                const batchId = buildUploadBatchId(uploadSession.uploadSessionId, deviceMac, batchIndex, batch);
                 const batchStartedAt = Date.now();
                 const remainingBudgetMs = getSubmitForegroundRemainingMs();
                 if (remainingBudgetMs <= 0 || (batchIndex > 0 && remainingBudgetMs < 2000)) {
+                  foregroundBudgetExpired = true;
                   appendAwarenessDiagnosticLog('upload-http-foreground-budget-expired', {
                     protocol,
                     isRwRing,
@@ -4830,6 +4991,7 @@ watch(
                     submitData(
                       {
                         deviceMac,
+                        batchId,
                         dataList: batch,
                         ...parsedUploadMeta
                       },
@@ -4885,6 +5047,27 @@ watch(
                 if (!isSubmitDataResponseSuccessful(batchResponse)) {
                   throw new Error(`legacy local data submit batch failed: ${batchIndex + 1}/${submitBatches.length}`);
                 }
+                const batchAck = requireSubmitDataBatchAck(batchResponse, batchId, batch.length);
+                acknowledgePendingUploadBatch(uploadSession.uploadSessionId, batchAck.acceptedCount, batchResponse);
+                markUploadedRingHistorySubmitRecordsForDevice(deviceMac, batch);
+                if (batchAck.acceptedThrough > 0) {
+                  setDeviceHistoryBackendAckCheckpoint(deviceMac, protocol || 'legacy', batchAck.acceptedThrough);
+                }
+                appendAwarenessDiagnosticLog('upload-http-batch-acknowledged', {
+                  protocol,
+                  isRwRing,
+                  uploadSessionId: uploadSession.uploadSessionId,
+                  deviceMac,
+                  batchIndex: batchIndex + 1,
+                  batchCount: submitBatches.length,
+                  batchSize: batch.length,
+                  batchId,
+                  backendAckTimestamp: batchAck.acceptedThrough,
+                  remainingRecordCount: Math.max(
+                    0,
+                    submitRecords.length - (batchIndex * LEGACY_LOCAL_DATA_SUBMIT_BATCH_SIZE + batch.length)
+                  )
+                });
                 submitBatchResponses.push(batchResponse);
               }
               const aggregateSleepAcceptedCounts = submitBatchResponses
@@ -4938,7 +5121,9 @@ watch(
               snapshot: getAwarenessConnectionSnapshot()
             });
             releaseLegacyLocalDataUploadSignature(uploadSignatureSnapshot);
-            markPendingUploadDataFailed(uploadSession.uploadSessionId, uploadError);
+            if (!foregroundBudgetExpired) {
+              markPendingUploadDataFailed(uploadSession.uploadSessionId, uploadError);
+            }
             if (!isRwRing) {
               rememberLegacyLocalDataHttpRetryWindow(deviceMac, uploadSinceTimestamp);
               const retrySnapshot = getLegacyLocalDataStableSnapshot();
@@ -4962,19 +5147,26 @@ watch(
                 homeDataSyncing.value = false;
                 releaseAwarenessHomeSyncSession(
                   'legacy-local-data-upload-http-failed-background-retry',
-                  'failed',
+                  foregroundBudgetExpired ? 'background_pending' : 'failed',
                   false
                 );
-                const httpRetryQueued = requestLegacyLocalDataTimeoutFlush(
-                  'legacy-local-data-upload-http-failed-http-retry-only',
-                  protocol,
-                  retrySnapshot
-                );
+                const httpRetryQueued = foregroundBudgetExpired
+                  ? (schedulePendingParsedUploadRetry(
+                      'legacy-local-data-upload-foreground-budget-background-continue',
+                      PENDING_PARSED_UPLOAD_RETRY_DELAY_MS
+                    ), true)
+                  : requestLegacyLocalDataTimeoutFlush(
+                      'legacy-local-data-upload-http-failed-http-retry-only',
+                      protocol,
+                      retrySnapshot
+                    );
                 appendAwarenessDiagnosticLog('legacy-local-data-upload-http-retry-only', {
                   protocol,
                   stage: 'legacy-local-data-submit',
                   uploadSessionId: uploadSession.uploadSessionId,
-                  reason: 'http-failed-with-uploadable-snapshot',
+                  reason: foregroundBudgetExpired
+                    ? 'foreground-budget-expired-continue-pending-session'
+                    : 'http-failed-with-uploadable-snapshot',
                   httpRetryQueued,
                   deviceMac,
                   uploadSinceTimestamp,
@@ -4988,6 +5180,7 @@ watch(
             }
             throw uploadError;
           } finally {
+            setRwDiagnosticBusinessUploadActive(false);
             if (submitHttpWatchdogTimer) {
               clearTimeout(submitHttpWatchdogTimer);
               submitHttpWatchdogTimer = null;
@@ -5792,6 +5985,21 @@ const claimAwarenessAuxiliaryRefresh = (key: string, date: Date, ttlMs = AWARENE
   return true;
 };
 
+const releaseAwarenessAuxiliaryRefresh = (key: string, date: Date, reason: string) => {
+  const cacheKey = getAwarenessAuxiliaryCacheKey(key, date);
+  const released = awarenessAuxiliaryRefreshAt.delete(cacheKey);
+  if (released) {
+    appendAwarenessDiagnosticLog('business-aux-request-cache-released', {
+      key,
+      date: formatLocalDate(date),
+      reason,
+      cacheKey,
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+  }
+  return released;
+};
+
 const runAwarenessAuxiliaryCached = <T>(
   key: string,
   date: Date,
@@ -5815,6 +6023,8 @@ const runAwarenessAuxiliaryCached = <T>(
     if (result != null && result !== '') {
       writeAwarenessAuxiliaryStorageCache(key, date, result);
       onResult(result);
+    } else {
+      releaseAwarenessAuxiliaryRefresh(key, date, 'empty-or-failed-response');
     }
   });
 };
@@ -6044,23 +6254,80 @@ type AwarenessBusinessRefreshOptions = {
   sourceTrigger?: string;
   forceStressRefresh?: boolean;
 };
+const consumePostBindingRefreshFlag = () => {
+  try {
+    const markedAt = Number(uni.getStorageSync(POST_BINDING_REFRESH_STORAGE_KEY) || 0);
+    if (!markedAt) return false;
+    uni.removeStorageSync(POST_BINDING_REFRESH_STORAGE_KEY);
+    return Date.now() - markedAt <= POST_BINDING_REFRESH_MAX_AGE_MS;
+  } catch {
+    return false;
+  }
+};
+
+const getAwarenessSyncGateSnapshot = () =>
+  buildDeviceSyncGateSnapshot({
+    homeSyncing: homeDataSyncing.value,
+    businessRefreshRunning: Boolean(awarenessRefreshPromise),
+    historySyncRunning: Boolean(awarenessHistorySyncPromise),
+    historyReadRunning: legacyHomeHistoryReadInFlight.value,
+    historyReadPromiseRunning: Boolean(legacyHomeHistoryReadPromise),
+    stableSnapshotRunning: Boolean(legacyLocalDataStablePromise),
+    stableUploadScheduled: legacyLocalDataStableUploadScheduled,
+    uploadRunning: Boolean(legacyLocalDataUploadPromise),
+    finalRefreshRunning: homeDataRefreshingAfterSync.value
+  });
 
 const isAwarenessBackgroundDataSyncInProgress = () =>
+  getAwarenessSyncGateSnapshot().backgroundSyncing;
+
+const hasAwarenessActualBackgroundWork = () =>
   Boolean(
     awarenessHistorySyncPromise ||
       legacyHomeHistoryReadInFlight.value ||
       legacyHomeHistoryReadPromise ||
       legacyLocalDataStablePromise ||
       legacyLocalDataStableUploadScheduled ||
+      legacyLocalDataUploadWatcherActive ||
+      legacyLocalDataUploadWatcherPending ||
       legacyLocalDataUploadPromise ||
-      homeDataRefreshingAfterSync.value
+      pendingParsedUploadRetryPromise ||
+      homeDataRefreshingAfterSync.value ||
+      awarenessProcessedRefreshPromise
   );
 
-const isAwarenessDataSyncInProgress = () =>
-  Boolean(homeDataSyncing.value || awarenessRefreshPromise || isAwarenessBackgroundDataSyncInProgress());
+const reconcileAwarenessVisibleSyncState = (trigger: string) => {
+  const stillRunning = hasAwarenessActualBackgroundWork();
+  appendAwarenessDiagnosticLog('home-sync-visible-state-reconcile', {
+    trigger,
+    stillRunning,
+    homeDataSyncing: homeDataSyncing.value,
+    uploadingStatus: userStore.uploadingStatus,
+    isSending: userStore.isSending,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+  if (stillRunning) return false;
+  homeDataSyncing.value = false;
+  homeSyncRunningInBackground.value = false;
+  userStore.updateIsSending(false);
+  if (userStore.uploadingStatus === 'uploading') {
+    userStore.updateUploadingStatus('2');
+  }
+  return true;
+};
+
+function scheduleAwarenessVisibleSyncReconcile(trigger: string) {
+  // Promise references are cleared in their own finally blocks. Reconcile on
+  // the next task so the just-finished promise is not mistaken for live work.
+  setTimeout(() => {
+    reconcileAwarenessVisibleSyncState(trigger);
+  }, 0);
+}
+
+const isAwarenessDataSyncInProgress = () => getAwarenessSyncGateSnapshot().dataSyncing;
 
 const isAwarenessBusinessRefreshDeferredBySync = () =>
-  Boolean(awarenessRefreshPromise || isAwarenessBackgroundDataSyncInProgress());
+  getAwarenessSyncGateSnapshot().deferBusinessRefresh;
 
 const waitForAwarenessAuxiliaryIdleSlot = async (key: string) => {
   const startedAt = Date.now();
@@ -6283,7 +6550,8 @@ const runAwarenessBusinessOverviewRefresh = async (date: string, options: Awaren
 
 const refreshAwarenessBusinessOverview = async (date: string, options: AwarenessBusinessRefreshOptions = {}) => {
   const trigger = options.trigger || 'unknown';
-  if (!options.allowDuringSync && isAwarenessBusinessRefreshDeferredBySync()) {
+  const syncGate = getAwarenessSyncGateSnapshot();
+  if (!options.allowDuringSync && syncGate.deferBusinessRefresh) {
     const queued = queueAwarenessBusinessRefresh(date, trigger, 'sync-in-progress');
     appendAwarenessDiagnosticLog('business-overview-refresh-deferred', {
       trigger,
@@ -6296,6 +6564,8 @@ const refreshAwarenessBusinessOverview = async (date: string, options: Awareness
       hasAwarenessHistorySyncPromise: Boolean(awarenessHistorySyncPromise),
       hasAwarenessRefreshPromise: Boolean(awarenessRefreshPromise),
       hasLegacyLocalDataUploadPromise: Boolean(legacyLocalDataUploadPromise),
+      gateReasons: syncGate.reasons,
+      gate: syncGate,
       snapshot: getAwarenessConnectionSnapshot()
     });
     return;
@@ -6490,6 +6760,7 @@ const refreshAwarenessAfterDataProcessed = async (reason: string, date = getSele
   } finally {
     awarenessProcessedRefreshPromise = null;
     homeDataRefreshingAfterSync.value = false;
+    scheduleAwarenessVisibleSyncReconcile(`processed-refresh-finished:${reason}`);
   }
 };
 
@@ -8170,7 +8441,7 @@ const startLegacyHomeHistoryReadInBackground = (
             snapshot: getAwarenessConnectionSnapshot()
           });
           return false;
-        })) && hasAwarenessRuntimeCommunicationReady();
+        }));
         if (!runtimeReady) {
           appendAwarenessDiagnosticLog('legacy-home-history-read-deferred-runtime-not-ready', {
             protocol,
@@ -8187,6 +8458,18 @@ const startLegacyHomeHistoryReadInBackground = (
         forceIfStaleMs: RW_AWARENESS_DEVICE_TIME_SYNC_HISTORY_STALE_MS
       });
       if (!hasAwarenessRuntimeCommunicationReady()) {
+        // The page-local device ref can lag behind the shared BLE runtime after
+        // a reconnect. Re-check the actual command channel instead of treating
+        // the stale notifyEnabled flag as authoritative.
+        const commandChannelReady = Boolean(await ensureCommunicationReady().catch(() => false));
+        if (commandChannelReady) {
+          appendAwarenessDiagnosticLog('legacy-home-history-command-channel-revalidated', {
+            protocol,
+            reason,
+            deviceMac: normalizedHistoryDeviceMac,
+            snapshot: getAwarenessConnectionSnapshot()
+          });
+        } else {
         appendAwarenessDiagnosticLog('legacy-home-history-read-deferred-command-channel-lost', {
           protocol,
           reason,
@@ -8194,6 +8477,7 @@ const startLegacyHomeHistoryReadInBackground = (
           snapshot: getAwarenessConnectionSnapshot()
         });
         throw new Error('Ring BLE command channel was lost before history read.');
+        }
       }
       legacyHomeHistoryReadInFlight.value = true;
       legacyHomeHistoryReadStartedAt = Date.now();
@@ -8928,11 +9212,14 @@ const executeCommandsSequentially = async () => {
       if (canUseReadyFastPath) {
         appendAwarenessDiagnosticLog('legacy-home-ensure-ready-fast-path', {
           protocol,
-          reason: 'already-connected-and-ready',
+          reason: 'store-ready-candidate-requires-physical-probe',
           snapshot: readyGateSnapshot
         });
       }
-      const ensureReady = canUseReadyFastPath ? true : await ensureCommunicationReady();
+      // Store readiness can be stale after the OS drops the BLE link. The SDK
+      // performs a cheap physical-link probe and reuses a healthy recent link,
+      // otherwise it reconnects before any device-info/history command is sent.
+      const ensureReady = await ensureCommunicationReady();
       appendAwarenessDiagnosticLog('legacy-home-ensure-ready-result', {
         protocol,
         reason: 'device-info-readiness-gate',
@@ -8968,11 +9255,23 @@ const executeCommandsSequentially = async () => {
         (isRwRing
           ? now - lastAwarenessRefreshAt >= RW_AWARENESS_REFRESH_DEDUP_MS
           : now - lastAwarenessRefreshAt >= LEGACY_HOME_DEVICE_INFO_REFRESH_INTERVAL_MS);
+      // Legacy device-info commands can remain queued far beyond their nominal
+      // timeout (32s observed on weak links). They must not block the history
+      // stream: use cached battery immediately and refill device info after the
+      // history/upload session releases the BLE command channel. RW keeps its
+      // existing protocol order because its history session depends on it.
       const shouldReadDeviceInfoBeforeHistory = isRwRing && (
-        shouldRefreshDeviceInfo ||
-        !hasAwarenessFreshBatteryDisplayValue()
+        shouldRefreshDeviceInfo || !hasAwarenessFreshBatteryDisplayValue()
       );
       let deviceInfoBeforeHistoryHasBattery = hasAwarenessFreshBatteryDisplayValue();
+      if (!isRwRing && !deviceInfoBeforeHistoryHasBattery) {
+        scheduleLegacyHomeDeviceInfoRetryAfterHistory(
+          protocol,
+          hasCachedSnapshot,
+          'legacy-home-sync-after-history',
+          'history-priority-device-info-deferred'
+        );
+      }
       if (shouldReadDeviceInfoBeforeHistory) {
         appendAwarenessDiagnosticLog('legacy-home-device-info-before-history-dispatch', {
           protocol,
@@ -9025,6 +9324,10 @@ const executeCommandsSequentially = async () => {
         });
       }
       if (!isRwRing) {
+        // Device discovery/APP_CONNECT may run beside the backend overview, but
+        // history parsing and upload must never compete with the first-screen
+        // requests. Release occurs on success or timeout of the overview task.
+        await waitForAwarenessInitialOverview('legacy-home-history-before-read');
         appendAwarenessDiagnosticLog('legacy-home-history-read-after-device-info', {
           protocol,
           hasCachedSnapshot,
@@ -9079,6 +9382,7 @@ const executeCommandsSequentially = async () => {
         homeDataSyncing.value = false;
       }
       awarenessRefreshPromise = null;
+      scheduleAwarenessVisibleSyncReconcile('legacy-home-sync-finally');
     }
   })();
   return awarenessRefreshPromise;
@@ -9207,8 +9511,11 @@ onShow(async () => {
     if (!userStore.token) {
       return;
     }
-    schedulePendingParsedUploadRetry('page-show');
+    const postBindingRefresh = consumePostBindingRefreshFlag();
+    const pageShowTrigger = postBindingRefresh ? 'post-binding-page-show' : 'page-show';
+    schedulePendingParsedUploadRetry(pageShowTrigger);
     appendAwarenessDiagnosticLog('page-show', {
+      postBindingRefresh,
       snapshot: getAwarenessConnectionSnapshot()
     });
     pullDownProgress.value = 0;
@@ -9289,6 +9596,9 @@ onShow(async () => {
           const detailData = await requestAwarenessAuxiliary('userGirlHealthAll', today.value, () =>
             getUserGirlHealthAll({ date: girlHealthDate }, getAwarenessAuxiliaryRequestConfig())
           );
+          if (healthData == null || detailData == null) {
+            releaseAwarenessAuxiliaryRefresh('girlHealthBundle', today.value, 'bundle-request-incomplete');
+          }
           hasPeriodProfile = hasPeriodProfile || hasGirlHealthProfilePayload(detailData);
           if (detailData != null && detailData != '') {
             detailPhaseSynced = syncHomePeriodCycle(detailData, girlHealthDate);
@@ -9323,6 +9633,7 @@ onShow(async () => {
             showPeriodDetail: showPeriodDetail.value
           });
         })().catch((error) => {
+          releaseAwarenessAuxiliaryRefresh('girlHealthBundle', today.value, 'bundle-request-failed');
           appendAwarenessDiagnosticLog('girl-health-background-load-failed', {
             error: formatBleErrorMessage(error, 'girl health background load failed')
           });
@@ -9338,9 +9649,22 @@ onShow(async () => {
     userStore.fetchUserInfo();
     pullDownProgress.value = 30;
 
-    dispatchAwarenessHomeSyncWhenReady('page-show');
-    // 后台异步加载数据和图表，不阻塞页面首次渲染；同步中会自动排队到上传/解析完成后刷新一次。
-    void refreshPageDataAndCharts({ trigger: 'page-show-data-load', allowDuringSync: true });
+    // First dispatch backend overview requests. BLE readiness/APP_CONNECT is
+    // allowed to progress in parallel, while the history stage waits on the
+    // explicit gate above.
+    const initialOverviewGate = beginAwarenessInitialOverviewGate(pageShowTrigger);
+    const initialOverviewTask = refreshPageDataAndCharts({
+      trigger: postBindingRefresh ? 'post-binding-page-show-data-load' : 'page-show-data-load',
+      force: postBindingRefresh,
+      allowDuringSync: true
+    });
+    const releaseInitialOverviewGate = () => {
+      if (initialOverviewGate.seq === awarenessInitialOverviewGateSeq) {
+        releaseAwarenessInitialOverviewGate?.();
+      }
+    };
+    void initialOverviewTask.then(releaseInitialOverviewGate, releaseInitialOverviewGate);
+    dispatchAwarenessHomeSyncWhenReady(pageShowTrigger);
     pullDownProgress.value = 100;
   } catch (error) {
     const typedError = error as { msg?: unknown; errMsg?: unknown; message?: unknown };
@@ -9360,6 +9684,7 @@ onShow(async () => {
 });
 onHide(() => {
   awarenessPageActive.value = false;
+  releaseAwarenessInitialOverviewGate?.();
   // clearTimer();
 });
 const scrollTop = ref(0);
@@ -9368,6 +9693,11 @@ onPageScroll((e) => {
 });
 onUnload(() => {
   awarenessPageActive.value = false;
+  releaseAwarenessInitialOverviewGate?.();
+  if (homeSyncForegroundBudgetTimer) {
+    clearTimeout(homeSyncForegroundBudgetTimer);
+    homeSyncForegroundBudgetTimer = null;
+  }
   if (chartRef1.value && chartRef1.value) {
     chartRef1.value?.dispose();
   }
@@ -9391,8 +9721,12 @@ onPullDownRefresh(async () => {
     pullDownProgress.value = 30;
     if (isAwarenessRwRing()) {
       pullDownProgress.value = 60;
-      await syncRwHomeHistoryAndRefreshOverview(formatLocalDate(new Date()), 'pull-down-refresh', { force: true });
+      await refreshAwarenessBusinessOverview(formatLocalDate(new Date()), {
+        trigger: 'pull-down-rw-overview',
+        allowDuringSync: true
+      });
       pullDownProgress.value = 100;
+      void syncRwHomeHistoryAndRefreshOverview(formatLocalDate(new Date()), 'pull-down-refresh-background', { force: true });
       return;
     }
     if (hasAwarenessCommunicationReady()) {
@@ -9409,16 +9743,21 @@ onPullDownRefresh(async () => {
         snapshot: getAwarenessConnectionSnapshot()
       });
       pullDownProgress.value = 60;
-      await executeCommandsSequentially();
-      pullDownProgress.value = 80;
       await refreshAwarenessBusinessOverview(formatLocalDate(new Date()), {
-        trigger: 'pull-down-legacy',
+        trigger: 'pull-down-legacy-overview',
         allowDuringSync: true
       });
-      appendAwarenessDiagnosticLog('legacy-home-pull-down-sync-result', {
+      pullDownProgress.value = 100;
+      void executeCommandsSequentially().catch((syncError) => {
+        appendAwarenessDiagnosticLog('legacy-home-pull-down-background-sync-failed', {
+          error: formatBleErrorMessage(syncError, 'legacy home sync failed'),
+          rawError: getAwarenessRawError(syncError),
+          snapshot: getAwarenessConnectionSnapshot()
+        });
+      });
+      appendAwarenessDiagnosticLog('legacy-home-pull-down-sync-background-started', {
         snapshot: getAwarenessConnectionSnapshot()
       });
-      pullDownProgress.value = 100;
       return;
     }
     await refreshAwarenessBusinessOverview(formatLocalDate(new Date()), {

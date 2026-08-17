@@ -24,6 +24,7 @@ MAX_TEXT_LENGTH = 20000
 
 class RwDebugLogEntry(BaseModel):
     id: int | None = None
+    eventId: str | None = Field(default=None, max_length=160)
     time: str | None = Field(default=None, max_length=64)
     clientTime: str | None = Field(default=None, max_length=64)
     source: str = Field(default="RW", max_length=64)
@@ -98,15 +99,27 @@ def normalize_optional_text(value: Any, max_length: int) -> str | None:
 def initialize_rw_debug_schema(db: Session) -> None:
     bind = db.get_bind()
     inspector = inspect(bind)
+    dialect = bind.dialect.name
     if inspector.has_table(RW_DEBUG_TABLE):
+        columns = {column["name"] for column in inspector.get_columns(RW_DEBUG_TABLE)}
+        if "event_id" not in columns:
+            db.execute(text(f"alter table {RW_DEBUG_TABLE} add column event_id varchar(160) null"))
+            db.commit()
+        indexes = {index["name"] for index in inspect(bind).get_indexes(RW_DEBUG_TABLE)}
+        if "uq_rw_debug_event_id" not in indexes:
+            if dialect == "mysql":
+                db.execute(text(f"create unique index uq_rw_debug_event_id on {RW_DEBUG_TABLE} (event_id)"))
+            else:
+                db.execute(text(f"create unique index if not exists uq_rw_debug_event_id on {RW_DEBUG_TABLE} (event_id)"))
+            db.commit()
         return
 
-    dialect = bind.dialect.name
     if dialect == "mysql":
         ddl = f"""
         create table if not exists {RW_DEBUG_TABLE} (
             id bigint not null auto_increment primary key,
             created_at datetime not null,
+            event_id varchar(160) null,
             client_log_id bigint null,
             client_time varchar(64) null,
             source varchar(64) not null,
@@ -119,7 +132,8 @@ def initialize_rw_debug_schema(db: Session) -> None:
             payload_json mediumtext null,
             index idx_rw_debug_created_at (created_at),
             index idx_rw_debug_source_event (source, event),
-            index idx_rw_debug_session (session_id)
+            index idx_rw_debug_session (session_id),
+            unique index uq_rw_debug_event_id (event_id)
         ) default charset=utf8mb4
         """
     else:
@@ -127,6 +141,7 @@ def initialize_rw_debug_schema(db: Session) -> None:
         create table if not exists {RW_DEBUG_TABLE} (
             id integer primary key autoincrement,
             created_at datetime not null,
+            event_id varchar(160) null,
             client_log_id integer null,
             client_time varchar(64) null,
             source varchar(64) not null,
@@ -144,6 +159,7 @@ def initialize_rw_debug_schema(db: Session) -> None:
         db.execute(text(f"create index if not exists idx_rw_debug_created_at on {RW_DEBUG_TABLE} (created_at)"))
         db.execute(text(f"create index if not exists idx_rw_debug_source_event on {RW_DEBUG_TABLE} (source, event)"))
         db.execute(text(f"create index if not exists idx_rw_debug_session on {RW_DEBUG_TABLE} (session_id)"))
+        db.execute(text(f"create unique index if not exists uq_rw_debug_event_id on {RW_DEBUG_TABLE} (event_id)"))
     db.commit()
 
 
@@ -159,8 +175,13 @@ def rw_debug_row(entry: RwDebugLogEntry, batch: RwDebugLogBatch) -> dict[str, An
         "snapshot.storeDevice.deviceId",
         "snapshot.userDevice.deviceId",
     )
+    session_id = normalize_optional_text(entry.sessionId or batch.sessionId, 128)
+    event_id = normalize_optional_text(entry.eventId, 160)
+    if not event_id and entry.id is not None:
+        event_id = normalize_optional_text(f"{session_id or 'anonymous'}:{entry.id}", 160)
     return {
         "created_at": now_app_time(),
+        "event_id": event_id,
         "client_log_id": entry.id,
         "client_time": entry.clientTime or entry.time,
         "source": (entry.source or "RW")[:64],
@@ -168,7 +189,7 @@ def rw_debug_row(entry: RwDebugLogEntry, batch: RwDebugLogBatch) -> dict[str, An
         "build_tag": normalize_optional_text(build_tag, 128),
         "device_id": normalize_optional_text(device_id, 128),
         "user_id": entry.userId,
-        "session_id": normalize_optional_text(entry.sessionId or batch.sessionId, 128),
+        "session_id": session_id,
         "details_json": json_text(entry.details),
         "payload_json": json_text(payload),
     }
@@ -218,21 +239,21 @@ def receive_rw_debug_logs(payload: RwDebugLogBatch, db: Session = Depends(get_db
     if not entries:
         return success({"count": 0})
     rows = [rw_debug_row(entry, payload) for entry in entries]
-    db.execute(
+    result = db.execute(
         text(
             f"""
-            insert into {RW_DEBUG_TABLE}
-              (created_at, client_log_id, client_time, source, event, build_tag, device_id,
+            {"insert ignore" if db.get_bind().dialect.name == "mysql" else "insert or ignore"} into {RW_DEBUG_TABLE}
+              (created_at, event_id, client_log_id, client_time, source, event, build_tag, device_id,
                user_id, session_id, details_json, payload_json)
             values
-              (:created_at, :client_log_id, :client_time, :source, :event, :build_tag, :device_id,
+              (:created_at, :event_id, :client_log_id, :client_time, :source, :event, :build_tag, :device_id,
                :user_id, :session_id, :details_json, :payload_json)
             """
         ),
         rows,
     )
     db.commit()
-    return success({"count": len(rows)})
+    return success({"count": max(0, result.rowcount or 0), "received": len(rows)})
 
 
 @router.delete("/app/rw-debug/logs")

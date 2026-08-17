@@ -162,25 +162,30 @@ const jumpEdit = () => {
 const leftClick = (): void => {
   uni.navigateBack();
 };
-onLoad(async (options) => {
+const loadInitialExerciseData = (dayIndex: number, selectedDate?: string) => {
+  const task = dayIndex !== 3
+    ? handleDateClick(dayIndex)
+    : (() => {
+        if (selectedDate) {
+          const formattedDate = uni.$uv.timeFormat(selectedDate, 'yyyy-mm-dd');
+          if (formattedDate && formattedDate !== 'NaN-NaN-NaN') {
+            return confirm({ fulldate: formattedDate });
+          }
+        }
+        selectedDayIndex.value = 2;
+        return handleDateClick(2);
+      })();
+  void task.catch(() => {
+    // 首屏和返回操作不等待网络；请求失败时保留页面骨架及已有数据。
+  });
+};
+
+onLoad((options) => {
   const rawDayIndex = options?.selectedDayIndex;
   const parsedDayIndex = rawDayIndex !== undefined && rawDayIndex !== '' ? Number(rawDayIndex) : 2;
   const dayIndex = Number.isFinite(parsedDayIndex) ? parsedDayIndex : 2;
   selectedDayIndex.value = dayIndex;
-
-  if (dayIndex !== 3) {
-    await handleDateClick(selectedDayIndex.value);
-  } else {
-    if (options?.selectedDate) {
-      const formattedDate = uni.$uv.timeFormat(options.selectedDate, 'yyyy-mm-dd');
-      if (formattedDate && formattedDate !== 'NaN-NaN-NaN') {
-        await confirm({ fulldate: formattedDate });
-        return;
-      }
-    }
-    selectedDayIndex.value = 2;
-    await handleDateClick(2);
-  }
+  loadInitialExerciseData(dayIndex, options?.selectedDate);
 });
 // onShow(async () => {
 //   await getMotionOverviewData();

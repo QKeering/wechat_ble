@@ -6,6 +6,7 @@ type SessionState = {
   activeUntil: number;
   seq: number;
   context: Record<string, unknown>;
+  expiryTimer: ReturnType<typeof setTimeout>;
 };
 
 type IdleSubscription = {
@@ -40,6 +41,7 @@ const notifyIdle = (deviceKey: string) => {
 const pruneExpiredSession = (deviceKey: string, now = Date.now()) => {
   const state = sessions.get(deviceKey);
   if (!state || state.activeUntil > now) return state;
+  clearTimeout(state.expiryTimer);
   sessions.delete(deviceKey);
   appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-expired-recovered', {
     deviceKey,
@@ -87,6 +89,28 @@ export const getLegacyBleHistoryExclusiveSnapshot = (deviceIdentity?: unknown) =
 export const isLegacyBleHistoryExclusiveActive = (deviceIdentity?: unknown) =>
   getLegacyBleHistoryExclusiveSnapshot(deviceIdentity).active;
 
+export const releaseLegacyBleCommandSessions = (deviceIdentity?: unknown, reason = 'forced-release') => {
+  const targetKeys = deviceIdentity == null ? [...sessions.keys()] : [resolveDeviceKey(deviceIdentity)];
+  let releasedCount = 0;
+  for (const deviceKey of targetKeys) {
+    const state = sessions.get(deviceKey);
+    if (!state) continue;
+    clearTimeout(state.expiryTimer);
+    sessions.delete(deviceKey);
+    releasedCount += 1;
+    appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-forced-release', {
+      deviceKey,
+      seq: state.seq,
+      sessionId: `legacy-command-${state.seq}`,
+      reason,
+      remainingMs: Math.max(0, state.activeUntil - Date.now()),
+      ...state.context
+    });
+    notifyIdle(deviceKey);
+  }
+  return releasedCount;
+};
+
 const createRelease = (
   deviceKey: string,
   seq: number,
@@ -98,7 +122,10 @@ const createRelease = (
     if (released) return;
     released = true;
     const current = sessions.get(deviceKey);
-    if (current?.seq === seq) sessions.delete(deviceKey);
+    if (current?.seq === seq) {
+      clearTimeout(current.expiryTimer);
+      sessions.delete(deviceKey);
+    }
     appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-end', {
       seq,
       sessionId: `legacy-command-${seq}`,
@@ -123,7 +150,12 @@ export const tryClaimLegacyBleCommandSession = (
   const seq = ++sessionSeq;
   const startedAt = Date.now();
   const activeUntil = startedAt + timeoutMs + 1000;
-  sessions.set(deviceKey, { activeUntil, seq, context });
+  const expiryTimer = setTimeout(() => {
+    const current = sessions.get(deviceKey);
+    if (current?.seq !== seq) return;
+    pruneExpiredSession(deviceKey);
+  }, Math.max(0, activeUntil - Date.now()) + 10);
+  sessions.set(deviceKey, { activeUntil, seq, context, expiryTimer });
   appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-start', {
     seq,
     sessionId: `legacy-command-${seq}`,

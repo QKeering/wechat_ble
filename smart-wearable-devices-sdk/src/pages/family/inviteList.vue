@@ -1,154 +1,92 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { onShow, onPullDownRefresh } from '@dcloudio/uni-app';
-import { acceptFamilyInvite, claimFamilyElderProfile, getFamilyInvites, rejectFamilyInvite, type FamilyInvite } from '@/common/api/family';
+import { onPullDownRefresh, onShow } from '@dcloudio/uni-app';
+import { acceptFamilyInvite, getFamilyInvites, rejectFamilyInvite, type FamilyInvite } from '@/common/api/family';
 
 const loading = ref(false);
+const processingId = ref<number | string | null>(null);
+const remark = ref('');
 const invites = ref<FamilyInvite[]>([]);
+const pendingInvites = computed(() => invites.value.filter(item => (
+  Number(item.status) === 0 && (item.isReceived === true || item.direction === 'received')
+)));
+const scopeLabels = ['睡眠', '心率', '血氧', '步数', '压力趋势'];
 
-const pendingInvites = computed(() => invites.value.filter((item) => item.status === 0));
-const historyInvites = computed(() => invites.value.filter((item) => item.status !== 0));
+const inviterName = (item: FamilyInvite) => item.inviterName || item.relationName || '亲友';
 
-const fetchInvites = async () => {
+async function loadInvites() {
   loading.value = true;
   try {
     invites.value = await getFamilyInvites();
+  } catch (error) {
+    console.warn('[family-share] load invites failed', error);
+    uni.showToast({ title: '邀请加载失败', icon: 'none' });
   } finally {
     loading.value = false;
   }
-};
+}
 
-const titleOf = (invite: FamilyInvite) => {
-  const name = invite.elderProfileName || invite.relationName || '家人';
-  if (invite.inviteType === 1) return `${invite.inviterName || '家人'} 邀请你查看 ${name} 的健康数据`;
-  return `${invite.inviterName || '家人'} 邀请老人确认共享`;
-};
-
-const descOf = (invite: FamilyInvite) => {
-  const expire = invite.expireTime ? `有效期至 ${invite.expireTime}` : '请及时处理';
-  const phone = invite.targetPhoneMasked || invite.targetPhone;
-  if (phone) return `${expire} · 手机号 ${phone}`;
-  return expire;
-};
-
-const acceptInvite = async (invite: FamilyInvite) => {
-  await acceptFamilyInvite(invite.inviteCode);
-  if (invite.elderProfileId && invite.inviteType === 2) {
-    await claimFamilyElderProfile(Number(invite.elderProfileId));
-  }
-  uni.showToast({ title: '已接受邀请', icon: 'success' });
-  fetchInvites();
-};
-
-const rejectInvite = async (invite: FamilyInvite) => {
-  await rejectFamilyInvite(invite.inviteCode);
-  uni.showToast({ title: '已拒绝', icon: 'success' });
-  fetchInvites();
-};
-
-onShow(fetchInvites);
-
-onPullDownRefresh(async () => {
+async function handleInvite(item: FamilyInvite, accept: boolean) {
+  if (processingId.value !== null) return;
+  processingId.value = item.id;
   try {
-    await fetchInvites();
+    if (accept) {
+      await acceptFamilyInvite(item.inviteCode);
+      uni.showToast({ title: '已接受邀请', icon: 'success' });
+      setTimeout(() => uni.redirectTo({ url: '/pages/family/family' }), 350);
+    } else {
+      await rejectFamilyInvite(item.inviteCode);
+      uni.showToast({ title: '已拒绝邀请', icon: 'success' });
+      await loadInvites();
+    }
+  } catch (error) {
+    console.warn('[family-share] handle invite failed', error);
+    uni.showToast({ title: '处理失败，请稍后重试', icon: 'none' });
   } finally {
-    uni.stopPullDownRefresh();
+    processingId.value = null;
   }
+}
+
+onShow(loadInvites);
+onPullDownRefresh(async () => {
+  await loadInvites();
+  uni.stopPullDownRefresh();
 });
 </script>
 
 <template>
   <view class="page">
-    <uv-navbar placeholder title="家人邀请" bgColor="#f1f3f6"></uv-navbar>
-
-    <view v-if="loading" class="empty">正在加载邀请...</view>
-
+    <uv-navbar placeholder title="亲友邀请" bgColor="transparent" />
+    <view v-if="loading" class="state-card">正在加载邀请...</view>
+    <view v-else-if="pendingInvites.length === 0" class="state-card">
+      <view class="empty-icon">✓</view>
+      <view class="empty-title">暂无待处理邀请</view>
+      <view class="empty-desc">收到亲友的健康共享邀请后，会显示在这里。</view>
+    </view>
     <view v-else>
-      <view class="section-title">待处理邀请</view>
-      <view v-if="pendingInvites.length === 0" class="empty-card">
-        <view class="empty-title">暂无待处理邀请</view>
-        <view class="empty-desc">收到家人邀请后，会显示在这里。</view>
-      </view>
-
-      <view v-for="invite in pendingInvites" :key="invite.id" class="invite-card">
-        <view class="invite-title">{{ titleOf(invite) }}</view>
-        <view class="invite-desc">{{ descOf(invite) }}</view>
-        <view class="invite-actions">
-          <uv-button text="接受" color="#2E70FC" :customStyle="{ height: '82rpx' }" :customTextStyle="{ fontSize: '30rpx' }" @click="acceptInvite(invite)" />
-          <view class="button-gap"></view>
-          <uv-button text="拒绝" color="#F3F4F6" :customStyle="{ height: '82rpx' }" :customTextStyle="{ color: '#6B7280', fontSize: '30rpx' }" @click="rejectInvite(invite)" />
+      <view v-for="item in pendingInvites" :key="item.id" class="invite-card">
+        <view class="inviter">
+          <view class="avatar">{{ inviterName(item).slice(0, 1) }}</view>
+          <view>
+            <view class="inviter-name">{{ inviterName(item) }}</view>
+            <view class="invite-tip">邀请你查看其健康数据</view>
+          </view>
         </view>
-      </view>
-
-      <view class="section-title history-title">历史邀请</view>
-      <view v-if="historyInvites.length === 0" class="soft-text">暂无历史邀请。</view>
-      <view v-for="invite in historyInvites" :key="invite.id" class="history-card">
-        <view class="history-main">{{ titleOf(invite) }}</view>
-        <view class="history-desc">{{ invite.statusText }} · {{ invite.createTime || '' }}</view>
+        <view class="scope-title">共享内容</view>
+        <view class="scope-list">
+          <view v-for="label in scopeLabels" :key="label" class="scope-chip">{{ label }}</view>
+        </view>
+        <textarea v-model="remark" class="remark" maxlength="20" placeholder="备注名称（选填）" />
+        <view class="expire">邀请有效期至 {{ item.expireTime || '7 天后' }}</view>
+        <button class="accept-button" :loading="processingId === item.id" @click="handleInvite(item, true)">接受邀请</button>
+        <button class="reject-button" :disabled="processingId !== null" @click="handleInvite(item, false)">暂不接受</button>
       </view>
     </view>
   </view>
 </template>
 
 <style lang="scss" scoped>
-.page {
-  min-height: 100vh;
-  background: #f1f3f6;
-  padding: 0 30rpx 60rpx;
-  box-sizing: border-box;
-}
-.section-title {
-  margin-top: 30rpx;
-  color: #111827;
-  font-size: 36rpx;
-  font-weight: 900;
-}
-.history-title {
-  margin-top: 42rpx;
-}
-.empty,
-.empty-card,
-.invite-card,
-.history-card {
-  margin-top: 22rpx;
-  padding: 32rpx;
-  border-radius: 24rpx;
-  background: #ffffff;
-}
-.empty,
-.empty-card {
-  text-align: center;
-}
-.empty-title,
-.invite-title,
-.history-main {
-  color: #111827;
-  font-size: 32rpx;
-  font-weight: 800;
-  line-height: 1.5;
-}
-.empty-desc,
-.invite-desc,
-.history-desc,
-.soft-text {
-  margin-top: 12rpx;
-  color: #6b7280;
-  font-size: 28rpx;
-  line-height: 1.6;
-}
-.invite-actions {
-  display: flex;
-  align-items: center;
-  margin-top: 26rpx;
-}
-.invite-actions :deep(.uv-button) {
-  flex: 1;
-}
-.button-gap {
-  width: 18rpx;
-  flex: 0 0 18rpx;
-}
-.soft-text {
-  padding: 26rpx 0;
-}
+.page{min-height:100vh;box-sizing:border-box;padding:0 28rpx 64rpx;background:linear-gradient(180deg,#eef4ff 0,#f3f5f8 360rpx)}
+.state-card,.invite-card{margin-top:28rpx;padding:36rpx;border-radius:30rpx;background:#fff;box-shadow:0 12rpx 36rpx rgba(42,73,128,.07)}.state-card{text-align:center;color:#8b94a3;font-size:28rpx}.empty-icon{display:flex;align-items:center;justify-content:center;width:96rpx;height:96rpx;margin:12rpx auto 24rpx;border-radius:50%;background:#eaf7ef;color:#3ab873;font-size:42rpx}.empty-title{font-size:34rpx;font-weight:800;color:#172033}.empty-desc{margin-top:12rpx;line-height:1.6}
+.inviter{display:flex;align-items:center}.avatar{display:flex;align-items:center;justify-content:center;width:94rpx;height:94rpx;margin-right:22rpx;border-radius:30rpx;background:linear-gradient(135deg,#4e87ff,#2767f2);color:#fff;font-size:38rpx;font-weight:800}.inviter-name{font-size:36rpx;font-weight:800;color:#172033}.invite-tip{margin-top:7rpx;font-size:27rpx;color:#828b9a}.scope-title{margin-top:34rpx;font-size:28rpx;font-weight:700;color:#3f4857}.scope-list{display:flex;flex-wrap:wrap;gap:14rpx;margin-top:16rpx}.scope-chip{padding:13rpx 22rpx;border-radius:999rpx;background:#edf3ff;color:#2e70fc;font-size:26rpx}.remark{box-sizing:border-box;width:100%;height:88rpx;margin-top:26rpx;padding:22rpx;border-radius:18rpx;background:#f6f8fb;font-size:28rpx}.expire{margin-top:18rpx;font-size:25rpx;text-align:center;color:#9aa2af}.accept-button,.reject-button{height:92rpx;border:0;border-radius:24rpx;font-size:31rpx;font-weight:700;line-height:92rpx}.accept-button{margin-top:26rpx;background:#2e70fc;color:#fff}.reject-button{margin-top:16rpx;background:#f2f4f7;color:#6f7886}.accept-button::after,.reject-button::after{border:0}
 </style>

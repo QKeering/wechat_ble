@@ -23,14 +23,14 @@ import {
   getSubmitDeviceMac,
   requestMetricRefresh
 } from '@/composables/useRingMetricReadings';
-import { useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
+import { appendRingDiagnosticLog, useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
 import {
   getRemainingVitalMeasurementMs,
   MIN_VITAL_MEASUREMENT_DURATION_MS,
   MAX_VITAL_MEASUREMENT_DURATION_MS
 } from '@/utils/measurementDuration';
-const { sendActiveMeasureCommand, refreshHealthData } = useRingBLE();
+const { sendActiveMeasureCommand, refreshHealthData, ensureCommunicationReady } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
 const userStore = useUserStore();
 const echarts = require('../../../static/echarts.min.js');
@@ -294,8 +294,36 @@ let measureTimeout: any = null;
 let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
 let measureStartedAt = 0;
+const HEART_RATE_READY_TIMEOUT_MS = 12000;
 const measureChange = (e: any) => {};
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
+const getHeartRateMeasureSnapshot = () => ({
+  deviceMac: getSubmitDeviceMac(userStore, isIOS.value),
+  protocol: resolveRingProtocol(userStore.deviceInfo as any),
+  userConnected: Boolean(userStore.isConnected),
+  notifyEnabled: Boolean((userStore.deviceInfo as any)?.notifyEnabled),
+  measureStatus: measureStatus.value
+});
+const ensureHeartRateCommunicationReady = async () => {
+  appendRingDiagnosticLog('VITAL HEART', 'heart-rate-ready-check-start', getHeartRateMeasureSnapshot());
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const ready = await Promise.race([
+      Promise.resolve(ensureCommunicationReady()),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), HEART_RATE_READY_TIMEOUT_MS);
+      })
+    ]);
+    appendRingDiagnosticLog('VITAL HEART', 'heart-rate-ready-check-result', {
+      ...getHeartRateMeasureSnapshot(),
+      ready: Boolean(ready),
+      timeoutMs: HEART_RATE_READY_TIMEOUT_MS
+    });
+    if (!ready) throw new Error('设备连接未就绪，请靠近设备后重试');
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
 const clearMeasureCompleteTimer = () => {
   if (!measureCompleteTimer) return;
   clearTimeout(measureCompleteTimer);
@@ -358,6 +386,21 @@ const startMeasure = async () => {
     return;
   }
 
+  appendRingDiagnosticLog('VITAL HEART', 'heart-rate-measure-requested', getHeartRateMeasureSnapshot());
+  uni.showLoading({ title: '正在连接设备...' });
+  try {
+    await ensureHeartRateCommunicationReady();
+  } catch (error) {
+    uni.hideLoading();
+    appendRingDiagnosticLog('VITAL HEART', 'heart-rate-ready-check-failed', {
+      ...getHeartRateMeasureSnapshot(),
+      error: formatBleErrorMessage(error, '设备连接未就绪')
+    });
+    uni.showToast({ title: formatBleErrorMessage(error, '设备未连接，请靠近设备后重试'), icon: 'none' });
+    return;
+  }
+  uni.hideLoading();
+
   // 清除可能残留的旧定时器
   if (measureTimeout) {
     clearTimeout(measureTimeout);
@@ -367,6 +410,11 @@ const startMeasure = async () => {
 
   measureStatus.value = 'measuring';
   measureStartedAt = Date.now();
+
+  appendRingDiagnosticLog('VITAL HEART', 'heart-rate-command-dispatch-start', {
+    ...getHeartRateMeasureSnapshot(),
+    measureStartedAt
+  });
 
   await showMeasureWaitingPopup();
   startMeasureFallbackTimer();
@@ -384,6 +432,10 @@ const startMeasure = async () => {
       return;
     }
     await requestMetricRefresh(refreshHealthData, sendActiveMeasureCommand, { expectedSteps: 'heart_rate' });
+    appendRingDiagnosticLog('VITAL HEART', 'heart-rate-command-dispatch-result', {
+      ...getHeartRateMeasureSnapshot(),
+      elapsedMs: Date.now() - measureStartedAt
+    });
     await completeMeasureWithLatestReading();
   } catch (error) {
     if (measureStatus.value !== 'measuring') return;
@@ -393,6 +445,10 @@ const startMeasure = async () => {
     }
     measureStatus.value = 'idle';
     measureStartedAt = 0;
+    appendRingDiagnosticLog('VITAL HEART', 'heart-rate-command-dispatch-failed', {
+      ...getHeartRateMeasureSnapshot(),
+      error: formatBleErrorMessage(error, '测量指令发送失败')
+    });
     uni.showToast({ title: formatBleErrorMessage(error, '测量指令发送失败'), icon: 'none' });
     return;
   }

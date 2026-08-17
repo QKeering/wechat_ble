@@ -679,6 +679,9 @@ def _member_from_row(row: Any) -> dict[str, Any] | None:
     if not row:
         return None
     data = camelize_dict(dict(row._mapping))
+    effective_name = str(data.pop("effectiveName", "") or "").strip()
+    if effective_name:
+        data["name"] = effective_name
     data["permissions"] = _parse_permissions(data.get("permissions"))
     _mask_response_phone_fields(data, ("phone",))
     return data
@@ -702,12 +705,14 @@ def list_members(db: Session, owner_user_id: int) -> list[dict[str, Any]]:
         text(
             """
             select m.*,
+                   coalesce(nullif(trim(r.display_name), ''), m.name) as effective_name,
                    coalesce(d.device_mac, profile_dev.mac, latest_health.device_mac) as device_mac,
                    d.service_id,
                    coalesce(d.device_name, dev.device_name, profile_dev.device_name, health_dev.device_name) as device_name,
                    coalesce(dev.battery, profile_dev.battery, health_dev.battery) as battery,
                    coalesce(dev.last_sync_time, profile_dev.last_sync_time, health_dev.last_sync_time, latest_health.record_time) as last_sync_time
             from family_member m
+            left join family_relation r on r.id=m.relation_id and r.del_flag='0'
             left join family_member_device d on d.member_id=m.id and d.del_flag=0 and d.status='active'
             left join device dev on dev.mac=d.device_mac collate utf8mb4_general_ci and dev.del_flag=0
             left join device profile_dev on profile_dev.id=(
@@ -2032,6 +2037,15 @@ def create_invite(db: Session, inviter_user_id: int, payload: dict[str, Any]) ->
     target_phone = _normalize_phone(payload.get("targetPhone") or payload.get("target_phone")) or None
     if target_phone and len(target_phone) != 11:
         raise ValueError("请输入正确的邀请手机号")
+    if target_phone:
+        inviter_phone = _normalize_phone(
+            db.execute(
+                text("select phone from app_user where id=:id and del_flag=0 limit 1"),
+                {"id": inviter_user_id},
+            ).scalar()
+        )
+        if inviter_phone and target_phone == inviter_phone:
+            raise ValueError("邀请人与接收人不能相同")
     elder_user_id = payload.get("elderUserId") or payload.get("elder_user_id")
     elder_profile_id = payload.get("elderProfileId") or payload.get("elder_profile_id")
     relation_id = payload.get("relationId") or payload.get("relation_id")
@@ -2070,6 +2084,40 @@ def create_invite(db: Session, inviter_user_id: int, payload: dict[str, Any]) ->
     return {"inviteCode": code, "expireTime": expire.strftime("%Y-%m-%d %H:%M:%S")}
 
 
+def require_pending_invite(db: Session, invite_code: str) -> dict[str, Any]:
+    code = str(invite_code or "").strip().upper()
+    row = db.execute(
+        text("select * from family_invite where invite_code=:code limit 1"),
+        {"code": code},
+    ).first()
+    if not row:
+        raise ValueError("邀请不存在")
+    invite = dict(row._mapping)
+    if int(invite.get("status") or 0) != INVITE_STATUS["pending"]:
+        raise ValueError("邀请已处理")
+    expire_time = invite.get("expire_time")
+    if expire_time and datetime.strptime(str(expire_time)[:19], "%Y-%m-%d %H:%M:%S") < datetime.now():
+        db.execute(text("update family_invite set status=3 where id=:id"), {"id": invite["id"]})
+        db.commit()
+        raise ValueError("邀请已过期")
+    return invite
+
+
+def get_invite_preview(db: Session, invite_code: str, current_user_id: int) -> dict[str, Any]:
+    invite = require_pending_invite(db, invite_code)
+    inviter = app_auth.user_by_id(db, int(invite["inviter_user_id"])) or {}
+    nickname = str(inviter.get("nickName") or inviter.get("nick_name") or "亲友")
+    is_self_invite = int(invite["inviter_user_id"]) == int(current_user_id)
+    return {
+        "inviteCode": str(invite["invite_code"]),
+        "inviterName": nickname[:1] + "*" if len(nickname) > 1 else nickname,
+        "expireTime": str(invite.get("expire_time") or "")[:19],
+        "permissionSummary": "接受后可查看对方授权的健康概览，不能修改对方资料或设备设置。",
+        "canAccept": not is_self_invite,
+        "disabledReason": "邀请人与接收人不能相同" if is_self_invite else "",
+    }
+
+
 def _normalize_phone(value: Any) -> str:
     return "".join(ch for ch in str(value or "").strip() if ch.isdigit())
 
@@ -2105,17 +2153,9 @@ def _assert_invite_target(db: Session, current_user_id: int, invite: dict[str, A
 
 
 def handle_invite(db: Session, current_user_id: int, invite_code: str, accept: bool) -> dict[str, Any]:
-    row = db.execute(text("select * from family_invite where invite_code=:code limit 1"), {"code": invite_code}).first()
-    if not row:
-        raise ValueError("邀请不存在")
-    invite = dict(row._mapping)
-    if int(invite.get("status") or 0) != INVITE_STATUS["pending"]:
-        raise ValueError("邀请已处理")
-    expire_time = invite.get("expire_time")
-    if expire_time and datetime.strptime(str(expire_time)[:19], "%Y-%m-%d %H:%M:%S") < datetime.now():
-        db.execute(text("update family_invite set status=3 where id=:id"), {"id": invite["id"]})
-        db.commit()
-        raise ValueError("邀请已过期")
+    invite = require_pending_invite(db, invite_code)
+    if int(invite["inviter_user_id"]) == int(current_user_id):
+        raise ValueError("邀请人与接收人不能相同")
     _assert_invite_target(db, current_user_id, invite)
     if not accept:
         db.execute(text("update family_invite set status=2, invitee_user_id=:user_id where id=:id"), {"id": invite["id"], "user_id": current_user_id})
@@ -2281,6 +2321,17 @@ def update_relation(db: Session, current_user_id: int, relation_id: int, payload
             text("update family_member set permissions=:permissions, update_time=now() where relation_id=:relation_id"),
             {"permissions": _permissions_payload(permissions), "relation_id": relation_id},
         )
+    if display_name:
+        db.execute(
+            text(
+                """
+                update family_member
+                set name=:display_name, update_time=now()
+                where relation_id=:relation_id and del_flag=0
+                """
+            ),
+            {"display_name": str(display_name).strip()[:64], "relation_id": relation_id},
+        )
     if status:
         db.execute(
             text("update family_member set status=:status, update_time=now() where relation_id=:relation_id"),
@@ -2351,9 +2402,11 @@ def list_invites(db: Session, user: dict[str, Any]) -> list[dict[str, Any]]:
             left join app_user invitee on invitee.id=i.invitee_user_id
             left join elder_profile p on p.id=i.elder_profile_id
             left join family_relation r on r.id=i.relation_id
-            where i.inviter_user_id=:user_id
-               or i.invitee_user_id=:user_id
-               or (:phone <> '' and i.target_phone=:phone)
+            where i.inviter_user_id<>:user_id
+              and (
+                   i.invitee_user_id=:user_id
+                   or (:phone <> '' and i.target_phone=:phone)
+              )
             order by i.create_time desc
             limit 100
             """
@@ -2365,6 +2418,11 @@ def list_invites(db: Session, user: dict[str, Any]) -> list[dict[str, Any]]:
         item = _invite_from_row(row)
         if not item:
             continue
+        is_sent = int(item.get("inviterUserId") or 0) == user_id
+        item["direction"] = "sent" if is_sent else "received"
+        item["isSent"] = is_sent
+        item["isReceived"] = not is_sent
+        item["canHandle"] = not is_sent and int(item.get("status") or 0) == INVITE_STATUS["pending"]
         result.append(item)
     return result
 

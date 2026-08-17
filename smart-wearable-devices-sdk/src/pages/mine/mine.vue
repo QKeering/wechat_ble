@@ -198,14 +198,8 @@ const menuList: MineMenuItem[] = [
   {
     iconText: '友',
     iconClass: 'menu-icon-family',
-    title: '\u4eb2\u53cb\u5171\u4eab',
+    title: '\u4eb2\u53cb\u5173\u6000',
     path: '/pages/family/family'
-  },
-  {
-    iconText: '长',
-    iconClass: 'menu-icon-elder',
-    title: '\u957f\u8f88\u6a21\u5f0f',
-    path: '/pages/family/elderHome'
   },
   {
     icon: '/static/images/mine/menu01.png',

@@ -210,6 +210,16 @@ export interface FamilyElderProfileResult {
 export interface FamilyInviteResult {
   inviteCode: string;
   expireTime: string;
+  miniProgramCodeUrl: string;
+}
+
+export interface FamilyInvitePreview {
+  inviteCode: string;
+  inviterName: string;
+  expireTime: string;
+  permissionSummary: string;
+  canAccept: boolean;
+  disabledReason: string;
 }
 
 export interface FamilyInvite {
@@ -225,6 +235,10 @@ export interface FamilyInvite {
   targetPhoneMasked?: string;
   status: number;
   statusText: string;
+  direction?: 'sent' | 'received';
+  isSent?: boolean;
+  isReceived?: boolean;
+  canHandle?: boolean;
   expireTime: string;
   createTime?: string;
   inviterName?: string;
@@ -315,8 +329,11 @@ export const createFamilyInvite = (
 export const getFamilyInvites = (params = {}, config = {}): Promise<FamilyInvite[]> =>
   (uni as any).$uv.http.get('/app/family/invite/list', { params, ...config });
 
+export const getFamilyInvitePreview = (inviteCode: string, config = {}): Promise<FamilyInvitePreview> =>
+  (uni as any).$uv.http.get(`/app/family/invite/${encodeURIComponent(inviteCode)}/preview`, config);
+
 export const acceptFamilyInvite = (inviteCode: string, config = {}) =>
-  (uni as any).$uv.http.post(`/app/family/invite/${inviteCode}/accept`, {}, config);
+  (uni as any).$uv.http.post(`/app/family/invite/${encodeURIComponent(inviteCode)}/accept`, {}, config);
 
 export const rejectFamilyInvite = (inviteCode: string, config = {}) =>
   (uni as any).$uv.http.post(`/app/family/invite/${inviteCode}/reject`, {}, config);

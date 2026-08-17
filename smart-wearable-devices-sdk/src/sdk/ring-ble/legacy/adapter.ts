@@ -6,7 +6,8 @@ import { parseLegacyRingData } from './parser';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import {
   getLegacyBleHistoryExclusiveSnapshot,
-  onLegacyBleCommandSessionIdle
+  onLegacyBleCommandSessionIdle,
+  releaseLegacyBleCommandSessions
 } from './commandSession';
 import {
   buildLegacyCommandByName,
@@ -451,6 +452,9 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   let legacyCommandWriteQueueGeneration = 0;
   let legacyLastCommandWriteAt = 0;
   let lastAppConnectAt = 0;
+  let appConnectReadyGeneration = -1;
+  let appConnectInFlight: Promise<unknown> | null = null;
+  let appConnectInFlightGeneration = -1;
   let legacyPhysicalConnectedAt = 0;
   let establishAppConnectSession: () => Promise<unknown> = async () => undefined;
   let connectionStateHandler: BleConnectionStateCallback | null = null;
@@ -470,13 +474,39 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     subcmd: number;
     payloadHex: string;
     notifyCount: number;
+    firstPacketAt: number;
+    lastPacketAt: number;
+    maxPacketGapMs: number;
+    totalRecordCount: number;
   } | null = null;
 
+  const finalizeHistoryWireTrace = (reason: string, details: Record<string, unknown> = {}) => {
+    const trace = historyWireTrace;
+    if (!trace) return;
+    const now = Date.now();
+    appendRingDiagnosticLog('L19 BLE', 'legacy-history-wire-summary', {
+      reason,
+      elapsedMs: now - trace.startedAt,
+      firstPacketDelayMs: trace.firstPacketAt ? trace.firstPacketAt - trace.startedAt : null,
+      lastPacketElapsedMs: trace.lastPacketAt ? trace.lastPacketAt - trace.startedAt : null,
+      notifyCount: trace.notifyCount,
+      totalRecordCount: trace.totalRecordCount,
+      maxPacketGapMs: trace.maxPacketGapMs,
+      historyCmd: '0x36',
+      historySubcmd: formatLegacyFrameByte(trace.subcmd),
+      sinceTimestamp: trace.sinceTimestamp,
+      readAll: trace.readAll,
+      requestPayloadHex: trace.payloadHex,
+      ...details
+    });
+    historyWireTrace = null;
+  };
+
   const resetLegacyCommandWriteQueue = (reason: string, deviceId = '') => {
+    finalizeHistoryWireTrace(`command-queue-reset:${reason}`, { deviceId });
     legacyCommandWriteQueueGeneration += 1;
     legacyCommandWriteQueue = Promise.resolve();
     legacyLastCommandWriteAt = 0;
-    historyWireTrace = null;
     appendRingDiagnosticLog('L19 BLE', 'legacy-command-write-queue-reset', {
       reason,
       deviceId: deviceId || runtime?.getDeviceInfo?.().deviceId,
@@ -513,19 +543,33 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     const trace = historyWireTrace;
     if (!trace) return;
 
-    const elapsedMs = Date.now() - trace.startedAt;
-    if (elapsedMs > 60000) return;
-
+    const now = Date.now();
+    const elapsedMs = now - trace.startedAt;
+    const previousPacketAt = trace.lastPacketAt;
+    if (!trace.firstPacketAt) trace.firstPacketAt = now;
+    if (previousPacketAt) trace.maxPacketGapMs = Math.max(trace.maxPacketGapMs, now - previousPacketAt);
+    trace.lastPacketAt = now;
     trace.notifyCount += 1;
     const parsedRecordCount = Array.isArray((parsed as any)?.records) ? (parsed as any).records.length : undefined;
     const parsedDataCount = Array.isArray((parsed as any)?.data) ? (parsed as any).data.length : undefined;
+    trace.totalRecordCount += parsedRecordCount ?? parsedDataCount ?? 0;
     const parsedStatus = (parsed as any)?.status;
-    const shouldLog =
-      trace.notifyCount <= 5 ||
-      trace.notifyCount % 50 === 0 ||
-      parsedStatus === 'complete' ||
-      parsedStatus === 'empty' ||
-      (!parsed && trace.notifyCount <= 10);
+    if (trace.notifyCount === 1) {
+      appendRingDiagnosticLog('L19 BLE', 'legacy-history-wire-first-packet', {
+        firstPacketDelayMs: trace.firstPacketAt - trace.startedAt,
+        historySubcmd: formatLegacyFrameByte(trace.subcmd),
+        sinceTimestamp: trace.sinceTimestamp,
+        ...notifyFrame,
+        parsedType: parsed?.type,
+        status: parsedStatus,
+        recordCount: parsedRecordCount,
+        dataCount: parsedDataCount
+      });
+    }
+    // Normal frames are deliberately not logged one by one. The first-packet
+    // event above plus the terminal summary retain enough timing evidence to
+    // distinguish device latency, packet gaps and post-processing latency.
+    const shouldLog = parsedStatus === 'complete' || parsedStatus === 'empty' || !parsed;
 
     if (!shouldLog) return;
 
@@ -548,7 +592,12 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     });
 
     if (parsedStatus === 'complete' || parsedStatus === 'empty') {
-      historyWireTrace = null;
+      finalizeHistoryWireTrace('terminal-frame', {
+        terminalStatus: parsedStatus,
+        terminalFrame: notifyFrame,
+        terminalRecordCount: parsedRecordCount,
+        terminalDataCount: parsedDataCount
+      });
     }
   };
 
@@ -600,6 +649,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
       legacyPhysicalConnectedAt = 0;
       lastAppConnectAt = 0;
+      releaseLegacyBleCommandSessions(runtime?.getDeviceInfo?.() || eventDeviceId, 'physical-disconnect');
       resetLegacyCommandWriteQueue('physical-disconnect', eventDeviceId);
 
       clearDataListener({
@@ -618,6 +668,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       if (result.available) return;
 
       void stopScan();
+      releaseLegacyBleCommandSessions(runtime?.getDeviceInfo?.(), 'bluetooth-adapter-unavailable');
       resetLegacyCommandWriteQueue('bluetooth-adapter-unavailable');
       clearDataListener({
         reason: 'bluetooth-adapter-unavailable',
@@ -1248,6 +1299,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   };
 
   const sendReadLocalDataCommand = (sinceTimestamp = 0, readAll = true) => {
+    finalizeHistoryWireTrace('superseded-by-new-read');
     const subcmd = readAll ? 0x01 : 0x00;
     const payload = numberToUint32LE(sinceTimestamp);
     const startedAt = Date.now();
@@ -1257,7 +1309,11 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       readAll,
       subcmd,
       payloadHex: getLegacyBytesHex(payload),
-      notifyCount: 0
+      notifyCount: 0,
+      firstPacketAt: 0,
+      lastPacketAt: 0,
+      maxPacketGapMs: 0,
+      totalRecordCount: 0
     };
     appendRingDiagnosticLog('L19 BLE', 'legacy-history-wire-write', {
       historyCmd: '0x36',
@@ -1288,7 +1344,9 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
           error: formatLegacyBleError(error),
           rawError: error
         });
-        historyWireTrace = null;
+        finalizeHistoryWireTrace('write-failed', {
+          error: formatLegacyBleError(error)
+        });
         throw error;
       });
   };
@@ -1327,6 +1385,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   };
 
   const sendAppConnectCommand = async (options: { timeoutMs?: number } = {}) => {
+    const commandGeneration = legacyCommandWriteQueueGeneration;
     const timeoutMs = Math.max(3000, Number(options.timeoutMs) || 8000);
     const frameId = createLegacyFrameId();
     const timestampMs = Date.now();
@@ -1365,7 +1424,10 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         result: writeResult
       });
       const ack = await ackPromise;
-      lastAppConnectAt = Date.now();
+      if (legacyCommandWriteQueueGeneration === commandGeneration) {
+        lastAppConnectAt = Date.now();
+        appConnectReadyGeneration = commandGeneration;
+      }
       appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-result', {
         deviceId: runtime?.getDeviceInfo().deviceId,
         frameId,
@@ -1384,30 +1446,55 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     }
   };
   establishAppConnectSession = async () => {
+    const currentGeneration = legacyCommandWriteQueueGeneration;
     const appConnectElapsedMs = lastAppConnectAt > 0 ? Date.now() - lastAppConnectAt : Number.POSITIVE_INFINITY;
-    if (appConnectElapsedMs < 60_000) {
+    if (lastAppConnectAt > 0 && appConnectReadyGeneration === currentGeneration) {
       appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-skipped', {
         reason: 'session-already-established',
-        appConnectElapsedMs
+        appConnectElapsedMs,
+        connectionGeneration: currentGeneration
       });
       return { skipped: true, reason: 'session-already-established' };
     }
 
-    const connectedElapsedMs = legacyPhysicalConnectedAt > 0 ? Date.now() - legacyPhysicalConnectedAt : 0;
-    const waitMs = Math.max(0, 3000 - connectedElapsedMs);
-    if (waitMs > 0) {
-      appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-post-physical-wait-start', {
-        deviceId: runtime?.getDeviceInfo().deviceId,
-        connectedElapsedMs,
-        waitMs
+    if (appConnectInFlight && appConnectInFlightGeneration === currentGeneration) {
+      appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-await-shared', {
+        connectionGeneration: currentGeneration
       });
-      await sleep(waitMs);
+      return appConnectInFlight;
     }
-    return sendAppConnectCommand();
+
+    appConnectInFlightGeneration = currentGeneration;
+    // Register the shared task before the mandatory post-connect wait. Several
+    // restore/page-show callers can arrive during this window; registering only
+    // after the wait lets every caller pass the in-flight guard and send its own
+    // APP_CONNECT frame when the wait expires.
+    const task = (async () => {
+      const connectedElapsedMs = legacyPhysicalConnectedAt > 0 ? Date.now() - legacyPhysicalConnectedAt : 0;
+      const waitMs = Math.max(0, 3000 - connectedElapsedMs);
+      if (waitMs > 0) {
+        appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-post-physical-wait-start', {
+          deviceId: runtime?.getDeviceInfo().deviceId,
+          connectedElapsedMs,
+          waitMs
+        });
+        await sleep(waitMs);
+      }
+      return sendAppConnectCommand();
+    })();
+    appConnectInFlight = task;
+    try {
+      return await task;
+    } finally {
+      if (appConnectInFlight === task) {
+        appConnectInFlight = null;
+        appConnectInFlightGeneration = -1;
+      }
+    }
   };
 
   const updateDeviceTime = async (timestampMs = Date.now(), timezone = 8) => {
-    if (lastAppConnectAt > 0 && Date.now() - lastAppConnectAt < 60_000) {
+    if (lastAppConnectAt > 0 && appConnectReadyGeneration === legacyCommandWriteQueueGeneration) {
       appendRingDiagnosticLog('L19 BLE', 'legacy-device-time-write-skipped', {
         reason: 'app-connect-already-synced-time',
         appConnectElapsedMs: Date.now() - lastAppConnectAt

@@ -33,6 +33,7 @@ const scanTarget = ref('');
 const scanTargetName = ref('');
 const directScan = ref(false);
 const scanTargetAutoConnectDone = ref(false);
+const POST_BINDING_REFRESH_STORAGE_KEY = 'qkeer_post_binding_refresh_at';
 
 const picker = ref<any>(null);
 const columns = ref([['全部']]);
@@ -404,6 +405,24 @@ const confirmConnect = async () => {
     refreshDeviceInfoAfterConnect();
     cancelConnect(true);
     setTimeout(() => {
+      if (isDirectScanMode.value) {
+        uni.setStorageSync(POST_BINDING_REFRESH_STORAGE_KEY, Date.now());
+        appendConnectPageDiagnosticLog('connect-page-post-binding-home-navigation', {
+          target: '/pages/awareness/awareness',
+          snapshot: getConnectPageSnapshot()
+        });
+        uni.switchTab({
+          url: '/pages/awareness/awareness',
+          fail: (error) => {
+            appendConnectPageDiagnosticLog('connect-page-post-binding-home-navigation-failed', {
+              error: String((error as any)?.errMsg || error || ''),
+              snapshot: getConnectPageSnapshot()
+            });
+            uni.navigateBack();
+          }
+        });
+        return;
+      }
       uni.navigateBack();
     }, 1000);
   } catch (err) {

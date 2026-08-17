@@ -2,6 +2,7 @@ import { getFullUrl } from '@/utils/utils.js';
 
 export interface RwDiagnosticUploadEntry {
   id?: number;
+  eventId?: string;
   time?: string;
   source?: string;
   event?: string;
@@ -14,9 +15,10 @@ export interface RwDiagnosticUploadEntry {
 
 const QUEUE_STORAGE_KEY = 'qkeer:rw-diagnostic-upload-queue';
 const SESSION_STORAGE_KEY = 'qkeer:rw-diagnostic-session-id';
-const MAX_QUEUE_COUNT = 600;
-const BATCH_SIZE = 120;
-const FLUSH_DELAY_MS = 2500;
+const MAX_QUEUE_COUNT = 300;
+const BATCH_SIZE = 40;
+const FLUSH_DELAY_MS = 12000;
+const BUSINESS_UPLOAD_ACTIVE_RETRY_MS = 5000;
 const QUEUE_PERSIST_DELAY_MS = 2500;
 const REQUEST_TIMEOUT_MS = 3000;
 
@@ -26,6 +28,7 @@ let flushing = false;
 let pendingFlush = false;
 let queueCache: RwDiagnosticUploadEntry[] | null = null;
 let diagnosticSessionIdCache = '';
+let businessUploadActiveDepth = 0;
 
 const isNodeRuntime = () => Boolean((globalThis as any).process?.versions?.node);
 
@@ -119,17 +122,24 @@ const pickDeviceId = (entry: RwDiagnosticUploadEntry) => {
   );
 };
 
-const normalizeUploadEntry = (entry: RwDiagnosticUploadEntry): RwDiagnosticUploadEntry => ({
-  id: typeof entry.id === 'number' ? entry.id : Date.now() * 1000 + Math.floor(Math.random() * 1000),
-  time: entry.time ? String(entry.time) : undefined,
-  source: String(entry.source || 'RW').slice(0, 64),
-  event: String(entry.event || 'log').slice(0, 128),
-  details: entry.details ?? '',
-  buildTag: pickBuildTag(entry),
-  deviceId: pickDeviceId(entry),
-  userId: typeof entry.userId === 'number' ? entry.userId : undefined,
-  sessionId: entry.sessionId || getRwDiagnosticUploadSessionId()
-});
+const normalizeUploadEntry = (entry: RwDiagnosticUploadEntry): RwDiagnosticUploadEntry => {
+  const id = typeof entry.id === 'number' ? entry.id : Date.now() * 1000 + Math.floor(Math.random() * 1000);
+  const sessionId = entry.sessionId || getRwDiagnosticUploadSessionId();
+  return {
+    id,
+    // A retry sends the same eventId, allowing the server to make ingestion
+    // idempotent even when the request succeeded but its response was lost.
+    eventId: entry.eventId || `${sessionId || 'anonymous'}:${id}`,
+    time: entry.time ? String(entry.time) : undefined,
+    source: String(entry.source || 'RW').slice(0, 64),
+    event: String(entry.event || 'log').slice(0, 128),
+    details: entry.details ?? '',
+    buildTag: pickBuildTag(entry),
+    deviceId: pickDeviceId(entry),
+    userId: typeof entry.userId === 'number' ? entry.userId : undefined,
+    sessionId
+  };
+};
 
 const requestRwDiagnosticUpload = (entries: RwDiagnosticUploadEntry[]) =>
   new Promise<boolean>((resolve) => {
@@ -162,6 +172,11 @@ const requestRwDiagnosticUpload = (entries: RwDiagnosticUploadEntry[]) =>
   });
 
 export const flushRwDiagnosticUploadQueue = async () => {
+  if (businessUploadActiveDepth > 0) {
+    pendingFlush = true;
+    scheduleRwDiagnosticUploadFlush(BUSINESS_UPLOAD_ACTIVE_RETRY_MS);
+    return;
+  }
   if (flushing || isNodeRuntime()) {
     pendingFlush = true;
     return;
@@ -187,13 +202,23 @@ export const flushRwDiagnosticUploadQueue = async () => {
   }
 };
 
-export const scheduleRwDiagnosticUploadFlush = () => {
+export const scheduleRwDiagnosticUploadFlush = (delayMs = FLUSH_DELAY_MS) => {
   if (isNodeRuntime()) return;
   if (flushTimer) return;
   flushTimer = setTimeout(() => {
     flushTimer = null;
     void flushRwDiagnosticUploadQueue();
-  }, FLUSH_DELAY_MS);
+  }, delayMs);
+};
+
+export const setRwDiagnosticBusinessUploadActive = (active: boolean) => {
+  businessUploadActiveDepth = active
+    ? businessUploadActiveDepth + 1
+    : Math.max(0, businessUploadActiveDepth - 1);
+  if (businessUploadActiveDepth === 0 && (pendingFlush || readQueue().length > 0)) {
+    pendingFlush = false;
+    scheduleRwDiagnosticUploadFlush();
+  }
 };
 
 export const enqueueRwDiagnosticUpload = (entry: RwDiagnosticUploadEntry) => {
