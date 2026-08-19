@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue';
 import { onLoad, onShow, onUnload } from '@dcloudio/uni-app';
-import { baseOption } from '@/homeDetail/vitalSigns/echartOptions';
+import { applyVitalSignsLineStyle, baseOption } from '@/homeDetail/vitalSigns/echartOptions';
+import MetricYAxisLabels from './MetricYAxisLabels.vue';
 import {
   applyMetricSleepRangeAxisStyle,
   buildMetricSleepTimelineAxis,
@@ -95,6 +96,14 @@ const formatIntegerStat = (value: unknown, fallback = '00') => {
   const numeric = Number(String(value ?? '').replace(/[^\d.-]/g, ''));
   return Number.isFinite(numeric) && numeric > 0 ? String(Math.round(numeric)) : fallback;
 };
+const heartYAxisMax = computed(() => {
+  const values = (Array.isArray(props.heartRateData?.chartData) ? props.heartRateData.chartData : [])
+    .map((item: Point) => Number(item?.value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const maxValue = values.length ? Math.max(...values) : 0;
+  return maxValue > 120 ? Math.ceil(maxValue / 20) * 20 : 120;
+});
+const heartYAxisSplitNumber = computed(() => Math.max(6, Math.ceil(heartYAxisMax.value / 20)));
 const getProcessedOption = () => {
   const newOption = cloneDeep(baseOption);
   const chartData = Array.isArray(props.heartRateData?.chartData) ? props.heartRateData.chartData : [];
@@ -129,34 +138,17 @@ const getProcessedOption = () => {
   newOption.yAxis = {
     ...newOption.yAxis,
     min: 0,
-    max: 180,
-    splitNumber: 6
+    max: heartYAxisMax.value,
+    splitNumber: heartYAxisSplitNumber.value
   };
   if (chartData.length > 0) {
     // 过滤掉null值，计算有效数据的最大值
     const validData = fullSeriesData.filter((value) => value !== null && !isNaN(value)) as number[];
     if (validData.length > 0) {
       const maxValue = Math.max(...validData);
-      // 如果最大值超过100，则动态调整Y轴最大值
-      if (maxValue > 180) {
-        const yAxisConfigs = [
-          { max: 120, splitNumber: 6 },
-          { max: 140, splitNumber: 7 },
-          { max: 160, splitNumber: 8 },
-          { max: 180, splitNumber: 9 },
-          { max: 200, splitNumber: 10 },
-          { max: 220, splitNumber: 11 },
-          { max: 240, splitNumber: 12 }
-        ];
-        const config = yAxisConfigs.find((cfg) => maxValue <= cfg.max);
-        if (config) {
-          newOption.yAxis.max = config.max;
-          newOption.yAxis.splitNumber = config.splitNumber;
-        } else {
-          // 如果超过240，使用自动调整
-          newOption.yAxis.max = Math.ceil(maxValue / 20) * 20; // 向上取整到最近的20的倍数
-          newOption.yAxis.splitNumber = Math.ceil(newOption.yAxis.max / 20); // 每20一个刻度
-        }
+      if (maxValue > 120) {
+        newOption.yAxis.max = heartYAxisMax.value;
+        newOption.yAxis.splitNumber = heartYAxisSplitNumber.value;
       }
     }
   }
@@ -197,13 +189,15 @@ const getProcessedOption = () => {
     }
   } as any;
   applyMetricSleepRangeAxisStyle(newOption, axisData);
+  // 时间轴先确定布局，再统一套用新版折线样式，避免 grid 被旧配置覆盖。
+  applyVitalSignsLineStyle(newOption);
   return newOption;
 };
 const initChart = async () => {
   if (!chartRef.value) return;
   try {
     const pie = await chartRef.value.init(echarts);
-    pie.setOption(getProcessedOption());
+    pie.setOption(getProcessedOption(), true);
   } catch {
     // 图表失败时保持页面可用，避免体验版输出原始运行时错误。
   }
@@ -476,42 +470,29 @@ onUnload(() => {
 });
 </script>
 <template>
-  <view class="score-card mb-30 r-50 bg-white p-30">
-    <!-- 标题栏 -->
-    <view class="flex jc-between ai-center">
-      <view>
-        <text class="fs-36">心率</text>
-        <text v-if="!isHeartTate" class="fs-28">(次/分钟)</text>
+  <view class="score-card mb-30">
+    <view class="metric-header">
+      <view class="metric-title">
+        <text>心率</text>
         <slot></slot>
       </view>
       <view v-if="isHeartTate" class="textBox" @click.stop="handleMeasure">
-<uv-image src="/static/images/homeDetail/love.png" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
-        <text style="color: #ff5959">{{ measureText }}</text>
+        <uv-image src="/static/images/homeDetail/love.png" width="40rpx" height="40rpx" mode="aspectFit"></uv-image>
+        <text>{{ measureText }}</text>
       </view>
     </view>
-    <view @click="jumpDetail">
-      <view style="width: 100%" v-if="isHeartTate">
-        <view class="flex ai-center jc-center">
-<uv-image src="/static/images/homeDetail/love.png" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
-          <view class="ml-15">
-            <text class="fs-48">{{ formatIntegerStat(heartRateData?.newValue) }}</text>
-            <text class="t-979797 fs-24">次/分钟</text>
-          </view>
-        </view>
-      </view>
-      <view class="stats" v-if="!isHeartTate">
-        <view class="stat-item">
-          <view class="stat-value">{{ formatIntegerStat(heartRateData?.avgValue) }}</view>
-          <view class="stat-label">平均心率</view>
-        </view>
-        <view class="stat-item">
-          <view class="stat-value">{{ formatIntegerStat(heartRateData?.maxValue) }}</view>
-          <view class="stat-label">最大心率</view>
+    <view class="metric-body" @click="jumpDetail">
+      <view class="metric-current">
+        <uv-image src="/static/images/homeDetail/love.png" width="44rpx" height="44rpx" mode="aspectFit"></uv-image>
+        <view class="metric-current-copy">
+          <text class="metric-current-value">{{ formatIntegerStat(isHeartTate ? heartRateData?.newValue : heartRateData?.avgValue) }}</text>
+          <text class="metric-current-unit">次/分钟</text>
         </view>
       </view>
       <view class="metric-chart-wrap">
+        <MetricYAxisLabels :min="0" :max="heartYAxisMax" :split-number="heartYAxisSplitNumber" />
         <view class="metric-echart-box flex ai-center jc-center">
-          <l-echart :key="metricChartKey" ref="chartRef" @finished="initChart" style="width: 100%; height: 320rpx; margin: 0"></l-echart>
+          <l-echart :key="metricChartKey" ref="chartRef" @finished="initChart" style="width: 100%; height: 340rpx; margin: 0"></l-echart>
         </view>
         <view v-if="visibleMetricAxisTicks.length" class="metric-time-axis">
           <text
@@ -523,8 +504,7 @@ onUnload(() => {
         </view>
       </view>
 
-      <!-- 统计信息 -->
-      <view class="stats" v-if="isHeartTate">
+      <view class="stats">
         <view class="stat-item">
           <view class="stat-value">{{ formatIntegerStat(heartRateData?.avgValue) }}</view>
           <view class="stat-label">平均心率</view>
@@ -566,28 +546,78 @@ onUnload(() => {
 }
 .score-card {
   margin-top: 30rpx;
-  border-radius: 50rpx;
+  border-radius: 44rpx;
   background-color: #fff;
-  padding: 30rpx;
+  padding: 34rpx 30rpx 38rpx;
   box-sizing: border-box;
+  overflow: hidden;
+}
+
+.metric-header {
+  min-height: 68rpx;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.metric-title {
+  display: flex;
+  align-items: center;
+  color: #111827;
+  font-size: 38rpx;
+  font-weight: 500;
+  line-height: 1.2;
 }
 
 .textBox {
-  background-color: #ffeeee;
-  border-radius: 30rpx;
-  padding: 20rpx;
+  min-height: 68rpx;
+  background-color: #fff0f1;
+  border-radius: 26rpx;
+  padding: 0 22rpx;
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 8rpx;
+  color: #ff5959;
+  font-size: 28rpx;
   cursor: pointer;
+}
+
+.metric-body {
+  width: 100%;
+}
+
+.metric-current {
+  min-height: 94rpx;
+  margin-top: 8rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.metric-current-copy {
+  margin-left: 14rpx;
+  display: flex;
+  align-items: baseline;
+}
+
+.metric-current-value {
+  color: #050505;
+  font-size: 54rpx;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.metric-current-unit {
+  margin-left: 6rpx;
+  color: #9ca3af;
+  font-size: 24rpx;
 }
 
 .stats {
   display: flex;
   justify-content: space-around;
   align-items: center;
-  margin-top: 36rpx;
-  padding-top: 24rpx;
+  margin-top: 24rpx;
 }
 
 .stat-item {
@@ -610,19 +640,19 @@ onUnload(() => {
 .metric-chart-wrap {
   width: 100%;
   position: relative;
-  height: 360rpx;
+  height: 382rpx;
 }
 
 .metric-echart-box {
   width: 100%;
-  height: 320rpx;
+  height: 340rpx;
 }
 
 .metric-time-axis {
   position: absolute;
-  left: 28rpx;
-  right: 28rpx;
-  bottom: 8rpx;
+  left: 92rpx;
+  right: 20rpx;
+  bottom: 10rpx;
   height: 24rpx;
   color: #9ca3af;
   font-size: 20rpx;

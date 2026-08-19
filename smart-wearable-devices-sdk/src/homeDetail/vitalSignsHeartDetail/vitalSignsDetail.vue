@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow, onPullDownRefresh, onReachBottom, onUnload } from '@dcloudio/uni-app';
 import homeHeartChart from '@/components/homeHeartChart.vue';
 import { defaultEchartOption } from '@/homeDetail/vitalSignsHeartDetail/echartOptions';
+import { applyVitalSignsLineStyle } from '@/homeDetail/vitalSigns/echartOptions';
 import { getHeartRateDetail } from '@/common/api/homeDetail';
 import { formatDate, calculateOffset, getPrevDate, getNextDate, formatLocalDate } from '@/utils/utils.js';
 import type { heartRateDetail, Point } from '@/types/api/homeDetail';
@@ -191,7 +192,7 @@ const getProcessedOption = () => {
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = fullSeriesData;
   newOption.yAxis.min = 0;
-  newOption.yAxis.max = 180;
+  newOption.yAxis.max = 120;
   newOption.yAxis.splitNumber = 6;
 
   if (chartData.value && chartData.value.length > 0) {
@@ -199,26 +200,9 @@ const getProcessedOption = () => {
     const validData = fullSeriesData.filter((value) => value !== null && !isNaN(value)) as number[];
     if (validData.length > 0) {
       const maxValue = Math.max(...validData);
-      // 如果最大值超过100，则动态调整Y轴最大值
-      if (maxValue > 180) {
-        const yAxisConfigs = [
-          { max: 120, splitNumber: 6 },
-          { max: 140, splitNumber: 7 },
-          { max: 160, splitNumber: 8 },
-          { max: 180, splitNumber: 9 },
-          { max: 200, splitNumber: 10 },
-          { max: 220, splitNumber: 11 },
-          { max: 240, splitNumber: 12 }
-        ];
-        const config = yAxisConfigs.find((cfg) => maxValue <= cfg.max);
-        if (config) {
-          newOption.yAxis.max = config.max;
-          newOption.yAxis.splitNumber = config.splitNumber;
-        } else {
-          // 如果超过240，使用自动调整
-          newOption.yAxis.max = Math.ceil(maxValue / 20) * 20; // 向上取整到最近的20的倍数
-          newOption.yAxis.splitNumber = Math.ceil(newOption.yAxis.max / 20); // 每20一个刻度
-        }
+      if (maxValue > 120) {
+        newOption.yAxis.max = Math.ceil(maxValue / 20) * 20;
+        newOption.yAxis.splitNumber = Math.max(6, Math.ceil(newOption.yAxis.max / 20));
       }
     }
   }
@@ -279,6 +263,9 @@ const getProcessedOption = () => {
   //   newOption.yAxis.interval = Math.ceil(maxValue / 50) * 10;
   // }
 
+  applyVitalSignsLineStyle(newOption);
+  // 详情卡片使用独立的时间刻度层，避免 ECharts 标签和页面刻度重复。
+  newOption.xAxis.axisLabel = { ...(newOption.xAxis.axisLabel || {}), show: false };
   return newOption;
 };
 const initChart = async (chartRef: any) => {
@@ -288,7 +275,7 @@ const initChart = async (chartRef: any) => {
     const chart = await chartRef.init(echarts);
     chartInstance.value = chart;
     // 应用处理后的option
-    chart.setOption(getProcessedOption());
+    chart.setOption(getProcessedOption(), true);
   } catch (error) {
     console.error(`图表初始化失败:`, error);
   }

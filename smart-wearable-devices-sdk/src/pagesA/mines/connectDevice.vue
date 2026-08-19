@@ -320,12 +320,6 @@ const handleDirectScanRetryClick = () => {
   autoReconnectMessage.value = '';
   scanBusinessDevices({ force: true, reason: 'direct-scan-retry' });
 };
-// 是否为 iOS 设备。
-const isIOS = computed(() => {
-  const systemInfo = uni.getSystemInfoSync();
-  return systemInfo.platform.toLowerCase().includes('ios');
-});
-
 const prepareConnectDevice = (device: ScanDeviceInfo) => {
   selectedDevice.value = device;
   deviceId.value = device.deviceId || '';
@@ -595,10 +589,14 @@ onUnload(() => {
 
       <!-- 设备列表 -->
       <view class="device-list mt-50">
-        <view v-for="dev in devices" :key="dev.deviceId" class="device-item flex jc-between ai-center mb-50 bg-white pt-20 pb-20 pl-40 pr-40 r-50">
+        <view
+          v-for="dev in devices"
+          :key="getRingBusinessDeviceKey(dev)"
+          class="device-item flex jc-between ai-center mb-50 bg-white pt-20 pb-20 pl-40 pr-40 r-50"
+        >
           <view class="device-info">
             <view class="device-name">{{ getRingBusinessDeviceName(dev) || copy.unknownDevice }}</view>
-            <view class="device-model t-979797">{{ isIOS ? dev?.uniMacId : dev?.deviceId }}</view>
+            <view class="device-model t-979797">{{ getRingDeviceStableIdentity(dev) || '-' }}</view>
           </view>
           <uv-button
             :text="copy.connect"

@@ -3,9 +3,9 @@ import { QKEER_BUILD_INFO, QKEER_BUILD_TAG } from '@/utils/buildInfo';
 
 export const RING_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 export const RING_DIAGNOSTIC_VERBOSE_STORAGE_KEY = 'qkeer:ring-diagnostic-verbose';
-const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
-const RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH = 2400;
-const RING_DIAGNOSTIC_LOG_FLUSH_DELAY_MS = 2500;
+const RING_DIAGNOSTIC_LOG_MAX_COUNT = 180;
+const RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH = 1200;
+const RING_DIAGNOSTIC_LOG_FLUSH_DELAY_MS = 10000;
 
 type RingDiagnosticLogEntry = {
   id: number;
@@ -17,6 +17,8 @@ type RingDiagnosticLogEntry = {
 
 let diagnosticLogCache: RingDiagnosticLogEntry[] | null = null;
 let diagnosticLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let diagnosticLogFlushInFlight = false;
+let diagnosticLogFlushPending = false;
 let diagnosticVerboseLoggingCache: boolean | null = null;
 // A new value is created for every JavaScript runtime. Unlike the persisted
 // diagnostic session id, this can reveal two mini-program runtimes competing
@@ -91,6 +93,18 @@ const DIAGNOSTIC_DEFAULT_HIDDEN_EVENTS = new Set([
   'legacy-local-data-window-overlap-preserved',
   'legacy-local-raw-frame-compensation-preserved',
   'upload-http-batch-request-timing',
+  'upload-http-batch-callback-enter',
+  'upload-http-batch-post-ack-bookkeeping-result',
+  'pending-parsed-upload-retry-request-timing',
+  'pending-parsed-upload-retry-batch-callback-enter',
+  'pending-upload-ack-memory-result',
+  'pending-upload-ack-persist-scheduled',
+  'pending-upload-ack-persist-result',
+  'pending-payload-persist-sync-result',
+  'pending-payload-persist-async-result',
+  'pending-queue-persist-async-result',
+  'page-show-device-sync-active-ready',
+  'home-sync-visible-state-reconcile',
   'business-aux-request-cache-skip',
   'legacy-home-history-read-completed-skip',
   'legacy-home-history-read-completed-marked',
@@ -289,9 +303,26 @@ const readDiagnosticLogCache = () => {
 
 export const flushRingDiagnosticLogs = () => {
   if (isRingDiagnosticNodeRuntime() || !diagnosticLogCache) return;
+  if (diagnosticLogFlushInFlight) {
+    diagnosticLogFlushPending = true;
+    return;
+  }
+  const snapshot = diagnosticLogCache.slice(-RING_DIAGNOSTIC_LOG_MAX_COUNT);
+  diagnosticLogFlushInFlight = true;
   try {
-    uni.setStorageSync?.(RING_DIAGNOSTIC_LOG_STORAGE_KEY, diagnosticLogCache.slice(-RING_DIAGNOSTIC_LOG_MAX_COUNT));
+    uni.setStorage?.({
+      key: RING_DIAGNOSTIC_LOG_STORAGE_KEY,
+      data: snapshot,
+      complete: () => {
+        diagnosticLogFlushInFlight = false;
+        if (diagnosticLogFlushPending) {
+          diagnosticLogFlushPending = false;
+          scheduleDiagnosticLogFlush();
+        }
+      }
+    });
   } catch {
+    diagnosticLogFlushInFlight = false;
     // Diagnostic logging must never affect Bluetooth sync.
   }
 };

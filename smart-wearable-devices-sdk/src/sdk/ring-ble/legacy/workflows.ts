@@ -561,17 +561,26 @@ const isLegacyLocalDataChunkComplete = (parsed: RingParsedData) => {
 const getLegacySyncErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : `${(error as any)?.errMsg || error || ''}`;
 
-const combineLegacyLocalDataChunks = (chunks: RingParsedData[], status?: string, error?: unknown): RingParsedData => {
+const yieldLegacyHistoryProcessing = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+const combineLegacyLocalDataChunks = async (chunks: RingParsedData[], status?: string, error?: unknown): Promise<RingParsedData> => {
   const lastChunk = chunks[chunks.length - 1] || ({ type: 'local_data', records: [] } as RingParsedData);
-  const records = chunks.flatMap(getLegacyLocalDataChunkRecords);
-  const rawChunks = chunks
-    .map((chunk) => (Array.isArray(chunk.raw) ? chunk.raw : []))
-    .filter((raw): raw is number[] => raw.length > 0);
-  const totalNum = chunks.reduce<number | undefined>((latest, chunk) => {
+  const records: Array<Record<string, any>> = [];
+  const rawChunks: number[][] = [];
+  let totalNum: number | undefined;
+  let maxSeq = 0;
+
+  // A ring can return hundreds of chunks. Avoid one large flatMap/reduce task
+  // monopolising the mini-program JS thread after the last BLE frame arrives.
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
+    records.push(...getLegacyLocalDataChunkRecords(chunk));
+    if (Array.isArray(chunk.raw) && chunk.raw.length > 0) rawChunks.push(chunk.raw);
     const value = Number(chunk.totalNum);
-    return Number.isFinite(value) ? value : latest;
-  }, undefined);
-  const maxSeq = chunks.reduce((max, chunk) => Math.max(max, getLegacyLocalDataChunkMaxSeq(chunk)), 0);
+    if (Number.isFinite(value)) totalNum = value;
+    maxSeq = Math.max(maxSeq, getLegacyLocalDataChunkMaxSeq(chunk));
+    if (index > 0 && index % 20 === 0) await yieldLegacyHistoryProcessing();
+  }
   const nextStatus = status || (records.length > 0 ? 'success' : lastChunk.status || 'empty');
 
   return {
@@ -613,12 +622,12 @@ const readLegacyLocalDataUntilComplete = async (
     await pendingLocalData;
   } catch (error) {
     if (chunks.length > 0) {
-      return combineLegacyLocalDataChunks(chunks, 'partial', error);
+      return await combineLegacyLocalDataChunks(chunks, 'partial', error);
     }
     throw error;
   }
 
-  return combineLegacyLocalDataChunks(chunks);
+  return await combineLegacyLocalDataChunks(chunks);
 };
 
 const isLegacyHistoryUploadSafeToDelete = (uploadResult: unknown) => {
@@ -823,7 +832,7 @@ export const refreshLegacyBusinessMetrics = async (
   options: RefreshLegacyBusinessMetricsOptions = {}
 ): Promise<RefreshLegacyBusinessMetricsResult> => {
   const currentDevice = runtime?.getDeviceInfo?.() as RingDeviceInfo | undefined;
-  const currentDeviceIdentity = currentDevice?.mac || currentDevice?.uniMacId || currentDevice?.deviceId;
+  const currentDeviceIdentity = currentDevice;
   if (isLegacyBleHistoryExclusiveActive(currentDeviceIdentity)) {
     const exclusive = getLegacyBleHistoryExclusiveSnapshot(currentDeviceIdentity);
     appendRingDiagnosticLog('L19 BLE', 'legacy-business-refresh-skip-history-exclusive', {

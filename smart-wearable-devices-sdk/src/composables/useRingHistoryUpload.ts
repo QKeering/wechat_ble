@@ -694,12 +694,23 @@ const getRingHistorySubmitDedupeKey = (record: RingHistorySubmitRecord) =>
 
 const normalizeUploadedRecordDeviceKey = (deviceMac: string | undefined) => String(deviceMac || '').trim().toUpperCase();
 
+// Reading and JSON-parsing the uploaded-key ledger for every stability poll
+// can pause the mini-program main thread when a device has accumulated many
+// records. Keep an in-memory copy and let the existing async writer remain the
+// durable source of truth across launches.
+const uploadedRingHistoryRecordKeysMemoryCache = new Map<string, Set<string>>();
+
 const readUploadedRingHistoryRecordKeys = (deviceMac: string) => {
   const deviceKey = normalizeUploadedRecordDeviceKey(deviceMac);
   if (!deviceKey) return new Set<string>();
+  const cached = uploadedRingHistoryRecordKeysMemoryCache.get(deviceKey);
+  if (cached) return new Set(cached);
   try {
     const stored = uni.getStorageSync(RING_HISTORY_UPLOADED_RECORD_KEYS_STORAGE_KEY);
-    if (!stored || typeof stored !== 'object') return new Set<string>();
+    if (!stored || typeof stored !== 'object') {
+      uploadedRingHistoryRecordKeysMemoryCache.set(deviceKey, new Set());
+      return new Set<string>();
+    }
     const record = stored as {
       devices?: Record<string, { keys?: string[]; updatedAt?: number }>;
       deviceMac?: string;
@@ -707,12 +718,17 @@ const readUploadedRingHistoryRecordKeys = (deviceMac: string) => {
     };
     const deviceRecord = record.devices?.[deviceKey];
     if (deviceRecord && Array.isArray(deviceRecord.keys)) {
-      return new Set(deviceRecord.keys.filter(Boolean).map((item) => String(item)));
+      const keys = new Set(deviceRecord.keys.filter(Boolean).map((item) => String(item)));
+      uploadedRingHistoryRecordKeysMemoryCache.set(deviceKey, keys);
+      return new Set(keys);
     }
     const legacyDeviceKey = normalizeUploadedRecordDeviceKey(record.deviceMac);
     if (legacyDeviceKey === deviceKey && Array.isArray(record.keys)) {
-      return new Set(record.keys.filter(Boolean).map((item) => String(item)));
+      const keys = new Set(record.keys.filter(Boolean).map((item) => String(item)));
+      uploadedRingHistoryRecordKeysMemoryCache.set(deviceKey, keys);
+      return new Set(keys);
     }
+    uploadedRingHistoryRecordKeysMemoryCache.set(deviceKey, new Set());
     return new Set<string>();
   } catch {
     return new Set<string>();
@@ -724,6 +740,8 @@ const writeUploadedRingHistoryRecordKeys = (deviceMac: string, keys: string[]) =
   if (!deviceKey) return 0;
   const previous = readUploadedRingHistoryRecordKeys(deviceMac);
   keys.filter(Boolean).forEach((key) => previous.add(String(key)));
+  const limitedKeys = Array.from(previous).slice(-RING_HISTORY_UPLOADED_RECORD_KEYS_MAX_COUNT);
+  uploadedRingHistoryRecordKeysMemoryCache.set(deviceKey, new Set(limitedKeys));
   try {
     const stored = uni.getStorageSync(RING_HISTORY_UPLOADED_RECORD_KEYS_STORAGE_KEY);
     const payload =
@@ -736,13 +754,72 @@ const writeUploadedRingHistoryRecordKeys = (deviceMac: string, keys: string[]) =
       devices[legacyDeviceKey] = { keys: payload.keys.filter(Boolean).map((item) => String(item)), updatedAt: Date.now() };
     }
     devices[deviceKey] = {
-      keys: Array.from(previous).slice(-RING_HISTORY_UPLOADED_RECORD_KEYS_MAX_COUNT),
+      keys: limitedKeys,
       updatedAt: Date.now()
     };
     uni.setStorageSync(RING_HISTORY_UPLOADED_RECORD_KEYS_STORAGE_KEY, { devices, updatedAt: Date.now() });
     return devices[deviceKey]?.keys?.length || 0;
   } catch {
     return previous.size;
+  }
+};
+
+const getRingHistoryStorageAsync = <T = unknown>(key: string): Promise<T | undefined> =>
+  new Promise((resolve) => {
+    (uni as any).getStorage({
+      key,
+      success: (result: { data?: T }) => resolve(result?.data),
+      fail: () => resolve(undefined)
+    });
+  });
+
+const setRingHistoryStorageAsync = (key: string, data: unknown): Promise<void> =>
+  new Promise((resolve, reject) => {
+    (uni as any).setStorage({
+      key,
+      data,
+      success: () => resolve(),
+      fail: (error: unknown) => reject(error)
+    });
+  });
+
+const writeUploadedRingHistoryRecordKeysAsync = async (deviceMac: string, keys: string[]) => {
+  const deviceKey = normalizeUploadedRecordDeviceKey(deviceMac);
+  if (!deviceKey) return 0;
+  try {
+    const stored = await getRingHistoryStorageAsync<{
+      devices?: Record<string, { keys?: string[]; updatedAt?: number }>;
+      deviceMac?: string;
+      keys?: string[];
+    }>(RING_HISTORY_UPLOADED_RECORD_KEYS_STORAGE_KEY);
+    const devices = { ...(stored?.devices || {}) };
+    const legacyDeviceKey = normalizeUploadedRecordDeviceKey(stored?.deviceMac);
+    if (legacyDeviceKey && Array.isArray(stored?.keys) && !devices[legacyDeviceKey]) {
+      devices[legacyDeviceKey] = {
+        keys: stored.keys.filter(Boolean).map((item) => String(item)),
+        updatedAt: Date.now()
+      };
+    }
+    const merged = new Set<string>(
+      Array.isArray(devices[deviceKey]?.keys)
+        ? devices[deviceKey].keys!.filter(Boolean).map((item) => String(item))
+        : []
+    );
+    const cached = uploadedRingHistoryRecordKeysMemoryCache.get(deviceKey);
+    cached?.forEach((key) => merged.add(key));
+    keys.filter(Boolean).forEach((key) => merged.add(String(key)));
+    devices[deviceKey] = {
+      keys: Array.from(merged).slice(-RING_HISTORY_UPLOADED_RECORD_KEYS_MAX_COUNT),
+      updatedAt: Date.now()
+    };
+    uploadedRingHistoryRecordKeysMemoryCache.set(deviceKey, new Set(devices[deviceKey].keys));
+    await setRingHistoryStorageAsync(RING_HISTORY_UPLOADED_RECORD_KEYS_STORAGE_KEY, {
+      devices,
+      updatedAt: Date.now()
+    });
+    return devices[deviceKey]?.keys?.length || 0;
+  } catch {
+    return 0;
   }
 };
 
@@ -775,6 +852,11 @@ export const markUploadedRingHistorySubmitRecordsForDevice = (
   deviceMac: string,
   records: RingHistorySubmitRecord[]
 ) => writeUploadedRingHistoryRecordKeys(deviceMac, records.map((record) => getRingHistorySubmitDedupeKey(record)));
+
+export const markUploadedRingHistorySubmitRecordsForDeviceAsync = (
+  deviceMac: string,
+  records: RingHistorySubmitRecord[]
+) => writeUploadedRingHistoryRecordKeysAsync(deviceMac, records.map((record) => getRingHistorySubmitDedupeKey(record)));
 
 const isRingHistorySubmitResponseSuccessful = (response: unknown) => {
   const payload = (response as any)?.data ?? response;

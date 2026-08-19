@@ -126,7 +126,7 @@ const leftClick = () => {
 
       <view class="login-actions">
         <button class="login-btn login-btn-primary" :disabled="isLoggingIn" hover-class="none" open-type="getPhoneNumber" @getphonenumber="handleGetPhoneNumber">
-          {{ isLoggingIn ? '登录中...' : '微信授权登录' }}
+          {{ isLoggingIn ? '登录中...' : '微信快捷登录' }}
         </button>
         <button class="login-mobile-entry" :disabled="isLoggingIn" hover-class="none" @click="handleMobileLoginEntry">手机号验证登录</button>
       </view>

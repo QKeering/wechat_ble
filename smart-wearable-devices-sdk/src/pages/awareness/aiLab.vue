@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { onLoad, onShow, onUnload } from '@dcloudio/uni-app';
-import { getAiLabStatus } from '@/common/api/aiLab';
+import { getAiLabStatus, requestH5Ticket } from '@/common/api/aiLab';
+import AiHealthAgentEntry from '@/pages/health/components/AiHealthAgentEntry.vue';
 
 enum APPLY_STATUS {
   not_apply = -1,
@@ -14,9 +15,12 @@ const applyStatus = ref<APPLY_STATUS>(APPLY_STATUS.not_apply);
 const jumpUrl = ref('');
 const remark = ref('');
 const isLoading = ref(false);
+const isOpeningH5 = ref(false);
+const XIAOQING_BASE_URL = 'https://sh.qkeering.com/xiaoqing/';
+const XIAOQING_TODAY_SCENE_ID = 'xiaoqing_today';
 
 const actionText = computed(() => {
-  if (isLoading.value) return '加载中';
+  if (isLoading.value || isOpeningH5.value) return '加载中';
   switch (applyStatus.value) {
     case APPLY_STATUS.applying:
       return '审核中';
@@ -29,13 +33,35 @@ const actionText = computed(() => {
   }
 });
 
-const openApprovedPage = () => {
+const openApprovedPage = async () => {
   if (!jumpUrl.value) {
     uni.showToast({ title: '体验页面暂未配置，请稍后再试', icon: 'none' });
     return;
   }
 
-  const url = jumpUrl.value.trim();
+  let url = jumpUrl.value.trim();
+  if (url === XIAOQING_BASE_URL) {
+    if (isOpeningH5.value) return;
+    isOpeningH5.value = true;
+    try {
+      const response: any = await requestH5Ticket({
+        sceneId: XIAOQING_TODAY_SCENE_ID
+      });
+      const ticket = String(response?.ticket || response?.data?.ticket || '').trim();
+      if (!ticket) throw new Error('H5 ticket 为空');
+      url =
+        `${XIAOQING_BASE_URL}` +
+        `?ticket=${encodeURIComponent(ticket)}` +
+        `&tab=today` +
+        `&sceneId=${XIAOQING_TODAY_SCENE_ID}`;
+    } catch (error) {
+      console.warn('[AiLab] 获取小轻登录票据失败', error);
+      uni.showToast({ title: '登录凭证获取失败，请稍后再试', icon: 'none' });
+      return;
+    } finally {
+      isOpeningH5.value = false;
+    }
+  }
   if (url.startsWith('/pages/')) {
     uni.navigateTo({ url });
     return;
@@ -55,10 +81,10 @@ const openApprovedPage = () => {
 };
 
 const handleApplyClick = () => {
-  if (isLoading.value || applyStatus.value === APPLY_STATUS.applying) return;
+  if (isLoading.value || isOpeningH5.value || applyStatus.value === APPLY_STATUS.applying) return;
 
   if (applyStatus.value === APPLY_STATUS.passed) {
-    openApprovedPage();
+    void openApprovedPage();
     return;
   }
 
@@ -100,101 +126,42 @@ onUnload(() => uni.$off('refreshAiStatus', fetchApplyStatus));
 </script>
 
 <template>
-  <view class="ai-lab-container">
-    <view class="ai-lab-card" @tap="handleApplyClick">
-      <view class="ai-lab-icon">
-        <uv-image src="/static/images/brain.png" width="92rpx" height="92rpx"></uv-image>
-      </view>
-
-      <view class="ai-lab-content">
-        <text class="ai-lab-title">Ai lab</text>
-        <text class="ai-lab-subtitle">会听你说，也更懂你的状态</text>
-        <text class="ai-lab-desc">AI融合多维健康大数据，生成健康、美丽、成长建议</text>
-      </view>
-
-      <view class="ai-lab-button" :class="{ disabled: isLoading || applyStatus === APPLY_STATUS.applying }">
-        <text>{{ actionText }}</text>
-      </view>
+  <view
+    class="ai-lab-container"
+    :class="{ disabled: isLoading || isOpeningH5 || applyStatus === APPLY_STATUS.applying }"
+  >
+    <AiHealthAgentEntry @tap="handleApplyClick" />
+    <view class="ai-lab-action" @tap.stop="handleApplyClick">
+      <text>{{ actionText }}</text>
     </view>
   </view>
 </template>
 
 <style lang="scss" scoped>
 .ai-lab-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
+  position: relative;
+
+  &.disabled {
+    opacity: 0.82;
+  }
 }
 
-.ai-lab-card {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  overflow: hidden;
-  border-radius: 36rpx;
-  background: linear-gradient(135deg, #fff8fd 0%, #fff4fa 55%, #fffafd 100%);
-}
-
-.ai-lab-icon {
-  width: 108rpx;
-  height: 108rpx;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #5f7cff 0%, #9b6dff 100%);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  margin-right: 22rpx;
-  flex-shrink: 0;
-  box-shadow: 0 8rpx 24rpx rgba(104, 102, 255, 0.22);
-}
-
-.ai-lab-content {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.ai-lab-title {
-  font-size: 32rpx;
-  font-weight: 700;
-  color: #2b2f3a;
-  line-height: 1.2;
-}
-
-.ai-lab-subtitle {
-  margin-top: 8rpx;
-  font-size: 24rpx;
-  color: #697181;
-  line-height: 1.35;
-}
-
-.ai-lab-desc {
-  margin-top: 4rpx;
-  font-size: 22rpx;
-  color: #8d94a3;
-  line-height: 1.35;
-}
-
-.ai-lab-button {
-  min-width: 84rpx;
-  height: 52rpx;
-  padding: 0 16rpx;
-  margin-left: 18rpx;
-  border-radius: 26rpx;
-  background: #ffffff;
+.ai-lab-action {
+  position: absolute;
+  z-index: 3;
+  top: 28rpx;
+  left: 300rpx;
+  min-width: 88rpx;
+  height: 48rpx;
+  padding: 0 18rpx;
+  border-radius: 24rpx;
+  background: rgba(255, 255, 255, 0.88);
   color: #2e70fc;
-  font-size: 24rpx;
+  font-size: 22rpx;
   font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
-  box-shadow: 0 6rpx 18rpx rgba(46, 112, 252, 0.12);
-
-  &.disabled {
-    color: #9aa1ae;
-    box-shadow: none;
-  }
+  box-shadow: 0 6rpx 18rpx rgba(46, 112, 252, 0.1);
 }
 </style>

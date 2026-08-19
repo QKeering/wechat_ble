@@ -110,6 +110,7 @@ const removePersistedDataList = (uploadSessionId: string) => {
 };
 
 const persistDataList = <T = Record<string, any>>(uploadSessionId: string, dataList: T[]) => {
+  const startedAt = Date.now();
   if (!dataList.length) {
     removePersistedDataList(uploadSessionId);
     return true;
@@ -132,6 +133,12 @@ const persistDataList = <T = Record<string, any>>(uploadSessionId: string, dataL
     for (let index = chunks.length; index < previousCount; index += 1) {
       uni.removeStorageSync(payloadChunkKey(uploadSessionId, index));
     }
+    appendRingDiagnosticLog('UPLOAD', 'pending-payload-persist-sync-result', {
+      uploadSessionId,
+      dataListCount: dataList.length,
+      chunkCount: chunks.length,
+      elapsedMs: Date.now() - startedAt
+    });
     return true;
   } catch (error) {
     appendRingDiagnosticLog('UPLOAD', 'pending-payload-persist-failed', {
@@ -141,6 +148,98 @@ const persistDataList = <T = Record<string, any>>(uploadSessionId: string, dataL
     });
     return false;
   }
+};
+
+const getStorageAsync = <T = unknown>(key: string): Promise<T | undefined> =>
+  new Promise((resolve) => {
+    (uni as any).getStorage({
+      key,
+      success: (result: { data?: T }) => resolve(result?.data),
+      fail: () => resolve(undefined)
+    });
+  });
+
+const setStorageAsync = (key: string, data: unknown): Promise<void> =>
+  new Promise((resolve, reject) => {
+    (uni as any).setStorage({
+      key,
+      data,
+      success: () => resolve(),
+      fail: (error: unknown) => reject(error)
+    });
+  });
+
+const removeStorageAsync = (key: string): Promise<void> =>
+  new Promise((resolve) => {
+    (uni as any).removeStorage({
+      key,
+      success: () => resolve(),
+      fail: () => resolve()
+    });
+  });
+
+const persistDataListAsync = async <T = Record<string, any>>(
+  uploadSessionId: string,
+  dataList: T[],
+  version: number
+) => {
+  const startedAt = Date.now();
+  const previous = await getStorageAsync<PendingUploadPayloadManifest>(payloadManifestKey(uploadSessionId));
+  const previousCount = Math.max(0, Number(previous?.chunkCount || 0));
+  if (!dataList.length) {
+    // Remove the manifest first so stale chunks are no longer readable. Chunk
+    // cleanup is best-effort and must not hold the upload/UI completion edge.
+    await removeStorageAsync(payloadManifestKey(uploadSessionId));
+    if (previousCount > 0) {
+      setTimeout(() => {
+        void Promise.all(
+          Array.from({ length: previousCount }, (_, index) =>
+            removeStorageAsync(payloadChunkKey(uploadSessionId, index))
+          )
+        );
+      }, 0);
+    }
+    appendRingDiagnosticLog('UPLOAD', 'pending-payload-persist-async-result', {
+      uploadSessionId,
+      version,
+      dataListCount: 0,
+      chunkCount: 0,
+      previousChunkCount: previousCount,
+      elapsedMs: Date.now() - startedAt
+    });
+    return;
+  }
+
+  const chunks: T[][] = [];
+  for (let index = 0; index < dataList.length; index += PENDING_UPLOAD_PAYLOAD_CHUNK_SIZE) {
+    chunks.push(dataList.slice(index, index + PENDING_UPLOAD_PAYLOAD_CHUNK_SIZE));
+  }
+  const chunkTimings: number[] = [];
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunkStartedAt = Date.now();
+    await setStorageAsync(payloadChunkKey(uploadSessionId, index), chunks[index]);
+    chunkTimings.push(Date.now() - chunkStartedAt);
+  }
+  const manifest: PendingUploadPayloadManifest = {
+    version: 1,
+    chunkCount: chunks.length,
+    dataListCount: dataList.length,
+    updatedAt: Date.now()
+  };
+  await setStorageAsync(payloadManifestKey(uploadSessionId), manifest);
+  for (let index = chunks.length; index < previousCount; index += 1) {
+    await removeStorageAsync(payloadChunkKey(uploadSessionId, index));
+  }
+  appendRingDiagnosticLog('UPLOAD', 'pending-payload-persist-async-result', {
+    uploadSessionId,
+    version,
+    dataListCount: dataList.length,
+    chunkCount: chunks.length,
+    previousChunkCount: previousCount,
+    chunkTimings,
+    maxChunkMs: chunkTimings.length > 0 ? Math.max(...chunkTimings) : 0,
+    elapsedMs: Date.now() - startedAt
+  });
 };
 
 export const normalizeUploadDeviceMac = (value: unknown) => String(value || '').replace(/[^0-9a-fA-F]/g, '').toLowerCase();
@@ -399,6 +498,154 @@ const writeQueue = (queue: PendingUploadSession[]) => {
   return nextQueue;
 };
 
+interface DeferredPendingUploadPersistenceResult {
+  ok: boolean;
+  version: number;
+  elapsedMs: number;
+  error?: string;
+}
+
+interface DeferredPendingUploadPersistenceWaiter {
+  version: number;
+  resolve: (result: DeferredPendingUploadPersistenceResult) => void;
+}
+
+interface DeferredPendingUploadPersistenceState {
+  requestedVersion: number;
+  completedVersion: number;
+  running: boolean;
+  snapshot: PendingUploadSession<any>;
+  waiters: DeferredPendingUploadPersistenceWaiter[];
+}
+
+const deferredPendingUploadPersistence = new Map<string, DeferredPendingUploadPersistenceState>();
+let pendingUploadQueueAsyncWriteChain: Promise<void> = Promise.resolve();
+
+const clonePendingUploadSession = <T = Record<string, any>>(
+  session: PendingUploadSession<T>
+): PendingUploadSession<T> => ({
+  ...session,
+  dataList: Array.isArray(session.dataList) ? session.dataList.slice() : [],
+  rawFrames: Array.isArray(session.rawFrames) ? session.rawFrames.slice() : []
+});
+
+const persistStorageSessionAsync = (
+  session: PendingUploadSession,
+  version: number
+): Promise<void> => {
+  const task = pendingUploadQueueAsyncWriteChain
+    .catch(() => undefined)
+    .then(async () => {
+      const startedAt = Date.now();
+      const stored = await getStorageAsync<any>(PENDING_UPLOAD_QUEUE_STORAGE_KEY);
+      const list = (Array.isArray(stored) ? stored : Array.isArray(stored?.sessions) ? stored.sessions : [])
+        .filter((item: any) => item && item.uploadSessionId && item.deviceMac);
+      const next = [
+        buildStorageSession(session),
+        ...list.filter((item: PendingUploadSession) => item.uploadSessionId !== session.uploadSessionId)
+      ]
+        .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
+        .slice(0, PENDING_UPLOAD_QUEUE_STORAGE_MAX_COUNT);
+      await setStorageAsync(PENDING_UPLOAD_QUEUE_STORAGE_KEY, next);
+      appendRingDiagnosticLog('UPLOAD', 'pending-queue-persist-async-result', {
+        uploadSessionId: session.uploadSessionId,
+        version,
+        queueCount: next.length,
+        elapsedMs: Date.now() - startedAt
+      });
+    });
+  pendingUploadQueueAsyncWriteChain = task.catch((error) => {
+    appendRingDiagnosticLog('UPLOAD', 'pending-queue-persist-async-failed', {
+      uploadSessionId: session.uploadSessionId,
+      version,
+      error: error instanceof Error ? error.message : String(error || '')
+    });
+  });
+  return task;
+};
+
+const flushDeferredPendingUploadPersistence = async (uploadSessionId: string) => {
+  const state = deferredPendingUploadPersistence.get(uploadSessionId);
+  if (!state || state.running) return;
+  state.running = true;
+  try {
+    while (state.completedVersion < state.requestedVersion) {
+      const version = state.requestedVersion;
+      const snapshot = clonePendingUploadSession(state.snapshot);
+      const startedAt = Date.now();
+      let result: DeferredPendingUploadPersistenceResult;
+      try {
+        await persistDataListAsync(uploadSessionId, snapshot.dataList, version);
+        await persistStorageSessionAsync(snapshot, version);
+        result = { ok: true, version, elapsedMs: Date.now() - startedAt };
+        appendRingDiagnosticLog('UPLOAD', 'pending-upload-ack-persist-result', {
+          uploadSessionId,
+          version,
+          dataListCount: snapshot.dataList.length,
+          elapsedMs: result.elapsedMs
+        });
+      } catch (error) {
+        result = {
+          ok: false,
+          version,
+          elapsedMs: Date.now() - startedAt,
+          error: error instanceof Error ? error.message : String(error || '')
+        };
+        appendRingDiagnosticLog('UPLOAD', 'pending-upload-ack-persist-failed', {
+          uploadSessionId,
+          version,
+          dataListCount: snapshot.dataList.length,
+          elapsedMs: result.elapsedMs,
+          error: result.error
+        });
+      }
+      state.completedVersion = version;
+      const resolved = state.waiters.filter((waiter) => waiter.version <= version);
+      state.waiters = state.waiters.filter((waiter) => waiter.version > version);
+      resolved.forEach((waiter) => waiter.resolve(result));
+    }
+  } finally {
+    state.running = false;
+    if (state.completedVersion >= state.requestedVersion && state.waiters.length === 0) {
+      deferredPendingUploadPersistence.delete(uploadSessionId);
+    } else {
+      setTimeout(() => void flushDeferredPendingUploadPersistence(uploadSessionId), 0);
+    }
+  }
+};
+
+const schedulePendingUploadSessionPersistence = <T = Record<string, any>>(
+  session: PendingUploadSession<T>,
+  reason: string
+): Promise<DeferredPendingUploadPersistenceResult> => {
+  const existing = deferredPendingUploadPersistence.get(session.uploadSessionId);
+  const state: DeferredPendingUploadPersistenceState = existing || {
+    requestedVersion: 0,
+    completedVersion: 0,
+    running: false,
+    snapshot: clonePendingUploadSession(session),
+    waiters: []
+  };
+  state.requestedVersion += 1;
+  state.snapshot = clonePendingUploadSession(session);
+  deferredPendingUploadPersistence.set(session.uploadSessionId, state);
+  const version = state.requestedVersion;
+  appendRingDiagnosticLog('UPLOAD', 'pending-upload-ack-persist-scheduled', {
+    uploadSessionId: session.uploadSessionId,
+    version,
+    reason,
+    dataListCount: session.dataList.length,
+    coalesced: state.running || state.waiters.length > 0
+  });
+  const task = new Promise<DeferredPendingUploadPersistenceResult>((resolve) => {
+    state.waiters.push({ version, resolve });
+  });
+  if (!state.running) {
+    setTimeout(() => void flushDeferredPendingUploadPersistence(session.uploadSessionId), 0);
+  }
+  return task;
+};
+
 const dedupeRawFrames = (frames: RingRawHistoryFrame[] = []) => {
   const keyed = new Map<string, RingRawHistoryFrame>();
   frames.forEach((frame) => {
@@ -570,6 +817,114 @@ export const acknowledgePendingUploadBatch = <T = Record<string, any>>(
   queue[index] = next;
   writeQueue(queue as PendingUploadSession[]);
   return next;
+};
+
+/**
+ * Advances the live upload cursor in memory and defers the durable snapshot.
+ *
+ * The original staged payload remains on disk until the asynchronous writer
+ * succeeds. If the app exits before then, the deterministic batch id allows
+ * the old snapshot to be replayed safely without losing records.
+ */
+export const acknowledgePendingUploadBatchDeferred = <T = Record<string, any>>(
+  session: PendingUploadSession<T>,
+  acceptedCount: number,
+  response?: unknown
+) => {
+  const startedAt = Date.now();
+  const count = Math.max(0, Math.min(session.dataList.length, Math.floor(acceptedCount)));
+  if (count <= 0) {
+    return {
+      session,
+      persistence: Promise.resolve<DeferredPendingUploadPersistenceResult>({
+        ok: true,
+        version: 0,
+        elapsedMs: 0
+      })
+    };
+  }
+  const remaining = session.dataList.slice(count);
+  const dataDone = remaining.length === 0;
+  Object.assign(session, {
+    dataList: remaining,
+    dataListCount: remaining.length,
+    dataPersisted: true,
+    dataStatus: dataDone ? 'done' : 'pending',
+    nextDataRetryAt: undefined,
+    status: dataDone
+      ? session.rawStatus === 'done' || session.rawStatus === 'none'
+        ? 'done'
+        : 'data_done'
+      : 'pending',
+    dataResponse: response,
+    lastError: undefined,
+    updatedAt: Date.now()
+  } satisfies Partial<PendingUploadSession<T>>);
+  appendRingDiagnosticLog('UPLOAD', 'pending-upload-ack-memory-result', {
+    uploadSessionId: session.uploadSessionId,
+    acceptedCount: count,
+    remainingRecordCount: remaining.length,
+    elapsedMs: Date.now() - startedAt
+  });
+  // Do not rewrite the complete remaining payload after every HTTP batch.
+  // The original durable snapshot can be replayed safely because batch ids are
+  // deterministic and backend ingestion is idempotent. Persist once at the
+  // pause/failure/final completion edge instead.
+  return {
+    session,
+    persistence: Promise.resolve<DeferredPendingUploadPersistenceResult>({
+      ok: true,
+      version: 0,
+      elapsedMs: Date.now() - startedAt
+    })
+  };
+};
+
+export const persistPendingUploadSessionDeferred = <T = Record<string, any>>(
+  session: PendingUploadSession<T>,
+  reason = 'explicit-checkpoint'
+) => schedulePendingUploadSessionPersistence(session, reason);
+
+export const markPendingUploadDataFailedDeferred = <T = Record<string, any>>(
+  session: PendingUploadSession<T>,
+  error: unknown
+) => {
+  const retryCount = Number(session.retryCount || 0) + 1;
+  Object.assign(session, {
+    status: 'data_failed',
+    dataStatus: 'failed',
+    retryCount,
+    nextDataRetryAt: Date.now() + getPendingUploadRetryDelayMs(retryCount),
+    lastError: error instanceof Error ? error.message : String((error as any)?.errMsg || error || 'data upload failed'),
+    canDeleteDeviceBlocks: false,
+    updatedAt: Date.now()
+  } satisfies Partial<PendingUploadSession<T>>);
+  return schedulePendingUploadSessionPersistence(session, 'data-failed');
+};
+
+export const markPendingUploadDataDoneDeferred = <T = Record<string, any>>(
+  session: PendingUploadSession<T>,
+  response?: unknown
+) => {
+  const payload = unwrapResponsePayload(response) as Record<string, any> | null;
+  const nextDataStatus = ['done', 'partial', 'failed', 'empty'].includes(String(payload?.dataStatus))
+    ? (String(payload?.dataStatus) as UploadDataStatus)
+    : 'done';
+  Object.assign(session, {
+    status:
+      nextDataStatus === 'failed'
+        ? 'data_failed'
+        : nextDataStatus === 'done' && (session.rawStatus === 'done' || session.rawStatus === 'none')
+          ? 'done'
+          : 'data_done',
+    dataStatus: nextDataStatus,
+    dataResponse: response,
+    nextDataRetryAt: nextDataStatus === 'failed' ? session.nextDataRetryAt : undefined,
+    lastError: nextDataStatus === 'failed' ? session.lastError : undefined,
+    canDeleteDeviceBlocks: Boolean(payload?.canDeleteDeviceBlocks),
+    updatedAt: Date.now()
+  } satisfies Partial<PendingUploadSession<T>>);
+  return schedulePendingUploadSessionPersistence(session, 'data-done');
 };
 
 export const markPendingUploadRawDone = (uploadSessionId: string, response?: unknown) =>

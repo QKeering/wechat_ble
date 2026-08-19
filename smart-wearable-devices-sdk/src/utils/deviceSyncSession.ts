@@ -160,6 +160,16 @@ export const isDeviceSyncSessionRunning = (userId?: unknown, mac?: unknown) => {
   return activeDeviceSyncSessions.has(key);
 };
 
+export const isAnyDeviceSyncSessionRunning = (userId?: unknown, mac?: unknown) => {
+  pruneDeviceSyncSessions();
+  const normalizedUserId = String(userId || 'anonymous').trim() || 'anonymous';
+  const normalizedMac = normalizeDeviceSyncMac(mac);
+  return [...activeDeviceSyncSessions.values()].some((claim) => {
+    if (claim.userId !== normalizedUserId) return false;
+    return !normalizedMac || claim.mac === normalizedMac;
+  });
+};
+
 /**
  * The single source of truth for UI/business gates during a device sync.
  * Keep protocol/session state out of page-specific boolean expressions so a

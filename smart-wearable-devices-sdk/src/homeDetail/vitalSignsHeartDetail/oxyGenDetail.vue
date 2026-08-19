@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow, onPullDownRefresh, onReachBottom, onUnload } from '@dcloudio/uni-app';
 import homeHeartChart from '@/components/homeHeartChart.vue';
 import { defaultEchartOption } from '@/homeDetail/vitalSignsHeartDetail/echartOptions';
+import { applyVitalSignsLineStyle } from '@/homeDetail/vitalSigns/echartOptions';
 import { getBloodOxygenDetail } from '@/common/api/homeDetail';
 import { formatDate, calculateOffset, getPrevDate, getNextDate, formatLocalDate } from '@/utils/utils.js';
 import type { heartRateDetail, Point } from '@/types/api/homeDetail';
@@ -194,9 +195,9 @@ const getProcessedOption = () => {
   // 替换xAxis.data和series.data为扩展后的数据
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = fullSeriesData;
-  newOption.yAxis.min = 70;
+  newOption.yAxis.min = 60;
   newOption.yAxis.max = 100;
-  newOption.yAxis.splitNumber = 6;
+  newOption.yAxis.splitNumber = 4;
 
   newOption.xAxis.axisLabel = {
     ...newOption.xAxis.axisLabel,
@@ -254,6 +255,9 @@ const getProcessedOption = () => {
   //   newOption.yAxis.interval = Math.ceil(maxValue / 50) * 10;
   // }
 
+  applyVitalSignsLineStyle(newOption);
+  // 详情卡片使用独立的时间刻度层，避免 ECharts 标签和页面刻度重复。
+  newOption.xAxis.axisLabel = { ...(newOption.xAxis.axisLabel || {}), show: false };
   return newOption;
 };
 const initChart = async (chartRef: any) => {
@@ -263,7 +267,7 @@ const initChart = async (chartRef: any) => {
     const chart = await chartRef.init(echarts);
     chartInstance.value = chart;
     // 应用处理后的option
-    chart.setOption(getProcessedOption());
+    chart.setOption(getProcessedOption(), true);
   } catch (error) {
     console.error(`图表初始化失败:`, error);
   }

@@ -631,12 +631,14 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
     { immediate: true }
   );
   watch(sdk.receivedData, (value) => ringStore.setReceivedData(value), { immediate: true });
-  watch(
-    sdk.receivedData,
-    (value) => {
-      const currentDevice = sdk.deviceInfo.value;
-      const localDataSource = getLocalDataSourceAfterLastReset(value, currentDevice);
-      const localDataRecords: Array<Record<string, any>> = localDataSource.flatMap((item) => {
+  let localDataStoreSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingLocalDataStoreSyncValue: RingParsedData[] = [];
+  const flushLocalDataStoreSync = () => {
+    localDataStoreSyncTimer = null;
+    const value = pendingLocalDataStoreSyncValue;
+    const currentDevice = sdk.deviceInfo.value;
+    const localDataSource = getLocalDataSourceAfterLastReset(value, currentDevice);
+    const localDataRecords: Array<Record<string, any>> = localDataSource.flatMap((item) => {
         if (!isRecordForCurrentDevice(item, currentDevice)) return [];
 
         if (item.type === 'local_data' && Array.isArray(item.records)) {
@@ -687,21 +689,31 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
           ];
         }
         return [];
-      });
-      const resetTypes = getLocalDataResetTypes(localDataSource, currentDevice);
-      const dedupedLocalDataRecords = dedupeLocalDataRecords(localDataRecords).filter(
-        (record) => !resetTypes.has(getLocalDataRecordNormalizedType(record))
-      );
-      ringStore.setLocalData(dedupedLocalDataRecords);
+    });
+    const resetTypes = getLocalDataResetTypes(localDataSource, currentDevice);
+    const dedupedLocalDataRecords = dedupeLocalDataRecords(localDataRecords).filter(
+      (record) => !resetTypes.has(getLocalDataRecordNormalizedType(record))
+    );
+    ringStore.setLocalData(dedupedLocalDataRecords);
 
-      const latestUnixTime = dedupedLocalDataRecords.reduce((latest, record) => {
-        const unixTime = getLocalDataRecordTime(record);
-        return unixTime > latest ? unixTime : latest;
-      }, 0);
+    const latestUnixTime = dedupedLocalDataRecords.reduce((latest, record) => {
+      const unixTime = getLocalDataRecordTime(record);
+      return unixTime > latest ? unixTime : latest;
+    }, 0);
 
-      if (latestUnixTime > 0) {
-        ringStore.setLastReadTimestamp(latestUnixTime);
-      }
+    if (latestUnixTime > 0) {
+      ringStore.setLastReadTimestamp(latestUnixTime);
+    }
+  };
+  watch(
+    sdk.receivedData,
+    (value) => {
+      pendingLocalDataStoreSyncValue = value;
+      if (localDataStoreSyncTimer) return;
+      // Let navigation/touch callbacks run before rebuilding and deduplicating
+      // the complete history snapshot. Multiple BLE flushes share the latest
+      // value, so no received record is discarded.
+      localDataStoreSyncTimer = setTimeout(flushLocalDataStoreSync, 80);
     },
     { immediate: true }
   );

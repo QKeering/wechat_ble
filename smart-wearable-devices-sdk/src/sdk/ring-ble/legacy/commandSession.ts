@@ -4,9 +4,12 @@ type IdleCallback = () => void;
 
 type SessionState = {
   activeUntil: number;
+  idleTimeoutMs: number;
+  activityCount: number;
+  lastActivityAt: number;
   seq: number;
   context: Record<string, unknown>;
-  expiryTimer: ReturnType<typeof setTimeout>;
+  expiryTimer: ReturnType<typeof setTimeout> | null;
 };
 
 type IdleSubscription = {
@@ -18,18 +21,43 @@ const FALLBACK_DEVICE_KEY = '__legacy_unknown_device__';
 let sessionSeq = 0;
 const sessions = new Map<string, SessionState>();
 const idleCallbacks = new Set<IdleSubscription>();
+const deviceKeyAliases = new Map<string, string>();
 
 const normalizeDeviceIdentity = (value: unknown) =>
   `${value || ''}`.trim().toUpperCase().replace(/-/g, ':');
 
+const isStableBleMac = (value: unknown) =>
+  /^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(normalizeDeviceIdentity(value));
+
+const registerDeviceKeyAliases = (canonicalKey: string, values: unknown[]) => {
+  if (!canonicalKey || canonicalKey === FALLBACK_DEVICE_KEY) return;
+  for (const value of values) {
+    const alias = normalizeDeviceIdentity(value);
+    if (alias) deviceKeyAliases.set(alias, canonicalKey);
+  }
+};
+
 const resolveDeviceKey = (identity?: unknown): string => {
-  if (typeof identity === 'string') return normalizeDeviceIdentity(identity) || FALLBACK_DEVICE_KEY;
+  if (typeof identity === 'string') {
+    const normalized = normalizeDeviceIdentity(identity);
+    return deviceKeyAliases.get(normalized) || normalized || FALLBACK_DEVICE_KEY;
+  }
   if (!identity || typeof identity !== 'object') return FALLBACK_DEVICE_KEY;
   const source = identity as Record<string, unknown>;
-  return normalizeDeviceIdentity(
-    source.mac || source.uniMacId || source.deviceMac || source.deviceId
-  ) || FALLBACK_DEVICE_KEY;
+  const advertis = source.advertis && typeof source.advertis === 'object'
+    ? source.advertis as Record<string, unknown>
+    : undefined;
+  const stableCandidates = [advertis?.macInfo, source.mac, source.deviceMac, source.uniMacId];
+  const stableMac = stableCandidates.find(isStableBleMac);
+  const fallbackIdentity = stableCandidates.find(Boolean) || source.deviceId;
+  const normalized = normalizeDeviceIdentity(stableMac || fallbackIdentity);
+  const canonicalKey = deviceKeyAliases.get(normalized) || normalized || FALLBACK_DEVICE_KEY;
+  registerDeviceKeyAliases(canonicalKey, [...stableCandidates, source.deviceId]);
+  return canonicalKey;
 };
+
+export const resolveLegacyBleCommandSessionDeviceKey = (identity?: unknown) =>
+  resolveDeviceKey(identity);
 
 const notifyIdle = (deviceKey: string) => {
   for (const subscription of [...idleCallbacks]) {
@@ -38,10 +66,20 @@ const notifyIdle = (deviceKey: string) => {
   }
 };
 
+const armSessionExpiry = (deviceKey: string, state: SessionState) => {
+  if (state.expiryTimer) clearTimeout(state.expiryTimer);
+  const seq = state.seq;
+  state.expiryTimer = setTimeout(() => {
+    const current = sessions.get(deviceKey);
+    if (current?.seq !== seq) return;
+    pruneExpiredSession(deviceKey);
+  }, Math.max(0, state.activeUntil - Date.now()) + 10);
+};
+
 const pruneExpiredSession = (deviceKey: string, now = Date.now()) => {
   const state = sessions.get(deviceKey);
   if (!state || state.activeUntil > now) return state;
-  clearTimeout(state.expiryTimer);
+  if (state.expiryTimer) clearTimeout(state.expiryTimer);
   sessions.delete(deviceKey);
   appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-expired-recovered', {
     deviceKey,
@@ -95,7 +133,7 @@ export const releaseLegacyBleCommandSessions = (deviceIdentity?: unknown, reason
   for (const deviceKey of targetKeys) {
     const state = sessions.get(deviceKey);
     if (!state) continue;
-    clearTimeout(state.expiryTimer);
+    if (state.expiryTimer) clearTimeout(state.expiryTimer);
     sessions.delete(deviceKey);
     releasedCount += 1;
     appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-forced-release', {
@@ -123,7 +161,7 @@ const createRelease = (
     released = true;
     const current = sessions.get(deviceKey);
     if (current?.seq === seq) {
-      clearTimeout(current.expiryTimer);
+      if (current.expiryTimer) clearTimeout(current.expiryTimer);
       sessions.delete(deviceKey);
     }
     appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-end', {
@@ -149,13 +187,21 @@ export const tryClaimLegacyBleCommandSession = (
 
   const seq = ++sessionSeq;
   const startedAt = Date.now();
+  const idleTimeoutMs = context.sessionType === 'history'
+    ? Math.max(7000, Math.min(timeoutMs + 1000, 12000))
+    : timeoutMs + 1000;
   const activeUntil = startedAt + timeoutMs + 1000;
-  const expiryTimer = setTimeout(() => {
-    const current = sessions.get(deviceKey);
-    if (current?.seq !== seq) return;
-    pruneExpiredSession(deviceKey);
-  }, Math.max(0, activeUntil - Date.now()) + 10);
-  sessions.set(deviceKey, { activeUntil, seq, context, expiryTimer });
+  const state: SessionState = {
+    activeUntil,
+    idleTimeoutMs,
+    activityCount: 0,
+    lastActivityAt: startedAt,
+    seq,
+    context,
+    expiryTimer: null
+  };
+  sessions.set(deviceKey, state);
+  armSessionExpiry(deviceKey, state);
   appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-start', {
     seq,
     sessionId: `legacy-command-${seq}`,
@@ -165,6 +211,40 @@ export const tryClaimLegacyBleCommandSession = (
     ...context
   });
   return createRelease(deviceKey, seq, startedAt, context);
+};
+
+/**
+ * Keep a history command lease alive while the ring is still producing frames.
+ * The original timeout remains the first-frame budget; after the first frame,
+ * only a genuine quiet period expires the lease.
+ */
+export const renewLegacyBleCommandSessionActivity = (
+  deviceIdentity?: unknown,
+  detail: Record<string, unknown> = {}
+) => {
+  const deviceKey = resolveDeviceKey(deviceIdentity);
+  const state = pruneExpiredSession(deviceKey);
+  if (!state || state.context.sessionType !== 'history') return false;
+
+  const now = Date.now();
+  state.lastActivityAt = now;
+  state.activityCount += 1;
+  state.activeUntil = now + state.idleTimeoutMs;
+  armSessionExpiry(deviceKey, state);
+
+  if (state.activityCount === 1 || state.activityCount % 50 === 0) {
+    appendRingDiagnosticLog('L19 BLE', 'legacy-command-session-activity-renewed', {
+      deviceKey,
+      seq: state.seq,
+      sessionId: `legacy-command-${state.seq}`,
+      activityCount: state.activityCount,
+      idleTimeoutMs: state.idleTimeoutMs,
+      exclusiveUntil: state.activeUntil,
+      ...detail,
+      ...state.context
+    });
+  }
+  return true;
 };
 
 export const claimLegacyBleHistoryExclusive = (
@@ -199,4 +279,29 @@ export const onLegacyBleCommandSessionIdle = (
   };
   idleCallbacks.add(subscription);
   return () => idleCallbacks.delete(subscription);
+};
+
+export const waitForLegacyBleCommandSessionIdle = (
+  deviceIdentity?: unknown,
+  timeoutMs = 30000
+) => {
+  const snapshot = getLegacyBleHistoryExclusiveSnapshot(deviceIdentity);
+  if (!snapshot.active) return Promise.resolve(true);
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const settle = (idle: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      cancel();
+      resolve(idle);
+    };
+    const cancel = onLegacyBleCommandSessionIdle(() => settle(true), deviceIdentity);
+    timer = setTimeout(() => settle(false), Math.max(0, timeoutMs));
+
+    // Close the release/register race without waiting for the timeout.
+    if (!getLegacyBleHistoryExclusiveSnapshot(deviceIdentity).active) settle(true);
+  });
 };

@@ -5,6 +5,11 @@ import { resolveRingProtocol, type RefreshLegacyBusinessMetricsResult, type Ring
 import type { RwHealthMonitoringConfig, RwUserProfile } from '@/sdk/ring-ble/rw/protocol';
 import { getRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
+import {
+  getLegacyBleHistoryExclusiveSnapshot,
+  resolveLegacyBleCommandSessionDeviceKey,
+  waitForLegacyBleCommandSessionIdle
+} from '@/sdk/ring-ble/legacy/commandSession';
 
 export interface UseRingBLEOptions extends UseRingBleSdkOptions {
   rwCompatScanTimeoutMs?: number;
@@ -220,9 +225,9 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const lastMetricUpdateAt = computed(() => sdk.ringStore.lastMetricUpdateAt || sdk.ringStore.healthData.lastMetricUpdateAt || 0);
   const localData = computed(() => sdk.ringStore.localData || []);
   const historyRecords = computed(() => sdk.ringStore.historyRecords || []);
+  const getCommunicationDeviceIdentity = () => sdk.deviceInfo.value;
   const getCommunicationDeviceKey = () => {
-    const current = sdk.deviceInfo.value;
-    return String(current.mac || current.advertis?.macInfo || current.uniMacId || current.deviceId || '').toUpperCase();
+    return resolveLegacyBleCommandSessionDeviceKey(getCommunicationDeviceIdentity());
   };
   watch(
     () => [sdk.isConnected.value, sdk.deviceInfo.value.deviceId, sdk.deviceInfo.value.notifyEnabled] as const,
@@ -272,7 +277,36 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     return task;
   };
 
-  const runWithReady = async <T>(task: () => Promise<T>) => {
+  const waitForHistoryCommandWindow = async (command: string) => {
+    const deviceIdentity = getCommunicationDeviceIdentity();
+    const deviceKey = resolveLegacyBleCommandSessionDeviceKey(deviceIdentity);
+    const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(deviceIdentity);
+    if (!historyExclusive.active) return;
+    const timeoutMs = Math.max(1000, Math.min(36000, historyExclusive.remainingMs + 1200));
+    appendRingDiagnosticLog('L19 BLE', 'command-deferred-history-exclusive', {
+      command,
+      deviceKey,
+      sessionId: historyExclusive.sessionId,
+      remainingMs: historyExclusive.remainingMs,
+      timeoutMs
+    });
+    const idle = await waitForLegacyBleCommandSessionIdle(deviceIdentity, timeoutMs);
+    if (!idle) {
+      appendRingDiagnosticLog('L19 BLE', 'command-skipped-history-exclusive-timeout', {
+        command,
+        deviceKey,
+        sessionId: historyExclusive.sessionId,
+        timeoutMs
+      });
+      throw new Error('History read is still active; command was not inserted.');
+    }
+    if (resolveLegacyBleCommandSessionDeviceKey(getCommunicationDeviceIdentity()) !== deviceKey) {
+      throw new Error('Ring device changed while waiting for history read.');
+    }
+  };
+
+  const runWithReady = async <T>(task: () => Promise<T>, command = 'interactive-command') => {
+    await waitForHistoryCommandWindow(command);
     const ready = await ensureCommunicationReadyShared();
     if (!ready) {
       throw new Error('Ring BLE communication is not ready.');
@@ -295,6 +329,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const enqueueDeviceInfoCommand = <T>(command: string, task: () => Promise<T>) => {
     const queuedAt = Date.now();
     const run = async () => {
+      await waitForHistoryCommandWindow(command);
       const startedAt = Date.now();
       const fastPath = hasDeviceInfoFastPath();
       const commandDeviceId = sdk.deviceInfo.value.deviceId;
@@ -307,7 +342,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       try {
         let result: T;
         try {
-          result = await (fastPath ? task() : runWithReady(task));
+          result = await (fastPath ? task() : runWithReady(task, command));
         } catch (directError) {
           if (!fastPath) throw directError;
           communicationReadyPromiseByDevice.delete(getCommunicationDeviceKey() || 'unknown-device');
@@ -492,7 +527,10 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const readDeviceTime = () => enqueueDeviceInfoCommand('device-time', () => sdk.readDeviceTime());
   // SDK 已按协议处理校时所需的 ready 策略；不要在兼容层再包一层恢复，
   // 否则 legacy 设备会在校时阶段重复恢复并阻塞历史读取。
-  const updateDeviceTime = (...args: Parameters<typeof sdk.updateDeviceTime>) => sdk.updateDeviceTime(...args);
+  const updateDeviceTime = async (...args: Parameters<typeof sdk.updateDeviceTime>) => {
+    await waitForHistoryCommandWindow('update-device-time');
+    return sdk.updateDeviceTime(...args);
+  };
   const sendDeleteAllLocalDataCommand = () => runWithReady(() => sdk.sendDeleteAllLocalDataCommand());
   const sendResetCommand = () => runWithReady(() => sdk.sendResetCommand());
   const sendFactoryResetWithTimeCommand = () => runWithReady(() => sdk.sendFactoryResetWithTimeCommand());

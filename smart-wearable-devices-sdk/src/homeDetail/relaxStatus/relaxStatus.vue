@@ -102,9 +102,11 @@ const getStressSummaryDetail = async (currentDate = new Date()) => {
 const handleDateClick = async (index: number) => {
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
-  await getStressDetail(currentDate);
-  await getStressProportionDetail(currentDate);
-  await getStressSummaryDetail(currentDate);
+  await Promise.all([
+    getStressDetail(currentDate),
+    getStressProportionDetail(currentDate),
+    getStressSummaryDetail(currentDate)
+  ]);
 };
 
 const openTimePicker = () => {
@@ -139,27 +141,25 @@ const leftClick = (): void => {
   uni.navigateBack();
 };
 
-onLoad(async (options) => {
+onLoad((options) => {
   const rawDayIndex = options?.selectedDayIndex;
   const parsedDayIndex = rawDayIndex !== undefined && rawDayIndex !== '' ? Number(rawDayIndex) : 2;
   const dayIndex = Number.isFinite(parsedDayIndex) ? parsedDayIndex : 2;
   selectedDayIndex.value = dayIndex;
-
-  if (dayIndex !== 3) {
-    await handleDateClick(selectedDayIndex.value);
-    return;
-  }
-
-  if (options?.selectedDate) {
-    const formattedDate = uni.$uv.timeFormat(options.selectedDate, 'yyyy-mm-dd');
-    if (formattedDate && formattedDate !== 'NaN-NaN-NaN') {
-      await confirm({ fulldate: formattedDate });
-      return;
+  const loadTask = (() => {
+    if (dayIndex !== 3) return handleDateClick(selectedDayIndex.value);
+    if (options?.selectedDate) {
+      const formattedDate = uni.$uv.timeFormat(options.selectedDate, 'yyyy-mm-dd');
+      if (formattedDate && formattedDate !== 'NaN-NaN-NaN') {
+        return confirm({ fulldate: formattedDate });
+      }
     }
-  }
-
-  selectedDayIndex.value = 2;
-  await handleDateClick(2);
+    selectedDayIndex.value = 2;
+    return handleDateClick(2);
+  })();
+  void loadTask.catch(() => {
+    // Render the page immediately; keep the skeleton/current values on failure.
+  });
 });
 
 onPullDownRefresh(async () => {

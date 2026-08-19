@@ -10,6 +10,11 @@ export interface AiLabStatusResponse {
   remark?: string;
 }
 
+export interface H5TicketResponse {
+  ticket: string;
+  expiresIn?: number;
+}
+
 export interface ApiResponse<T = any> {
   code: number;
   msg: string;

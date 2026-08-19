@@ -245,6 +245,8 @@ let connectedDevices: Array<{ deviceId: string }> = [];
 let writeShouldFail = false;
 let discoveryShouldFail = false;
 let mtuShouldFail = false;
+let bluetoothAdapterAvailable = true;
+let bluetoothAdapterOpenCount = 0;
 const getConnectionStateCallbackCount = () => connectionStateCallbacks.length;
 const getWrittenRwTimeFrames = () => writtenHex.filter((hex) => hex.slice(4, 8) === '1000' || hex.slice(4, 8) === '1001');
 (globalThis as any).uni = {
@@ -253,7 +255,13 @@ const getWrittenRwTimeFrames = () => writtenHex.filter((hex) => hex.slice(4, 8) 
   setStorageSync: (key: string, value: unknown) => {
     storage[key] = value;
   },
-  openBluetoothAdapter: ({ success }: { success: (result: unknown) => void }) => success({}),
+  getBluetoothAdapterState: ({ success }: { success: (result: unknown) => void }) =>
+    success({ available: bluetoothAdapterAvailable, discovering: false }),
+  openBluetoothAdapter: ({ success }: { success: (result: unknown) => void }) => {
+    bluetoothAdapterOpenCount += 1;
+    bluetoothAdapterAvailable = true;
+    success({});
+  },
   closeBluetoothAdapter: ({ success }: { success: (result: unknown) => void; fail: (error: unknown) => void }) => success({}),
   offBLEConnectionStateChange: () => {
     connectionStateCallbacks.length = 0;
@@ -3196,13 +3204,26 @@ if (staleConnectionEvents.length !== 0) {
 connectionStateCallbacks.length = 0;
 const openOnlyAdapter = createRwRingAdapter({ devices: { value: [] as any[] }, isScanning: { value: false } } as any);
 await openOnlyAdapter.openBluetoothAdapter();
-if (getConnectionStateCallbackCount() !== 0) {
-  throw new Error(`RW openBluetoothAdapter should only open bluetooth like L19: ${getConnectionStateCallbackCount()}`);
+if (getConnectionStateCallbackCount() !== 0 || bluetoothAdapterOpenCount !== 1) {
+  throw new Error(
+    `RW openBluetoothAdapter should only open bluetooth like L19: ${JSON.stringify({ callbackCount: getConnectionStateCallbackCount(), bluetoothAdapterOpenCount })}`
+  );
 }
 
 await openOnlyAdapter.initBluetooth();
-if (getConnectionStateCallbackCount() !== 1) {
-  throw new Error(`RW initBluetooth should register the connection-state listener like L19: ${getConnectionStateCallbackCount()}`);
+if (getConnectionStateCallbackCount() !== 1 || bluetoothAdapterOpenCount !== 1) {
+  throw new Error(
+    `RW initBluetooth should register the listener and reuse an available adapter: ${JSON.stringify({ callbackCount: getConnectionStateCallbackCount(), bluetoothAdapterOpenCount })}`
+  );
+}
+
+bluetoothAdapterAvailable = false;
+const coldInitAdapter = createRwRingAdapter({ devices: { value: [] as any[] }, isScanning: { value: false } } as any);
+await coldInitAdapter.initBluetooth();
+if (getConnectionStateCallbackCount() !== 1 || Number(bluetoothAdapterOpenCount) !== 2 || !bluetoothAdapterAvailable) {
+  throw new Error(
+    `RW initBluetooth should open an unavailable adapter exactly once: ${JSON.stringify({ callbackCount: getConnectionStateCallbackCount(), bluetoothAdapterOpenCount, bluetoothAdapterAvailable })}`
+  );
 }
 
 const connectionFilterState = {

@@ -328,6 +328,19 @@ const getProcessedOption = () => {
   // 3. 替换xAxis.data和series.data为完整数据
   newOption.xAxis.data = fullXData || [];
   newOption.series[0].data = fullSeriesData || [];
+  newOption.grid = {
+    ...(newOption.grid || {}),
+    left: 8,
+    right: 8,
+    containLabel: true
+  };
+  newOption.yAxis.axisLabel = {
+    ...(newOption.yAxis.axisLabel || {}),
+    show: true,
+    color: '#666',
+    fontSize: 12,
+    margin: 8
+  };
   // 4. 控制x轴只显示指定刻度
   newOption.xAxis.axisLabel = {
     ...newOption.xAxis.axisLabel,
@@ -504,6 +517,25 @@ const getHeartRateOption = () => {
   // 替换xAxis.data和series.data为扩展后的数据
   newOption.xAxis.data = fullXData || [];
   newOption.series[0].data = fullSeriesData || [];
+  newOption.grid = {
+    ...(newOption.grid || {}),
+    left: 8,
+    right: 12,
+    containLabel: true
+  };
+  newOption.yAxis = {
+    ...(newOption.yAxis || {}),
+    min: 0,
+    max: 120,
+    splitNumber: 6,
+    axisLabel: {
+      ...(newOption.yAxis?.axisLabel || {}),
+      show: true,
+      color: '#666',
+      fontSize: 12,
+      margin: 8
+    }
+  };
   newOption.xAxis.axisLabel = {
     ...newOption.xAxis.axisLabel,
     interval: 0,

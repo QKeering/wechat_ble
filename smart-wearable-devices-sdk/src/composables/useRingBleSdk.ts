@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue';
+import { computed, ref, shallowRef } from 'vue';
 import {
   autoReconnectLegacyRing,
   cleanupLegacyRing,
@@ -856,11 +856,19 @@ const shouldIgnoreRwReconnectDisconnectNoise = (device: RingDeviceInfo, expected
   return !isCommunicationReadyDevice(device);
 };
 
+// Re-entering a page should reuse an OS-confirmed healthy BLE link instead of
+// reopening the adapter/Notify path. RSSI is still probed before reuse, so a
+// stale Pinia snapshot cannot bypass reconnect recovery.
+const COMMUNICATION_READY_REUSE_LEASE_MS = 30000;
+
 export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   const devices = ref<RingDeviceInfo[]>([]);
   const deviceInfo = ref<RingDeviceInfo>({});
-  const receivedData = ref<RingParsedData[]>([]);
-  const normalizedData = ref<any[]>([]);
+  // History payloads can contain hundreds of nested records. They are always
+  // replaced as complete arrays below, so deep Vue proxies only add main-thread
+  // work while BLE notifications are arriving and can delay page taps.
+  const receivedData = shallowRef<RingParsedData[]>([]);
+  const normalizedData = shallowRef<any[]>([]);
   const isScanning = ref(false);
   const isBluetoothReady = ref(false);
   const reconnectStatus = ref<RingReconnectStatus>('idle');
@@ -1621,7 +1629,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       currentDevice.notifyEnabled !== false &&
       isConnected.value === true &&
       lastCommunicationReadyAt > 0 &&
-      Date.now() - lastCommunicationReadyAt < 8000;
+      Date.now() - lastCommunicationReadyAt < COMMUNICATION_READY_REUSE_LEASE_MS;
     if (canProbeRecentReadyLink) {
       const recentAdapter = await switchAdapter(protocol);
       const physicalLinkAlive = Boolean(
@@ -1717,7 +1725,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       readyDevice.notifyEnabled !== false &&
       !shouldRefreshRwDiscovery &&
       isConnected.value === true &&
-      Date.now() - lastCommunicationReadyAt < 8000
+      Date.now() - lastCommunicationReadyAt < COMMUNICATION_READY_REUSE_LEASE_MS
     ) {
       if (protocol === 'rw') {
         writeRwStoreLog('ensure-ready-reuse-recent', {
@@ -2447,6 +2455,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   };
   scheduleLegacyDisconnectRecovery = (target, reason) => {
     const recoveryToken = (legacyDisconnectRecoveryToken += 1);
+    let recoveryAttempt = 0;
+    const maxRecoveryAttempts = 3;
     clearLegacyDisconnectRecoveryWait();
 
     const attemptRecovery = () => {
@@ -2477,16 +2487,50 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         return;
       }
 
+      const backoffRemainingMs = Math.max(0, autoReconnectRetryAfter - Date.now());
+      if (backoffRemainingMs > 0) {
+        writeRwStoreLog('legacy-physical-disconnect-recovery-backoff-wait', {
+          backoffRemainingMs,
+          recoveryAttempt,
+          maxRecoveryAttempts,
+          target: summarizeRingDeviceForStoreLog(target)
+        });
+        legacyDisconnectRecoveryTimer = setTimeout(attemptRecovery, Math.max(250, backoffRemainingMs));
+        return;
+      }
+
+      if (recoveryAttempt >= maxRecoveryAttempts) {
+        reconnectStatus.value = 'failed';
+        reconnectResult.value = false;
+        clearLegacyDisconnectRecoveryWait();
+        writeRwStoreLog('legacy-physical-disconnect-recovery-exhausted', {
+          recoveryAttempt,
+          maxRecoveryAttempts,
+          target: summarizeRingDeviceForStoreLog(target)
+        });
+        return;
+      }
+
       clearLegacyDisconnectRecoveryWait();
+      recoveryAttempt += 1;
+      expectedConnectionDevice = {
+        ...target,
+        deviceName: target.deviceName || target.name,
+        protocol: resolveRingProtocol(target)
+      };
       writeRwStoreLog('legacy-physical-disconnect-recovery-start', {
         originalReason: reason,
+        recoveryAttempt,
+        maxRecoveryAttempts,
         target: summarizeRingDeviceForStoreLog(target)
       });
-      void runReconnect(target)
+      void reconnect()
         .then((success) => {
           if (recoveryToken !== legacyDisconnectRecoveryToken) return;
           writeRwStoreLog('legacy-physical-disconnect-recovery-result', {
             success,
+            recoveryAttempt,
+            maxRecoveryAttempts,
             target: summarizeRingDeviceForStoreLog(target),
             current: summarizeRingDeviceForStoreLog(deviceInfo.value),
             communicationReady: isCommunicationReadyDevice(deviceInfo.value)
@@ -2494,6 +2538,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           if (!success) {
             reconnectStatus.value = 'failed';
             reconnectResult.value = false;
+            const retryDelayMs = Math.max(500, autoReconnectRetryAfter - Date.now());
+            legacyDisconnectRecoveryTimer = setTimeout(attemptRecovery, retryDelayMs);
           }
         })
         .catch((error) => {
@@ -2502,8 +2548,12 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           reconnectResult.value = false;
           writeRwStoreLog('legacy-physical-disconnect-recovery-failed', {
             target: summarizeRingDeviceForStoreLog(target),
+            recoveryAttempt,
+            maxRecoveryAttempts,
             message: error instanceof Error ? error.message : String(error)
           });
+          const retryDelayMs = Math.max(500, autoReconnectRetryAfter - Date.now());
+          legacyDisconnectRecoveryTimer = setTimeout(attemptRecovery, retryDelayMs);
         });
     };
 

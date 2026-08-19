@@ -198,13 +198,21 @@ def rw_debug_row(entry: RwDebugLogEntry, batch: RwDebugLogBatch) -> dict[str, An
 def query_rw_debug_logs(
     db: Session,
     limit: int,
+    offset: int = 0,
+    before_id: int | None = None,
     source: str | None = None,
     event: str | None = None,
     q: str | None = None,
 ) -> list[dict[str, Any]]:
     initialize_rw_debug_schema(db)
     clauses: list[str] = []
-    params: dict[str, Any] = {"limit": max(1, min(limit, 2000))}
+    params: dict[str, Any] = {
+        "limit": max(1, min(limit, 2000)),
+        "offset": max(0, offset),
+    }
+    if before_id is not None:
+        clauses.append("id < :before_id")
+        params["before_id"] = max(1, before_id)
     if source:
         clauses.append("source = :source")
         params["source"] = source
@@ -218,12 +226,13 @@ def query_rw_debug_logs(
     rows = db.execute(
         text(
             f"""
-            select id, created_at, client_log_id, client_time, source, event, build_tag,
+            select id, created_at, event_id, client_log_id, client_time, source, event, build_tag,
                    device_id, user_id, session_id, details_json, payload_json
             from {RW_DEBUG_TABLE}
             {where_sql}
             order by id desc
             limit :limit
+            offset :offset
             """
         ),
         params,
@@ -268,11 +277,21 @@ def clear_rw_debug_logs(db: Session = Depends(get_db)):
 def list_rw_debug_logs(
     db: Session = Depends(get_db),
     limit: int = Query(default=300, ge=1, le=2000),
+    offset: int = Query(default=0, ge=0),
+    before_id: int | None = Query(default=None, ge=1),
     source: str | None = None,
     event: str | None = None,
     q: str | None = None,
 ):
-    rows = query_rw_debug_logs(db, limit=limit, source=source, event=event, q=q)
+    rows = query_rw_debug_logs(
+        db,
+        limit=limit,
+        offset=offset,
+        before_id=before_id,
+        source=source,
+        event=event,
+        q=q,
+    )
     return table(rows, total=len(rows))
 
 
@@ -292,11 +311,21 @@ def render_log_details(details_json: str | None) -> str:
 def rw_debug_logs_page(
     db: Session = Depends(get_db),
     limit: int = Query(default=500, ge=1, le=2000),
+    offset: int = Query(default=0, ge=0),
+    before_id: int | None = Query(default=None, ge=1),
     source: str | None = None,
     event: str | None = None,
     q: str | None = None,
 ):
-    rows = query_rw_debug_logs(db, limit=limit, source=source, event=event, q=q)
+    rows = query_rw_debug_logs(
+        db,
+        limit=limit,
+        offset=offset,
+        before_id=before_id,
+        source=source,
+        event=event,
+        q=q,
+    )
     body_rows = "\n".join(
         f"""
         <tr>

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const distRoot = join(process.cwd(), 'dist', 'build', 'mp-weixin');
@@ -70,4 +70,18 @@ if (!existsSync(vitalSignsDetailDir)) {
 
 mkdirSync(dirname(metricFallbackPath), { recursive: true });
 writeFileSync(metricFallbackPath, metricFallbackSource, 'utf8');
+
+// Preserve source assets for development, but keep unreferenced files out of
+// the generated mini-program package.
+const unusedArtifactPaths = [
+  join(distRoot, 'static', 'images', 'homeDetail', 'Measuring2.png'),
+];
+
+for (const unusedPath of unusedArtifactPaths) {
+  if (existsSync(unusedPath)) {
+    rmSync(unusedPath);
+    console.log(`pruned unused mp-weixin asset: ${unusedPath}`);
+  }
+}
+
 console.log(`patched mp-weixin artifact: ${metricFallbackPath}`);

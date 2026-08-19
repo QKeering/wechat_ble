@@ -746,19 +746,21 @@ const jumpEdit = () => {
 const leftClick = (): void => {
   uni.navigateBack();
 };
-onLoad(async (options) => {
+onLoad((options) => {
   const dayIndex = normalizeSelectedDayIndex(options?.selectedDayIndex);
   selectedDayIndex.value = dayIndex;
-
-  if (dayIndex === 3 && options?.selectedDate) {
-    const formattedDate = uni.$uv.timeFormat(options.selectedDate, 'yyyy-mm-dd');
-    if (formattedDate && formattedDate !== 'NaN-NaN-NaN') {
-      await confirm({ fulldate: formattedDate });
-      return;
+  const loadTask = (() => {
+    if (dayIndex === 3 && options?.selectedDate) {
+      const formattedDate = uni.$uv.timeFormat(options.selectedDate, 'yyyy-mm-dd');
+      if (formattedDate && formattedDate !== 'NaN-NaN-NaN') {
+        return confirm({ fulldate: formattedDate });
+      }
     }
-  }
-
-  await handleDateClick(dayIndex === 3 ? 2 : dayIndex);
+    return handleDateClick(dayIndex === 3 ? 2 : dayIndex);
+  })();
+  void loadTask.catch(() => {
+    // Navigation and first paint must not wait for backend detail requests.
+  });
 });
 onShow(async () => {
   // await getRatDetail();

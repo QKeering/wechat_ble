@@ -76,6 +76,9 @@ const MISSING_VITAL_HISTORY_FALLBACK_TIMEOUT_MS = 5000;
 const HISTORY_PAGE_LOCAL_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const HISTORY_PAGE_UPLOAD_ENDPOINT = '/app/data/sync';
 const HISTORY_PAGE_UPLOAD_TIMEOUT_MS = 90000;
+// Detail-page reads are ordinary backend queries. Reusing the 90s upload
+// timeout makes an occupied/weak network channel look like a frozen page.
+const HISTORY_PAGE_QUERY_TIMEOUT_MS = 8000;
 const HISTORY_PAGE_PENDING_UPLOAD_STORAGE_KEY = 'qkeer:rw-history-page-pending-upload:v1';
 const HISTORY_PAGE_PENDING_UPLOAD_MAX_COUNT = 300;
 const HISTORY_PAGE_UPLOADED_RECORD_KEYS_STORAGE_KEY = 'qkeer:rw-history-page-uploaded-record-keys:v1';
@@ -118,7 +121,7 @@ const runningHistoryPageUploadSignatures = new Map<string, number>();
 const completedHistoryPageUploadSignatures = new Map<string, number>();
 
 const getHistoryPageSilentRequestConfig = (): HistoryPageSilentRequestConfig => ({
-  timeout: HISTORY_PAGE_UPLOAD_TIMEOUT_MS,
+  timeout: HISTORY_PAGE_QUERY_TIMEOUT_MS,
   custom: { toast: false, catch: true }
 });
 

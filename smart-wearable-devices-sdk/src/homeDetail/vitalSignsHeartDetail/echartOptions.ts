@@ -27,7 +27,9 @@ export const heartRateOption = {
     axisLine: { show: false },
     axisTick: { show: false },
     axisLabel: {
-      show: false
+      show: true,
+      color: '#999',
+      fontSize: 12
     },
     splitLine: { show: false }
   },
@@ -38,7 +40,7 @@ export const heartRateOption = {
     splitNumber: 6,
     axisLine: { show: false },
     axisTick: { show: false },
-    axisLabel: { show: true },
+    axisLabel: { show: true, color: '#666', fontSize: 12, margin: 8 },
     splitLine: {
       lineStyle: { type: 'dashed', color: '#eee' }
     }
@@ -71,11 +73,11 @@ export const heartRateOption = {
     }
   ],
   grid: {
-    left: 24,
-    right: 24,
+    left: 8,
+    right: 12,
     top: 56,
-    bottom: 34,
-    containLabel: false
+    bottom: 18,
+    containLabel: true
   }
 };
 // 体温图表配置（默认）
@@ -106,7 +108,9 @@ export const temperatureOption = {
     axisLine: { show: false },
     axisTick: { show: false },
     axisLabel: {
-      show: false
+      show: true,
+      color: '#999',
+      fontSize: 12
     },
     splitLine: { show: false }
   },
@@ -117,7 +121,7 @@ export const temperatureOption = {
     splitNumber: 5, // 刻度分段数
     axisLine: { show: false },
     axisTick: { show: false },
-    axisLabel: { show: true },
+    axisLabel: { show: true, color: '#666', fontSize: 12, margin: 8 },
     splitLine: {
       lineStyle: { type: 'dashed', color: '#eee' }
     }
@@ -152,11 +156,11 @@ export const temperatureOption = {
     }
   ],
   grid: {
-    left: 24,
-    right: 24,
+    left: 8,
+    right: 12,
     top: 56,
-    bottom: 34,
-    containLabel: false
+    bottom: 18,
+    containLabel: true
   }
 };
 

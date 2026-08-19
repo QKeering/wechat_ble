@@ -52,9 +52,18 @@ const discoveredCallbacks: Array<(result: { devices: any[] }) => void> = [];
 const adapterStateCallbacks: Array<(result: { available: boolean; discovering: boolean }) => void> = [];
 let mtuFailureCount = 0;
 let writeFailure: unknown = null;
+let bluetoothAdapterAvailable = true;
+let bluetoothAdapterOpenCount = 0;
 const serviceCache: Record<string, string> = {};
 (globalThis as any).uni = {
   getSystemInfoSync: () => ({ platform: 'android', system: 'Android 14', uniPlatform: 'mp-weixin' }),
+  getBluetoothAdapterState: ({ success }: { success: (result: unknown) => void }) =>
+    success({ available: bluetoothAdapterAvailable, discovering: false }),
+  openBluetoothAdapter: ({ success }: { success: (result: unknown) => void }) => {
+    bluetoothAdapterOpenCount += 1;
+    bluetoothAdapterAvailable = true;
+    success({});
+  },
   offBLEConnectionStateChange: () => undefined,
   onBLEConnectionStateChange: () => undefined,
   offBluetoothAdapterStateChange: () => {
@@ -106,6 +115,19 @@ const state = {
   isScanning: { value: false }
 };
 const adapter = createLegacyRingAdapter(state as any);
+await adapter.initBluetooth();
+if (bluetoothAdapterOpenCount !== 0) {
+  throw new Error(`Legacy initBluetooth should reuse an already available adapter: ${bluetoothAdapterOpenCount}`);
+}
+bluetoothAdapterAvailable = false;
+const coldAdapter = createLegacyRingAdapter({ devices: { value: [] }, isScanning: { value: false } } as any);
+await coldAdapter.initBluetooth();
+if (Number(bluetoothAdapterOpenCount) !== 1 || !bluetoothAdapterAvailable) {
+  throw new Error(
+    `Legacy initBluetooth should open an unavailable adapter exactly once: ${JSON.stringify({ bluetoothAdapterOpenCount, bluetoothAdapterAvailable })}`
+  );
+}
+adapterStateCallbacks.length = 0;
 await adapter.startScan({ includeUnknown: true, timeoutMs: 1000 });
 discoveredCallbacks[0]?.({
   devices: [

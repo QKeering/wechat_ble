@@ -14,6 +14,7 @@ import AiLab from '../awareness/aiLab.vue';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthLevel, normalizeHealthText } from '@/utils/healthText';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
+import { isAnyDeviceSyncSessionRunning } from '@/utils/deviceSyncSession';
 
 const echarts = require('../../static/echarts.min.js');
 const userStore = useUserStore();
@@ -26,7 +27,20 @@ const {
   autoConnectLastDevice
 } = useRingBLE();
 const scrollTop = ref(0);
-const healthSummary = ref<HabitAnalysisData>();
+const getHealthSummaryCacheKey = () => {
+  const userInfo = userStore.userInfo || {};
+  const userId = String(userInfo.id || (userInfo as any).userId || (userInfo as any).user_id || 'anonymous');
+  return `qkeer:health-summary:${userId}`;
+};
+const readHealthSummaryCache = (): HabitAnalysisData | undefined => {
+  try {
+    const cached = uni.getStorageSync(getHealthSummaryCacheKey());
+    return cached && typeof cached === 'object' ? (cached as HabitAnalysisData) : undefined;
+  } catch {
+    return undefined;
+  }
+};
+const healthSummary = ref<HabitAnalysisData | undefined>(readHealthSummaryCache());
 const chartRef1 = ref<any>(null);
 type itemType = {
   name: string;
@@ -135,6 +149,24 @@ const hasRuntimeRingDevice = () =>
       userStore.normalMac ||
       userStore.iosMacId
   );
+const getHealthPageSyncIdentity = () => {
+  const userInfo = userStore.userInfo || {};
+  const userId = String(userInfo.id || (userInfo as any).userId || (userInfo as any).user_id || 'anonymous');
+  const mac = String(
+    normalMac.value ||
+      iosMacId.value ||
+      (ringDeviceInfo.value as any)?.mac ||
+      (ringDeviceInfo.value as any)?.uniMacId ||
+      userStore.normalMac ||
+      userStore.iosMacId ||
+      ''
+  );
+  return { userId, mac };
+};
+const isHealthPageDeviceSyncRunning = () => {
+  const { userId, mac } = getHealthPageSyncIdentity();
+  return isAnyDeviceSyncSessionRunning(userId, mac) || isAnyDeviceSyncSessionRunning(userId);
+};
 const refreshBoundRingBusinessData = async () => {
   let boundDevice: any = null;
   try {
@@ -153,8 +185,19 @@ const refreshBoundRingBusinessData = async () => {
   }
 };
 const loadHealthPageSnapshot = async (options: { waitForRing?: boolean } = {}) => {
-  const ringRefresh = refreshBoundRingBusinessData();
-  healthSummary.value = await getHealthSummary();
+  const deviceSyncActive = isHealthPageDeviceSyncRunning();
+  // Health data comes from the backend and must remain available while the
+  // home page owns BLE. Only suppress the competing BLE restore operation.
+  const ringRefresh = deviceSyncActive ? Promise.resolve() : refreshBoundRingBusinessData();
+  const summary = await getHealthSummary();
+  healthSummary.value = summary;
+  try {
+    uni.setStorage({
+      key: getHealthSummaryCacheKey(),
+      data: summary
+    });
+  } catch {
+  }
   if (options.waitForRing) {
     await ringRefresh;
   }
@@ -205,21 +248,28 @@ const jumpMeasureDetail = async () => {
 };
 
 onLoad(async () => {});
-onShow(async () => {
+onShow(() => {
   if (!userStore.token) {
     userStore.updateDeviceInfo({});
     userStore.updateReceivedData([]);
     return;
   }
-  pullDownRefresh.value = true;
-  pullDownProgress.value = 0;
-  pullDownProgress.value = 50;
-  await loadHealthPageSnapshot();
-  pullDownProgress.value = 80;
-  await initHabitChart();
-  pullDownProgress.value = 100;
-  pullDownRefresh.value = false;
-  pullDownProgress.value = 0;
+  // Do not make tab activation wait for HTTP, chart work, or the BLE session.
+  // Cached content is immediately interactive; a normal idle visit refreshes
+  // it in the background. During a device sync we intentionally keep it stable.
+  void (async () => {
+    pullDownRefresh.value = true;
+    pullDownProgress.value = 50;
+    try {
+      await loadHealthPageSnapshot();
+      pullDownProgress.value = 80;
+      await initHabitChart();
+      pullDownProgress.value = 100;
+    } finally {
+      pullDownRefresh.value = false;
+      pullDownProgress.value = 0;
+    }
+  })();
 });
 onPageScroll((e) => {
   scrollTop.value = e.scrollTop;
@@ -262,9 +312,9 @@ onPullDownRefresh(async () => {
         </view>
       </view>
 
-      <!-- AI 实验室 -->
-      <view class="module bg-white p-40 mt-30 r-50">
-        <AiLab></AiLab>
+      <!-- AI 健康智能体 -->
+      <view class="module mt-30">
+        <AiLab />
       </view>
 
       <view class="score-card mt-30 r-50 bg-white p-40">

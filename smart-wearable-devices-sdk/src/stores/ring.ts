@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { computed, ref, watch } from 'vue';
+import { computed, ref, shallowRef, watch } from 'vue';
 import type {
   RingBoundDevice,
   RingBusinessMetrics,
@@ -114,10 +114,13 @@ export const useRingStore = defineStore('ring', () => {
   const devices = ref<RingDeviceInfo[]>([]);
   const deviceInfo = ref<RingDeviceInfo>({});
   const boundDevice = ref<RingBoundDevice | null>(null);
-  const receivedData = ref<RingParsedData[]>([]);
-  const normalizedData = ref<any[]>([]);
-  const historyRecords = ref<RingHistoricalRecord[]>([]);
-  const localData = ref<RingHistoricalRecord[]>([]);
+  // BLE/history arrays are immutable snapshots in this store. Keeping their
+  // nested records raw avoids recursively proxying the same growing history
+  // payload on every buffered flush.
+  const receivedData = shallowRef<RingParsedData[]>([]);
+  const normalizedData = shallowRef<any[]>([]);
+  const historyRecords = shallowRef<RingHistoricalRecord[]>([]);
+  const localData = shallowRef<RingHistoricalRecord[]>([]);
   const normalMac = ref<string>(uni.getStorageSync(NORMAL_MAC_KEY) || '');
   const iosMacId = ref<string>(uni.getStorageSync(IOS_MAC_KEY) || '');
   const deviceTime = ref(0);
@@ -625,6 +628,7 @@ export const useRingStore = defineStore('ring', () => {
   };
 
   const setLastReadTimestamp = (timestamp: number) => {
+    if (lastReadTimestamp.value === timestamp) return;
     lastReadTimestamp.value = timestamp;
     uni.setStorageSync(LAST_READ_TIMESTAMP_KEY, timestamp);
   };

@@ -38,90 +38,6 @@
       }
     },
     {
-      "path": "pages/family/family",
-      "style": {
-        "navigationBarTitleText": "亲友关怀",
-        "navigationStyle": "custom",
-        "enablePullDownRefresh": true
-      }
-    },
-    {
-      "path": "pages/family/addMember",
-      "style": {
-        "navigationBarTitleText": "添加家人",
-        "navigationStyle": "custom"
-      }
-    },
-    {
-      "path": "pages/family/memberDetail",
-      "style": {
-        "navigationBarTitleText": "家人详情",
-        "navigationStyle": "custom",
-        "enablePullDownRefresh": true
-      }
-    },
-    {
-      "path": "pages/family/bindDevice",
-      "style": {
-        "navigationBarTitleText": "绑定父母设备",
-        "navigationStyle": "custom"
-      }
-    },
-    {
-      "path": "pages/family/sharePermission",
-      "style": {
-        "navigationBarTitleText": "共享权限",
-        "navigationStyle": "custom"
-      }
-    },
-    {
-      "path": "pages/family/elderHome",
-      "style": {
-        "navigationBarTitleText": "长辈模式",
-        "navigationStyle": "custom",
-        "enablePullDownRefresh": true
-      }
-    },
-    {
-      "path": "pages/family/elderDevice",
-      "style": {
-        "navigationBarTitleText": "我的设备",
-        "navigationStyle": "custom",
-        "enablePullDownRefresh": true
-      }
-    },
-    {
-      "path": "pages/family/shareManage",
-      "style": {
-        "navigationBarTitleText": "分享我的数据",
-        "navigationStyle": "custom",
-        "enablePullDownRefresh": true
-      }
-    },
-    {
-      "path": "pages/family/inviteList",
-      "style": {
-        "navigationBarTitleText": "亲友邀请",
-        "navigationStyle": "custom",
-        "enablePullDownRefresh": true
-      }
-    },
-    {
-      "path": "pages/family/acceptInvite",
-      "style": {
-        "navigationBarTitleText": "确认邀请",
-        "navigationStyle": "custom"
-      }
-    },
-    {
-      "path": "pages/family/familyCollaborate",
-      "style": {
-        "navigationBarTitleText": "协同照护",
-        "navigationStyle": "custom",
-        "enablePullDownRefresh": true
-      }
-    },
-    {
       "path": "pages/mine/mine",
       "style": {
         "navigationBarTitleText": "我的",
@@ -158,6 +74,95 @@
     }
   ],
   "subPackages": [
+    {
+      "root": "pages/family",
+      "pages": [
+        {
+          "path": "family",
+          "style": {
+            "navigationBarTitleText": "亲友关怀",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
+          "path": "addMember",
+          "style": {
+            "navigationBarTitleText": "添加家人",
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "memberDetail",
+          "style": {
+            "navigationBarTitleText": "家人详情",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
+          "path": "bindDevice",
+          "style": {
+            "navigationBarTitleText": "绑定父母设备",
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "sharePermission",
+          "style": {
+            "navigationBarTitleText": "共享权限",
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "elderHome",
+          "style": {
+            "navigationBarTitleText": "长辈模式",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
+          "path": "elderDevice",
+          "style": {
+            "navigationBarTitleText": "我的设备",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
+          "path": "shareManage",
+          "style": {
+            "navigationBarTitleText": "分享我的数据",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
+          "path": "inviteList",
+          "style": {
+            "navigationBarTitleText": "亲友邀请",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
+          "path": "acceptInvite",
+          "style": {
+            "navigationBarTitleText": "确认邀请",
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "familyCollaborate",
+          "style": {
+            "navigationBarTitleText": "协同照护",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        }
+      ]
+    },
     {
       "root": "pagesA/mines",
       "pages": [
@@ -422,7 +427,7 @@
     },
     "pages/mine/mine": {
       "network": "all",
-      "packages": ["pagesA/mines", "homeDetail"]
+      "packages": ["pagesA/mines", "homeDetail", "pages/family"]
     }
   },
   "globalStyle": {

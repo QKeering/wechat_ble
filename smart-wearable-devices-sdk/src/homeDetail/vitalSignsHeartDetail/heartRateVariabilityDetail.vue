@@ -3,6 +3,7 @@ import { ref, computed, watch, h } from 'vue';
 import { onLoad, onPageScroll, onShow, onPullDownRefresh, onReachBottom, onUnload } from '@dcloudio/uni-app';
 import homeHeartChart from '@/components/homeHeartChart.vue';
 import { defaultEchartOption } from '@/homeDetail/vitalSignsHeartDetail/echartOptions';
+import { applyVitalSignsLineStyle } from '@/homeDetail/vitalSigns/echartOptions';
 import { getHrvDetail } from '@/common/api/homeDetail';
 import { formatDate, calculateOffset, getPrevDate, getNextDate, formatLocalDate } from '@/utils/utils.js';
 import type { heartRateDetail, Point } from '@/types/api/homeDetail';
@@ -190,8 +191,10 @@ const getProcessedOption = () => {
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = fullSeriesData;
   newOption.yAxis.min = 0;
-  newOption.yAxis.max = 200;
-  newOption.yAxis.interval = 40;
+  const validValues = fullSeriesData.filter((value) => value !== null && Number.isFinite(Number(value))) as number[];
+  const maxValue = validValues.length ? Math.max(...validValues) : 0;
+  newOption.yAxis.max = maxValue > 120 ? Math.ceil(maxValue / 20) * 20 : 120;
+  newOption.yAxis.interval = 20;
 
   newOption.xAxis.axisLabel = {
     ...newOption.xAxis.axisLabel,
@@ -240,6 +243,9 @@ const getProcessedOption = () => {
   }
 
   // 根据数据最大值动态调整y轴
+  applyVitalSignsLineStyle(newOption);
+  // 详情卡片使用独立的时间刻度层，避免 ECharts 标签和页面刻度重复。
+  newOption.xAxis.axisLabel = { ...(newOption.xAxis.axisLabel || {}), show: false };
   return newOption;
 };
 const initChart = async (chartRef: any) => {
@@ -249,7 +255,7 @@ const initChart = async (chartRef: any) => {
     const chart = await chartRef.init(echarts);
     chartInstance.value = chart;
     // 应用处理后的option
-    chart.setOption(getProcessedOption());
+    chart.setOption(getProcessedOption(), true);
   } catch (error) {
     console.error(`图表初始化失败:`, error);
   }

@@ -143,6 +143,9 @@ const RW_ALTERNATE_NOTIFY_MAX_BACKGROUND_CANDIDATES = 2;
 const RW_CREATE_CONNECTION_TIMEOUT_MS = 20000;
 const RW_CREATE_CONNECTION_RETRY_DELAYS_MS = [0, 900, 1800];
 const RW_CREATE_CONNECTION_ADAPTER_RESET_DELAY_MS = 1200;
+const BLUETOOTH_ADAPTER_STATE_CHECK_TIMEOUT_MS = 800;
+const BLUETOOTH_ADAPTER_OPEN_FOREGROUND_TIMEOUT_MS = 3000;
+const BLUETOOTH_ADAPTER_OPEN_CALLBACK_EXPIRY_MS = 12000;
 const RW_APP_READY_PREFLIGHT_TTL_MS = 2 * 60 * 1000;
 const RW_APP_READY_MONITORING_INTERVAL_MINUTES = 60;
 const RW_APP_HISTORY_SYNC_RESPONSE_WAIT_MS = 2200;
@@ -152,6 +155,19 @@ const RW_BLE_DEBUG_STORAGE_KEY = 'qkeer:ring-ble-debug';
 const RW_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 const RW_DIAGNOSTIC_LOG_MAX_COUNT = 500;
 const RW_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH = 4000;
+
+type BluetoothAdapterStateSnapshot = {
+  available: boolean;
+  discovering: boolean;
+  source: 'state' | 'unsupported' | 'timeout' | 'failed';
+  error?: unknown;
+};
+
+type BluetoothAdapterOpenOperation = {
+  promise: Promise<unknown>;
+  startedAt: number;
+  foregroundTimedOut: boolean;
+};
 const RW_DIAGNOSTIC_NOISY_EVENT_THROTTLE_MS = 5000;
 const RW_DIAGNOSTIC_NOISY_EVENTS = new Set([
   'tx',
@@ -403,6 +419,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   let dataListenerCallback: BleCharacteristicValueCallback | null = null;
   let connectionStateCallback: BleConnectionStateCallback | null = null;
   let adapterStateCallback: BluetoothAdapterStateCallback | null = null;
+  let bluetoothAdapterOpenOperation: BluetoothAdapterOpenOperation | null = null;
   let lastLocalDataReadIntent: RwLocalDataReadIntent | null = null;
   let pendingDeleteAllLocalDataAlias: RwPendingAlias | null = null;
   const pendingFirmwareAliases: RwPendingFirmwareAlias[] = [];
@@ -496,19 +513,201 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     return cache[mac] || '';
   };
 
-  const openBluetoothAdapter = () => {
-    return new Promise((resolve, reject) => {
-      uni.openBluetoothAdapter({
-        success: resolve,
-        fail: reject
+  const getBluetoothAdapterStateSnapshot = (reason: string) => {
+    const startedAt = Date.now();
+    rwBleLog('bluetooth-adapter-state-check-start', { reason });
+    return new Promise<BluetoothAdapterStateSnapshot>((resolve) => {
+      let settled = false;
+      const finish = (snapshot: BluetoothAdapterStateSnapshot, event: string) => {
+        if (settled) {
+          rwBleLog('bluetooth-adapter-state-check-late-result', {
+            reason,
+            available: snapshot.available,
+            discovering: snapshot.discovering,
+            source: snapshot.source,
+            elapsedMs: Date.now() - startedAt,
+            error: formatError(snapshot.error)
+          });
+          if (snapshot.available) runtime?.onBluetoothReadyChange?.(true);
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        rwBleLog(event, {
+          reason,
+          available: snapshot.available,
+          discovering: snapshot.discovering,
+          source: snapshot.source,
+          elapsedMs: Date.now() - startedAt,
+          error: formatError(snapshot.error)
+        });
+        resolve(snapshot);
+      };
+      const timer = setTimeout(() => {
+        finish(
+          { available: false, discovering: false, source: 'timeout' },
+          'bluetooth-adapter-state-check-timeout'
+        );
+      }, BLUETOOTH_ADAPTER_STATE_CHECK_TIMEOUT_MS);
+
+      if (typeof uni.getBluetoothAdapterState !== 'function') {
+        finish(
+          { available: false, discovering: false, source: 'unsupported' },
+          'bluetooth-adapter-state-check-unsupported'
+        );
+        return;
+      }
+
+      uni.getBluetoothAdapterState({
+        success: (result) => finish(
+          {
+            available: Boolean(result.available),
+            discovering: Boolean(result.discovering),
+            source: 'state'
+          },
+          'bluetooth-adapter-state-check-result'
+        ),
+        fail: (error) => finish(
+          { available: false, discovering: false, source: 'failed', error },
+          'bluetooth-adapter-state-check-failed'
+        )
       });
     });
   };
 
+  const startBluetoothAdapterOpenOperation = () => {
+    const startedAt = Date.now();
+    const operation = {
+      promise: Promise.resolve(undefined) as Promise<unknown>,
+      startedAt,
+      foregroundTimedOut: false
+    } satisfies BluetoothAdapterOpenOperation;
+
+    rwBleLog('bluetooth-adapter-open-start', {
+      foregroundTimeoutMs: BLUETOOTH_ADAPTER_OPEN_FOREGROUND_TIMEOUT_MS,
+      callbackExpiryMs: BLUETOOTH_ADAPTER_OPEN_CALLBACK_EXPIRY_MS
+    });
+
+    operation.promise = new Promise<unknown>((resolve, reject) => {
+      let callbackSettled = false;
+      const expiryTimer = setTimeout(() => {
+        if (callbackSettled) return;
+        callbackSettled = true;
+        rwBleLog('bluetooth-adapter-open-callback-expired', {
+          elapsedMs: Date.now() - startedAt,
+          foregroundTimedOut: operation.foregroundTimedOut
+        });
+        reject(new Error('Open Bluetooth adapter callback expired.'));
+      }, BLUETOOTH_ADAPTER_OPEN_CALLBACK_EXPIRY_MS);
+
+      uni.openBluetoothAdapter({
+        success: (result) => {
+          if (callbackSettled) {
+            rwBleLog('bluetooth-adapter-open-expired-success', {
+              elapsedMs: Date.now() - startedAt
+            });
+            runtime?.onBluetoothReadyChange?.(true);
+            return;
+          }
+          callbackSettled = true;
+          clearTimeout(expiryTimer);
+          rwBleLog(
+            operation.foregroundTimedOut ? 'bluetooth-adapter-open-late-success' : 'bluetooth-adapter-open-success',
+            {
+              elapsedMs: Date.now() - startedAt,
+              foregroundTimedOut: operation.foregroundTimedOut
+            }
+          );
+          runtime?.onBluetoothReadyChange?.(true);
+          resolve(result);
+        },
+        fail: (error) => {
+          if (callbackSettled) {
+            rwBleLog('bluetooth-adapter-open-expired-failed', {
+              elapsedMs: Date.now() - startedAt,
+              error: formatError(error)
+            });
+            return;
+          }
+          callbackSettled = true;
+          clearTimeout(expiryTimer);
+          rwBleLog(
+            operation.foregroundTimedOut ? 'bluetooth-adapter-open-late-failed' : 'bluetooth-adapter-open-failed',
+            {
+              elapsedMs: Date.now() - startedAt,
+              foregroundTimedOut: operation.foregroundTimedOut,
+              error: formatError(error)
+            }
+          );
+          reject(error);
+        }
+      });
+    });
+
+    bluetoothAdapterOpenOperation = operation;
+    operation.promise.then(
+      () => {
+        if (bluetoothAdapterOpenOperation === operation) bluetoothAdapterOpenOperation = null;
+      },
+      () => {
+        if (bluetoothAdapterOpenOperation === operation) bluetoothAdapterOpenOperation = null;
+      }
+    );
+    return operation;
+  };
+
+  const openBluetoothAdapter = () => {
+    const existingOperation = bluetoothAdapterOpenOperation;
+    const operation = existingOperation || startBluetoothAdapterOpenOperation();
+    if (existingOperation) {
+      rwBleLog('bluetooth-adapter-open-reuse', {
+        elapsedMs: Date.now() - operation.startedAt,
+        foregroundTimedOut: operation.foregroundTimedOut
+      });
+    }
+    const elapsedMs = Date.now() - operation.startedAt;
+    const remainingMs = Math.max(0, BLUETOOTH_ADAPTER_OPEN_FOREGROUND_TIMEOUT_MS - elapsedMs);
+    return new Promise<unknown>((resolve, reject) => {
+      let foregroundSettled = false;
+      const timer = setTimeout(() => {
+        if (foregroundSettled) return;
+        foregroundSettled = true;
+        operation.foregroundTimedOut = true;
+        rwBleLog('bluetooth-adapter-open-foreground-timeout', {
+          elapsedMs: Date.now() - operation.startedAt,
+          timeoutMs: BLUETOOTH_ADAPTER_OPEN_FOREGROUND_TIMEOUT_MS
+        });
+        reject(new Error('Open Bluetooth adapter foreground timeout.'));
+      }, remainingMs);
+      operation.promise.then(
+        (result) => {
+          if (foregroundSettled) return;
+          foregroundSettled = true;
+          clearTimeout(timer);
+          resolve(result);
+        },
+        (error) => {
+          if (foregroundSettled) return;
+          foregroundSettled = true;
+          clearTimeout(timer);
+          reject(error);
+        }
+      );
+    });
+  };
+
   const initBluetooth = async () => {
-    const result = await openBluetoothAdapter();
     registerConnectionStateListener();
-    return result;
+    const stateSnapshot = await getBluetoothAdapterStateSnapshot('init-bluetooth');
+    if (stateSnapshot.available) {
+      runtime?.onBluetoothReadyChange?.(true);
+      rwBleLog('bluetooth-adapter-open-skipped', {
+        reason: 'adapter-already-available',
+        discovering: stateSnapshot.discovering
+      });
+      return stateSnapshot;
+    }
+    return openBluetoothAdapter();
   };
 
   const closeBluetoothAdapterQuietly = () => {
@@ -536,13 +735,9 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     rwBleLog('connect-adapter-reset-done', { deviceId, deviceName });
   };
 
-  const checkBluetoothState = () => {
-    return new Promise<boolean>((resolve) => {
-      uni.getBluetoothAdapterState({
-        success: (res) => resolve(Boolean(res.available)),
-        fail: () => resolve(false)
-      });
-    });
+  const checkBluetoothState = async () => {
+    const stateSnapshot = await getBluetoothAdapterStateSnapshot('check-bluetooth-state');
+    return stateSnapshot.available;
   };
 
   const isBenignMtuError = (error: unknown) => {

@@ -76,3 +76,107 @@ export const baseOption = {
     containLabel: false
   }
 };
+
+/**
+ * 心率、血氧、HRV 共用的趋势折线样式。
+ *
+ * 生命体征详情和睡眠页复用同一批组件，因此在这里固定折线形态，
+ * 避免各页面因局部 option 合并顺序不同而退化成带点折线或默认样式。
+ */
+export const applyVitalSignsLineStyle = (option: any, color = '#ff5a5f') => {
+  const series = option?.series?.[0];
+  if (!series) return option;
+
+  const sourceSeriesData: unknown[] = Array.isArray(series.data) ? series.data : [];
+  const sourceAxisData = Array.isArray(option?.xAxis?.data) ? option.xAxis.data : [];
+  const axisLength = Math.max(sourceAxisData.length, sourceSeriesData.length, 2);
+  // Some mini-program ECharts/WebView combinations draw category placeholders
+  // (null, undefined or '-') down to the Y-axis minimum. Feeding those sparse
+  // placeholders to a line series therefore creates a row of false vertical
+  // bars. Keep only real samples and encode the original bucket index as the
+  // numeric X coordinate; this preserves the true position in the day without
+  // ever sending a missing value to the renderer.
+  const normalizedSeriesData = sourceSeriesData.reduce((points: Array<[number, number]>, value: unknown, index: number) => {
+    const rawValue = Array.isArray(value) ? value[1] : value;
+    const rawX = Array.isArray(value) ? value[0] : index;
+    const numeric = Number(rawValue);
+    const numericX = Number(rawX);
+    if (rawValue !== null && rawValue !== '' && Number.isFinite(numeric) && numeric > 0 && Number.isFinite(numericX)) {
+      points.push([numericX, numeric]);
+    }
+    return points;
+  }, []);
+  const validPointCount = normalizedSeriesData.length;
+
+  option.animation = true;
+  option.animationDuration = 320;
+  option.animationEasing = 'cubicOut';
+  option.xAxis = {
+    ...(option.xAxis || {}),
+    type: 'value',
+    data: undefined,
+    min: 0,
+    max: axisLength - 1,
+    boundaryGap: [0, 0],
+    axisLine: { show: false },
+    axisTick: { show: false },
+    axisLabel: { show: false },
+    splitLine: { show: false }
+  };
+  option.yAxis = {
+    ...(option.yAxis || {}),
+    axisLine: { show: false },
+    axisTick: { show: false },
+    axisLabel: {
+      ...(option.yAxis?.axisLabel || {}),
+      // Rendered by MetricYAxisLabels in the view layer. Canvas axis labels
+      // disappear on some Android WebViews even when show=true.
+      show: false,
+      color: '#666',
+      fontSize: 12,
+      margin: 10,
+      formatter: (value: unknown) => {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? `${Math.round(numeric)}` : '';
+      }
+    },
+    splitLine: {
+      show: true,
+      lineStyle: {
+        type: 'dashed',
+        color: '#edf0f4',
+        width: 1
+      }
+    }
+  };
+  option.grid = {
+    ...(option.grid || {}),
+    // Reserve an explicit label gutter. containLabel alone is unreliable in
+    // the mini-program canvas renderer and previously clipped the Y values.
+    left: 46,
+    right: 12,
+    bottom: 18,
+    containLabel: false
+  };
+  option.series[0] = {
+    ...series,
+    data: normalizedSeriesData,
+    type: 'line',
+    smooth: 0.38,
+    showSymbol: validPointCount === 1,
+    symbol: validPointCount === 1 ? 'circle' : 'none',
+    symbolSize: validPointCount === 1 ? 7 : 0,
+    connectNulls: false,
+    itemStyle: { color },
+    lineStyle: {
+      color,
+      width: 2.5,
+      cap: 'round',
+      join: 'round'
+    },
+    emphasis: {
+      disabled: true
+    }
+  };
+  return option;
+};

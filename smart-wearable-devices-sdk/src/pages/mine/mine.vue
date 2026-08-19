@@ -63,6 +63,7 @@ import {
   isBatteryChargingLike
 } from '@/utils/batteryDisplay';
 import { readBatteryDisplayCache, writeBatteryDisplayCache } from '@/utils/batteryCache';
+import { isAnyDeviceSyncSessionRunning } from '@/utils/deviceSyncSession';
 const {
   deviceInfo: ringDeviceInfo,
   isDeviceConnected,
@@ -3315,6 +3316,15 @@ onShow(async () => {
       return;
     }
     clearMineSleepProbeIsolationLock('mine-page-show');
+    const deviceSyncActive =
+      isAnyDeviceSyncSessionRunning(getMineBatteryCacheUserId(), getMineBatteryCacheMac()) ||
+      isAnyDeviceSyncSessionRunning(getMineBatteryCacheUserId());
+    if (deviceSyncActive) {
+      appendMineDiagnosticLog('page-show-device-sync-active-backend-only', {
+        reason: 'load-page-backend-data-without-competing-for-ble',
+        snapshot: getMineConnectionSnapshot()
+      });
+    }
     let boundInfo: any = null;
     // 并行发起 API 请求和 BLE 连接检查，不再串行等待
     const boundInfoPromise = getBindInfo().catch((error) => {
@@ -3323,9 +3333,9 @@ onShow(async () => {
     });
     const { deviceId: prevDeviceId, serviceId: prevServiceId } = userStore.deviceInfo;
     const connectedCheckPromise =
-      prevDeviceId && prevServiceId
+      !deviceSyncActive && prevDeviceId && prevServiceId
         ? isDeviceConnected(prevDeviceId, prevServiceId || '').catch(() => false)
-        : Promise.resolve(false);
+        : Promise.resolve(deviceSyncActive && isConnectedStatus.value);
 
     boundInfo = await boundInfoPromise;
     if (boundInfo) bindInfo.value = boundInfo;
@@ -3342,6 +3352,16 @@ onShow(async () => {
       bindInfo.value = null;
       await clearFrontendRingBindingState(userStore, ringStore);
       appendMineDiagnosticLog('page-show-unbound', {
+        snapshot: getMineConnectionSnapshot()
+      });
+      return;
+    }
+
+    // The active home session owns BLE. Mine still finishes its normal HTTP
+    // initialization, but must not start another connection/command sequence.
+    if (deviceSyncActive) {
+      appendMineDiagnosticLog('page-show-device-sync-active-ready', {
+        reason: 'backend-page-initialized-ble-reused',
         snapshot: getMineConnectionSnapshot()
       });
       return;

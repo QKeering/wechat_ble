@@ -25,7 +25,7 @@ export const heartRateOption: AnyEchartOption = {
     splitNumber: 5,
     axisLine: { show: false },
     axisTick: { show: false },
-    axisLabel: { show: true },
+    axisLabel: { show: true, color: '#666', fontSize: 12, margin: 8 },
     splitLine: {
       lineStyle: { type: 'dashed', color: '#eee' }
     }
@@ -73,8 +73,10 @@ export const sleepTimeOption: AnyEchartOption = {
     axisLine: { show: false },
     axisTick: { show: false },
     axisLabel: {
+      show: true,
       fontSize: 12,
       color: '#979797',
+      margin: 8,
       // 关键：将数值刻度转换为中文
       formatter: function (value) {
         const labelMap = {

@@ -15,15 +15,17 @@ export interface RwDiagnosticUploadEntry {
 
 const QUEUE_STORAGE_KEY = 'qkeer:rw-diagnostic-upload-queue';
 const SESSION_STORAGE_KEY = 'qkeer:rw-diagnostic-session-id';
-const MAX_QUEUE_COUNT = 300;
+const MAX_QUEUE_COUNT = 160;
 const BATCH_SIZE = 40;
 const FLUSH_DELAY_MS = 12000;
 const BUSINESS_UPLOAD_ACTIVE_RETRY_MS = 5000;
-const QUEUE_PERSIST_DELAY_MS = 2500;
+const QUEUE_PERSIST_DELAY_MS = 10000;
 const REQUEST_TIMEOUT_MS = 3000;
 
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let queuePersistTimer: ReturnType<typeof setTimeout> | null = null;
+let queuePersistInFlight = false;
+let queuePersistPending = false;
 let flushing = false;
 let pendingFlush = false;
 let queueCache: RwDiagnosticUploadEntry[] | null = null;
@@ -54,9 +56,26 @@ const readQueue = (): RwDiagnosticUploadEntry[] => {
 
 const persistQueueNow = () => {
   if (isNodeRuntime() || !queueCache) return;
+  if (queuePersistInFlight) {
+    queuePersistPending = true;
+    return;
+  }
+  const snapshot = queueCache.slice(-MAX_QUEUE_COUNT);
+  queuePersistInFlight = true;
   try {
-    uni.setStorageSync?.(QUEUE_STORAGE_KEY, queueCache.slice(-MAX_QUEUE_COUNT));
+    uni.setStorage?.({
+      key: QUEUE_STORAGE_KEY,
+      data: snapshot,
+      complete: () => {
+        queuePersistInFlight = false;
+        if (queuePersistPending) {
+          queuePersistPending = false;
+          persistQueueNow();
+        }
+      }
+    });
   } catch {
+    queuePersistInFlight = false;
     // Upload queue must never affect diagnostics.
   }
 };
