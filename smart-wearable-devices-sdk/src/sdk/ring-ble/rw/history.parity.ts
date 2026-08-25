@@ -1991,4 +1991,47 @@ if (
   })}`);
 }
 
+const l19HistoryWrites: Array<{ hex: string; label?: string }> = [];
+let l19HistorySessionStarted = 0;
+let l19HistorySessionEnded = 0;
+const l19NoFirstFrameAdapter = {
+  protocol: 'rw',
+  state: {} as RingBleState,
+  isL19HistoryDevice: () => true,
+  beginL19HistorySession: () => {
+    l19HistorySessionStarted += 1;
+    return 7;
+  },
+  endL19HistorySession: (generation?: number | null) => {
+    if (generation === 7) l19HistorySessionEnded += 1;
+  },
+  sendL19HistoryBytes: async (bytes: Uint8Array, label?: string) => {
+    l19HistoryWrites.push({ hex: bytesToHex(bytes), label });
+  },
+  sendBytes: async (_bytes: Uint8Array, label?: string) => {
+    throw new Error(`L19 history must not run SDK preflight/fallback writes: ${label || 'unlabelled'}`);
+  },
+  waitForParsedData: () => new Promise<RingParsedData>(() => undefined)
+} as unknown as LegacyRingAdapter;
+
+const l19NoFirstFrameResult = await syncRwHistoryFiles(l19NoFirstFrameAdapter, {
+  readAll: true,
+  timeoutMs: 5000
+});
+if (
+  l19HistorySessionStarted !== 1 ||
+  l19HistorySessionEnded !== 1 ||
+  l19HistoryWrites.length !== 2 ||
+  l19HistoryWrites.some((item) => !/^00[0-9a-f]{2}360100000000$/i.test(item.hex)) ||
+  l19NoFirstFrameResult.parsed.status !== 'empty' ||
+  l19NoFirstFrameResult.records.length !== 0
+) {
+  throw new Error(`RW L19 no-first-frame history should retry the same raw 0x36 once and finish normally: ${JSON.stringify({
+    l19HistorySessionStarted,
+    l19HistorySessionEnded,
+    l19HistoryWrites,
+    l19NoFirstFrameResult
+  })}`);
+}
+
 export const rwHistoryParityPassed = true;

@@ -80,6 +80,23 @@ const pressureLevel = computed(() =>
   )
 );
 const hasPressureScore = computed(() => pressureScore.value > 0);
+const hasRealPressureDetail = computed(() => {
+  const chart = Array.isArray(stressDetailObj.value?.stressChart) ? stressDetailObj.value?.stressChart : [];
+  return chart.length > 0 || getStressScoreNumber(
+    stressDetailObj.value?.avgStressValue,
+    stressDetailObj.value?.stressValue
+  ) > 0;
+});
+const pressureFallbackMode = computed(() => {
+  if (hasRealPressureDetail.value) return 'real';
+  if (stressDetailObj.value?.pressureDisplayMode) return stressDetailObj.value.pressureDisplayMode;
+  return stressDetailObj.value?.hrvDisplay?.displayMode || 'real';
+});
+const isPressureProxy = computed(() => pressureFallbackMode.value === 'proxy');
+const isPressureEmpty = computed(() => pressureFallbackMode.value === 'empty');
+const pressureFallbackTip = computed(() => {
+  return '';
+});
 const pressureIcon = computed(() => {
   const levelStatus = getStressStatusByLevel(pressureLevel.value);
   if (levelStatus === '\u504f\u9ad8') return '/static/images/homeDetail/cry.png';
@@ -88,16 +105,24 @@ const pressureIcon = computed(() => {
   if (pressureScore.value >= 80) return '/static/images/homeDetail/smile.png';
   return '/static/images/homeDetail/normal.png';
 });
-const pressureDisplayText = computed(() =>
-  resolveStressDisplayStatus({
+const pressureDisplayText = computed(() => {
+  if (isPressureProxy.value) {
+    const status =
+      stressDetailObj.value?.pressureStatusText || stressDetailObj.value?.hrvDisplay?.statusText || '平稳';
+    if (status === '波动较大') return '压力偏高';
+    if (status === '略有波动') return '正常状态';
+    return '放松状态';
+  }
+  if (isPressureEmpty.value) return '暂无压力趋势';
+  return resolveStressDisplayStatus({
     detail: stressDetailObj.value,
     summary: stressSummaryObj.value,
     fallbackStatus: stressDetailObj.value?.stressLevel,
     score: Number(pressureScore.value) || 0,
     level: pressureLevel.value,
     fallbackText: '\u538b\u529b'
-  })
-);
+  });
+});
 const pressureMainText = computed(() => (hasPressureScore.value ? String(pressureScore.value) : pressureDisplayText.value));
 const statusClass = computed(() => {
   if (pressureDisplayText.value === '\u7d27\u5f20\u72b6\u6001') return 'status-bad';
@@ -371,7 +396,7 @@ onPageScroll((e) => {
           <view v-if="hasPressureScore" class="status-tag" :class="statusClass">{{ pressureDisplayText }}</view>
         </view>
       </view>
-      <view class="mt-30 bg-white r-50 p-30">
+      <view v-if="!isPressureEmpty" class="mt-30 bg-white r-50 p-30">
         <view class="fs-36">指标数据</view>
         <view class="flex jc-between mt-30 pl-50 pr-50">
           <text class="fs-28 t-979797">压力指数范围</text>

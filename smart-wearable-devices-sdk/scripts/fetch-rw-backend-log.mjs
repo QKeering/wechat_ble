@@ -5,14 +5,17 @@ import path from 'node:path';
 
 const args = process.argv.slice(2);
 const limitArg = args.find((arg) => arg.startsWith('--limit='));
+const offsetArg = args.find((arg) => arg.startsWith('--offset='));
 const outputArg = args.find((arg) => arg.startsWith('--output='));
 const pageMode = args.includes('--page');
 
 const limit = Math.min(2000, Math.max(1, Number(limitArg?.slice('--limit='.length)) || 2000));
+const offset = Math.max(0, Number(offsetArg?.slice('--offset='.length)) || 0);
 const outputPath = path.resolve(outputArg?.slice('--output='.length) || (pageMode ? 'rw-debug-page-latest.html' : 'rw-debug-latest.json'));
 const pathname = pageMode ? '/api/app/rw-debug/logs/page' : '/api/app/rw-debug/logs';
 const url = new URL(`https://sh.qkeering.com${pathname}`);
 url.searchParams.set('limit', String(limit));
+url.searchParams.set('offset', String(offset));
 url.searchParams.set('_ts', String(Date.now()));
 
 const fetchText = (targetUrl) =>

@@ -232,7 +232,7 @@ const adapterStateCallbacks: Array<(result: { available: boolean; discovering: b
 const connectionStateCallbacks: Array<(result: { deviceId: string; connected: boolean }) => void> = [];
 const discoveryRequests: Array<{ allowDuplicatesKey?: boolean }> = [];
 const writtenHex: string[] = [];
-const writeRecords: Array<{ deviceId: string; serviceId: string; characteristicId: string; hex: string }> = [];
+const writeRecords: Array<{ deviceId: string; serviceId: string; characteristicId: string; hex: string; writeType?: string }> = [];
 const mtuRequests: Array<{ deviceId: string; mtu: number }> = [];
 const closedDeviceIds: string[] = [];
 const notifyRequests: Array<{ deviceId: string; serviceId: string; characteristicId: string; state: boolean }> = [];
@@ -539,6 +539,7 @@ const getWrittenRwTimeFrames = () => writtenHex.filter((hex) => hex.slice(4, 8) 
     serviceId,
     characteristicId,
     value,
+    writeType,
     success,
     fail
   }: {
@@ -546,12 +547,13 @@ const getWrittenRwTimeFrames = () => writtenHex.filter((hex) => hex.slice(4, 8) 
     serviceId: string;
     characteristicId: string;
     value: ArrayBuffer;
+    writeType?: string;
     success: (result: unknown) => void;
     fail: (error: unknown) => void;
   }) => {
     const hex = Array.from(new Uint8Array(value), (byte) => byte.toString(16).padStart(2, '0')).join('');
     writtenHex.push(hex);
-    writeRecords.push({ deviceId, serviceId, characteristicId, hex });
+    writeRecords.push({ deviceId, serviceId, characteristicId, hex, writeType });
     if (writeShouldFail) {
       fail(new Error('write failed'));
       return;
@@ -3304,6 +3306,55 @@ if (
       staleStableDisconnectEvents
     )}`
   );
+}
+
+const l19PlatformDeviceId = '50:0B:22:33:44:9E';
+const l19DisconnectEvents: any[] = [];
+const l19HistoryAdapter = createRwRingAdapter(
+  { devices: { value: [] as any[] }, isScanning: { value: false } } as any,
+  {
+    getDeviceInfo: () => ({
+      deviceId: l19PlatformDeviceId,
+      name: 'QKL19_8888',
+      protocol: 'rw',
+      mac: 'B0:05:F0:00:02:9E',
+      advertis: { macInfo: 'B0:05:F0:00:02:9E' }
+    }),
+    onDisconnected: (reason: unknown) => l19DisconnectEvents.push({ type: 'runtime', reason })
+  } as any
+);
+await l19HistoryAdapter.connectAndDiscover(l19PlatformDeviceId, 'QKL19_8888', {
+  deviceId: l19PlatformDeviceId,
+  name: 'QKL19_8888',
+  protocol: 'rw',
+  mac: 'B0:05:F0:00:02:9E',
+  advertis: { macInfo: 'B0:05:F0:00:02:9E' }
+} as any);
+l19HistoryAdapter.registerConnectionStateListener({
+  onDisconnected: (deviceId) => l19DisconnectEvents.push({ type: 'option', deviceId })
+});
+const l19HistoryWriteStart = writeRecords.length;
+await l19HistoryAdapter.sendL19HistoryBytes?.(hexToBytes('0001360100000000'), 'history/l19-platform-default-write');
+const l19HistoryWrite = writeRecords
+  .slice(l19HistoryWriteStart)
+  .find((record) => record.hex === '0001360100000000');
+if (
+  !l19HistoryAdapter.isL19HistoryDevice?.() ||
+  !l19HistoryWrite ||
+  l19HistoryWrite.deviceId !== l19PlatformDeviceId ||
+  l19HistoryWrite.writeType !== undefined
+) {
+  throw new Error(`RW L19 history should use the platform deviceId and omit writeType: ${JSON.stringify(l19HistoryWrite)}`);
+}
+
+const l19HistoryGeneration = l19HistoryAdapter.beginL19HistorySession?.();
+connectedDevices = [{ deviceId: l19PlatformDeviceId }];
+connectionStateCallbacks[connectionStateCallbacks.length - 1]?.({ deviceId: l19PlatformDeviceId, connected: false });
+await new Promise((resolve) => setTimeout(resolve, 0));
+l19HistoryAdapter.endL19HistorySession?.(l19HistoryGeneration);
+connectedDevices = [];
+if (l19DisconnectEvents.length !== 0) {
+  throw new Error(`RW L19 history should ignore an old disconnect event while the physical link is still connected: ${JSON.stringify(l19DisconnectEvents)}`);
 }
 
 const adapterUnavailableState = {

@@ -66,9 +66,9 @@ const handleGetPhoneNumber = async (event) => {
   try {
     const wxProfile = await getWechatProfileForNickname();
     uni.showLoading({ title: '登录中' });
-    const wxResult = await withTimeout(wx.login(), 10000, '微信登录凭证获取超时');
+    const wxResult = await withTimeout(wx.login(), 10000, '登录凭证获取超时');
     if (!wxResult?.code) {
-      throw new Error('微信登录凭证获取失败');
+      throw new Error('登录凭证获取失败');
     }
     const response = await withTimeout(
       wechatLogin(
@@ -126,9 +126,9 @@ const leftClick = () => {
 
       <view class="login-actions">
         <button class="login-btn login-btn-primary" :disabled="isLoggingIn" hover-class="none" open-type="getPhoneNumber" @getphonenumber="handleGetPhoneNumber">
-          {{ isLoggingIn ? '登录中...' : '微信快捷登录' }}
+          {{ isLoggingIn ? '登录中...' : '快捷登录' }}
         </button>
-        <button class="login-mobile-entry" :disabled="isLoggingIn" hover-class="none" @click="handleMobileLoginEntry">手机号验证登录</button>
+        <button class="login-mobile-entry" :disabled="isLoggingIn" hover-class="none" @click="handleMobileLoginEntry">手机验证登录</button>
       </view>
 
       <view @click="agreementChecked = !agreementChecked" class="agreement-row">

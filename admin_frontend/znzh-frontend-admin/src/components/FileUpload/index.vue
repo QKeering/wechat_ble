@@ -30,7 +30,7 @@
     <!-- 文件列表 -->
     <transition-group ref="uploadFileList" class="upload-file-list el-upload-list el-upload-list--text" name="el-fade-in-linear" tag="ul">
       <li :key="file.url" class="el-upload-list__item ele-upload-list__item-content" v-for="(file, index) in fileList">
-        <el-link :href="`${baseUrl}${file.url}`" :underline="false" target="_blank">
+        <el-link :href="getDownloadUrl(file.url)" :underline="false" target="_blank">
           <span class="el-icon-document"> {{ getFileName(file.name) }} </span>
         </el-link>
         <div class="ele-upload-list__item-content-action">
@@ -148,6 +148,14 @@ export default {
     },
   },
   methods: {
+    getDownloadUrl(url) {
+      if (!url || /^https?:\/\//i.test(url)) {
+        return url
+      }
+      // /profile is the legacy public download path and must not be prefixed
+      // with /api. Other upload endpoints are API-backed as before.
+      return url.startsWith('/profile/') ? url : `${this.baseUrl}${url}`
+    },
     // 上传前校检格式和大小
     handleBeforeUpload(file) {
       // 校检文件类型
@@ -189,7 +197,11 @@ export default {
     // 上传成功回调
     handleUploadSuccess(res, file) {
       if (res.code === 200) {
-        this.uploadList.push({ name: res.fileName, url: res.fileName })
+        const result = res.data && typeof res.data === "object" ? { ...res.data, ...res } : res
+        this.uploadList.push({ name: result.fileName, url: result.fileName, size: result.fileSize })
+        // FileUpload's v-model only carries the URL. Expose the complete
+        // upload response so business forms can persist metadata such as size.
+        this.$emit("upload-success", result, file)
         this.uploadedSuccessfully()
       } else {
         this.number--

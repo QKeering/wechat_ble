@@ -3,6 +3,7 @@ import io
 import json
 import re
 import zipfile
+from datetime import datetime
 from typing import Any
 
 from pathlib import Path
@@ -14,6 +15,7 @@ from redis import Redis
 from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.responses import error, not_migrated, success, table
 from app.core.security import read_request_token
 from app.db.redis import get_redis
@@ -1000,6 +1002,7 @@ def ensure_device_battery_log_schema(db: Session) -> None:
               device_mac varchar(64) not null,
               device_mac_norm varchar(32) not null,
               real_battery int not null,
+              display_battery int null,
               record_time datetime not null,
               source varchar(64) null,
               create_time datetime not null default current_timestamp,
@@ -1010,6 +1013,19 @@ def ensure_device_battery_log_schema(db: Session) -> None:
             """
         )
     )
+    display_battery_column_exists = db.execute(
+        text(
+            """
+            select count(*)
+            from information_schema.columns
+            where table_schema=database()
+              and table_name='device_battery_log'
+              and column_name='display_battery'
+            """
+        )
+    ).scalar()
+    if not display_battery_column_exists:
+        db.execute(text("alter table device_battery_log add column display_battery int null after real_battery"))
     db.commit()
     DEVICE_BATTERY_LOG_SCHEMA_READY = True
 
@@ -1055,6 +1071,7 @@ def app_user_battery_log_query(db: Session, query: dict[str, Any], paginate: boo
           u.phone,
           l.device_mac,
           l.real_battery,
+          l.display_battery,
           l.record_time,
           l.source,
           l.create_time
@@ -1467,15 +1484,32 @@ def gen_code_batch(tables: str = "", db: Session = Depends(get_db)):
 
 @router.post("/device/ota/upload")
 async def device_ota_upload(file: UploadFile):
-    suffix = Path(file.filename or "").suffix.lower()
+    original_name = Path(file.filename or "").name.strip()
+    suffix = Path(original_name).suffix.lower()
     if suffix not in {".hex", ".bin", ".hex16"}:
         return error("文件类型不支持")
-    upload_dir = Path("uploads/ota")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    target = upload_dir / f"{uuid4().hex}{suffix}"
+
+    # Keep the legacy OTA path contract used by the mini program and existing
+    # package rows: /profile/ota/YYYY/MM/DD/<original firmware filename>.
+    # Only strip characters that are invalid in Windows/Linux filenames; the
+    # firmware filename itself is meaningful and must not be replaced by UUID.
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", original_name).strip(" .")
+    if not safe_name or Path(safe_name).suffix.lower() != suffix:
+        return error("文件名不合法")
+
+    date_path = datetime.now().strftime("%Y/%m/%d")
+    upload_dir = settings.upload_path / "ota"
+    target_dir = upload_dir / date_path
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / safe_name
     content = await file.read()
+
+    # Do not silently replace a published firmware package with different
+    # content. Re-uploading the same file is idempotent.
+    if target.exists() and target.read_bytes() != content:
+        return error("同名固件已存在，请修改文件名后重新上传")
     target.write_bytes(content)
-    url = f"/admin/files/ota/{target.name}"
+    url = f"/profile/ota/{date_path}/{safe_name}"
     data = success()
     data.update({
         "url": url,

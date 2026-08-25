@@ -127,6 +127,7 @@ const rwHistorySyncResult = await syncLegacyHistory(
     onUploadingStatusChange: () => undefined,
     uploadHistoricalRecords: async (records) => {
       rwHistoryUploads.push(records);
+      return { rawStored: true, storedCount: records.length };
     }
   },
   {
@@ -484,7 +485,7 @@ if (
   !(rwHistoryFailureError instanceof Error) ||
   !rwHistoryFailureError.message.includes('RW history response timeout after 20ms') ||
   !rwHistoryFailureError.message.includes('cause=file-list failed') ||
-  rwHistoryFailureUploadStatuses.join(',') !== 'uploading,failed' ||
+  rwHistoryFailureUploadStatuses.length !== 0 ||
   rwHistoryFailureEvents[0]?.type !== 'rw_history_pending' ||
   rwHistoryFailureEvents[0]?.message !== 'RW 历史同步失败，请重试' ||
   !`${rwHistoryFailureEvents[0]?.error || ''}`.includes('RW history response timeout after 20ms') ||
@@ -569,7 +570,8 @@ const result = await refreshLegacyBusinessMetrics(
     onParsedData: (parsed) => received.push(parsed)
   },
   {
-    timeoutMs: 20
+    timeoutMs: 20,
+    includeHistorySnapshot: true
   }
 );
 const elapsedMs = Date.now() - startTime;
@@ -589,14 +591,10 @@ for (const step of ['battery', 'firmware', 'software']) {
   }
 }
 
-for (const command of ['battery', 'firmware', 'temperature']) {
+for (const command of ['battery', 'firmware', 'software', 'temperature']) {
   if (!rwRefreshCommandLog.includes(command)) {
     throw new Error(`RW refresh should trigger ${command} command like L19: ${JSON.stringify({ result, rwRefreshCommandLog })}`);
   }
-}
-
-if (rwRefreshCommandLog.includes('software')) {
-  throw new Error(`RW refresh should reuse the combined firmware response instead of probing software again: ${JSON.stringify(rwRefreshCommandLog)}`);
 }
 
 if (result.failed.some((item) => item.step === 'blood_oxygen')) {
@@ -951,7 +949,7 @@ if (
   !rwBatteryFallbackRefreshResult.ok.includes('firmware') ||
   !rwBatteryFallbackRefreshResult.ok.includes('software') ||
   rwBatteryFallbackRefreshResult.failed.some((item) => item.step === 'battery') ||
-  rwBatteryFallbackRefreshCommands.join(',') !== 'battery,firmware' ||
+  rwBatteryFallbackRefreshCommands.join(',') !== 'battery,firmware,software' ||
   !rwBatteryFallbackRefreshReceived.some(
     (item) => item.type === 'battery' && item.protocol === 'rw' && item.battery === 78 && item.raw?.[0] === 0xc6
   )
@@ -1010,7 +1008,7 @@ if (
   !rwVersionAliasOnlyRefreshResult.ok.includes('firmware') ||
   !rwVersionAliasOnlyRefreshResult.ok.includes('software') ||
   rwVersionAliasOnlyRefreshResult.failed.some((item) => item.step === 'firmware' || item.step === 'software') ||
-  rwVersionAliasOnlyRefreshCommands.join(',') !== 'battery,firmware' ||
+  rwVersionAliasOnlyRefreshCommands.join(',') !== 'battery,firmware,software' ||
   !rwVersionAliasOnlyRefreshReceived.some((item) => item.type === 'hardwareVersion' && item.value === '0.3.3') ||
   !rwVersionAliasOnlyRefreshReceived.some((item) => item.type === 'softwareVersion' && item.value === '0B060503')
 ) {
@@ -1628,7 +1626,8 @@ const historyFailureResult = await refreshLegacyBusinessMetrics(
     onParsedData: (parsed) => historyFailureReceived.push(parsed)
   },
   {
-    timeoutMs: 20
+    timeoutMs: 20,
+    includeHistorySnapshot: true
   }
 );
 
@@ -1929,10 +1928,8 @@ if (
   throw new Error(`RW auto reconnect should reuse current device name when already selected: ${JSON.stringify(currentReconnectEvents)}`);
 }
 
-if (!currentReconnectRebindPayloads.some((payload: any) => payload.mac === '3E:00:00:00:05:1B')) {
-  throw new Error(
-    `RW auto reconnect should fall back to deviceId when rebinding without a stable MAC: ${JSON.stringify(currentReconnectRebindPayloads)}`
-  );
+if (currentReconnectRebindPayloads.length !== 0) {
+  throw new Error(`RW auto reconnect must not recreate a missing backend binding from a platform deviceId: ${JSON.stringify(currentReconnectRebindPayloads)}`);
 }
 
 const rwRandomDirectReconnectEvents: unknown[] = [];
@@ -2230,6 +2227,9 @@ const qkeerV2Adapter = {
   sendFirmwareVersion: async () => {
     qkeerV2Sent.push('firmware');
   },
+  sendSoftwareVersion: async () => {
+    qkeerV2Sent.push('software');
+  },
   readDeviceTime: async () => {
     qkeerV2Sent.push('device_time');
   },
@@ -2275,7 +2275,8 @@ const qkeerV2RefreshResult = await refreshLegacyBusinessMetrics(
     getDeviceInfo: () => ({ deviceId: 'qkeer-v2-device', protocol: 'qkeer-v2' })
   },
   {
-    timeoutMs: 20
+    timeoutMs: 20,
+    includeHistorySnapshot: true
   }
 );
 
@@ -2285,7 +2286,7 @@ for (const step of ['battery', 'firmware', 'software', 'device_time', 'heart_rat
   }
 }
 
-for (const command of ['battery', 'firmware', 'device_time', 'heart_rate', 'blood_oxygen', 'last_data', 'collect_period', 'history_snapshot']) {
+for (const command of ['battery', 'firmware', 'software', 'device_time', 'heart_rate', 'blood_oxygen', 'last_data', 'collect_period', 'history_snapshot']) {
   if (!qkeerV2Sent.includes(command)) {
     throw new Error(`QKeer V2 business refresh should trigger ${command}: ${JSON.stringify(qkeerV2Sent)}`);
   }

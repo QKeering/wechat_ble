@@ -7,6 +7,8 @@ export interface DeviceInfo {
   deviceSize?: string;
   deviceVersion?: string;
   firmwareVersion?: string;
+  softwareVersion?: string;
+  uiVersion?: string;
   productId?: string;
   sn?: string;
   [key: string]: any;

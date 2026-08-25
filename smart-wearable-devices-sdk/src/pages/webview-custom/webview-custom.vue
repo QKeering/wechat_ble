@@ -8,6 +8,7 @@
 import { onLoad } from '@dcloudio/uni-app';
 import { ref } from 'vue';
 import { useUserStore } from '@/stores/user';
+import { requestH5Ticket } from '@/common/api/aiLab';
 
 const userStore = useUserStore();
 const url = ref('');
@@ -21,7 +22,25 @@ function getTodaysVersion() {
   return `${year}${month}${day}`;
 }
 
-onLoad((options: any) => {
+const XIAOQING_TODAY_SCENE_ID = 'xiaoqing_today';
+const buildXiaoqingTicketUrl = (value: string, ticket: string) => {
+  const source = String(value || '').trim();
+  const hashIndex = source.indexOf('#');
+  const hash = hashIndex >= 0 ? source.slice(hashIndex + 1) : '';
+  const beforeHash = hashIndex >= 0 ? source.slice(0, hashIndex) : source;
+  const queryIndex = beforeHash.indexOf('?');
+  const base = queryIndex >= 0 ? beforeHash.slice(0, queryIndex) : beforeHash;
+  const retained = (queryIndex >= 0 ? beforeHash.slice(queryIndex + 1) : '')
+    .split('&')
+    .filter(Boolean)
+    .filter((item) => !['ticket', 'tab', 'sceneid'].includes(decodeURIComponent(item.split('=', 1)[0] || '').toLowerCase()));
+  const query = [...retained, `ticket=${encodeURIComponent(ticket)}`, 'tab=today', `sceneId=${XIAOQING_TODAY_SCENE_ID}`].join('&');
+  const hashTicket = `ticket=${encodeURIComponent(ticket)}&sceneId=${XIAOQING_TODAY_SCENE_ID}`;
+  const nextHash = hash ? `${hash}${hash.includes('?') ? '&' : '?'}${hashTicket}` : hashTicket;
+  return `${base}?${query}#${nextHash}`;
+};
+
+onLoad(async (options: any) => {
   // 获取用户ID
   const userId = userStore.userInfo?.id || '';
 
@@ -34,7 +53,18 @@ onLoad((options: any) => {
   // - url: 完整的URL（会覆盖其他参数）
   // - route: 路由路径（如 'aiPet' 或 '#/aiPet'）
   // - path: 与route相同，别名
-  const fullUrl = decodeURIComponent(options?.url || '');
+  const handoffId = String(options?.handoff || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  const handoffStorageKey = handoffId ? `qkeer:webview-handoff:${handoffId}` : '';
+  let handedOffUrl = '';
+  if (handoffStorageKey) {
+    try {
+      handedOffUrl = String(uni.getStorageSync(handoffStorageKey) || '').trim();
+    } catch {
+      handedOffUrl = '';
+    }
+    uni.removeStorage({ key: handoffStorageKey });
+  }
+  let fullUrl = handedOffUrl || decodeURIComponent(options?.url || '');
   let hashRoute = decodeURIComponent(options?.route || options?.path || '');
 
   // 如果hashRoute不以#开头，添加#
@@ -53,7 +83,40 @@ onLoad((options: any) => {
 
   // 如果传入了完整URL，直接使用
   if (fullUrl) {
+    const isXiaoqingUrl = /^https:\/\/sh\.qkeering\.com\/xiaoqin(?:g)?(?:\/|[?#]|$)/i.test(fullUrl);
+    let hasTicket = /(?:[?&#]|%3F|%23|%26)ticket=/i.test(fullUrl);
+    // Do not depend on a route marker to authenticate Xiaoqing. Some WeChat
+    // environments drop secondary route parameters while retaining the H5 URL.
+    // The destination URL itself is authoritative and is already restricted to
+    // the trusted Xiaoqing host/path.
+    if (isXiaoqingUrl && !hasTicket) {
+      try {
+        const response: any = await requestH5Ticket({ sceneId: XIAOQING_TODAY_SCENE_ID });
+        const ticket = String(response?.ticket || response?.data?.ticket || '').trim();
+        if (!ticket) throw new Error('H5 ticket 为空');
+        fullUrl = buildXiaoqingTicketUrl(fullUrl, ticket);
+        hasTicket = true;
+      } catch (error) {
+        console.error('[WebView] 获取小轻登录票据失败', error);
+        uni.showToast({ title: '登录凭证获取失败，请稍后再试', icon: 'none' });
+        setTimeout(() => uni.navigateBack(), 1200);
+        return;
+      }
+    }
+    if (isXiaoqingUrl && !hasTicket) {
+      console.error('[WebView] 小轻地址缺少登录票据', {
+        source: handedOffUrl ? 'storage-handoff' : 'route-query'
+      });
+      uni.showToast({ title: '登录参数传递失败，请重新进入', icon: 'none' });
+      setTimeout(() => uni.navigateBack(), 1200);
+      return;
+    }
     url.value = fullUrl;
+    console.info('[WebView] 完整地址已接收', {
+      source: handedOffUrl ? 'storage-handoff' : 'route-query',
+      hasTicket,
+      hasSceneId: /[?&]sceneId=xiaoqing_today(?:&|#|$)/.test(fullUrl)
+    });
   } else {
     url.value = `${baseUrl}${params}${hashRoute}?userId=${userId ? encodeURIComponent(userId) : ''}`;
   }

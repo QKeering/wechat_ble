@@ -10,10 +10,19 @@ const BLE_TIMEOUT_RE = /timeout|timed out|wait .*timeout|超时/i;
 const BLE_INTERNAL_RE = /internal error|setBLEMTU.*internal|fail:internal/i;
 const NETWORK_ERROR_RE = /request:fail|net::|err_connection|network|网络请求|网络连接/i;
 const NETWORK_TIMEOUT_RE = /err_connection_timed_out|timeout|time\s*out|超时/i;
+const BLUETOOTH_PRIVACY_RE =
+  /api\s+scope\s+is\s+not\s+declared\s+in\s+the\s+privacy\s+agreement|scope\.bluetooth.*privacy|privacy.*scope\.bluetooth/i;
+
+export const BLUETOOTH_PRIVACY_ERROR_HINT = '请先同意小程序隐私保护指引后使用蓝牙';
 
 export const formatBleErrorMessage = (error: unknown, fallback = '设备暂时无响应，请重试') => {
   const message = pickErrorMessage(error);
   if (!message) return fallback;
+
+  const errorCode = getBleErrorCode(error);
+  if (errorCode === '112' || BLUETOOTH_PRIVACY_RE.test(message)) {
+    return BLUETOOTH_PRIVACY_ERROR_HINT;
+  }
 
   if (DEVICE_STATE_CHANGED_RE.test(message)) {
     return '设备状态已变化，请重新搜索后再连接';
@@ -82,6 +91,12 @@ const pickErrorMessage = (error: unknown): string => {
   } catch {
     return '';
   }
+};
+
+const getBleErrorCode = (error: unknown) => {
+  if (!error || typeof error !== 'object') return '';
+  const record = error as Record<string, any>;
+  return String(record.errno ?? record.errCode ?? record.code ?? record.rawError?.errno ?? record.rawError?.errCode ?? '').trim();
 };
 
 const normalizeMessage = (value: unknown): string => {

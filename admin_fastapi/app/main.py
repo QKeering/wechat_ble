@@ -109,10 +109,15 @@ def create_app() -> FastAPI:
                 return JSONResponse(status_code=200, content=error("未登录或登录已过期", code=401))
         return await call_next(request)
 
+    legacy_ota_dir = settings.upload_path / "ota"
+    legacy_ota_dir.mkdir(parents=True, exist_ok=True)
     Path("uploads/ota").mkdir(parents=True, exist_ok=True)
     Path("uploads/avatar").mkdir(parents=True, exist_ok=True)
     Path("uploads/app").mkdir(parents=True, exist_ok=True)
     Path("uploads/common").mkdir(parents=True, exist_ok=True)
+    # Legacy public OTA path. Keep /admin/files/ota mounted as an alias so
+    # packages uploaded by the interim FastAPI version remain downloadable.
+    app.mount("/profile/ota", StaticFiles(directory=legacy_ota_dir), name="profile-ota-files")
     app.mount("/admin/files/ota", StaticFiles(directory="uploads/ota"), name="ota-files")
     app.mount("/admin/files/avatar", StaticFiles(directory="uploads/avatar"), name="avatar-files")
     app.mount("/app/files", StaticFiles(directory="uploads/app"), name="app-files")
@@ -124,6 +129,12 @@ def create_app() -> FastAPI:
     # migration fallback, otherwise the fallback returns 501 first.
     app.include_router(rw_debug_router)
     app.include_router(h5_auth_router)
+    # Production routes /app/* to FastAPI while /h5/* may be handled by the
+    # static H5 site. Keep the original H5 routes for compatibility and expose
+    # equivalent /app/h5/* aliases before app_router's /app/{path:path}
+    # fallback so the H5 can reliably reach the API through the existing proxy.
+    app.include_router(h5_xiaoqing_router, prefix="/app")
+    app.include_router(h5_xiaoqing_actions_router, prefix="/app")
     app.include_router(app_router)
     app.include_router(h5_xiaoqing_router)
     app.include_router(h5_xiaoqing_actions_router)

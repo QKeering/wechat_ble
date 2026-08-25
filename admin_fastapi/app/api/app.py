@@ -8,10 +8,11 @@ import logging
 import math
 import random
 import re
+import threading
 import traceback
 import urllib.error
 import urllib.request
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import perf_counter
@@ -144,7 +145,7 @@ def write_sms_log(event: str, **data) -> None:
         pass
 
 
-def recalculate_sync_summaries(user_id: int, dates: list[str]) -> None:
+def recalculate_sync_summaries(user_id: int, dates: list[str]) -> list[dict]:
     db = SessionLocal()
     started_at = perf_counter()
     summary_dates = []
@@ -173,6 +174,7 @@ def recalculate_sync_summaries(user_id: int, dates: list[str]) -> None:
             elapsed_ms=round((perf_counter() - started_at) * 1000),
             summary_dates=summary_dates,
         )
+        return summary_dates
     finally:
         db.close()
 
@@ -260,6 +262,15 @@ RAW_SERIES_FIELD_RANGES = {
     "motion_intensity": (0, 4),
 }
 
+RAW_SERIES_ISOLATED_SPIKE_THRESHOLDS = {
+    "heart_rate": 45.0,
+    "hrv": 120.0,
+    "spo2": 6.0,
+    "temperature": 3.0,
+    "systolic": 55.0,
+    "diastolic": 45.0,
+}
+
 SYNC_RECORD_MIN_DATE = date(2020, 1, 1)
 SYNC_RECORD_FUTURE_TOLERANCE = timedelta(minutes=10)
 SYNC_INLINE_SUMMARY_DATE_LIMIT = 3
@@ -271,6 +282,61 @@ def current_app_datetime() -> datetime:
 
 def max_visible_record_time() -> datetime:
     return current_app_datetime() + SYNC_RECORD_FUTURE_TOLERANCE
+
+
+def sanitize_raw_metric_series(rows, field: str) -> list[dict]:
+    """Clean display series without changing persisted health_raw records."""
+    grouped: dict[tuple[object, object], list[dict]] = {}
+    for raw_row in rows or []:
+        row = dict(raw_row._mapping) if hasattr(raw_row, "_mapping") else dict(raw_row)
+        key = (row.get("record_time"), row.get("device_mac"))
+        grouped.setdefault(key, []).append(row)
+
+    deduplicated: list[dict] = []
+    for items in grouped.values():
+        values = sorted(float(item.get("value")) for item in items if item.get("value") is not None)
+        if not values:
+            continue
+        middle = len(values) // 2
+        median = values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+        row = dict(items[-1])
+        row["value"] = median
+        deduplicated.append(row)
+    deduplicated.sort(key=lambda item: item.get("record_time") or datetime.min)
+
+    threshold = RAW_SERIES_ISOLATED_SPIKE_THRESHOLDS.get(field)
+    if threshold is None or len(deduplicated) < 3:
+        return deduplicated
+
+    cleaned: list[dict] = []
+    for index, row in enumerate(deduplicated):
+        if index == 0 or index == len(deduplicated) - 1:
+            cleaned.append(row)
+            continue
+        previous = deduplicated[index - 1]
+        following = deduplicated[index + 1]
+        current_time = row.get("record_time")
+        previous_time = previous.get("record_time")
+        following_time = following.get("record_time")
+        if not all(isinstance(value, datetime) for value in (previous_time, current_time, following_time)):
+            cleaned.append(row)
+            continue
+        nearby = (
+            current_time - previous_time <= timedelta(hours=3)
+            and following_time - current_time <= timedelta(hours=3)
+        )
+        previous_value = float(previous.get("value"))
+        current_value = float(row.get("value"))
+        following_value = float(following.get("value"))
+        isolated_spike = (
+            nearby
+            and abs(previous_value - following_value) <= threshold / 2
+            and abs(current_value - previous_value) > threshold
+            and abs(current_value - following_value) > threshold
+        )
+        if not isolated_spike:
+            cleaned.append(row)
+    return cleaned
 
 
 def normalize_sync_record_time_for_storage(record_time: datetime) -> datetime | None:
@@ -297,7 +363,7 @@ def raw_series(db: Session, user_id: int, date_value: str | None, field: str) ->
         text(f"select record_time, device_mac, {field} as value from health_raw where {' and '.join(clauses)} order by record_time"),
         params,
     ).all()
-    return [camelize_dict(dict(row._mapping)) for row in rows]
+    return [camelize_dict(row) for row in sanitize_raw_metric_series(rows, field)]
 
 
 def raw_series_between(
@@ -331,7 +397,7 @@ def raw_series_between(
             "max_record_time": max_visible_record_time(),
         },
     ).all()
-    return [camelize_dict(dict(row._mapping)) for row in rows]
+    return [camelize_dict(row) for row in sanitize_raw_metric_series(rows, field)]
 
 
 def date_from_request(request: Request) -> str | None:
@@ -541,18 +607,10 @@ def sleep_minutes_from_raw(db: Session, user_id: int, date_value: str | None) ->
 def should_prefer_raw_sleep_values(record_values: dict[str, int], raw_values: dict[str, int]) -> bool:
     record_total = sleep_stage_total(record_values)
     raw_total = sleep_stage_total(raw_values)
-    if raw_total <= 0:
-        return False
-    if record_total <= 0:
-        return True
-    sample_minutes = int(getattr(health, "L19_SLEEP_DEFAULT_SAMPLE_MINUTES", 5) or 5)
-    # health_raw.sleep_state is a compensation source. Do not switch to raw for
-    # small differences, otherwise dirty/pre-sleep state points can make detail
-    # pages diverge from sleep_record based summaries. Only use raw when the
-    # canonical sleep_record is clearly incomplete (typical legacy/L19 symptom:
-    # data_sync receives many sleep_state rows but sleep_record writes 0/few rows).
-    incomplete_threshold = max(30, int(raw_total * 0.6))
-    return (record_total + sample_minutes) < incomplete_threshold
+    # Keep overview/detail and daily-summary source selection identical.  In
+    # particular, a non-zero but truncated client-built segment set must not
+    # suppress a materially more complete raw L19 sleep session.
+    return health.should_prefer_raw_sleep_total(record_total, raw_total)
 
 
 def resolved_sleep_values(db: Session, user_id: int, date_value: str | None, records=None) -> tuple[dict[str, int], bool]:
@@ -567,6 +625,67 @@ def resolved_sleep_values(db: Session, user_id: int, date_value: str | None, rec
 def effective_sleep_values(db: Session, user_id: int, date_value: str | None, records=None) -> dict[str, int]:
     values, _ = resolved_sleep_values(db, user_id, date_value, records)
     return values
+
+
+def sleep_awake_segment_count(intervals: list[dict]) -> int:
+    """Count contiguous awake periods from the selected sleep source."""
+    awake_intervals = sorted(
+        (
+            item
+            for item in intervals or []
+            if str(item.get("stage_key") or "") == "AWAKE"
+            and isinstance(item.get("start"), datetime)
+            and isinstance(item.get("end"), datetime)
+            and item.get("end") > item.get("start")
+        ),
+        key=lambda item: item["start"],
+    )
+    count = 0
+    merged_end: datetime | None = None
+    for item in awake_intervals:
+        start_time = item["start"]
+        end_time = item["end"]
+        if merged_end is None or start_time > merged_end + timedelta(minutes=1):
+            count += 1
+            merged_end = end_time
+        elif end_time > merged_end:
+            merged_end = end_time
+    return count
+
+
+def resolved_sleep_awake_count(
+    db: Session,
+    user_id: int,
+    date_value: str | None,
+    records,
+    prefer_raw_sleep: bool,
+) -> int:
+    if prefer_raw_sleep:
+        intervals = raw_sleep_state_intervals_from_rows(raw_sleep_state_rows(db, user_id, date_value))
+    else:
+        intervals = sleep_record_session_intervals(records)
+    return sleep_awake_segment_count(intervals)
+
+
+def user_goal_targets(db: Session, user_id: int) -> dict[str, int]:
+    row = db.execute(
+        text("select step, calorie, motion_time from user_goal where user_id=:user_id limit 1"),
+        {"user_id": user_id},
+    ).first()
+    data = dict(row._mapping) if row else {}
+
+    def positive_int(key: str, fallback: int) -> int:
+        try:
+            value = int(data.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        return value if value > 0 else fallback
+
+    return {
+        "targetStep": positive_int("step", 8000),
+        "targetCalorie": positive_int("calorie", 300),
+        "targetMotionTime": positive_int("motion_time", 30),
+    }
 
 
 def raw_sleep_state_rows(db: Session, user_id: int, date_value: str | None) -> list[dict]:
@@ -1013,6 +1132,86 @@ def stress_counts(rows) -> dict[str, int]:
     return values
 
 
+def pressure_proxy_value_from_bpm(bpm_value, previous_bpm=None) -> tuple[int, int] | None:
+    bpm = valid_range(bpm_value, 40, 180)
+    if bpm is None:
+        return None
+    delta = abs(float(bpm) - float(previous_bpm)) if previous_bpm is not None else 0.0
+    # Display-only proxy: higher sustained heart rate and larger adjacent changes
+    # lower the HRV proxy and therefore raise the pressure value.
+    proxy_hrv = int(round(72 - max(0.0, float(bpm) - 60.0) * 0.9 - min(delta, 30.0) * 0.8))
+    proxy_hrv = max(18, min(90, proxy_hrv))
+    proxy_stress = health.estimate_stress_from_hrv(proxy_hrv)
+    return proxy_hrv, max(1, int(proxy_stress or 1))
+
+
+def pressure_proxy_records(
+    db: Session,
+    user_id: int,
+    date_value: str | None,
+    *,
+    days: int = 1,
+) -> list[dict]:
+    try:
+        end_date = datetime.strptime((date_value or str(current_app_datetime().date()))[:10], "%Y-%m-%d").date()
+    except ValueError:
+        end_date = current_app_datetime().date()
+    start_date = end_date - timedelta(days=max(days - 1, 0))
+    rows = db.execute(
+        text(
+            """
+            select record_time, heart_rate
+            from health_raw
+            where user_id=:user_id
+              and date(record_time) between :start_date and :end_date
+              and heart_rate between 40 and 180
+              and record_time <= :max_record_time
+            order by record_time
+            """
+        ),
+        {
+            "user_id": user_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "max_record_time": max_visible_record_time(),
+        },
+    ).mappings().all()
+
+    result: list[dict] = []
+    previous_bpm = None
+    for raw_row in rows:
+        row = dict(raw_row)
+        proxy = pressure_proxy_value_from_bpm(row.get("heart_rate"), previous_bpm)
+        if proxy is None:
+            continue
+        proxy_hrv, proxy_stress = proxy
+        result.append({
+            "record_time": row.get("record_time"),
+            "stress": proxy_stress,
+            "hrv": proxy_hrv,
+            "pressure_proxy": True,
+        })
+        previous_bpm = row.get("heart_rate")
+
+    if result or days != 1:
+        return result
+
+    # Some historical uploads only produced a daily average. Keep the inner page
+    # populated with one current-day point instead of falling back to zero.
+    summary = daily_summary(db, user_id, str(end_date)) or {}
+    summary_bpm = summary.get("heartRateAvg") or summary.get("heart_rate_avg") or summary.get("heartRate")
+    proxy = pressure_proxy_value_from_bpm(summary_bpm)
+    if proxy is None:
+        return []
+    proxy_hrv, proxy_stress = proxy
+    return [{
+        "record_time": datetime.combine(end_date, min(current_app_datetime().time(), time(23, 59))),
+        "stress": proxy_stress,
+        "hrv": proxy_hrv,
+        "pressure_proxy": True,
+    }]
+
+
 def format_raw_point_value(field: str, value) -> str:
     if value in (None, ""):
         return "0"
@@ -1094,6 +1293,307 @@ def rounded_metric(value, digits: int = 0):
     return round(number, digits)
 
 
+HRV_PROXY_ALGORITHM_VERSION = "bpm_proxy_display_v1"
+HRV_PROXY_TIPS = "基于心率趋势估算，仅供参考"
+HRV_PROXY_WINDOW_SECONDS = 5 * 60
+HRV_PROXY_MIN_SAMPLES = 10
+HRV_PROXY_MAX_AVG_INTERVAL_SECONDS = 60
+HRV_PROXY_MAX_GAP_SECONDS = 2 * 60
+HRV_PROXY_SPARSE_MIN_SAMPLES = 3
+HRV_PROXY_SPARSE_TIPS = "基于离散心率趋势估算，仅供参考"
+
+
+def conservative_hrv_proxy_from_bpm(bpm_value: float) -> int:
+    """Map a sparse BPM snapshot to a conservative display-only HRV trend.
+
+    Sparse, minutes-apart BPM points cannot be treated as beat-to-beat RR
+    intervals.  Keep the fallback inside a deliberately narrow, non-alarming
+    range and reserve larger HRV values for device/RR-derived measurements.
+    """
+    return max(18, min(90, int(round(72 - max(0.0, float(bpm_value) - 65.0) * 1.2))))
+
+
+def hrv_real_display_meta() -> dict:
+    return {
+        "displayMode": "real",
+        "hrvSource": "device_or_rr",
+        "proxyMs": None,
+        "proxyQuality": 100,
+        "statusText": "",
+        "tips": "",
+        "emptyReason": "",
+        "algorithmVersion": "",
+    }
+
+
+def hrv_proxy_empty_meta(reason: str, valid_bpm_count: int = 0, tips: str | None = None) -> dict:
+    default_tips = {
+        "no_bpm_data": "暂无可用于估算的数据",
+        "insufficient_bpm_samples": "数据不足，暂无法估算",
+        "sample_interval_too_large": "心率数据间隔较大，暂无法估算",
+        "data_gap_too_large": "心率数据不连续，暂无法估算",
+        "active_window": "运动期间暂不估算 HRV 趋势",
+    }
+    return {
+        "displayMode": "empty",
+        "hrvSource": "none",
+        "proxyMs": None,
+        "proxyQuality": 0,
+        "statusText": "暂无数据",
+        "tips": tips or default_tips.get(reason, "数据不足，暂无法估算"),
+        "emptyReason": reason,
+        "algorithmVersion": HRV_PROXY_ALGORITHM_VERSION,
+        "validBpmCount": valid_bpm_count,
+    }
+
+
+def estimate_hrv_proxy_display(rows: list[dict], context: str = "day") -> dict:
+    """Build a display-only HRV trend proxy from densely sampled BPM.
+
+    This deliberately does not return chart points and must never be persisted as
+    health_raw.hrv. Converting sparse BPM snapshots to approximate IBI is only a
+    qualitative fallback, not an RMSSD measurement.
+    """
+    points: list[tuple[datetime, float]] = []
+    low_activity_count = 0
+    valid_bpm_count = 0
+    for raw_row in rows:
+        row = row_mapping(raw_row)
+        record_time = coerce_datetime(row.get("record_time"))
+        bpm = valid_range(row.get("heart_rate"), 40, 180)
+        if record_time is None or bpm is None:
+            continue
+        valid_bpm_count += 1
+        if context == "sleep":
+            eligible = True
+        else:
+            raw_motion = row.get("motion_intensity")
+            motion = valid_range(raw_motion, 0, 4) if raw_motion not in (None, "") else None
+            sleep_state = row.get("sleep_state")
+            sleeping = sleep_state not in (None, "") and sleep_type_value(sleep_state) in {2, 3, 4, 5}
+            eligible = sleeping or (motion is not None and motion <= 1)
+        if not eligible:
+            continue
+        low_activity_count += 1
+        points.append((record_time, float(bpm)))
+
+    points.sort(key=lambda item: item[0])
+    if valid_bpm_count == 0:
+        return hrv_proxy_empty_meta("no_bpm_data")
+    if low_activity_count == 0:
+        return hrv_proxy_empty_meta("active_window", valid_bpm_count)
+    if len(points) < HRV_PROXY_MIN_SAMPLES:
+        return hrv_proxy_empty_meta("insufficient_bpm_samples", len(points))
+
+    candidates: list[tuple[int, int]] = []
+    saw_dense_sample_count = False
+    saw_acceptable_average_interval = False
+    for start_index in range(len(points)):
+        window: list[tuple[datetime, float]] = []
+        window_start = points[start_index][0]
+        for point in points[start_index:]:
+            if (point[0] - window_start).total_seconds() > HRV_PROXY_WINDOW_SECONDS:
+                break
+            window.append(point)
+        if len(window) < HRV_PROXY_MIN_SAMPLES:
+            continue
+        saw_dense_sample_count = True
+        intervals = [
+            (window[index][0] - window[index - 1][0]).total_seconds()
+            for index in range(1, len(window))
+        ]
+        avg_interval = sum(intervals) / len(intervals)
+        if avg_interval > HRV_PROXY_MAX_AVG_INTERVAL_SECONDS:
+            continue
+        saw_acceptable_average_interval = True
+        if max(intervals) > HRV_PROXY_MAX_GAP_SECONDS:
+            continue
+
+        approximate_ibi = [60000.0 / bpm for _, bpm in window]
+        squared_diffs = [
+            (approximate_ibi[index] - approximate_ibi[index - 1]) ** 2
+            for index in range(1, len(approximate_ibi))
+        ]
+        if not squared_diffs:
+            continue
+        proxy_ms = int(round(math.sqrt(sum(squared_diffs) / len(squared_diffs))))
+        proxy_ms = max(18, min(90, proxy_ms))
+        interval_score = max(0, min(20, round((HRV_PROXY_MAX_AVG_INTERVAL_SECONDS - avg_interval) / 3)))
+        sample_score = min(20, len(window))
+        context_score = 10 if context == "sleep" else 5
+        quality = max(50, min(100, 45 + sample_score + interval_score + context_score))
+        candidates.append((proxy_ms, quality))
+
+    if not candidates:
+        if not saw_dense_sample_count:
+            reason = "insufficient_bpm_samples"
+        elif not saw_acceptable_average_interval:
+            reason = "sample_interval_too_large"
+        else:
+            reason = "data_gap_too_large"
+        return hrv_proxy_empty_meta(reason, len(points))
+
+    ordered_proxy_values = sorted(item[0] for item in candidates)
+    proxy_ms = ordered_proxy_values[len(ordered_proxy_values) // 2]
+    quality = round(sum(item[1] for item in candidates) / len(candidates))
+    if proxy_ms < 20:
+        status_text = "建议观察"
+    elif proxy_ms <= 100:
+        status_text = "平稳"
+    else:
+        status_text = "波动较大"
+    return {
+        "displayMode": "proxy",
+        "hrvSource": "bpm_proxy",
+        "proxyMs": proxy_ms,
+        "proxyQuality": quality,
+        "statusText": status_text,
+        "tips": HRV_PROXY_TIPS,
+        "emptyReason": "",
+        "algorithmVersion": HRV_PROXY_ALGORITHM_VERSION,
+        "validBpmCount": len(points),
+        "proxyWindowCount": len(candidates),
+        "newValue": str(proxy_ms),
+        "avgValue": str(proxy_ms),
+        "minValue": str(proxy_ms),
+        "maxValue": str(proxy_ms),
+        "avgValueRange": f"{proxy_ms}-{proxy_ms}",
+    }
+
+
+def estimate_sparse_hrv_proxy_display(rows: list[dict]) -> dict:
+    """Build a display-only HRV trend from sparse historical BPM samples."""
+    samples: list[tuple[datetime, float, float | None, object]] = []
+    for raw_row in rows:
+        row = row_mapping(raw_row)
+        record_time = coerce_datetime(row.get("record_time"))
+        bpm = valid_range(row.get("heart_rate"), 40, 180)
+        if record_time is None or bpm is None:
+            continue
+        raw_motion = row.get("motion_intensity")
+        motion = valid_range(raw_motion, 0, 4) if raw_motion not in (None, "") else None
+        samples.append((record_time, float(bpm), motion, row.get("sleep_state")))
+
+    if len(samples) < HRV_PROXY_SPARSE_MIN_SAMPLES:
+        return hrv_proxy_empty_meta("insufficient_bpm_samples", len(samples))
+
+    # Prefer sleeping/resting samples. Older L19 history may not contain motion
+    # intensity, so missing activity metadata remains eligible at lower quality.
+    resting = [
+        item
+        for item in samples
+        if item[2] is None
+        or item[2] <= 1
+        or (item[3] not in (None, "") and sleep_type_value(item[3]) in {2, 3, 4, 5})
+    ]
+    selected = resting if len(resting) >= HRV_PROXY_SPARSE_MIN_SAMPLES else samples
+    selected.sort(key=lambda item: item[0])
+    bpm_values = [item[1] for item in selected]
+    average_bpm = sum(bpm_values) / len(bpm_values)
+    ordered = sorted(bpm_values)
+    median_bpm = ordered[len(ordered) // 2]
+    spread = ordered[-1] - ordered[0]
+
+    # These samples are commonly 20-120 minutes apart.  Their IBI difference
+    # is not RMSSD and previously produced frightening 150-300 ms spikes.
+    # Convert each BPM snapshot independently, then use the median trend value.
+    proxy_values = [conservative_hrv_proxy_from_bpm(bpm) for bpm in bpm_values]
+    ordered_proxy_values = sorted(proxy_values)
+    proxy_ms = ordered_proxy_values[len(ordered_proxy_values) // 2]
+
+    if average_bpm >= 78 or spread >= 25:
+        status_text = "略有波动"
+    else:
+        status_text = "平稳"
+
+    chart_data = [
+        {"time": sample[0].strftime("%H:%M"), "value": proxy_value}
+        for sample, proxy_value in zip(selected, proxy_values)
+    ]
+    chart_min = min(proxy_values)
+    chart_max = max(proxy_values)
+
+    return {
+        "displayMode": "proxy",
+        "hrvSource": "sparse_bpm_proxy",
+        "proxyMs": proxy_ms,
+        "proxyQuality": min(55, 30 + min(25, len(selected))),
+        "statusText": status_text,
+        "tips": HRV_PROXY_SPARSE_TIPS,
+        "emptyReason": "",
+        "algorithmVersion": f"{HRV_PROXY_ALGORITHM_VERSION}_sparse_v2",
+        "validBpmCount": len(selected),
+        "proxyWindowCount": 1,
+        "medianBpm": int(round(median_bpm)),
+        "sparseEstimate": True,
+        "chartData": chart_data,
+        "newValue": str(proxy_values[-1]),
+        "avgValue": str(proxy_ms),
+        "minValue": str(chart_min),
+        "maxValue": str(chart_max),
+        "avgValueRange": f"{chart_min}-{chart_max}",
+    }
+
+
+def build_hrv_proxy_display(
+    db: Session,
+    user_id: int,
+    date_value: str | None,
+    *,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    context: str = "day",
+    allow_sparse_pressure: bool = False,
+) -> dict:
+    if start_time and end_time:
+        date_clause = "record_time between :start_time and :end_time"
+        params = {
+            "user_id": user_id,
+            "start_time": start_time,
+            "end_time": end_time,
+            "max_record_time": max_visible_record_time(),
+        }
+    elif date_value:
+        date_clause = "date(record_time)=:date_value"
+        params = {
+            "user_id": user_id,
+            "date_value": date_value,
+            "max_record_time": max_visible_record_time(),
+        }
+    else:
+        return hrv_proxy_empty_meta("no_bpm_data")
+    rows = db.execute(
+        text(
+            f"""
+            select record_time, heart_rate, motion_intensity, sleep_state
+            from health_raw
+            where user_id=:user_id and {date_clause}
+              and heart_rate is not null
+              and record_time <= :max_record_time
+            order by record_time
+            """
+        ),
+        params,
+    ).mappings().all()
+    normalized_rows = [dict(row) for row in rows]
+    result = estimate_hrv_proxy_display(normalized_rows, context=context)
+    if allow_sparse_pressure and result.get("displayMode") != "proxy":
+        result = estimate_sparse_hrv_proxy_display(normalized_rows)
+    log_event = "hrv_fallback_calculated" if result.get("displayMode") == "proxy" else "hrv_fallback_rejected"
+    write_algorithm_log(
+        log_event,
+        user_id=user_id,
+        date_value=date_value,
+        context=context,
+        source=result.get("hrvSource"),
+        quality=result.get("proxyQuality"),
+        valid_bpm_count=result.get("validBpmCount"),
+        empty_reason=result.get("emptyReason"),
+        algorithm_version=result.get("algorithmVersion") or HRV_PROXY_ALGORITHM_VERSION,
+    )
+    return result
+
+
 def build_vital_sign_payload(db: Session, user_id: int, date_value: str | None) -> dict:
     summary = daily_summary(db, user_id, date_value) or {}
     heart_stats = raw_metric_stats(db, user_id, date_value, "heart_rate")
@@ -1122,6 +1622,12 @@ def build_vital_sign_payload(db: Session, user_id: int, date_value: str | None) 
         else health.calculate_temperature_score(temperature_stats["values"]),
     ]
     vital_scores = [item for item in vital_scores if item is not None]
+    hrv_display = hrv_real_display_meta() if hrv_avg not in (None, "", 0, "0") else build_hrv_proxy_display(
+        db,
+        user_id,
+        date_value,
+        allow_sparse_pressure=True,
+    )
     return {
         "overallScore": round(sum(vital_scores) / len(vital_scores)) if vital_scores else summary.get("healthScore"),
         "heartRate": rounded_metric(heart_rate_avg) or 0,
@@ -1133,6 +1639,7 @@ def build_vital_sign_payload(db: Session, user_id: int, date_value: str | None) 
         "hrvMin": rounded_metric(summary.get("hrvMin") if summary.get("hrvMin") is not None else hrv_stats["min"]),
         "hrvMax": rounded_metric(summary.get("hrvMax") if summary.get("hrvMax") is not None else hrv_stats["max"]),
         "hrvChart": raw_points(db, user_id, date_value, "hrv"),
+        "hrvDisplay": hrv_display,
         "spo2Avg": spo2_avg,
         "temperatureAvg": temperature_avg,
         "stressAvg": stress_avg,
@@ -1185,7 +1692,7 @@ def data_detail_response(
             return str(int(round(number)))
         return f"{number:.1f}"
 
-    return localize_payload_levels({
+    payload = {
         "healthScore": summary.get(score_field) if score_field else summary.get("healthScore"),
         "latestDesc": latest_desc or summary.get("healthLevel"),
         "minValue": format_detail_metric(min_value),
@@ -1202,7 +1709,21 @@ def data_detail_response(
         "startDate": date_value,
         "endDate": date_value,
         "chartData": raw_points(db, user_id, date_value, field),
-    })
+    }
+    if field == "hrv":
+        hrv_display = (
+            hrv_real_display_meta()
+            if avg_value not in (None, "", 0, "0")
+            else build_hrv_proxy_display(
+                db,
+                user_id,
+                date_value,
+                context="day",
+                allow_sparse_pressure=True,
+            )
+        )
+        payload.update(hrv_display)
+    return localize_payload_levels(payload)
 
 
 def sleep_metric_detail_response(
@@ -1252,7 +1773,7 @@ def sleep_metric_detail_response(
         max_value = avg_value
         new_value = avg_value
 
-    return localize_payload_levels({
+    payload = {
         "healthScore": summary.get(score_field) if score_field else summary.get("healthScore"),
         "latestDesc": latest_desc or summary.get("healthLevel"),
         "minValue": format_detail_metric(min_value),
@@ -1270,7 +1791,23 @@ def sleep_metric_detail_response(
         "endDate": end_time.isoformat(sep=" ") if end_time else date_value,
         "metricSource": metric_source,
         "chartData": chart_data,
-    })
+    }
+    if field == "hrv":
+        hrv_display = (
+            hrv_real_display_meta()
+            if avg_value not in (None, "", 0, "0")
+            else build_hrv_proxy_display(
+                db,
+                user_id,
+                date_value,
+                start_time=start_time,
+                end_time=end_time,
+                context="sleep",
+                allow_sparse_pressure=True,
+            )
+        )
+        payload.update(hrv_display)
+    return localize_payload_levels(payload)
 
 
 def motion_intensity_counts(db: Session, user_id: int, date_value: str | None) -> dict[str, int]:
@@ -2255,17 +2792,66 @@ def hourly_stress_records(rows: list[dict]) -> list[dict]:
     ]
 
 
+_STRESS_ALGORITHM_CACHE_TTL_SECONDS = 10.0
+_STRESS_ALGORITHM_CACHE: dict[str, tuple[float, dict]] = {}
+_STRESS_ALGORITHM_CACHE_LOCK = threading.Lock()
+_STRESS_ALGORITHM_KEY_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
 def stress_algorithm_response(rows, context: dict) -> dict:
     records = hourly_stress_records([row_mapping(row) for row in rows])
     if not records:
         return {}
-    return localize_payload_levels(call_algorithm(
-        "/physicalHealth/stressRatio",
-        {"records": records},
-        default={},
-        context=context,
-        timeout=3,
-    ))
+    cache_key = hashlib.sha256(
+        json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    with _STRESS_ALGORITHM_CACHE_LOCK:
+        now = perf_counter()
+        cached = _STRESS_ALGORITHM_CACHE.get(cache_key)
+        if cached and now - cached[0] < _STRESS_ALGORITHM_CACHE_TTL_SECONDS:
+            write_algorithm_log(
+                "algorithm_cache_hit",
+                path="/physicalHealth/stressRatio",
+                context=context,
+                cache_age_ms=round((now - cached[0]) * 1000),
+            )
+            return dict(cached[1])
+        key_lock = _STRESS_ALGORITHM_KEY_LOCKS[int(cache_key[:8], 16) % len(_STRESS_ALGORITHM_KEY_LOCKS)]
+
+    # Detail and summary requests are often issued together.  Serialize only
+    # identical payloads so the second caller can reuse the first result while
+    # requests for other users/devices remain independent.
+    with key_lock:
+        with _STRESS_ALGORITHM_CACHE_LOCK:
+            now = perf_counter()
+            cached = _STRESS_ALGORITHM_CACHE.get(cache_key)
+            if cached and now - cached[0] < _STRESS_ALGORITHM_CACHE_TTL_SECONDS:
+                write_algorithm_log(
+                    "algorithm_cache_hit_after_wait",
+                    path="/physicalHealth/stressRatio",
+                    context=context,
+                    cache_age_ms=round((now - cached[0]) * 1000),
+                )
+                return dict(cached[1])
+
+        result = localize_payload_levels(call_algorithm(
+            "/physicalHealth/stressRatio",
+            {"records": records},
+            default={},
+            context=context,
+            timeout=3,
+        ))
+        cached_at = perf_counter()
+        with _STRESS_ALGORITHM_CACHE_LOCK:
+            expired_keys = [
+                key
+                for key, (created_at, _) in _STRESS_ALGORITHM_CACHE.items()
+                if cached_at - created_at >= _STRESS_ALGORITHM_CACHE_TTL_SECONDS
+            ]
+            for key in expired_keys:
+                _STRESS_ALGORITHM_CACHE.pop(key, None)
+            _STRESS_ALGORITHM_CACHE[cache_key] = (cached_at, dict(result))
+        return result
 
 
 STRESS_EMOTION_KEYS = (
@@ -3056,6 +3642,11 @@ async def device_battery_log_report(request: Request, user: dict = Depends(app_u
         if payload.get("real_battery") not in (None, "")
         else payload.get("battery")
     )
+    display_battery = normalize_real_battery_value(
+        payload.get("displayBattery")
+        if payload.get("displayBattery") not in (None, "")
+        else payload.get("display_battery")
+    )
     if not device_mac_norm:
         return error("缺少设备Mac")
     if real_battery is None:
@@ -3068,9 +3659,9 @@ async def device_battery_log_report(request: Request, user: dict = Depends(app_u
         text(
             """
             insert into device_battery_log
-              (user_id, device_mac, device_mac_norm, real_battery, record_time, source)
+              (user_id, device_mac, device_mac_norm, real_battery, display_battery, record_time, source)
             values
-              (:user_id, :device_mac, :device_mac_norm, :real_battery, :record_time, :source)
+              (:user_id, :device_mac, :device_mac_norm, :real_battery, :display_battery, :record_time, :source)
             """
         ),
         {
@@ -3078,12 +3669,71 @@ async def device_battery_log_report(request: Request, user: dict = Depends(app_u
             "device_mac": device_mac,
             "device_mac_norm": device_mac_norm,
             "real_battery": real_battery,
+            "display_battery": display_battery,
             "record_time": record_time,
             "source": source,
         },
     )
     db.commit()
-    return success({"saved": True, "realBattery": real_battery, "recordTime": record_time.isoformat(sep=" ")})
+    return success(
+        {
+            "saved": True,
+            "realBattery": real_battery,
+            "displayBattery": display_battery,
+            "recordTime": record_time.isoformat(sep=" "),
+        }
+    )
+
+
+@router.post("/device/version/report")
+async def device_version_report(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
+    payload = await request.json()
+    user_id = int(user["id"])
+    firmware_version = normalize_device_version_value(
+        payload.get("firmwareVersion") or payload.get("firmware_version") or payload.get("hardwareVersion")
+    )
+    software_version = normalize_device_version_value(
+        payload.get("softwareVersion") or payload.get("software_version") or payload.get("uiVersion")
+    )
+    if not firmware_version and not software_version:
+        return error("缺少有效版本信息")
+
+    ensure_device_version_schema(db)
+    row = select_current_bound_device(db, user_id)
+    if not row:
+        return error("当前用户未绑定设备")
+    current = dict(row._mapping)
+    reported_mac_norm = normalize_device_mac_norm(
+        payload.get("deviceMac") or payload.get("device_mac") or payload.get("mac")
+    )
+    current_mac_norm = normalize_device_mac_norm(current.get("mac"))
+    if reported_mac_norm and current_mac_norm and reported_mac_norm != current_mac_norm:
+        return error("版本信息与当前绑定设备不一致")
+
+    assignments = []
+    params = {"id": current["id"]}
+    current_firmware_version = normalize_device_version_value(current.get("firmware_version"))
+    current_software_version = normalize_device_version_value(current.get("software_version"))
+    if firmware_version and not current_firmware_version:
+        assignments.append("firmware_version=:firmware_version")
+        params["firmware_version"] = firmware_version
+    if software_version and not current_software_version:
+        assignments.append("software_version=:software_version")
+        params["software_version"] = software_version
+    if assignments:
+        db.execute(
+            text(f"update device set {', '.join(assignments)} where id=:id and user_id=:user_id and del_flag=0"),
+            {**params, "user_id": user_id},
+        )
+        db.commit()
+    return success(
+        {
+            "saved": bool(assignments),
+            "mac": current.get("mac"),
+            "firmwareVersion": current_firmware_version or firmware_version,
+            "softwareVersion": current_software_version or software_version,
+        }
+    )
 
 
 @router.get("/device/scanQRCode")
@@ -3138,6 +3788,36 @@ DEVICE_MAC_NORM_SQL = "lower(replace(replace(coalesce(mac,''), ':', ''), '-', ''
 FAMILY_DEVICE_MAC_NORM_SQL = "lower(replace(replace(coalesce(device_mac,''), ':', ''), '-', ''))"
 DEVICE_BIND_LOG_TABLE_AVAILABLE: bool | None = None
 DEVICE_BATTERY_LOG_SCHEMA_READY = False
+DEVICE_VERSION_SCHEMA_READY = False
+
+
+def ensure_device_version_schema(db: Session) -> None:
+    """Keep BLE version metadata on the bound device instead of reading it every session."""
+    global DEVICE_VERSION_SCHEMA_READY
+    if DEVICE_VERSION_SCHEMA_READY:
+        return
+    software_version_column_exists = db.execute(
+        text(
+            """
+            select count(*)
+            from information_schema.columns
+            where table_schema=database()
+              and table_name='device'
+              and column_name='software_version'
+            """
+        )
+    ).scalar()
+    if not software_version_column_exists:
+        db.execute(text("alter table device add column software_version varchar(128) null after firmware_version"))
+    db.commit()
+    DEVICE_VERSION_SCHEMA_READY = True
+
+
+def normalize_device_version_value(value) -> str | None:
+    text_value = str(value or "").strip()
+    if not text_value or text_value in {"-", "--"}:
+        return None
+    return text_value[:128]
 
 
 def is_truthy_payload_value(value) -> bool:
@@ -3159,6 +3839,7 @@ def ensure_device_battery_log_schema(db: Session) -> None:
               device_mac varchar(64) not null,
               device_mac_norm varchar(32) not null,
               real_battery int not null,
+              display_battery int null,
               record_time datetime not null,
               source varchar(64) null,
               create_time datetime not null default current_timestamp,
@@ -3169,6 +3850,19 @@ def ensure_device_battery_log_schema(db: Session) -> None:
             """
         )
     )
+    display_battery_column_exists = db.execute(
+        text(
+            """
+            select count(*)
+            from information_schema.columns
+            where table_schema=database()
+              and table_name='device_battery_log'
+              and column_name='display_battery'
+            """
+        )
+    ).scalar()
+    if not display_battery_column_exists:
+        db.execute(text("alter table device_battery_log add column display_battery int null after real_battery"))
     db.commit()
     DEVICE_BATTERY_LOG_SCHEMA_READY = True
 
@@ -4269,14 +4963,13 @@ def family_motion_overview(memberId: int, request: Request, user: dict = Depends
     data_user_id = int(member["dataUserId"])
     date_value = date_from_request(request)
     summary = daily_summary(db, data_user_id, date_value) or {}
+    targets = user_goal_targets(db, data_user_id)
     return success({
         "step": summary_steps_or_raw(db, data_user_id, date_value, summary),
         "calorie": round(float(summary.get("totalCalorie") or 0)),
         "calorieUnit": CALORIE_UNIT,
         "motionTime": int(summary.get("activeTime") or 0),
-        "targetStep": 8000,
-        "targetCalorie": 300,
-        "targetMotionTime": 30,
+        **targets,
     })
 
 
@@ -4296,7 +4989,7 @@ def family_sleep_overview(memberId: int, request: Request, user: dict = Depends(
     deep = values["DEEP"]
     nap = values["NAP"]
     total_sleep_time = rem + light + deep + nap
-    awake_count = sum(1 for row in records if sleep_type_key(dict(row._mapping).get("type")) == "AWAKE")
+    awake_count = resolved_sleep_awake_count(db, user_id, date_value, records, prefer_raw_sleep)
     return localized_success({
         "sleepDuration": str(total_sleep_time),
         "sleepQuality": str(int(calculate_sleep_efficiency(awake, rem, light, deep, nap))),
@@ -4345,23 +5038,41 @@ def ota_check(currentVersion: str, deviceModel: str | None = None, db: Session =
     params = {"prefix": (currentVersion or "")[:4] + "%"}
     sql = "select * from ota_package where del_flag=0 and version_code like :prefix"
     if deviceModel:
-        sql += " and device_model=:device_model"
-        params["device_model"] = deviceModel
-    sql += " order by create_time desc, update_time desc limit 1"
-    row = db.execute(text(sql), params).first()
-    if not row:
-        return success(None, "already latest")
-    data = get_row(db, "ota_package", row._mapping["id"])
-    if compare_version(data.get("versionCode"), currentVersion) > 0:
-        return success(data, "new version available")
+        # Model keys historically contain inconsistent casing (for example
+        # QKeeRingL19/QkeeRingL19). Treat them as the same model.
+        sql += " and lower(trim(device_model))=lower(trim(:device_model))"
+        params["device_model"] = deviceModel.strip()
+
+    # Do not pick a package by create/update time: imported legacy rows can
+    # have timestamps while newly created rows have NULL timestamps. Select
+    # the greatest actual firmware version instead.
+    rows = db.execute(text(sql), params).all()
+    latest = None
+    for row in rows:
+        data = get_row(db, "ota_package", row._mapping["id"])
+        if not data or compare_version(data.get("versionCode"), currentVersion) <= 0:
+            continue
+        if latest is None or compare_version(data.get("versionCode"), latest.get("versionCode")) > 0:
+            latest = data
+    if latest:
+        return success(latest, "new version available")
     return success(None, "already latest")
 
 
 @router.put("/ota/package/updateCallback")
-def ota_update_callback(packageId: int, mac: str, db: Session = Depends(get_db)):
+def ota_update_callback(packageId: int, mac: str, versionKind: str | None = None, db: Session = Depends(get_db)):
     ota = get_row(db, "ota_package", packageId)
     if ota:
-        db.execute(text("update device set firmware_version=:version where mac=:mac and del_flag=0"), {"version": ota.get("versionCode"), "mac": mac})
+        ensure_device_version_schema(db)
+        db.execute(
+            text(
+                f"""
+                update device set software_version=:version
+                where {DEVICE_MAC_NORM_SQL}=:mac_norm and del_flag=0
+                """
+            ),
+            {"version": ota.get("versionCode"), "mac_norm": normalize_device_mac_norm(mac)},
+        )
         db.commit()
     return success(True)
 
@@ -6227,6 +6938,13 @@ async def data_sync(
     ).strip().lower()
     device_read_done = payload_bool("deviceReadDone", "device_read_done", "uploadStatus.deviceReadDone", "uploadStatus.device_read_done", default=True)
     history_completed = payload_bool("historyCompleted", "history_completed", "uploadStatus.historyCompleted", "uploadStatus.history_completed", default=device_read_done)
+    defer_summary_finalize = payload_bool(
+        "deferSummaryFinalize",
+        "defer_summary_finalize",
+        "uploadStatus.deferSummaryFinalize",
+        "uploadStatus.defer_summary_finalize",
+        default=False,
+    )
     partial_upload = (
         payload_bool("partialUpload", "partial_upload", "uploadStatus.partialUpload", "uploadStatus.partial_upload", default=False)
         or not device_read_done
@@ -6244,6 +6962,7 @@ async def data_sync(
             "raw_frame_count": len(raw_frames),
             "device_read_done": device_read_done,
             "history_completed": history_completed,
+            "defer_summary_finalize": defer_summary_finalize,
             "partial_upload": partial_upload,
             "coverage_status": requested_coverage_status or None,
             "elapsed_ms": round((perf_counter() - started_at) * 1000),
@@ -6472,8 +7191,15 @@ async def data_sync(
         device_update_ms=result.get("deviceUpdateMs"),
     )
     summary_dates = result.get("touchedDates") or []
+    should_schedule_batch_summary = (
+        bool(summary_dates)
+        and not partial_upload
+        and device_read_done
+        and history_completed
+        and not defer_summary_finalize
+    )
     summary_inline = False
-    if summary_dates:
+    if should_schedule_batch_summary:
         background_tasks.add_task(recalculate_sync_summaries_background, target_user_id, summary_dates)
     log_data_sync_phase(
         "data_sync_summary_scheduled",
@@ -6481,12 +7207,21 @@ async def data_sync(
         resolved_device_mac=resolved_device_mac,
         summary_dates=summary_dates,
         summary_inline=summary_inline,
-        summary_scheduled=bool(summary_dates),
+        summary_scheduled=should_schedule_batch_summary,
+        summary_skip_reason=(
+            None
+            if should_schedule_batch_summary
+            else (
+                "explicit-summary-finalize"
+                if defer_summary_finalize
+                else "partial-upload-await-final-batch"
+            )
+        ),
     )
     result["inputCount"] = len(records)
-    result["summaryScheduled"] = bool(summary_dates) and not summary_inline
+    result["summaryScheduled"] = should_schedule_batch_summary and not summary_inline
     result["summaryInline"] = summary_inline
-    result["summarySkipped"] = not summary_inline
+    result["summarySkipped"] = not should_schedule_batch_summary
     success_count = int(result.get("count") or 0)
     fail_count = int(result.get("failCount") or 0)
     accepted_count = max(0, len(records) - fail_count)
@@ -6690,6 +7425,59 @@ async def data_sync(
         result,
         f"同步成功 {result['count']} 条，健康 {result['healthCount']} 条，睡眠 {result['sleepCount']} 条，失败 {result['failCount']} 条",
     )
+
+
+@router.post("/data/sync/summary/finalize")
+async def data_sync_summary_finalize(
+    request: Request,
+    user: dict = Depends(app_user),
+    db: Session = Depends(get_db),
+):
+    started_at = perf_counter()
+    operator_user_id = int(user["id"])
+    payload = await request.json()
+    requested_dates = payload.get("dates") or payload.get("summaryDates") or payload.get("summary_dates") or []
+    if isinstance(requested_dates, str):
+        requested_dates = [requested_dates]
+    if not isinstance(requested_dates, list):
+        requested_dates = []
+    summary_dates: list[str] = []
+    for value in requested_dates[:14]:
+        try:
+            parsed_date = date.fromisoformat(str(value).strip()[:10])
+        except (TypeError, ValueError):
+            continue
+        normalized_date = parsed_date.isoformat()
+        if normalized_date not in summary_dates:
+            summary_dates.append(normalized_date)
+    if not summary_dates:
+        return error("缺少有效的汇总日期")
+
+    device_mac = payload.get("deviceMac") or payload.get("device_mac")
+    binding = resolve_active_upload_binding(db, operator_user_id, device_mac) if device_mac else {"ok": True, "dataUserId": operator_user_id}
+    if not binding.get("ok"):
+        return error(binding.get("message") or "上传设备绑定无效")
+    target_user_id = int(binding.get("dataUserId") or operator_user_id)
+    summary_results = await asyncio.to_thread(recalculate_sync_summaries, target_user_id, summary_dates)
+    failed_dates = [item for item in summary_results if item.get("error")]
+    summary_ready = not failed_dates and len(summary_results) == len(summary_dates)
+    result = {
+        "uploadSessionId": payload.get("uploadSessionId") or payload.get("upload_session_id"),
+        "summaryReady": summary_ready,
+        "summaryDates": summary_dates,
+        "summaryResults": summary_results,
+        "elapsedMs": round((perf_counter() - started_at) * 1000),
+    }
+    write_algorithm_log(
+        "data_sync_summary_finalize",
+        operator_user_id=operator_user_id,
+        data_user_id=target_user_id,
+        device_mac=device_mac,
+        summary_ready=summary_ready,
+        summary_dates=summary_dates,
+        elapsed_ms=result["elapsedMs"],
+    )
+    return success(result, "汇总完成" if summary_ready else "部分汇总失败")
 
 
 @router.get("/data/vitalSign")
@@ -7222,47 +8010,97 @@ def stress_detail(request: Request, user: dict = Depends(app_user), db: Session 
     user_id = int(user["id"])
     date_value = date_from_request(request)
     rows = stress_records(db, user_id, date_value, include_hrv_only=True)
-    if not rows:
-        return localized_success({
-            "stressValue": 0,
-            "stressLevel": "",
-            "stressChart": [],
-            "stressRange": "0-0",
-            "avgStressValue": 0,
-            "latestHrvValue": 0,
-            "dailyAvgHrvValue": 0,
-            "stressEmotion": "",
-            "emotion": "",
-            "algorithm": {},
-        })
     values = [value for row in rows for value in [stress_value_from_row(row)] if value is not None]
     hrv_values = [int(row_mapping(row).get("hrv") or 0) for row in rows if row_mapping(row).get("hrv")]
-    avg_value = int(round(sum(values) / len(values))) if values else 0
-    algorithm = stress_algorithm_response(rows, {"source": "stressDetail", "userId": user_id, "date": date_value})
-    stress_emotion = stress_emotion_from_algorithm(algorithm)
+    hrv_display = (
+        hrv_real_display_meta()
+        if hrv_values
+        else build_hrv_proxy_display(
+            db,
+            user_id,
+            date_value,
+            context="day",
+            allow_sparse_pressure=True,
+        )
+    )
+    if not hrv_values and hrv_display.get("displayMode") != "proxy":
+        summary = daily_summary(db, user_id, date_value) or {}
+        summary_bpm = valid_range(
+            summary.get("heartRateAvg") or summary.get("heart_rate_avg") or summary.get("heartRate"),
+            40,
+            180,
+        )
+        if summary_bpm is not None:
+            if summary_bpm >= 90:
+                status_text = "波动较大"
+            elif summary_bpm >= 78:
+                status_text = "略有波动"
+            else:
+                status_text = "平稳"
+            hrv_display = {
+                "displayMode": "proxy",
+                "hrvSource": "daily_heart_rate_pressure_proxy",
+                "proxyMs": None,
+                "proxyQuality": 20,
+                "statusText": status_text,
+                "tips": "基于平均心率趋势估算，仅供参考",
+                "emptyReason": "",
+                "algorithmVersion": f"{HRV_PROXY_ALGORITHM_VERSION}_average_pressure_v1",
+                "validBpmCount": 1,
+                "proxyWindowCount": 0,
+                "averageBpm": int(round(summary_bpm)),
+                "sparseEstimate": True,
+            }
+    proxy_rows = pressure_proxy_records(db, user_id, date_value) if not values else []
+    display_rows = rows if values else proxy_rows
+    display_values = values or [
+        value for row in proxy_rows for value in [stress_value_from_row(row)] if value is not None
+    ]
+    display_hrv_values = hrv_values or [
+        int(row_mapping(row).get("hrv") or 0) for row in proxy_rows if row_mapping(row).get("hrv")
+    ]
+    proxy_pressure_display = bool(proxy_rows) and not values
+    avg_value = int(round(sum(display_values) / len(display_values))) if display_values else 0
+    algorithm = (
+        stress_algorithm_response(rows, {"source": "stressDetail", "userId": user_id, "date": date_value})
+        if values
+        else {}
+    )
+    stress_emotion = stress_emotion_from_algorithm(algorithm) if values else ""
     return localized_success({
         "stressValue": avg_value,
-        "stressLevel": stress_level(avg_value),
+        "stressLevel": stress_level(avg_value) if display_values else "",
         "stressEmotion": stress_emotion,
         "emotion": stress_emotion,
-        "stressChart": stress_chart(rows),
-        "stressRange": f"{min(values)}-{max(values)}" if values else "0-0",
+        "stressChart": stress_chart(display_rows),
+        "stressRange": f"{min(display_values)}-{max(display_values)}" if display_values else "0-0",
         "avgStressValue": avg_value,
-        "latestHrvValue": hrv_values[-1] if hrv_values else 0,
-        "dailyAvgHrvValue": int(sum(hrv_values) / len(hrv_values)) if hrv_values else 0,
+        "latestHrvValue": display_hrv_values[-1] if display_hrv_values else 0,
+        "dailyAvgHrvValue": int(sum(display_hrv_values) / len(display_hrv_values)) if display_hrv_values else 0,
         "stressRatio": score_from_result(algorithm, "stressRatio", "avgStressLevel"),
         "highStressRatio": score_from_result(algorithm, "highStressRatio"),
         "highStressDays": score_from_result(algorithm, "highStressDays"),
         "algorithm": algorithm,
+        "hrvDisplay": hrv_display,
+        "pressureDisplayMode": "proxy" if proxy_pressure_display else ("real" if values else "empty"),
+        "pressureStatusText": hrv_display.get("statusText", "") if proxy_pressure_display else "",
+        "pressureTips": hrv_display.get("tips", "") if proxy_pressure_display else "",
+        "pressureSource": hrv_display.get("hrvSource", "none") if proxy_pressure_display else ("stress" if values else "none"),
+        "proxyQuality": hrv_display.get("proxyQuality", 0) if proxy_pressure_display else 0,
     })
 
 
 @router.get("/data/stress/stressProportion")
 def stress_proportion(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
-    rows = stress_records(db, int(user["id"]), date_from_request(request), include_hrv_only=True)
-    if not rows:
+    user_id = int(user["id"])
+    date_value = date_from_request(request)
+    rows = stress_records(db, user_id, date_value, include_hrv_only=True)
+    values = [value for row in rows for value in [stress_value_from_row(row)] if value is not None]
+    proxy_rows = pressure_proxy_records(db, user_id, date_value) if not values else []
+    display_rows = rows if values else proxy_rows
+    if not display_rows:
         return localized_success({"stressDuration": [], "stressProportionChart": []})
-    counts = stress_counts(rows)
+    counts = stress_counts(display_rows)
     total = sum(counts.values())
     labels = ["放松", "正常", "中等", "偏高"]
     return localized_success({
@@ -7271,6 +8109,7 @@ def stress_proportion(request: Request, user: dict = Depends(app_user), db: Sess
             {"time": label, "value": str(round((counts[label] / total) * 100) if total else 0)}
             for label in labels
         ],
+        "pressureDisplayMode": "proxy" if proxy_rows else "real",
     })
 
 
@@ -7282,14 +8121,31 @@ def stress_summary(request: Request, user: dict = Depends(app_user), db: Session
     week_rows = stress_records(db, user_id, date_value, days=7, include_hrv_only=True)
     today_values = [value for row in today_rows for value in [stress_value_from_row(row)] if value is not None]
     week_values = [value for row in week_rows for value in [stress_value_from_row(row)] if value is not None]
-    counts = stress_counts(today_rows)
-    algorithm = stress_algorithm_response(today_rows, {"source": "stressSummary", "userId": user_id, "date": date_value})
-    stress_emotion = stress_emotion_from_algorithm(algorithm)
+    today_proxy_rows = pressure_proxy_records(db, user_id, date_value) if not today_values else []
+    week_proxy_rows = pressure_proxy_records(db, user_id, date_value, days=7) if not week_values else []
+    today_display_rows = today_rows if today_values else today_proxy_rows
+    if week_values:
+        week_display_rows = list(week_rows) + list(today_proxy_rows)
+    else:
+        week_display_rows = week_proxy_rows
+    today_display_values = today_values or [
+        value for row in today_proxy_rows for value in [stress_value_from_row(row)] if value is not None
+    ]
+    week_display_values = [
+        value for row in week_display_rows for value in [stress_value_from_row(row)] if value is not None
+    ]
+    counts = stress_counts(today_display_rows)
+    algorithm = (
+        stress_algorithm_response(today_rows, {"source": "stressSummary", "userId": user_id, "date": date_value})
+        if today_values
+        else {}
+    )
+    stress_emotion = stress_emotion_from_algorithm(algorithm) if today_values else ""
     return localized_success({
-        "todayStressChart": stress_chart(today_rows),
-        "weekStressChart": stress_chart(week_rows, "%m-%d"),
-        "todayStressScore": int(sum(today_values) / len(today_values)) if today_values else 0,
-        "weekAvgStressScore": int(sum(week_values) / len(week_values)) if week_values else 0,
+        "todayStressChart": stress_chart(today_display_rows),
+        "weekStressChart": stress_chart(week_display_rows, "%m-%d"),
+        "todayStressScore": int(sum(today_display_values) / len(today_display_values)) if today_display_values else 0,
+        "weekAvgStressScore": int(sum(week_display_values) / len(week_display_values)) if week_display_values else 0,
         "relaxDuration": counts["放松"],
         "normalDuration": counts["正常"],
         "moderateStressDuration": counts["中等"],
@@ -7297,6 +8153,7 @@ def stress_summary(request: Request, user: dict = Depends(app_user), db: Session
         "stressEmotion": stress_emotion,
         "emotion": stress_emotion,
         "algorithm": algorithm,
+        "pressureDisplayMode": "proxy" if today_proxy_rows else ("real" if today_values else "empty"),
     })
 
 
@@ -7305,14 +8162,13 @@ def motion_overview(request: Request, user: dict = Depends(app_user), db: Sessio
     user_id = int(user["id"])
     date_value = date_from_request(request)
     summary = daily_summary(db, user_id, date_value) or {}
+    targets = user_goal_targets(db, user_id)
     return success({
         "step": summary_steps_or_raw(db, user_id, date_value, summary),
         "calorie": round(float(summary.get("totalCalorie") or 0)),
         "calorieUnit": CALORIE_UNIT,
         "motionTime": int(summary.get("activeTime") or 0),
-        "targetStep": 8000,
-        "targetCalorie": 300,
-        "targetMotionTime": 30,
+        **targets,
     })
 
 
@@ -7322,10 +8178,11 @@ def motion_calorie(request: Request, user: dict = Depends(app_user), db: Session
     date_value = date_from_request(request)
     summary = daily_summary(db, user_id, date_value) or {}
     total_calorie = round(float(summary.get("totalCalorie") or 0))
+    targets = user_goal_targets(db, user_id)
     return success({
         "totalCalorie": total_calorie,
         "calorieUnit": CALORIE_UNIT,
-        "targetCalorie": 300,
+        "targetCalorie": targets["targetCalorie"],
         "motionCalorie": total_calorie,
         "basalCalorie": 0,
         "motionCalorieChart": raw_points(db, user_id, date_value, "step_count"),
@@ -7365,13 +8222,14 @@ def motion_detail(request: Request, user: dict = Depends(app_user), db: Session 
     calorie = round(float(summary.get("totalCalorie") or 0))
     distance = float(summary.get("totalDistance") or 0)
     step_chart = raw_points(db, user_id, date_value, "step_count")
+    targets = user_goal_targets(db, user_id)
     return success({
         "calorie": calorie,
         "calorieUnit": CALORIE_UNIT,
-        "targetCalorie": 300,
+        "targetCalorie": targets["targetCalorie"],
         "calorieChart": step_chart,
         "step": step,
-        "targetStep": 8000,
+        "targetStep": targets["targetStep"],
         "stepChart": step_chart,
         "distance": str(round(distance, 2)),
         "distanceChart": step_chart,
@@ -7419,7 +8277,7 @@ def sleep_overview(request: Request, user: dict = Depends(app_user), db: Session
     deep = values["DEEP"]
     nap = values["NAP"]
     total_sleep_time = rem + light + deep + nap
-    awake_count = sum(1 for row in records if sleep_type_key(dict(row._mapping).get("type")) == "AWAKE")
+    awake_count = resolved_sleep_awake_count(db, user_id, date_value, records, prefer_raw_sleep)
     return localized_success({
         "sleepDuration": str(total_sleep_time),
         "sleepQuality": str(int(calculate_sleep_efficiency(awake, rem, light, deep, nap))),
@@ -7685,6 +8543,15 @@ def get_user_girl_health_all(user: dict = Depends(app_user), db: Session = Depen
         ],
     }
     if not settings.other_api_base_url:
+        return success(payload)
+
+    cycle_length = int_value(girl.get("periodCycle"))
+    if cycle_length <= 0:
+        write_algorithm_log(
+            "ovulation_prediction_skipped_missing_profile",
+            context={"source": "getUserGirlHealthAll", "userId": int(user["id"]), "userName": user.get("nickName")},
+            reason="cycleLength-missing-or-invalid",
+        )
         return success(payload)
 
     response = call_algorithm(

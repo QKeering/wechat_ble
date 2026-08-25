@@ -34,6 +34,7 @@ const chartInstance = ref<any>(null);
 
 const oxyGen = ref(0);
 const heartRateVariability = ref(0);
+const heartRateObj = ref<heartRateDetail>({});
 const normalizeIntegerDisplayMetric = (value: unknown, min = 0, max = Number.POSITIVE_INFINITY) => {
   const numeric = pickMetricNumber([value], min, max);
   return numeric == null ? 0 : Math.round(numeric);
@@ -51,7 +52,22 @@ const formatIntegerRangeDisplayMetric = (value: unknown, fallback = '0') => {
     return Number.isFinite(numeric) ? String(Math.round(numeric)) : matched;
   });
 };
-const heartRateVariabilityDisplay = computed(() => formatIntegerDisplayMetric(heartRateVariability.value, '--', 1, 300));
+const hrvDisplayMode = computed(() => heartRateObj.value?.displayMode || 'real');
+const isHrvProxy = computed(() => hrvDisplayMode.value === 'proxy');
+const isHrvEmpty = computed(() => hrvDisplayMode.value === 'empty');
+const hasHrvMetric = computed(() => pickMetricNumber([
+  heartRateObj.value?.newValue,
+  heartRateObj.value?.avgValue,
+  heartRateObj.value?.maxValue,
+  heartRateObj.value?.proxyMs,
+  ...(Array.isArray(heartRateObj.value?.chartData) ? heartRateObj.value.chartData.map((item: Point) => item?.value) : [])
+], 1, 300) !== undefined);
+const showHrvMetric = computed(() => !isHrvEmpty.value && hasHrvMetric.value);
+const proxyStatusText = computed(() => heartRateObj.value?.statusText || (isHrvProxy.value ? '趋势参考' : '暂无数据'));
+const proxyTips = computed(() => heartRateObj.value?.tips || (isHrvProxy.value ? '基于心率趋势估算，仅供参考' : '数据不足，暂无法估算'));
+const heartRateVariabilityDisplay = computed(() =>
+  showHrvMetric.value ? formatIntegerDisplayMetric(heartRateVariability.value, '--', 1, 300) : proxyStatusText.value
+);
 const currentDate = ref(new Date());
 
 const heartRateList = ref([
@@ -59,7 +75,6 @@ const heartRateList = ref([
   { label: '关键指数', value: '76' }
 ]);
 
-const heartRateObj = ref<heartRateDetail>({});
 const chartData = ref<Point[]>([]);
 const chartTimeTicks = computed(() => (currentName.value === 'day' ? buildDailyDetailTimeTicks() : buildDetailTimeTicks(chartData.value)));
 watch(
@@ -93,6 +108,7 @@ const heartRateIcon = computed(() => {
   return '/static/images/homeDetail/normal.png';
 });
 const heartRateVariabilityText = computed(() => {
+  if (isHrvEmpty.value) return '暂无';
   const hrv = heartRateVariability.value; // 心率变异性值（单位：ms）
   if (!Number.isFinite(hrv) || hrv <= 0) return '\u6682\u65e0';
 
@@ -268,15 +284,55 @@ const getHrvDetailData = async () => {
     offset: offset.value
   }, getVitalDetailSilentRequestConfig());
   if (res) {
-    const detail = withMetricDetailFallback(
-      res,
-      userStore.healthData?.hrv ?? userStore.healthData?.heartRateVariability ?? userStore.latestMetrics?.hrv ?? heartRateVariability.value,
-      {
-        min: 1,
-        max: 300,
-        extra: { avgValueRange: (res as any)?.avgValueRange || '--' }
-      }
-    );
+    const responseDetail = res as heartRateDetail;
+    const isEmptyFallback = responseDetail.displayMode === 'empty';
+    const isProxyFallback = responseDetail.displayMode === 'proxy';
+    const rawProxyMetric = isProxyFallback ? pickMetricNumber([responseDetail.proxyMs], 1, 300) : undefined;
+    const proxyMetric = rawProxyMetric === undefined ? undefined : Math.max(18, Math.min(90, rawProxyMetric));
+    const roundedProxy = proxyMetric !== undefined ? Math.round(proxyMetric) : undefined;
+    const proxyChartData = isProxyFallback
+      ? (Array.isArray(responseDetail.chartData) ? responseDetail.chartData : []).map((point: Point) => ({
+          ...point,
+          value: String(Math.max(18, Math.min(90, Number(point.value) || proxyMetric || 18)))
+        }))
+      : responseDetail.chartData;
+    const proxyChartValues = (proxyChartData || [])
+      .map((point: Point) => Number(point.value))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const proxyRange = proxyChartValues.length
+      ? `${Math.min(...proxyChartValues)}-${Math.max(...proxyChartValues)}`
+      : (roundedProxy ? `${roundedProxy}-${roundedProxy}` : '--');
+    const normalizedProxyDetail = isProxyFallback
+      ? {
+          ...responseDetail,
+          proxyMs: proxyMetric,
+          newValue: String(proxyChartValues[proxyChartValues.length - 1] || roundedProxy || ''),
+          avgValue: String(roundedProxy || ''),
+          minValue: String(proxyChartValues.length ? Math.min(...proxyChartValues) : roundedProxy || ''),
+          maxValue: String(proxyChartValues.length ? Math.max(...proxyChartValues) : roundedProxy || ''),
+          avgValueRange: proxyRange,
+          chartData: proxyChartData
+        }
+      : responseDetail;
+    const detail = isEmptyFallback
+      ? ({ ...responseDetail, chartData: [] } as heartRateDetail)
+      : isProxyFallback
+        ? withMetricDetailFallback(normalizedProxyDetail, proxyMetric, {
+            min: 1,
+            max: 90,
+            extra: {
+              avgValueRange: proxyRange
+            }
+          })
+        : withMetricDetailFallback(
+          responseDetail,
+          userStore.healthData?.hrv ?? userStore.healthData?.heartRateVariability ?? userStore.latestMetrics?.hrv ?? heartRateVariability.value,
+          {
+            min: 1,
+            max: 300,
+            extra: { avgValueRange: (responseDetail as any)?.avgValueRange || '--' }
+          }
+        );
     heartRateObj.value = detail;
     heartRateList.value = [
       { label: '心率变异性', value: formatIntegerDisplayMetric(heartRateObj.value.avgValue, '0', 1, 300) },
@@ -347,13 +403,15 @@ onUnload(() => {
           <view class="flex ai-center">
             <uv-image :src="heartRateIcon" width="68rpx" height="68rpx"></uv-image>
             <view>
-              <text class="fs-72">{{ heartRateVariabilityDisplay }}</text>
+              <text :class="showHrvMetric ? 'fs-72' : 'proxy-status-value'">{{ heartRateVariabilityDisplay }}</text>
+              <text v-if="showHrvMetric" class="metric-unit">ms</text>
             </view>
           </view>
           <view class="status-tag" :class="statusClass">{{ heartRateVariabilityText }}</view>
         </view>
+        <view v-if="!showHrvMetric" class="proxy-explanation">{{ proxyTips }}</view>
       </view>
-      <view class="mt-30">
+      <view v-if="showHrvMetric" class="mt-30">
         <homeHeartChart
           ref="chartRefT"
           card-title="指标数据"
@@ -365,6 +423,11 @@ onUnload(() => {
           :time-ticks="chartTimeTicks"
           @chart-finished="(chartRef) => initChart(chartRef)"
         />
+      </view>
+      <view v-else class="proxy-detail-card">
+        <text class="proxy-detail-title">HRV 趋势参考</text>
+        <text class="proxy-detail-status">{{ proxyStatusText }}</text>
+        <text class="proxy-detail-copy">{{ proxyTips }}</text>
       </view>
     </view>
   </view>
@@ -387,6 +450,53 @@ onUnload(() => {
 }
 .health-card {
   box-shadow: 0 2rpx 10rpx rgba(0, 0, 0, 0.05);
+}
+.metric-unit {
+  margin-left: 8rpx;
+  color: #9ca3af;
+  font-size: 26rpx;
+}
+.proxy-status-value {
+  color: #111827;
+  font-size: 46rpx;
+  font-weight: 600;
+}
+.proxy-explanation {
+  margin-top: 24rpx;
+  padding-top: 22rpx;
+  border-top: 1rpx solid #eef1f6;
+  color: #8a94a6;
+  font-size: 25rpx;
+  line-height: 1.6;
+}
+.proxy-detail-card {
+  margin-top: 30rpx;
+  min-height: 300rpx;
+  border-radius: 44rpx;
+  background: linear-gradient(145deg, #ffffff, #f5f8ff);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 44rpx;
+  box-sizing: border-box;
+}
+.proxy-detail-title {
+  color: #6b7280;
+  font-size: 28rpx;
+}
+.proxy-detail-status {
+  margin-top: 20rpx;
+  color: #111827;
+  font-size: 52rpx;
+  font-weight: 600;
+}
+.proxy-detail-copy {
+  margin-top: 22rpx;
+  color: #8a94a6;
+  font-size: 26rpx;
+  line-height: 1.6;
+  text-align: center;
 }
 .status-good {
   font-size: 28rpx;

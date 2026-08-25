@@ -112,7 +112,7 @@ export default class RingOTAManager {
     let lastExtendedAddrBase = 0;
 
     for (const line of lines) {
-      const cleanLine = line.trim();
+      const cleanLine = line.trim().replace(/^\uFEFF/, '');
       if (!cleanLine.startsWith(':')) continue;
 
       const byteCount = Number.parseInt(cleanLine.substring(1, 3), 16);
@@ -196,22 +196,28 @@ export default class RingOTAManager {
     while (offset < data.length) {
       const end = Math.min(offset + this.options.chunkSize, data.length);
       const chunk = data.slice(offset, end);
-      await this.writeCharacteristic(RING_OTA_UUIDS.data, chunk.buffer as unknown as ArrayBuffer, true);
-      await sleep(this.options.writeDelayMs);
-
-      offset += chunk.length;
-      packetCount++;
-
-      const isPartitionEnd = offset >= data.length;
-      const isGroupEnd = packetCount % this.options.groupSize === 0;
-      if (!isPartitionEnd && !isGroupEnd) continue;
-
+      const nextOffset = offset + chunk.length;
+      const nextPacketCount = packetCount + 1;
+      const isPartitionEnd = nextOffset >= data.length;
+      const isGroupEnd = nextPacketCount % this.options.groupSize === 0;
       const expected = isPartitionEnd
         ? isLastPartition
           ? RING_OTA_RESPONSE_CODES.allDone
           : RING_OTA_RESPONSE_CODES.partitionDone
-        : RING_OTA_RESPONSE_CODES.blockOk;
-      await this.waitForResponse(expected);
+        : isGroupEnd
+          ? RING_OTA_RESPONSE_CODES.blockOk
+          : '';
+      // Arm the ACK waiter before the boundary packet is written. The device
+      // can reply within a few milliseconds; registering it after write +
+      // delay loses the ACK and creates a false 8s timeout.
+      const responseWait = expected ? this.waitForResponse(expected) : null;
+      responseWait?.catch(() => undefined);
+      await this.writeCharacteristic(RING_OTA_UUIDS.data, chunk.buffer as unknown as ArrayBuffer, true);
+      await sleep(this.options.writeDelayMs);
+
+      offset = nextOffset;
+      packetCount = nextPacketCount;
+      if (responseWait) await responseWait;
     }
   }
 

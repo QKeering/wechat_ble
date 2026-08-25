@@ -518,7 +518,22 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const setTimedTemperatureJL = (config: RwHealthMonitoringConfig) => runWithReady(() => sdk.setTimedTemperatureJL(config));
   const controlHealthDataJL = (name: CompatRwHealthDataName, enabled = true) =>
     runWithReady(() => sdk.controlHealthDataJL(normalizeCompatRwHealthDataName(name), enabled));
-  const readBattery = () => enqueueDeviceInfoCommand('battery', () => sdk.sendBatteryCommand());
+  const readBattery = () =>
+    enqueueDeviceInfoCommand('battery', async () => {
+      // Writing 0x12 only proves that WeChat accepted the command.  The value
+      // shown by the pages must come from the matching Notify response.  Start
+      // the waiter before the write so a fast device response cannot be lost.
+      const pendingBattery = sdk.waitForParsedData(
+        (parsed) => parsed.type === 'battery',
+        DEFAULT_COMPAT_REFRESH_TIMEOUT_MS,
+        { replayRecent: false }
+      );
+      // If the write fails first, keep the waiter rejection observed while the
+      // command error is propagated to the caller.
+      pendingBattery.catch(() => undefined);
+      await sdk.sendBatteryCommand();
+      return pendingBattery;
+    });
   const readFirmwareVersion = () => enqueueDeviceInfoCommand('firmware-version', () => sdk.sendFirmwareVersion());
   const readSoftwareVersion = () => enqueueDeviceInfoCommand('software-version', () => sdk.sendSoftwareVersion());
   const readHeartRate = () => runWithReady(() => sdk.sendActiveMeasureCommand());

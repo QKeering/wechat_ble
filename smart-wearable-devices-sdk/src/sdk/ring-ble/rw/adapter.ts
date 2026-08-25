@@ -52,6 +52,11 @@ import {
 import { parseRwRingData } from './parser';
 import { getRwHistoryDataType } from './history';
 import { enqueueRwDiagnosticUpload } from '@/utils/rwDiagnosticUpload';
+import {
+  ensureWechatBluetoothPrivacyAuthorization,
+  isBluetoothPrivacyError,
+  normalizeBluetoothPrivacyError
+} from '@/utils/wechatBluetoothPrivacy';
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
 type BleConnectionStateCallback = Parameters<typeof uni.onBLEConnectionStateChange>[0];
@@ -339,6 +344,10 @@ const summarizeParsedForRwBleLog = (parsed: RingParsedData) => {
     statusCode: item.statusCode,
     value: item.value,
     battery: item.battery,
+    batteryLevel: item.batteryLevel ?? item.battery,
+    batteryDisplay: parsed.type === 'battery' ? item.value ?? item.batteryLevel ?? item.battery : undefined,
+    batteryStatus: parsed.type === 'battery' ? item.status : undefined,
+    batteryRawValue: parsed.type === 'battery' ? item.batteryRawValue ?? item.batteryInfo : undefined,
     heartRate: item.heartRate,
     bloodOxygen: item.bloodOxygen,
     firmwareVersion: item.firmwareVersion,
@@ -411,6 +420,8 @@ const markParsedAsEmitted = <T extends RingParsedData>(parsed: T): T => {
 
 export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntime): LegacyRingAdapter => {
   let currentDevice: RingDeviceInfo = {};
+  let connectionGeneration = 0;
+  let activeL19HistorySession: { deviceId: string; generation: number } | null = null;
   let scanCallback: BluetoothDeviceFoundCallback | null = null;
   let scanTimeout: ReturnType<typeof setTimeout> | null = null;
   let scanPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -441,6 +452,32 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       }
     });
     return mergedDevice;
+  };
+
+  const isL19HistoryDevice = () => {
+    const device = getRuntimeDevice();
+    const candidates = [device.name, device.deviceName, device.model, device.modelKey, device.productName];
+    return candidates.some((value) => {
+      const normalized = String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      return normalized.includes('QKEERINGL19') || normalized.includes('QKL19');
+    });
+  };
+
+  const beginL19HistorySession = () => {
+    if (!isL19HistoryDevice() || !currentDevice.deviceId) return null;
+    activeL19HistorySession = {
+      deviceId: currentDevice.deviceId,
+      generation: connectionGeneration
+    };
+    rwBleLog('l19-history-session-start', activeL19HistorySession);
+    return connectionGeneration;
+  };
+
+  const endL19HistorySession = (generation?: number | null) => {
+    if (!activeL19HistorySession) return;
+    if (generation != null && activeL19HistorySession.generation !== generation) return;
+    rwBleLog('l19-history-session-end', activeL19HistorySession);
+    activeL19HistorySession = null;
   };
 
   const clearPendingAliases = () => {
@@ -588,7 +625,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       callbackExpiryMs: BLUETOOTH_ADAPTER_OPEN_CALLBACK_EXPIRY_MS
     });
 
-    operation.promise = new Promise<unknown>((resolve, reject) => {
+    operation.promise = ensureWechatBluetoothPrivacyAuthorization().then(() => new Promise<unknown>((resolve, reject) => {
       let callbackSettled = false;
       const expiryTimer = setTimeout(() => {
         if (callbackSettled) return;
@@ -622,10 +659,11 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
           resolve(result);
         },
         fail: (error) => {
+          const normalizedError = normalizeBluetoothPrivacyError(error);
           if (callbackSettled) {
             rwBleLog('bluetooth-adapter-open-expired-failed', {
               elapsedMs: Date.now() - startedAt,
-              error: formatError(error)
+              error: formatError(normalizedError)
             });
             return;
           }
@@ -636,12 +674,23 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
             {
               elapsedMs: Date.now() - startedAt,
               foregroundTimedOut: operation.foregroundTimedOut,
-              error: formatError(error)
+              error: formatError(normalizedError),
+              privacyBlocked: isBluetoothPrivacyError(normalizedError)
             }
           );
-          reject(error);
+          reject(normalizedError);
         }
       });
+    })).catch((error) => {
+      const normalizedError = normalizeBluetoothPrivacyError(error);
+      if (isBluetoothPrivacyError(normalizedError)) {
+        rwBleLog('bluetooth-privacy-authorization-required', {
+          elapsedMs: Date.now() - startedAt,
+          retryable: false,
+          error: formatError(normalizedError)
+        });
+      }
+      throw normalizedError;
     });
 
     bluetoothAdapterOpenOperation = operation;
@@ -1238,6 +1287,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         notifyEnabled: true,
         notifyError: ''
       };
+      connectionGeneration += 1;
+      activeL19HistorySession = null;
       cacheServiceId(deviceId, currentDevice.serviceId || '');
       cacheServiceId(currentDevice.mac || currentDevice.advertis?.macInfo || currentDevice.uniMacId || '', currentDevice.serviceId || '');
       runtime?.onDeviceReady?.(currentDevice);
@@ -1469,6 +1520,63 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       serviceId: device.serviceId,
       characteristicId: device.cmdCharId
     }, label);
+  };
+
+  const sendL19HistoryBytes = (bytes: Uint8Array, label?: string) => {
+    if (!isL19HistoryDevice()) return sendBytes(bytes, label);
+
+    const deviceId = currentDevice.deviceId;
+    const serviceId = currentDevice.serviceId;
+    const characteristicId = currentDevice.cmdCharId;
+    if (!deviceId || !serviceId || !characteristicId) {
+      throw new Error('RW L19 history device is not ready for command writes.');
+    }
+
+    const frameLog = summarizeRwBleFrameForLog(bytes, label);
+    const writeBuffer =
+      bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+        ? bytes.buffer
+        : bytes.slice().buffer;
+    rwBleLog('tx', {
+      ...frameLog,
+      deviceId,
+      serviceId,
+      characteristicId,
+      writeType: 'platform-default',
+      historyCompatibility: 'l19'
+    });
+
+    return enqueueWrite(() => new Promise((resolve, reject) => {
+      uni.writeBLECharacteristicValue({
+        deviceId,
+        serviceId,
+        characteristicId,
+        value: writeBuffer as unknown as any[],
+        success: (result) => {
+          rwBleLog('tx-ok', {
+            ...frameLog,
+            deviceId,
+            serviceId,
+            characteristicId,
+            writeType: 'platform-default',
+            historyCompatibility: 'l19'
+          });
+          resolve(result);
+        },
+        fail: (error) => {
+          rwBleLog('tx-fail', {
+            ...frameLog,
+            deviceId,
+            serviceId,
+            characteristicId,
+            writeType: 'platform-default',
+            historyCompatibility: 'l19',
+            error: formatError(error)
+          });
+          reject(error);
+        }
+      });
+    }));
   };
 
   const getAlternateWriteCandidates = () => {
@@ -2891,6 +2999,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
 
   const disconnect = (deviceId = getRuntimeDevice().deviceId) => {
     rwBleLog('disconnect-request', { deviceId });
+    connectionGeneration += 1;
+    activeL19HistorySession = null;
     clearDataListener();
     currentDevice = {};
     if (!deviceId) return Promise.resolve();
@@ -2908,6 +3018,25 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       offBleConnectionStateChange(connectionStateCallback);
       connectionStateCallback = null;
     }
+    const finishDisconnectedState = (res: Parameters<BleConnectionStateCallback>[0], capturedGeneration: number) => {
+      if (capturedGeneration !== connectionGeneration) {
+        rwBleLog('connection-state-ignored', {
+          deviceId: res.deviceId,
+          connected: res.connected,
+          capturedGeneration,
+          connectionGeneration,
+          reason: 'stale-connection-generation'
+        });
+        return;
+      }
+      connectionGeneration += 1;
+      activeL19HistorySession = null;
+      clearDataListener();
+      currentDevice = {};
+      options?.onDisconnected?.(res.deviceId);
+      runtime?.onDisconnected?.(res);
+    };
+
     connectionStateCallback = (res) => {
       rwBleLog('connection-state', {
         deviceId: res.deviceId,
@@ -2941,10 +3070,42 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         return;
       }
       if (!trackedPlatformDeviceId && activeDeviceId && res.deviceId !== activeDeviceId) return;
-      clearDataListener();
-      currentDevice = {};
-      options?.onDisconnected?.(res.deviceId);
-      runtime?.onDisconnected?.(res);
+
+      const capturedGeneration = connectionGeneration;
+      const historySession = activeL19HistorySession;
+      if (
+        historySession &&
+        historySession.deviceId === res.deviceId &&
+        historySession.generation === capturedGeneration
+      ) {
+        const serviceId = currentDevice.serviceId || runtimeDevice.serviceId || '';
+        void isDeviceConnected(historySession.deviceId, serviceId).then((stillConnected) => {
+          if (capturedGeneration !== connectionGeneration) {
+            rwBleLog('connection-state-ignored', {
+              deviceId: res.deviceId,
+              connected: res.connected,
+              capturedGeneration,
+              connectionGeneration,
+              reason: 'stale-history-disconnect-after-generation-change'
+            });
+            return;
+          }
+          if (stillConnected) {
+            rwBleLog('connection-state-ignored', {
+              deviceId: res.deviceId,
+              connected: res.connected,
+              capturedGeneration,
+              connectionGeneration,
+              reason: 'l19-history-physical-link-still-connected'
+            });
+            return;
+          }
+          finishDisconnectedState(res, capturedGeneration);
+        });
+        return;
+      }
+
+      finishDisconnectedState(res, capturedGeneration);
     };
     uni.onBLEConnectionStateChange(connectionStateCallback);
 
@@ -3003,6 +3164,10 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       }
     },
     sendBytes,
+    isL19HistoryDevice,
+    beginL19HistorySession,
+    endL19HistorySession,
+    sendL19HistoryBytes,
     sendCommand,
     sendNamedCommand,
     waitForParsedData,

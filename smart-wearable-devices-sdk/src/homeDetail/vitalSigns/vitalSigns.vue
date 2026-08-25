@@ -16,6 +16,7 @@ import { useRingBusinessHistoryPageSync, type HistoryPageSilentRequestConfig } f
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
+import { withMetricDetailFallback } from '@/homeDetail/vitalSignsHeartDetail/metricFallback';
 
 import DetailInfo from '@/components/DetailInfo.vue';
 import {usePopupFixer} from '@/hooks/usePopupFixer'
@@ -70,13 +71,6 @@ const getCachedMetricValue = (...keys: string[]) => getFirstObjectMetricValue([u
 const getVitalFallbackValue = (...values: unknown[]) => {
   if (isVitalSignsLoading.value) return null;
   return values.find((value) => getMetricNumber(value) !== null);
-};
-const resetVitalSignsDisplayData = () => {
-  heartRateObj.value = {};
-  oxyGenObj.value = {};
-  temperatureObj.value = {};
-  hrvObj.value = {};
-  extendedVitalObj.value = {};
 };
 const getObjectValueByKeys = (source: Record<string, any> | null | undefined, keys: string[]) => {
   for (const key of keys) {
@@ -277,19 +271,80 @@ const oxyGenDisplayObj = computed(() => {
     avgValue: formatIntegerMetricValue((data as any)?.avgValue)
   } as heartRateDetail);
 });
+
+const localSparseHrvProxy = computed(() => {
+  const heartPoints = Array.isArray(heartRateDisplayObj.value?.chartData)
+    ? heartRateDisplayObj.value.chartData
+    : [];
+  const validPoints = heartPoints
+    .map((point: any) => ({ time: point?.time, bpm: getMetricNumber(point?.value) }))
+    .filter((point: any) => point.bpm !== null && point.bpm >= 40 && point.bpm <= 180);
+  if (validPoints.length < 3) return null;
+
+  const chartData = validPoints.map((point: any) => {
+    // 离散心率点不是逐搏 RR，不能用相邻 IBI 差冒充 RMSSD。
+    const value = Math.max(18, Math.min(90, Math.round(72 - Math.max(0, point.bpm - 65) * 1.2)));
+    return { time: point.time, value: String(value) };
+  });
+  const ordered = chartData.map((point: any) => Number(point.value)).sort((a, b) => a - b);
+  const proxyMs = ordered[Math.floor(ordered.length / 2)];
+  return {
+    proxyMs,
+    chartData,
+    minValue: ordered[0],
+    maxValue: ordered[ordered.length - 1]
+  };
+});
+
 const hrvDisplayObj = computed(() => {
-  const data = withMetricFallback(
-    hrvObj.value,
-    getVitalFallbackValue(
-      getExtendedVitalValue('hrvAvg', 'hrv', 'heartRateVariability'),
-      userStore.healthData?.hrv,
-      userStore.healthData?.heartRateVariability,
-      userStore.latestMetrics?.hrv
-    ),
-    {
-      avgValueRange: (hrvObj.value as any)?.avgValueRange || '--'
-    }
+  const localProxy = localSparseHrvProxy.value;
+  const shouldUseLocalSparseProxy = localProxy && (
+    hrvObj.value?.displayMode === 'empty' ||
+    hrvObj.value?.hrvSource === 'sparse_bpm_proxy'
   );
+  const hrvSource = shouldUseLocalSparseProxy
+    ? {
+        ...hrvObj.value,
+        displayMode: 'proxy' as const,
+        hrvSource: 'sparse_bpm_proxy' as const,
+        proxyMs: localProxy.proxyMs,
+        statusText: localProxy.proxyMs < 20 ? '偏低' : '正常',
+        newValue: String(localProxy.chartData[localProxy.chartData.length - 1]?.value || localProxy.proxyMs),
+        avgValue: String(localProxy.proxyMs),
+        minValue: String(localProxy.minValue),
+        maxValue: String(localProxy.maxValue),
+        avgValueRange: `${localProxy.minValue}-${localProxy.maxValue}`,
+        chartData: localProxy.chartData,
+        algorithmVersion: 'bpm_proxy_display_v1_sparse_v2'
+      }
+    : hrvObj.value;
+  if (hrvSource?.displayMode === 'empty') {
+    return withSelectedVitalAxisMeta({ ...hrvObj.value, chartData: [] } as heartRateDetail);
+  }
+  const isProxy = hrvSource?.displayMode === 'proxy';
+  const rawProxyMetric = isProxy ? getMetricNumber((hrvSource as any)?.proxyMs) : null;
+  const proxyMetric = rawProxyMetric === null ? null : Math.max(18, Math.min(90, rawProxyMetric));
+  const roundedProxy = proxyMetric ? Math.round(proxyMetric) : null;
+  const data = isProxy
+    ? withMetricDetailFallback(hrvSource, proxyMetric, {
+        min: 1,
+        max: 300,
+        extra: {
+          avgValueRange: (hrvSource as any)?.avgValueRange || (roundedProxy ? `${roundedProxy}-${roundedProxy}` : '--')
+        }
+      })
+    : withMetricFallback(
+        hrvObj.value,
+        getVitalFallbackValue(
+          getExtendedVitalValue('hrvAvg', 'hrv', 'heartRateVariability'),
+          userStore.healthData?.hrv,
+          userStore.healthData?.heartRateVariability,
+          userStore.latestMetrics?.hrv
+        ),
+        {
+          avgValueRange: (hrvObj.value as any)?.avgValueRange || '--'
+        }
+      );
   return withSelectedVitalAxisMeta({
     ...data,
     avgValue: formatIntegerMetricValue((data as any)?.avgValue)
@@ -679,7 +734,8 @@ const loadVitalSignsData = async (currentDate = new Date(), trigger = 'manual') 
   const date = formatLocalDate(currentDate);
   const startedAt = Date.now();
   isVitalSignsLoading.value = true;
-  resetVitalSignsDisplayData();
+  // Weak/offline requests must keep the last successful snapshot visible.
+  // Each endpoint replaces its own card only after a successful response.
   appendVitalSignsPageLog('vital-signs-load-start', {
     trigger,
     date,

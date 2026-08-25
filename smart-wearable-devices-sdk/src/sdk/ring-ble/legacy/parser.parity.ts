@@ -8,6 +8,12 @@ const battery = parseLegacyRingData(new Uint8Array([0x00, 0x01, 0x12, 0x00, 101]
 assert(battery?.type === 'battery', 'battery frame should parse');
 assert(battery?.status === 'charging', 'battery status should keep legacy charging code');
 assert(battery?.value === '充电中', 'battery value should keep legacy display text');
+assert(battery?.batteryLevel == null, 'charging status should not be mistaken for 101 percent');
+assert(battery?.batteryRawValue === 101, 'battery log should preserve the raw charging code');
+
+const normalBattery = parseLegacyRingData(new Uint8Array([0x00, 0x01, 0x12, 0x00, 55]));
+assert(normalBattery?.batteryLevel === 55, 'normal battery frame should expose numeric batteryLevel');
+assert(normalBattery?.value === '55%', 'normal battery frame should expose display value');
 
 const activeMeasure = parseLegacyRingData(new Uint8Array([0x00, 0x02, 0x31, 0x00, 0x01, 70, 30, 36]));
 assert(activeMeasure?.type === 'active_measure', 'active measure frame should parse');

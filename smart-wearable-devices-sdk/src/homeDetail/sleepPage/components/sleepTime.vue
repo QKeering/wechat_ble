@@ -27,10 +27,11 @@ const formattedMinutes = computed(() => sleepDurationMinutes.value.toString().pa
 
 // ===== 阶段配置 =====
 const STAGE_CONFIG: Record<string, { level: number; color: string }> = {
-  快速眼动: { level: 0, color: SLEEP_STAGE_COLORS['快速眼动'] },
+  // 产品展示口径：深睡在高位，快速眼动在低位。
+  快速眼动: { level: 3, color: SLEEP_STAGE_COLORS['快速眼动'] },
   清醒: { level: 1, color: SLEEP_STAGE_COLORS['清醒'] },
   浅睡: { level: 2, color: SLEEP_STAGE_COLORS['浅睡'] },
-  深睡: { level: 3, color: SLEEP_STAGE_COLORS['深睡'] },
+  深睡: { level: 0, color: SLEEP_STAGE_COLORS['深睡'] },
   小睡: { level: 0, color: SLEEP_STAGE_COLORS['小睡'] }
 };
 

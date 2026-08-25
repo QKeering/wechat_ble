@@ -498,7 +498,7 @@ const writeQueue = (queue: PendingUploadSession[]) => {
   return nextQueue;
 };
 
-interface DeferredPendingUploadPersistenceResult {
+export interface DeferredPendingUploadPersistenceResult {
   ok: boolean;
   version: number;
   elapsedMs: number;
@@ -817,6 +817,91 @@ export const acknowledgePendingUploadBatch = <T = Record<string, any>>(
   queue[index] = next;
   writeQueue(queue as PendingUploadSession[]);
   return next;
+};
+
+/**
+ * Creates a brand-new upload session in memory and schedules its compensation
+ * payload/queue persistence asynchronously. The live HTTP pipeline can start
+ * immediately; device-side deletion and durable-checkpoint advancement still
+ * depend on either this persistence succeeding or an explicit backend ACK.
+ *
+ * This is intentionally separate from stagePendingUploadSession(): callers
+ * restoring/updating an existing session still use the synchronous merge path.
+ */
+export const stagePendingUploadSessionDeferred = <T = Record<string, any>>(
+  input: Partial<PendingUploadSession<T>> & {
+    deviceMac: string;
+    dataList?: T[];
+    rawFrames?: RingRawHistoryFrame[];
+  }
+): {
+  session: PendingUploadSession<T>;
+  persistence: Promise<DeferredPendingUploadPersistenceResult>;
+} => {
+  const now = Date.now();
+  const uploadSessionId = input.uploadSessionId || createUploadSessionId(input.protocol || 'upload');
+  const rawFrames = dedupeRawFrames(input.rawFrames || []);
+  const dataList = Array.isArray(input.dataList) ? input.dataList : [];
+  const rawLocalStatus: UploadRawLocalStatus = rawFrames.length > 0 ? 'done' : 'none';
+  const deviceReadDone = input.deviceReadDone ?? true;
+  const historyCompleted = input.historyCompleted ?? deviceReadDone;
+  const coverageStatus = (input.coverageStatus || (historyCompleted ? 'complete' : 'partial')) as UploadCoverageStatus;
+  const partialUpload = input.partialUpload ?? (!deviceReadDone || !historyCompleted || coverageStatus !== 'complete');
+  const session: PendingUploadSession<T> = {
+    uploadSessionId,
+    userId: input.userId,
+    dataUserId: input.dataUserId,
+    bindingId: input.bindingId,
+    bindingVersion: input.bindingVersion,
+    deviceMac: input.deviceMac,
+    deviceMacNorm: normalizeUploadDeviceMac(input.deviceMac),
+    protocol: input.protocol,
+    dataList,
+    dataListCount: dataList.length,
+    dataPersisted: dataList.length === 0,
+    rawFrames,
+    rawFrameCount: rawFrames.length,
+    deviceBlockRefs: input.deviceBlockRefs,
+    status: 'pending',
+    dataStatus: dataList.length > 0 ? 'pending' : 'empty',
+    rawLocalStatus,
+    rawStatus: rawFrames.length > 0 ? 'pending' : 'none',
+    canDeleteDeviceBlocks: Boolean(input.canDeleteDeviceBlocks) && !partialUpload,
+    deviceReadDone,
+    historyCompleted,
+    partialUpload,
+    coverageStatus,
+    retryCount: 0,
+    rawRetryCount: 0,
+    lastError: input.lastError,
+    createdAt: now,
+    updatedAt: now
+  };
+  const persistenceSnapshot = clonePendingUploadSession({
+    ...session,
+    dataPersisted: true
+  });
+  const persistence = schedulePendingUploadSessionPersistence(
+    persistenceSnapshot,
+    'initial-stage-background'
+  ).then((result) => {
+    if (result.ok) session.dataPersisted = true;
+    appendRingDiagnosticLog('UPLOAD', 'pending-upload-stage-background-result', {
+      uploadSessionId,
+      dataListCount: dataList.length,
+      rawFrameCount: rawFrames.length,
+      ok: result.ok,
+      elapsedMs: result.elapsedMs,
+      error: result.error
+    });
+    return result;
+  });
+  appendRingDiagnosticLog('UPLOAD', 'pending-upload-stage-background-scheduled', {
+    uploadSessionId,
+    dataListCount: dataList.length,
+    rawFrameCount: rawFrames.length
+  });
+  return { session, persistence };
 };
 
 /**

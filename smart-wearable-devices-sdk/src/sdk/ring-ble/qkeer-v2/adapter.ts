@@ -5,6 +5,10 @@ import bleManager from './vendor/common/ble_manager.js';
 import bleCmd from './vendor/common/ble_cmd.js';
 import bleConfig from './vendor/common/ble_config.js';
 import { parseQkeerV2AdvertisInfo, resolveRingProtocol } from '../protocolRegistry';
+import {
+  ensureWechatBluetoothPrivacyAuthorization,
+  normalizeBluetoothPrivacyError
+} from '@/utils/wechatBluetoothPrivacy';
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
 type BleConnectionStateCallback = Parameters<typeof uni.onBLEConnectionStateChange>[0];
@@ -122,7 +126,13 @@ export const createQkeerV2RingAdapter = (state: RingBleState, runtime?: RingBleR
   };
 
   const initBluetooth = async () => {
-    const result = await bleManager.openBluetoothAdapter();
+    await ensureWechatBluetoothPrivacyAuthorization();
+    let result: unknown;
+    try {
+      result = await bleManager.openBluetoothAdapter();
+    } catch (error) {
+      throw normalizeBluetoothPrivacyError(error);
+    }
     registerConnectionStateListener();
     runtime?.onBluetoothReadyChange?.(true);
     return result;

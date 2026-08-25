@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingStore, useUserStore } from '@/stores';
 import { tryClaimLegacyBleCommandSession } from '@/sdk/ring-ble/legacy/commandSession';
+import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 
 type AnyRecord = Record<string, any>;
 type DebugStatus = 'info' | 'success' | 'error';
@@ -14,7 +15,9 @@ type CommandKey =
   | 'deviceTime'
   | 'firmware'
   | 'software'
-  | 'historyAll';
+  | 'historyAll'
+  | 'collectPeriod'
+  | 'factoryReset';
 
 type DebugLog = {
   id: number;
@@ -43,6 +46,8 @@ const ble = useRingBLE() as any;
 const logs = ref<DebugLog[]>([]);
 const runningKey = ref<CommandKey | ''>('');
 const logSeq = ref(0);
+const collectPeriodOptions = [60, 90, 120];
+const testingCollectPeriodMinutes = ref(0);
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
 
 const unwrap = <T = unknown>(value: any): T => {
@@ -407,6 +412,111 @@ const commandRows = computed(() =>
   }))
 );
 
+const runCollectPeriodTest = async (targetMinutes: number) => {
+  if (runningKey.value) return;
+
+  const targetSeconds = targetMinutes * 60;
+  const startedAt = Date.now();
+  const commandTarget: AnyRecord = {
+    ...currentDevice.value,
+    advertis: currentDevice.value.advertis ? { ...currentDevice.value.advertis } : undefined
+  };
+  const releaseCommandSession = tryClaimLegacyBleCommandSession(12000, {
+    reason: 'ble-command-debug:collect-period',
+    caller: 'bleCommandDebug.runCollectPeriodTest',
+    deviceId: commandTarget.deviceId || commandTarget.mac || commandTarget.uniMacId || ''
+  });
+  if (!releaseCommandSession) {
+    uni.showToast({ title: '设备正在同步，请稍后重试', icon: 'none' });
+    return;
+  }
+
+  runningKey.value = 'collectPeriod';
+  testingCollectPeriodMinutes.value = targetMinutes;
+  let setAckError = '';
+  pushLog('采集周期 - 开始测试', 'info', {
+    targetMinutes,
+    targetSeconds,
+    deviceId: commandTarget.deviceId || '-',
+    mac: commandTarget.mac || commandTarget.uniMacId || '-'
+  });
+  appendRingDiagnosticLog('BLE COMMAND DEBUG', 'collect-period-test-start', {
+    targetMinutes,
+    targetSeconds,
+    deviceId: commandTarget.deviceId || '',
+    deviceMac: commandTarget.mac || commandTarget.uniMacId || ''
+  });
+
+  try {
+    if (typeof ble.waitForParsedData !== 'function') throw new Error('当前 BLE 适配器不支持回读等待');
+    if (typeof ble.sendCollectPeriodSettingCommand !== 'function') throw new Error('当前设备不支持采集周期设置');
+    if (typeof ble.readCollectPeriodCommand !== 'function') throw new Error('当前设备不支持采集周期回读');
+
+    const setAckPromise = ble
+      .waitForParsedData((parsed: AnyRecord) => parsed?.type === 'collect_period_set', 3000)
+      .catch((error: unknown) => {
+        setAckError = stringify(error);
+        return null;
+      });
+    await ble.sendCollectPeriodSettingCommand(targetSeconds);
+    const setAck = await setAckPromise;
+    if (setAck && setAck.status && setAck.status !== 'success') {
+      throw new Error('设备拒绝采集周期设置');
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    const readResultPromise = ble.waitForParsedData(
+      (parsed: AnyRecord) => parsed?.type === 'collect_period_read',
+      3500
+    );
+    await ble.readCollectPeriodCommand();
+    const readResult: AnyRecord = await readResultPromise;
+    const actualSeconds = Number(readResult?.period);
+    if (!Number.isFinite(actualSeconds) || actualSeconds <= 0) {
+      throw new Error('设备回读的采集周期无效');
+    }
+
+    const actualMinutes = actualSeconds / 60;
+    const matched = actualSeconds === targetSeconds;
+    const result = {
+      targetMinutes,
+      targetSeconds,
+      actualMinutes,
+      actualSeconds,
+      matched,
+      setAckStatus: setAck?.status || 'missing',
+      setAckError,
+      elapsedMs: Date.now() - startedAt,
+      raw: readResult?.raw
+    };
+    pushLog(
+      matched ? '采集周期 - 测试成功' : '采集周期 - 设备值不一致',
+      matched ? 'success' : 'error',
+      result
+    );
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'collect-period-test-result', result);
+    uni.showToast({
+      title: matched ? `设备实际 ${actualMinutes} 分钟` : `目标${targetMinutes}，实际${actualMinutes}分钟`,
+      icon: matched ? 'success' : 'none'
+    });
+  } catch (error) {
+    const result = {
+      targetMinutes,
+      targetSeconds,
+      setAckError,
+      elapsedMs: Date.now() - startedAt,
+      error: stringify(error)
+    };
+    pushLog('采集周期 - 测试失败', 'error', result);
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'collect-period-test-failed', result);
+    uni.showToast({ title: '采集周期测试失败', icon: 'none' });
+  } finally {
+    releaseCommandSession();
+    runningKey.value = '';
+    testingCollectPeriodMinutes.value = 0;
+  }
+};
+
 const runCommand = async (config: CommandConfig) => {
   if (runningKey.value) return;
   // Keep an immutable identity for the whole command. A physical disconnect
@@ -510,6 +620,47 @@ const clearLogs = () => {
   logs.value = [];
 };
 
+const jumpOtaUpgrade = () => {
+  uni.navigateTo({ url: '/pagesA/mines/otaUpgrade' });
+};
+
+const executeFactoryReset = async () => {
+  if (runningKey.value) return;
+  runningKey.value = 'factoryReset';
+  pushLog('恢复出厂设置 - 开始', 'info', {
+    deviceId: currentDevice.value.deviceId || '-',
+    mac: currentDevice.value.mac || currentDevice.value.uniMacId || '-'
+  });
+  try {
+    const ready = await ble.ensureCommunicationReady?.();
+    if (!ready) throw new Error('设备未连接，请重新连接后再试');
+    if (typeof ble.sendFactoryResetWithTimeCommand !== 'function') {
+      throw new Error('当前设备不支持恢复出厂设置');
+    }
+    await ble.sendFactoryResetWithTimeCommand();
+    pushLog('恢复出厂设置 - 命令已发送', 'success', '设备将清除数据并重新启动');
+    uni.showToast({ title: '恢复命令已发送', icon: 'success' });
+  } catch (error) {
+    pushLog('恢复出厂设置 - 失败', 'error', error);
+    uni.showToast({ title: '恢复出厂失败', icon: 'none' });
+  } finally {
+    runningKey.value = '';
+  }
+};
+
+const handleFactoryReset = () => {
+  if (runningKey.value) return;
+  uni.showModal({
+    title: '恢复出厂设置',
+    content: '此操作会清除戒指内的数据，确定继续吗？',
+    confirmText: '确定恢复',
+    confirmColor: '#ef4444',
+    success: (result) => {
+      if (result.confirm) void executeFactoryReset();
+    }
+  });
+};
+
 onBeforeUnmount(() => {
   pendingTimers.forEach((timer) => clearTimeout(timer));
   pendingTimers.clear();
@@ -547,6 +698,47 @@ onBeforeUnmount(() => {
         </button>
       </view>
       <view class="hint">用于临时验证 D7 等设备命令回执。血氧会等待 30 秒，超时会明确记录“未收到回执”。</view>
+
+      <view class="period-test">
+        <view class="period-test-head">
+          <view>
+            <view class="period-test-title">采集周期写入回读</view>
+            <view class="period-test-desc">分别写入 60 / 90 / 120 分钟，再读取设备中的实际值</view>
+          </view>
+        </view>
+        <view class="period-button-grid">
+          <button
+            v-for="minutes in collectPeriodOptions"
+            :key="minutes"
+            class="period-test-btn"
+            :class="{ running: runningKey === 'collectPeriod' && testingCollectPeriodMinutes === minutes }"
+            :disabled="Boolean(runningKey)"
+            @click="runCollectPeriodTest(minutes)"
+          >
+            {{ runningKey === 'collectPeriod' && testingCollectPeriodMinutes === minutes ? '测试中...' : `${minutes} 分钟` }}
+          </button>
+        </view>
+      </view>
+
+      <view class="period-test">
+        <view class="period-test-head">
+          <view>
+            <view class="period-test-title">设备维护</view>
+            <view class="period-test-desc">仅供测试人员执行 OTA 或恢复出厂设置</view>
+          </view>
+        </view>
+        <view class="maintenance-button-grid">
+          <button class="period-test-btn" :disabled="Boolean(runningKey)" @click="jumpOtaUpgrade">OTA 升级</button>
+          <button
+            class="period-test-btn danger"
+            :class="{ running: runningKey === 'factoryReset' }"
+            :disabled="Boolean(runningKey)"
+            @click="handleFactoryReset"
+          >
+            {{ runningKey === 'factoryReset' ? '恢复中...' : '恢复出厂设置' }}
+          </button>
+        </view>
+      </view>
     </view>
 
     <view class="debug-card">
@@ -683,6 +875,67 @@ onBeforeUnmount(() => {
   color: #6b7280;
   font-size: 22rpx;
   line-height: 1.5;
+}
+
+.period-test {
+  margin-top: 28rpx;
+  padding-top: 26rpx;
+  border-top: 1rpx solid #e5e7eb;
+}
+
+.period-test-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24rpx;
+}
+
+.period-test-title {
+  color: #111827;
+  font-size: 28rpx;
+  font-weight: 700;
+}
+
+.period-test-desc {
+  margin-top: 8rpx;
+  color: #6b7280;
+  font-size: 21rpx;
+  line-height: 1.4;
+}
+
+.period-button-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14rpx;
+  margin-top: 22rpx;
+}
+
+.maintenance-button-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14rpx;
+  margin-top: 22rpx;
+}
+
+.period-test-btn {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 20rpx;
+  color: #fff;
+  background: #3478f6;
+  font-size: 26rpx;
+  line-height: 78rpx;
+}
+
+.period-test-btn.running,
+.period-test-btn[disabled] {
+  color: #fff;
+  background: #94a3b8;
+}
+
+.period-test-btn.danger {
+  background: #ef4444;
 }
 
 .empty {

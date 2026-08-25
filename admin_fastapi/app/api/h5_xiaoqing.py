@@ -42,6 +42,7 @@ async def create_h5_session_ticket(
 
 
 @auth_router.post("/h5/auth/exchange")
+@auth_router.post("/app/h5/auth/exchange")
 async def exchange_h5_session_ticket(
     request: Request,
     db: Session = Depends(get_db),
@@ -95,50 +96,94 @@ def _freshness(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bounded_score(value: Any) -> int | None:
+    score = _integer(value)
+    return max(0, min(100, score)) if score is not None else None
+
+
+def _average_score(summary: dict[str, Any], *keys: str) -> int | None:
+    values = [_bounded_score(summary.get(key)) for key in keys]
+    available = [value for value in values if value is not None]
+    return round(sum(available) / len(available)) if available else None
+
+
+def _score_status(score: int | None) -> str:
+    if score is None:
+        return "数据不足"
+    if score >= 85:
+        return "优秀"
+    if score >= 70:
+        return "良好"
+    if score >= 55:
+        return "一般"
+    return "待改善"
+
+
 def _today_cards(summary: dict[str, Any]) -> list[dict[str, Any]]:
-    stress = _integer(summary.get("stressAvg"))
-    sleep_score = _integer(summary.get("sleepScore"))
-    steps = _integer(summary.get("stepCount"), 0) or 0
-    vital_values = [
-        _number(summary.get("heartRateAvg")),
-        _number(summary.get("hrvAvg")),
-        _number(summary.get("spo2Avg")),
-        _number(summary.get("temperatureAvg")),
-    ]
-    vital_count = len([value for value in vital_values if value is not None])
+    # Keep the same score semantics as /app/data/balanceScore. Raw stress,
+    # steps, or the number of available vital fields are not comparable scores.
+    stress_score = _bounded_score(summary.get("stressScore"))
+    stress_source = "algorithm"
+    if stress_score is None:
+        stress = _number(summary.get("stressAvg"))
+        stress_score = _bounded_score(100 - stress) if stress is not None else None
+        stress_source = "derived_from_stress_avg" if stress is not None else "missing"
+
+    sleep_score = _bounded_score(summary.get("sleepScore"))
+    activity_score = _bounded_score(summary.get("motionScore"))
+    activity_source = "algorithm"
+    steps = _integer(
+        summary.get("stepCount")
+        if summary.get("stepCount") is not None
+        else summary.get("totalSteps", summary.get("steps"))
+    )
+    if activity_score is None and steps is not None:
+        activity_score = _bounded_score(steps / 60)
+        activity_source = "derived_from_steps"
+    elif activity_score is None:
+        activity_source = "missing"
+
+    vital_score = _average_score(summary, "heartRateScore", "spo2Score", "temperatureScore", "hrvScore")
     return [
         {
             "type": "stress",
             "title": "心情与压力",
-            "status": "偏高" if stress is not None and stress >= 60 else ("平稳" if stress is not None else "数据不足"),
-            "value": stress,
-            "summary": "压力升高时，优先选择短时低风险放松。" if stress is not None and stress >= 60 else "当前仅作压力趋势观察。",
-            "available": stress is not None,
+            "status": _score_status(stress_score),
+            "value": stress_score,
+            "unit": "分",
+            "summary": f"压力恢复评分 {_score_status(stress_score)}，分数越高状态越好。",
+            "available": stress_score is not None,
+            "scoreSource": stress_source,
         },
         {
             "type": "sleep",
             "title": "昨夜睡眠",
-            "status": str(sleep_score) if sleep_score is not None else "数据不足",
+            "status": _score_status(sleep_score),
             "value": sleep_score,
-            "summary": "结合睡眠时长、分期和规律性观察恢复状态。",
+            "unit": "分",
+            "summary": f"睡眠综合评分 {_score_status(sleep_score)}，结合时长、分期和规律性。",
             "available": sleep_score is not None,
+            "scoreSource": "algorithm" if sleep_score is not None else "missing",
         },
         {
             "type": "activity",
             "title": "今日活动",
-            "status": str(steps) if summary else "数据不足",
-            "value": steps if summary else None,
-            "unit": "步",
-            "summary": "先从轻步行和减少久坐开始。",
-            "available": bool(summary),
+            "status": _score_status(activity_score),
+            "value": activity_score,
+            "unit": "分",
+            "summary": f"活动评分 {_score_status(activity_score)}" + (f"，今日 {steps} 步。" if steps is not None else "。"),
+            "available": activity_score is not None,
+            "scoreSource": activity_source,
         },
         {
             "type": "cardio",
             "title": "身体信号",
-            "status": "平稳" if vital_count >= 2 else "数据不足",
-            "value": vital_count,
-            "summary": "心率、HRV、血氧和体温仅用于趋势观察。",
-            "available": vital_count > 0,
+            "status": _score_status(vital_score),
+            "value": vital_score,
+            "unit": "分",
+            "summary": f"生命体征综合评分 {_score_status(vital_score)}，仅用于趋势观察。",
+            "available": vital_score is not None,
+            "scoreSource": "algorithm" if vital_score is not None else "missing",
         },
     ]
 

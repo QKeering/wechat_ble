@@ -190,7 +190,7 @@ const getProcessedOption = () => {
   } as any;
   applyMetricSleepRangeAxisStyle(newOption, axisData);
   // 时间轴先确定布局，再统一套用新版折线样式，避免 grid 被旧配置覆盖。
-  applyVitalSignsLineStyle(newOption);
+  applyVitalSignsLineStyle(newOption, '#ff5a5f', 'heartRate');
   return newOption;
 };
 const initChart = async () => {

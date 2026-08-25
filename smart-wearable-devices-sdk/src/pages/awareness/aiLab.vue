@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { onLoad, onShow, onUnload } from '@dcloudio/uni-app';
-import { getAiLabStatus, requestH5Ticket } from '@/common/api/aiLab';
+import { getAiLabStatus } from '@/common/api/aiLab';
 import AiHealthAgentEntry from '@/pages/health/components/AiHealthAgentEntry.vue';
 
 enum APPLY_STATUS {
@@ -16,8 +16,34 @@ const jumpUrl = ref('');
 const remark = ref('');
 const isLoading = ref(false);
 const isOpeningH5 = ref(false);
-const XIAOQING_BASE_URL = 'https://sh.qkeering.com/xiaoqing/';
-const XIAOQING_TODAY_SCENE_ID = 'xiaoqing_today';
+const isXiaoqingH5Url = (value: string) =>
+  /^https:\/\/sh\.qkeering\.com\/xiaoqin(?:g)?(?:\/|[?#]|$)/i.test(String(value || '').trim());
+const openFullWebviewUrl = (value: string, needsXiaoqingTicket = false) => {
+  const handoffId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const storageKey = `qkeer:webview-handoff:${handoffId}`;
+  const targetPage = '/pages/webview-custom/webview-custom';
+  const ticketFlag = needsXiaoqingTicket ? '&xiaoqingTicket=1' : '';
+  // Passing a complete URL through the mini-program route query is fragile:
+  // some runtimes decode it before splitting `&`, which drops ticket params.
+  // Hand off the short-lived URL through Storage and put only an opaque key in
+  // the page route. The WebView page consumes and removes it immediately.
+  try {
+    // iOS WebView can invoke the asynchronous storage callback before the
+    // value is visible to the newly opened page. A synchronous write plus a
+    // read-back makes the handoff deterministic.
+    uni.setStorageSync(storageKey, value);
+    const storedValue = String(uni.getStorageSync(storageKey) || '').trim();
+    if (storedValue !== value.trim()) throw new Error('WebView URL handoff verification failed');
+    uni.navigateTo({ url: `${targetPage}?handoff=${encodeURIComponent(handoffId)}${ticketFlag}` });
+  } catch (error) {
+    console.warn('[AiLab] URL Storage 交接失败，使用路由参数降级', error);
+    // Keep the authentication marker on the fallback route as well. Missing
+    // this flag caused iOS to open Xiaoqing without requesting a ticket.
+    uni.navigateTo({
+      url: `${targetPage}?url=${encodeURIComponent(value)}${ticketFlag}`
+    });
+  }
+};
 
 const actionText = computed(() => {
   if (isLoading.value || isOpeningH5.value) return '加载中';
@@ -34,40 +60,20 @@ const actionText = computed(() => {
 });
 
 const openApprovedPage = async () => {
-  if (!jumpUrl.value) {
+  const configuredUrl = jumpUrl.value.trim();
+  if (!configuredUrl) {
     uni.showToast({ title: '体验页面暂未配置，请稍后再试', icon: 'none' });
     return;
   }
 
-  let url = jumpUrl.value.trim();
-  if (url === XIAOQING_BASE_URL) {
-    if (isOpeningH5.value) return;
-    isOpeningH5.value = true;
-    try {
-      const response: any = await requestH5Ticket({
-        sceneId: XIAOQING_TODAY_SCENE_ID
-      });
-      const ticket = String(response?.ticket || response?.data?.ticket || '').trim();
-      if (!ticket) throw new Error('H5 ticket 为空');
-      url =
-        `${XIAOQING_BASE_URL}` +
-        `?ticket=${encodeURIComponent(ticket)}` +
-        `&tab=today` +
-        `&sceneId=${XIAOQING_TODAY_SCENE_ID}`;
-    } catch (error) {
-      console.warn('[AiLab] 获取小轻登录票据失败', error);
-      uni.showToast({ title: '登录凭证获取失败，请稍后再试', icon: 'none' });
-      return;
-    } finally {
-      isOpeningH5.value = false;
-    }
-  }
+  if (isOpeningH5.value) return;
+  const url = configuredUrl;
   if (url.startsWith('/pages/')) {
     uni.navigateTo({ url });
     return;
   }
 
-  if (url.includes('#')) {
+  if (!/^https?:\/\//i.test(url) && url.includes('#')) {
     const route = url.substring(url.indexOf('#'));
     uni.navigateTo({
       url: `/pages/webview-custom/webview-custom?route=${encodeURIComponent(route)}`
@@ -75,9 +81,12 @@ const openApprovedPage = async () => {
     return;
   }
 
-  uni.navigateTo({
-    url: `/pages/webview-custom/webview-custom?url=${encodeURIComponent(url)}`
+  console.info('[AiLab] H5 地址已生成', {
+    isXiaoqing: isXiaoqingH5Url(url),
+    hasTicket: /[?&]ticket=/.test(url),
+    hasSceneId: /[?&]sceneId=xiaoqing_today(?:&|#|$)/.test(url)
   });
+  openFullWebviewUrl(url, isXiaoqingH5Url(configuredUrl));
 };
 
 const handleApplyClick = () => {

@@ -14,6 +14,7 @@ import { useRingBleStoreSdk } from './useRingBleStoreSdk';
 import { getRingDeviceStableIdentity, isSameRingDevice } from './useRingBleSdk';
 import type { UseRingBleSdkOptions } from './useRingBleSdk';
 import { getRwDiagnosticCommandLock, type RwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
+import { reportDeviceVersions } from '@/common/api/device';
 
 export interface UseRingBusinessControllerOptions extends UseRingBleSdkOptions {
   connectTimeoutMs?: number;
@@ -197,6 +198,80 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
   let isAutoRefreshPaused = false;
   let scanFreshnessTimer: ReturnType<typeof setInterval> | null = null;
   let businessDataFreshnessTimer: ReturnType<typeof setInterval> | null = null;
+  let lastReportedDeviceVersionSignature = '';
+
+  const pickVersionText = (...values: unknown[]) => {
+    for (const value of values) {
+      const text = String(value ?? '').trim();
+      if (text && text !== '-' && text !== '--') return text;
+    }
+    return '';
+  };
+
+  const getDeviceVersionSnapshot = () => {
+    const device = ble.deviceInfo.value as Record<string, any>;
+    const metricValues = metrics.value as Record<string, any>;
+    return {
+      firmwareVersion: pickVersionText(
+        metricValues.firmwareVersion,
+        metricValues.hardwareVersion,
+        device.firmwareVersion,
+        device.firmware_version,
+        device.hardwareVersion,
+        device.hardware_version
+      ),
+      softwareVersion: pickVersionText(
+        metricValues.softwareVersion,
+        metricValues.uiVersion,
+        device.softwareVersion,
+        device.software_version,
+        device.uiVersion,
+        device.ui_version
+      )
+    };
+  };
+
+  const getCachedDeviceInfoCommandOptions = (includeDeviceInfo: boolean) => {
+    const versions = getDeviceVersionSnapshot();
+    return {
+      includeDeviceInfo,
+      includeBattery: includeDeviceInfo,
+      includeFirmwareVersion: includeDeviceInfo && !versions.firmwareVersion,
+      includeSoftwareVersion: includeDeviceInfo && !versions.softwareVersion
+    };
+  };
+
+  const reportCurrentDeviceVersions = async () => {
+    if (isNodeRuntime()) return;
+    const versions = getDeviceVersionSnapshot();
+    if (!versions.firmwareVersion && !versions.softwareVersion) return;
+    const device = ble.deviceInfo.value as Record<string, any>;
+    const mac = pickVersionText(device.mac, device.advertis?.macInfo, device.uniMacId);
+    const signature = `${mac}|${versions.firmwareVersion}|${versions.softwareVersion}`;
+    if (signature === lastReportedDeviceVersionSignature) return;
+    try {
+      await reportDeviceVersions({
+        mac,
+        firmwareVersion: versions.firmwareVersion || undefined,
+        softwareVersion: versions.softwareVersion || undefined
+      });
+      lastReportedDeviceVersionSignature = signature;
+      ble.ringStore.setDeviceInfo({
+        ...ble.deviceInfo.value,
+        ...(versions.firmwareVersion ? { firmwareVersion: versions.firmwareVersion } : {}),
+        ...(versions.softwareVersion ? { softwareVersion: versions.softwareVersion } : {})
+      });
+      appendRingDiagnosticLog('RW FLOW', 'device-version-cache-reported', {
+        mac,
+        ...versions
+      });
+    } catch (error) {
+      appendRingDiagnosticLog('RW FLOW', 'device-version-cache-report-failed', {
+        mac,
+        message: formatBleErrorMessage(error, 'version cache report failed')
+      });
+    }
+  };
 
   const isBusinessRequestInFlight = () =>
     Boolean(refreshPromise) ||
@@ -1064,11 +1139,12 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       includeHistorySnapshot,
       forceDeviceInfo: refreshOptions.forceDeviceInfo
     });
+    const deviceInfoCommandOptions = getCachedDeviceInfoCommandOptions(includeDeviceInfo);
     const refreshTask = ble.refreshBusinessMetrics({
       timeoutMs,
       includeCollectPeriod: false,
       includeDeviceTime: false,
-      includeDeviceInfo,
+      ...deviceInfoCommandOptions,
       includeRealtimeMetrics,
       realtimeMetricNames: refreshOptions.realtimeMetricNames,
       includeHistorySnapshot
@@ -1093,6 +1169,9 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         createRefreshTimeoutResult
       );
       const result = resolveRwDeviceInfoRefreshResult(rawResult, normalizedDataLengthAtStart);
+      if (deviceInfoCommandOptions.includeFirmwareVersion || deviceInfoCommandOptions.includeSoftwareVersion) {
+        void reportCurrentDeviceVersions();
+      }
       if (requestId === refreshRequestId) {
         lastRefreshResult.value = silent ? createSilentVisibleRefreshResult(result, lastRefreshResult.value) : result;
         lastRefreshAt = Date.now();
@@ -1241,10 +1320,11 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     const requestId = (refreshRequestId += 1);
     const timeoutMs = getRefreshTimeoutMs();
     const normalizedDataLengthAtStart = getNormalizedDataLength();
+    const deviceInfoCommandOptions = getCachedDeviceInfoCommandOptions(true);
     const deviceInfoRefreshTask = withTimeout(
       ble.refreshBusinessMetrics({
         timeoutMs,
-        includeDeviceInfo: true,
+        ...deviceInfoCommandOptions,
         includeDeviceTime: false,
         includeCollectPeriod: false,
         includeRealtimeMetrics: false,
@@ -1257,6 +1337,9 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     let result: RefreshLegacyBusinessMetricsResult;
     try {
       result = resolveRwDeviceInfoRefreshResult(await deviceInfoRefreshTask, normalizedDataLengthAtStart);
+      if (deviceInfoCommandOptions.includeFirmwareVersion || deviceInfoCommandOptions.includeSoftwareVersion) {
+        void reportCurrentDeviceVersions();
+      }
     } finally {
       if (refreshPromise === deviceInfoRefreshTask) {
         refreshPromise = null;

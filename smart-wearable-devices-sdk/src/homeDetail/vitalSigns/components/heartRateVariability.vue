@@ -98,6 +98,31 @@ const formatIntegerRangeStat = (value: unknown, fallback = '00') => {
   const validParts = parts.filter(Boolean);
   return validParts.length === 2 ? `${validParts[0]}-${validParts[1]}` : formatIntegerStat(value, fallback);
 };
+const hrvDisplayMode = computed(() => props.hrvData?.displayMode || 'real');
+const isHrvProxy = computed(() => hrvDisplayMode.value === 'proxy');
+const isHrvEmpty = computed(() => hrvDisplayMode.value === 'empty');
+const hasHrvMetric = computed(() => {
+  const values = [
+    props.hrvData?.newValue,
+    props.hrvData?.avgValue,
+    props.hrvData?.maxValue,
+    props.hrvData?.proxyMs,
+    ...(Array.isArray(props.hrvData?.chartData) ? props.hrvData.chartData.map((item: Point) => item?.value) : [])
+  ];
+  return values.some((value) => {
+    const numeric = Number(String(value ?? '').replace(/[^\d.-]/g, ''));
+    return Number.isFinite(numeric) && numeric > 0 && numeric <= 300;
+  });
+});
+const showHrvMetric = computed(() => !isHrvEmpty.value && hasHrvMetric.value);
+const hrvFallbackStatus = computed(() => {
+  if (isHrvProxy.value) return props.hrvData?.statusText || '趋势参考';
+  return props.hrvData?.statusText || '暂无数据';
+});
+const hrvFallbackTips = computed(() => {
+  if (props.hrvData?.tips) return props.hrvData.tips;
+  return isHrvProxy.value ? '基于心率趋势估算，仅供参考' : '数据不足，暂无法估算';
+});
 const hrvYAxisMax = computed(() => {
   const values = (Array.isArray(props.hrvData?.chartData) ? props.hrvData.chartData : [])
     .map((item: Point) => Number(item?.value))
@@ -201,7 +226,7 @@ const getProcessedOption = () => {
   } as any;
   applyMetricSleepRangeAxisStyle(newOption, axisData);
   // 时间轴先确定布局，再统一套用新版折线样式，避免 grid 被旧配置覆盖。
-  applyVitalSignsLineStyle(newOption);
+  applyVitalSignsLineStyle(newOption, '#ff5a5f', 'hrv');
   return newOption;
 };
 const initChart = async () => {
@@ -420,21 +445,27 @@ onUnload(() => {
 <template>
   <view class="score-card mb-30">
     <view class="metric-header">
-      <view class="metric-title">心率变异性<slot></slot></view>
+      <view class="metric-title">
+        心率变异性<slot></slot>
+      </view>
       <view v-if="isHeartTate" class="textBox" @click="handleMeasure">
         <uv-image src="/static/images/homeDetail/heartLove.png" width="40rpx" height="40rpx" mode="aspectFit"></uv-image>
         <text>{{ measureText }}</text>
       </view>
     </view>
     <view class="metric-body" @click="jumpDetail">
-      <view class="metric-current">
+      <view v-if="showHrvMetric" class="metric-current">
         <uv-image src="/static/images/homeDetail/heartLove.png" width="44rpx" height="44rpx" mode="aspectFit"></uv-image>
         <view class="metric-current-copy">
           <text class="metric-current-value">{{ formatIntegerStat(isHeartTate ? hrvData?.newValue : hrvData?.avgValue) }}</text>
-          <text class="metric-current-unit">%</text>
+          <text class="metric-current-unit">ms</text>
         </view>
       </view>
-      <view class="metric-chart-wrap">
+      <view v-else class="hrv-fallback-panel">
+        <text class="hrv-fallback-status">{{ hrvFallbackStatus }}</text>
+        <text class="hrv-fallback-tips">{{ hrvFallbackTips }}</text>
+      </view>
+      <view v-if="showHrvMetric" class="metric-chart-wrap">
         <MetricYAxisLabels :min="0" :max="hrvYAxisMax" :split-number="hrvYAxisSplitNumber" />
         <view class="metric-echart-box flex ai-center jc-center">
           <l-echart :key="metricChartKey" ref="chartRef" @finished="initChart" style="width: 100%; height: 340rpx; margin: 0"></l-echart>
@@ -449,7 +480,7 @@ onUnload(() => {
         </view>
       </view>
 
-      <view class="stats">
+      <view v-if="showHrvMetric" class="stats">
         <view class="stat-item">
           <view class="stat-value">{{ formatIntegerStat(hrvData?.avgValue) }}</view>
           <view class="stat-label">心率变异性</view>
@@ -518,6 +549,43 @@ onUnload(() => {
   font-size: 38rpx;
   font-weight: 500;
   line-height: 1.2;
+}
+
+.estimate-tag {
+  margin-left: 12rpx;
+  padding: 4rpx 12rpx;
+  border-radius: 14rpx;
+  color: #2e70fc;
+  background: #edf3ff;
+  font-size: 22rpx;
+  font-weight: 400;
+}
+
+.hrv-fallback-panel {
+  min-height: 310rpx;
+  margin-top: 24rpx;
+  border-radius: 28rpx;
+  background: linear-gradient(145deg, #f7f9ff, #fff8f8);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 36rpx;
+  box-sizing: border-box;
+}
+
+.hrv-fallback-status {
+  color: #111827;
+  font-size: 48rpx;
+  font-weight: 600;
+}
+
+.hrv-fallback-tips {
+  margin-top: 20rpx;
+  color: #8a94a6;
+  font-size: 26rpx;
+  line-height: 1.6;
+  text-align: center;
 }
 
 .textBox {

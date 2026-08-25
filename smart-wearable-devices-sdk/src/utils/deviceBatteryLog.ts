@@ -1,5 +1,5 @@
 import { reportDeviceBatteryLog } from '@/common/api/device';
-import { getRawBatteryPercent } from '@/utils/batteryDisplay';
+import { getRawBatteryPercent, mapBatteryPercentForDisplay } from '@/utils/batteryDisplay';
 import { normalizeDeviceIdentityMac } from '@/utils/deviceIdentityCache';
 
 const BATTERY_LOG_DEDUP_MS = 5 * 1000;
@@ -12,6 +12,7 @@ export interface ReportRealBatteryLogOptions {
   userId?: unknown;
   mac?: unknown;
   battery?: unknown;
+  displayBattery?: unknown;
   source?: string;
   recordTime?: string | Date;
 }
@@ -49,8 +50,10 @@ export const reportRealBatteryLog = async (options: ReportRealBatteryLogOptions)
   const now = Date.now();
   pruneBatteryLogReportCache(now);
   const realBattery = Math.round(rawBattery);
+  const mappedDisplayBattery = mapBatteryPercentForDisplay(options.displayBattery ?? rawBattery);
+  const displayBattery = mappedDisplayBattery == null ? realBattery : Math.round(mappedDisplayBattery);
   const minuteBucket = Math.floor(now / BATTERY_LOG_DEDUP_MS);
-  const signature = `${userId}|${deviceMac}|${realBattery}|${minuteBucket}`;
+  const signature = `${userId}|${deviceMac}|${realBattery}|${displayBattery}|${minuteBucket}`;
   const cachedAt = batteryLogReportCache.get(signature) || 0;
   if (now - cachedAt < BATTERY_LOG_DEDUP_MS) return false;
   batteryLogReportCache.set(signature, now);
@@ -61,6 +64,7 @@ export const reportRealBatteryLog = async (options: ReportRealBatteryLogOptions)
         userId,
         deviceMac,
         realBattery,
+        displayBattery,
         recordTime: normalizeBatteryRecordTime(options.recordTime),
         source: options.source
       },

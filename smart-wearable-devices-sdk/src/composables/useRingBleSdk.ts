@@ -36,6 +36,10 @@ import {
   markDeviceIdentityCacheConnected,
   markDeviceIdentityCacheFailed
 } from '@/utils/deviceIdentityCache';
+import {
+  isBluetoothPrivacyError,
+  isWechatBluetoothPrivacyScopeBlocked
+} from '@/utils/wechatBluetoothPrivacy';
 
 type CompatRwHealthDataName =
   | RwHealthDataName
@@ -2379,6 +2383,16 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     return reconnectByScanning(targetWithProtocol);
   };
   const reconnect = async () => {
+    if (isWechatBluetoothPrivacyScopeBlocked()) {
+      reconnectStatus.value = 'failed';
+      reconnectResult.value = false;
+      writeRwStoreLog('reconnect-privacy-blocked-skip', {
+        retryable: false,
+        current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+        expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+      });
+      return false;
+    }
     if (reconnectInFlight) {
       const currentDevice = deviceInfo.value;
       writeRwStoreLog('reconnect-reuse-inflight', {
@@ -2408,6 +2422,12 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       if (connected) {
         autoReconnectFailureCount = 0;
         autoReconnectRetryAfter = 0;
+      } else if (isWechatBluetoothPrivacyScopeBlocked()) {
+        writeRwStoreLog('reconnect-privacy-blocked-no-retry', {
+          retryable: false,
+          current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+          expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+        });
       } else {
         autoReconnectFailureCount += 1;
         const retryDelayMs = Math.min(
@@ -2424,6 +2444,17 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       }
       return connected;
     } catch (error) {
+      if (isBluetoothPrivacyError(error) || isWechatBluetoothPrivacyScopeBlocked()) {
+        reconnectStatus.value = 'failed';
+        reconnectResult.value = false;
+        writeRwStoreLog('reconnect-privacy-blocked-no-retry', {
+          retryable: false,
+          error: error instanceof Error ? error.message : String(error),
+          current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+          expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+        });
+        return false;
+      }
       autoReconnectFailureCount += 1;
       const retryDelayMs = Math.min(
         AUTO_RECONNECT_BACKOFF_MAX_MS,
@@ -2461,6 +2492,17 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
     const attemptRecovery = () => {
       if (recoveryToken !== legacyDisconnectRecoveryToken) return;
+      if (isWechatBluetoothPrivacyScopeBlocked()) {
+        reconnectStatus.value = 'failed';
+        reconnectResult.value = false;
+        clearLegacyDisconnectRecoveryWait();
+        writeRwStoreLog('legacy-physical-disconnect-recovery-privacy-blocked', {
+          retryable: false,
+          recoveryAttempt,
+          target: summarizeRingDeviceForStoreLog(target)
+        });
+        return;
+      }
       const exclusive = getLegacyBleHistoryExclusiveSnapshot(target);
       if (exclusive.active || uploadingStatus.value === 'uploading') {
         writeRwStoreLog('legacy-physical-disconnect-recovery-wait', {
@@ -2538,6 +2580,10 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           if (!success) {
             reconnectStatus.value = 'failed';
             reconnectResult.value = false;
+            if (isWechatBluetoothPrivacyScopeBlocked()) {
+              clearLegacyDisconnectRecoveryWait();
+              return;
+            }
             const retryDelayMs = Math.max(500, autoReconnectRetryAfter - Date.now());
             legacyDisconnectRecoveryTimer = setTimeout(attemptRecovery, retryDelayMs);
           }
@@ -2552,6 +2598,10 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
             maxRecoveryAttempts,
             message: error instanceof Error ? error.message : String(error)
           });
+          if (isBluetoothPrivacyError(error) || isWechatBluetoothPrivacyScopeBlocked()) {
+            clearLegacyDisconnectRecoveryWait();
+            return;
+          }
           const retryDelayMs = Math.max(500, autoReconnectRetryAfter - Date.now());
           legacyDisconnectRecoveryTimer = setTimeout(attemptRecovery, retryDelayMs);
         });

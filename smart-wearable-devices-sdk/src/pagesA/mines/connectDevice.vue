@@ -10,6 +10,11 @@ import {
 import { getRingDeviceStableIdentity, isSameRingDevice } from '@/composables/useRingBleSdk';
 import { deviceModelList, getBindInfo } from '@/common/api/device';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import {
+  BLUETOOTH_PRIVACY_REQUIRED_HINT,
+  isBluetoothPrivacyError,
+  isWechatBluetoothPrivacyScopeBlocked
+} from '@/utils/wechatBluetoothPrivacy';
 import { hasBoundRingIdentity } from '@/utils/ringBinding';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import type { DeviceModel } from '@/types/api/device';
@@ -34,6 +39,18 @@ const scanTargetName = ref('');
 const directScan = ref(false);
 const scanTargetAutoConnectDone = ref(false);
 const POST_BINDING_REFRESH_STORAGE_KEY = 'qkeer_post_binding_refresh_at';
+let bluetoothPrivacyPromptShown = false;
+
+const showBluetoothPrivacyPrompt = () => {
+  if (bluetoothPrivacyPromptShown) return;
+  bluetoothPrivacyPromptShown = true;
+  uni.showModal({
+    title: '需要隐私授权',
+    content: `${BLUETOOTH_PRIVACY_REQUIRED_HINT}。如未出现授权窗口，请重新进入小程序后再试。`,
+    showCancel: false,
+    confirmText: '我知道了'
+  });
+};
 
 const picker = ref<any>(null);
 const columns = ref([['全部']]);
@@ -228,6 +245,17 @@ const devices = computed(() => {
 });
 
 const scanBusinessDevices = (options: { force?: boolean; reason?: string } = {}) => {
+  if (isWechatBluetoothPrivacyScopeBlocked()) {
+    autoReconnectStatus.value = 'failed';
+    autoReconnectMessage.value = BLUETOOTH_PRIVACY_REQUIRED_HINT;
+    showBluetoothPrivacyPrompt();
+    appendConnectPageDiagnosticLog('connect-page-scan-privacy-blocked-skip', {
+      reason: options.reason || 'manual',
+      retryable: false,
+      snapshot: getConnectPageSnapshot()
+    });
+    return Promise.resolve();
+  }
   if (hasBoundDevice.value && !isDirectScanMode.value) {
     appendConnectPageDiagnosticLog('connect-page-scan-hidden-bound-device', {
       reason: options.reason || 'bound-device',
@@ -247,7 +275,19 @@ const scanBusinessDevices = (options: { force?: boolean; reason?: string } = {})
     force: options.force === true,
     snapshot: getConnectPageSnapshot()
   });
-  return ring.scanForBusinessDevices();
+  return ring.scanForBusinessDevices().catch((error) => {
+    if (!isBluetoothPrivacyError(error) && !isWechatBluetoothPrivacyScopeBlocked()) throw error;
+    stopScan();
+    autoReconnectStatus.value = 'failed';
+    autoReconnectMessage.value = BLUETOOTH_PRIVACY_REQUIRED_HINT;
+    showBluetoothPrivacyPrompt();
+    appendConnectPageDiagnosticLog('connect-page-scan-privacy-blocked', {
+      reason: options.reason || 'manual',
+      retryable: false,
+      message: formatBleErrorMessage(error, BLUETOOTH_PRIVACY_REQUIRED_HINT),
+      snapshot: getConnectPageSnapshot()
+    });
+  });
 };
 const loadBoundInfo = async () => {
   try {
@@ -296,6 +336,10 @@ const retryBoundReconnect = async () => {
   } catch (error) {
     autoReconnectStatus.value = 'failed';
     autoReconnectMessage.value = formatBleErrorMessage(error, '绑定设备重连失败，请靠近戒指后重试');
+    if (isBluetoothPrivacyError(error) || isWechatBluetoothPrivacyScopeBlocked()) {
+      autoReconnectMessage.value = BLUETOOTH_PRIVACY_REQUIRED_HINT;
+      showBluetoothPrivacyPrompt();
+    }
     appendConnectPageDiagnosticLog('connect-page-bound-reconnect-error', {
       message: autoReconnectMessage.value,
       snapshot: getConnectPageSnapshot()

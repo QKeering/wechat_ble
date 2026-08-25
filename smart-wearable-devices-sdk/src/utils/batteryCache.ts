@@ -1,7 +1,12 @@
+import { ref } from 'vue';
 import { formatBatteryStatusForDisplay, getRawBatteryPercent } from './batteryDisplay';
 
 const BATTERY_CACHE_KEY_PREFIX = 'qkeer:lastBattery:v1:';
 const BATTERY_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+// Storage itself is not reactive. Pages depend on this revision so a battery
+// update received on one page is reflected immediately on every other page.
+export const batteryDisplayCacheRevision = ref(0);
 
 export type BatteryDisplayCacheRecord = {
   userId: string;
@@ -83,6 +88,7 @@ export const writeBatteryDisplayCache = (params: {
   };
   try {
     uni.setStorageSync(key, record);
+    batteryDisplayCacheRevision.value += 1;
   } catch {
     // cache write failure must not block page rendering.
   }

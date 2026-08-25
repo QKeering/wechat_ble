@@ -1,4 +1,5 @@
 const DEVICE_HISTORY_CHECKPOINT_STORAGE_KEY = 'qkeer:ring-device-history-checkpoints:v1';
+const DEVICE_HISTORY_READ_COMPLETED_STORAGE_KEY = 'qkeer:ring-device-history-read-completed:v1';
 const DEVICE_HISTORY_CHECKPOINT_MAX_COUNT = 80;
 
 export type DeviceHistoryCheckpoint = {
@@ -11,6 +12,8 @@ export type DeviceHistoryCheckpoint = {
   durableTimestamp: number;
   backendAckTimestamp: number;
   emptyReadTimestamp: number;
+  /** Wall-clock time when a BLE 0x36 session confirmed its complete terminal result. */
+  lastHistoryReadCompletedAt: number;
   updatedAt: number;
   emptyReadUpdatedAt: number;
 };
@@ -25,10 +28,48 @@ export const buildHistoryCheckpointKey = (deviceMac: unknown, protocol?: unknown
   return `${normalizedProtocol}:${mac}`;
 };
 
+const readHistoryReadCompletedAtByKey = (): Record<string, number> => {
+  try {
+    const stored = uni.getStorageSync(DEVICE_HISTORY_READ_COMPLETED_STORAGE_KEY);
+    const source = stored && typeof stored === 'object' ? stored as Record<string, unknown> : {};
+    return Object.fromEntries(
+      Object.entries(source)
+        .map(([key, value]) => [key, Math.floor(Number(value || 0))] as const)
+        .filter(([, value]) => Number.isFinite(value) && value > 0)
+    );
+  } catch {
+    return {};
+  }
+};
+
+const writeHistoryReadCompletedAtByKey = (items: Record<string, number>) => {
+  const next = Object.fromEntries(
+    Object.entries(items)
+      .filter(([key, value]) => Boolean(key) && Number.isFinite(value) && value > 0)
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, DEVICE_HISTORY_CHECKPOINT_MAX_COUNT)
+  );
+  try {
+    uni.setStorageSync(DEVICE_HISTORY_READ_COMPLETED_STORAGE_KEY, next);
+  } catch {
+    // Completion persistence must not break Bluetooth sync.
+  }
+};
+
 const normalizeStoredDeviceHistoryCheckpoints = (stored: unknown): DeviceHistoryCheckpoint[] => {
   const list = Array.isArray(stored) ? stored : Array.isArray((stored as any)?.items) ? (stored as any).items : [];
   return list
-    .filter((item: any) => item && item.key && (Number(item.timestamp) > 0 || Number(item.readTimestamp) > 0 || Number(item.emptyReadTimestamp) > 0))
+    .filter(
+      (item: any) =>
+        item &&
+        item.key &&
+        (
+          Number(item.timestamp) > 0 ||
+          Number(item.readTimestamp) > 0 ||
+          Number(item.emptyReadTimestamp) > 0 ||
+          Number(item.lastHistoryReadCompletedAt) > 0
+        )
+    )
     .map((item: any) => {
       const storedBackendAckTimestamp = Math.floor(Number(item.backendAckTimestamp || item.timestamp || 0));
       const storedDurableTimestamp = Math.floor(Number(item.durableTimestamp || 0));
@@ -47,6 +88,9 @@ const normalizeStoredDeviceHistoryCheckpoints = (stored: unknown): DeviceHistory
         durableTimestamp,
         backendAckTimestamp,
         emptyReadTimestamp: Math.floor(Number(item.emptyReadTimestamp || 0)),
+        // Legacy `updatedAt` was also changed by durable persistence and HTTP
+        // ACK bookkeeping, so it cannot prove a BLE history read completed.
+        lastHistoryReadCompletedAt: Math.floor(Number(item.lastHistoryReadCompletedAt || 0)),
         updatedAt: Math.floor(Number(item.updatedAt || 0)),
         emptyReadUpdatedAt: Math.floor(Number(item.emptyReadUpdatedAt || 0))
       };
@@ -83,11 +127,24 @@ const setDeviceHistoryStorageAsync = (key: string, data: unknown): Promise<void>
 
 const writeDeviceHistoryCheckpoints = (items: DeviceHistoryCheckpoint[]) => {
   const next = items
-    .filter((item) => item && item.key && (item.backendAckTimestamp > 0 || item.readTimestamp > 0 || item.emptyReadTimestamp > 0))
+    .filter((item) => item && item.key && (
+      item.backendAckTimestamp > 0 ||
+      item.readTimestamp > 0 ||
+      item.emptyReadTimestamp > 0 ||
+      item.lastHistoryReadCompletedAt > 0
+    ))
     .sort(
       (left, right) =>
-        Math.max(Number(right.updatedAt || 0), Number(right.emptyReadUpdatedAt || 0)) -
-        Math.max(Number(left.updatedAt || 0), Number(left.emptyReadUpdatedAt || 0))
+        Math.max(
+          Number(right.updatedAt || 0),
+          Number(right.emptyReadUpdatedAt || 0),
+          Number(right.lastHistoryReadCompletedAt || 0)
+        ) -
+        Math.max(
+          Number(left.updatedAt || 0),
+          Number(left.emptyReadUpdatedAt || 0),
+          Number(left.lastHistoryReadCompletedAt || 0)
+        )
     )
     .slice(0, DEVICE_HISTORY_CHECKPOINT_MAX_COUNT);
   try {
@@ -100,11 +157,24 @@ const writeDeviceHistoryCheckpoints = (items: DeviceHistoryCheckpoint[]) => {
 
 const writeDeviceHistoryCheckpointsAsync = async (items: DeviceHistoryCheckpoint[]) => {
   const next = items
-    .filter((item) => item && item.key && (item.backendAckTimestamp > 0 || item.readTimestamp > 0 || item.emptyReadTimestamp > 0))
+    .filter((item) => item && item.key && (
+      item.backendAckTimestamp > 0 ||
+      item.readTimestamp > 0 ||
+      item.emptyReadTimestamp > 0 ||
+      item.lastHistoryReadCompletedAt > 0
+    ))
     .sort(
       (left, right) =>
-        Math.max(Number(right.updatedAt || 0), Number(right.emptyReadUpdatedAt || 0)) -
-        Math.max(Number(left.updatedAt || 0), Number(left.emptyReadUpdatedAt || 0))
+        Math.max(
+          Number(right.updatedAt || 0),
+          Number(right.emptyReadUpdatedAt || 0),
+          Number(right.lastHistoryReadCompletedAt || 0)
+        ) -
+        Math.max(
+          Number(left.updatedAt || 0),
+          Number(left.emptyReadUpdatedAt || 0),
+          Number(left.lastHistoryReadCompletedAt || 0)
+        )
     )
     .slice(0, DEVICE_HISTORY_CHECKPOINT_MAX_COUNT);
   await setDeviceHistoryStorageAsync(DEVICE_HISTORY_CHECKPOINT_STORAGE_KEY, next);
@@ -143,7 +213,32 @@ export const getDeviceHistoryCheckpointMeta = (deviceMac: unknown, protocol?: un
   const key = buildHistoryCheckpointKey(deviceMac, protocol);
   if (!key) return null;
   const matched = readDeviceHistoryCheckpoints().find((item) => item.key === key);
-  return matched || null;
+  const independentlyStoredCompletedAt = readHistoryReadCompletedAtByKey()[key] || 0;
+  if (matched) {
+    return {
+      ...matched,
+      lastHistoryReadCompletedAt: Math.max(
+        matched.lastHistoryReadCompletedAt || 0,
+        independentlyStoredCompletedAt
+      )
+    };
+  }
+  if (independentlyStoredCompletedAt <= 0) return null;
+  const deviceMacText = String(deviceMac || '');
+  return {
+    key,
+    deviceMac: deviceMacText,
+    deviceMacNorm: normalizeHistoryCheckpointDeviceMac(deviceMacText),
+    protocol: String(protocol || 'legacy').trim().toLowerCase() || 'legacy',
+    timestamp: 0,
+    readTimestamp: 0,
+    durableTimestamp: 0,
+    backendAckTimestamp: 0,
+    emptyReadTimestamp: 0,
+    lastHistoryReadCompletedAt: independentlyStoredCompletedAt,
+    updatedAt: 0,
+    emptyReadUpdatedAt: 0
+  };
 };
 
 const setCheckpointStage = (
@@ -178,6 +273,7 @@ const setCheckpointStage = (
     durableTimestamp,
     backendAckTimestamp,
     emptyReadTimestamp: nextEmptyReadTimestamp,
+    lastHistoryReadCompletedAt: existing?.lastHistoryReadCompletedAt || 0,
     updatedAt: Date.now(),
     emptyReadUpdatedAt: nextEmptyReadTimestamp > 0 ? existing?.emptyReadUpdatedAt || existing?.updatedAt || 0 : 0
   };
@@ -225,6 +321,7 @@ export const setDeviceHistoryBackendAckCheckpointAsync = async (
     durableTimestamp,
     backendAckTimestamp,
     emptyReadTimestamp: nextEmptyReadTimestamp,
+    lastHistoryReadCompletedAt: existing?.lastHistoryReadCompletedAt || 0,
     updatedAt: Date.now(),
     emptyReadUpdatedAt: nextEmptyReadTimestamp > 0 ? existing?.emptyReadUpdatedAt || existing?.updatedAt || 0 : 0
   };
@@ -233,6 +330,29 @@ export const setDeviceHistoryBackendAckCheckpointAsync = async (
 };
 
 export const setDeviceHistoryCheckpoint = setDeviceHistoryBackendAckCheckpoint;
+
+/**
+ * Persist the completion time of a BLE history read separately from the data
+ * cursor and upload ACK. Call this only after the current 0x36 session reports
+ * a complete terminal result; compensation uploads must never call it.
+ */
+export const setDeviceHistoryReadCompletedAt = (
+  deviceMac: unknown,
+  protocol: unknown,
+  completedAt: unknown = Date.now()
+) => {
+  const numericCompletedAt = Math.floor(Number(completedAt || 0));
+  const key = buildHistoryCheckpointKey(deviceMac, protocol);
+  if (!key || !Number.isFinite(numericCompletedAt) || numericCompletedAt <= 0) return 0;
+  const completionItems = readHistoryReadCompletedAtByKey();
+  const lastHistoryReadCompletedAt = Math.max(
+    completionItems[key] || 0,
+    numericCompletedAt
+  );
+  completionItems[key] = lastHistoryReadCompletedAt;
+  writeHistoryReadCompletedAtByKey(completionItems);
+  return lastHistoryReadCompletedAt;
+};
 
 export const setDeviceHistoryEmptyReadCheckpoint = (deviceMac: unknown, protocol: unknown, timestamp: unknown) => {
   const numericTimestamp = Math.floor(Number(timestamp || 0));
@@ -254,6 +374,7 @@ export const setDeviceHistoryEmptyReadCheckpoint = (deviceMac: unknown, protocol
     durableTimestamp: existing?.durableTimestamp || successfulTimestamp,
     backendAckTimestamp: successfulTimestamp,
     emptyReadTimestamp,
+    lastHistoryReadCompletedAt: existing?.lastHistoryReadCompletedAt || 0,
     updatedAt: existing?.updatedAt || 0,
     emptyReadUpdatedAt: Date.now()
   };

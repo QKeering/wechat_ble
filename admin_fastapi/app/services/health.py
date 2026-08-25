@@ -1598,6 +1598,44 @@ def sleep_summary_from_raw(db: Session, user_id: int, record_date: str) -> dict[
     }
 
 
+def should_prefer_raw_sleep_total(record_total: int | float | None, raw_total: int | float | None) -> bool:
+    """Return True when raw sleep states are clearly more complete.
+
+    L19 uploads contain both raw sleep-state points and client-built sleep
+    segments.  The segments are uploaded in batches and can stop before the
+    final sleeping period while still producing a non-zero total.  Treating any
+    non-zero sleep_record total as canonical therefore hides the complete raw
+    session.  Keep small differences on sleep_record to avoid switching sources
+    for rounding noise, but use raw data when it adds at least 30 minutes and
+    15 percent of the raw session.
+    """
+    try:
+        record_minutes = max(0, int(round(float(record_total or 0))))
+    except (TypeError, ValueError):
+        record_minutes = 0
+    try:
+        raw_minutes = max(0, int(round(float(raw_total or 0))))
+    except (TypeError, ValueError):
+        raw_minutes = 0
+    if raw_minutes <= 0:
+        return False
+    if record_minutes <= 0:
+        return True
+    material_gap = max(30, int(round(raw_minutes * 0.15)))
+    return raw_minutes - record_minutes >= material_gap
+
+
+def resolved_sleep_summary(db: Session, user_id: int, record_date: str) -> dict[str, Any]:
+    record_summary = sleep_summary_from_records(db, user_id, record_date)
+    raw_summary = sleep_summary_from_raw(db, user_id, record_date)
+    if should_prefer_raw_sleep_total(
+        record_summary.get("sleep_total_time"),
+        raw_summary.get("sleep_total_time"),
+    ):
+        return raw_summary
+    return record_summary
+
+
 def ensure_girl_health_table(db: Session) -> None:
     db.execute(
         text(
@@ -1717,9 +1755,7 @@ def calculate_daily_summary(db: Session, user_id: int, record_date: str | date) 
     if not has_direct_stress:
         effective_stress_avg = estimate_stress_from_hrv(data.get("hrv_avg"))
     stress_score = max(0, 100 - int(float(effective_stress_avg))) if effective_stress_avg is not None else None
-    sleep_data = sleep_summary_from_records(db, user_id, record_date)
-    if not sleep_data.get("sleep_total_time"):
-        sleep_data = sleep_summary_from_raw(db, user_id, record_date)
+    sleep_data = resolved_sleep_summary(db, user_id, record_date)
     sleep_score = sleep_data.get("sleep_score")
     score_values = [item for item in (motion_score, heart_score, hrv_score, spo2_score, temp_score, stress_score, sleep_score) if item is not None]
     health_score = int(sum(score_values) / len(score_values)) if score_values else None

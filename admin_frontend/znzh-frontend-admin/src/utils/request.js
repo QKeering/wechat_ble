@@ -11,6 +11,33 @@ let downloadLoadingInstance
 // 是否显示重新登录
 export let isRelogin = { show: false }
 
+const redirectToLogin = () => {
+  const currentPath = `${location.pathname || ''}${location.search || ''}${location.hash || ''}`
+  const loginUrl = currentPath.startsWith('/login')
+    ? '/login'
+    : `/login?redirect=${encodeURIComponent(currentPath || '/')}`
+
+  isRelogin.show = false
+  // Token 已过期时不能再依赖后端 logout 接口，否则 logout 再次返回
+  // 401 会阻断跳转。这里只清理本地登录态，并且无论清理结果如何都进入登录页。
+  Promise.resolve(store.dispatch('FedLogOut')).finally(() => {
+    location.replace(loginUrl)
+  })
+}
+
+const showReloginDialog = () => {
+  if (isRelogin.show || location.pathname === '/login') return
+
+  isRelogin.show = true
+  MessageBox.alert('登录状态已过期，请重新登录', '系统提示', {
+    confirmButtonText: '重新登录',
+    type: 'warning',
+    showClose: false,
+    closeOnClickModal: false,
+    closeOnPressEscape: false
+  }).then(redirectToLogin).catch(redirectToLogin)
+}
+
 axios.defaults.headers['Content-Type'] = 'application/json;charset=utf-8'
 // 创建axios实例
 const service = axios.create({
@@ -82,17 +109,7 @@ service.interceptors.response.use(res => {
       return res.data
     }
     if (code === 401) {
-      if (!isRelogin.show) {
-        isRelogin.show = true
-        MessageBox.confirm('登录状态已过期，您可以继续留在该页面，或者重新登录', '系统提示', { confirmButtonText: '重新登录', cancelButtonText: '取消', type: 'warning' }).then(() => {
-          isRelogin.show = false
-          store.dispatch('LogOut').then(() => {
-            location.href = '/index'
-          })
-      }).catch(() => {
-        isRelogin.show = false
-      })
-    }
+      showReloginDialog()
       return Promise.reject('无效的会话，或者会话已过期，请重新登录。')
     } else if (code === 500) {
       Message({ message: msg, type: 'error' })
@@ -109,6 +126,10 @@ service.interceptors.response.use(res => {
   },
   error => {
     console.log('err' + error)
+    if (error && error.response && error.response.status === 401) {
+      showReloginDialog()
+      return Promise.reject(error)
+    }
     let { message } = error
     if (message == "Network Error") {
       message = "后端接口连接异常"

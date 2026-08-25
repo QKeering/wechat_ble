@@ -54,7 +54,9 @@ class BleManager {
         fail: (err) => {
           this.isBluetoothAvailable = false;
           qkeerV2VendorConsole.error(err);
-          reject(new Error('蓝牙适配器初始化失败'));
+          // Preserve WeChat's errno/errCode. The facade uses errno 112 to
+          // stop automatic BLE retries when privacy scope is not declared.
+          reject(err);
         }
       });
     });

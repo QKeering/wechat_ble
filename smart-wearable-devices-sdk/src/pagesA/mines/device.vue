@@ -14,6 +14,7 @@ import { normalizeHealthText } from '@/utils/healthText';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import { formatBatteryPercentForDisplay, formatBatteryStatusForDisplay, getRawBatteryPercent, isBatteryChargingLike } from '@/utils/batteryDisplay';
 import { readBatteryDisplayCache, writeBatteryDisplayCache } from '@/utils/batteryCache';
+import { useUnifiedBatteryDisplay } from '@/composables/useUnifiedBatteryDisplay';
 import { reportRealBatteryLog } from '@/utils/deviceBatteryLog';
 import {
   applyDeviceIdentityCacheToDevice,
@@ -24,6 +25,7 @@ import {
 
 const userStore = useUserStore();
 const ringStore = useRingStore();
+const unifiedBattery = useUnifiedBatteryDisplay(userStore, ringStore);
 const ring = useRingBusinessData();
 const controller = useRingBusinessController();
 const DEVICE_INFO_SNAPSHOT_WAIT_MS = 2000;
@@ -62,64 +64,10 @@ const deviceIdentity = computed(() => {
 });
 const latestBattery = computed(() => findLatestReceivedData('battery'));
 const latestFirmware = computed(() => findLatestReceivedData(['firmware_version', 'hardwareVersion', 'softwareVersion']));
-const batteryValue = computed(() =>
-  getFirstMetricValue(
-    ring.metrics.value.battery,
-    (ring.deviceInfo.value as any)?.metrics?.battery,
-    (ring.deviceInfo.value as any)?.battery,
-    (ring.deviceInfo.value as any)?.batteryValue,
-    (ringStore.deviceInfo as any)?.metrics?.battery,
-    (ringStore.deviceInfo as any)?.battery,
-    (ringStore.deviceInfo as any)?.batteryValue,
-    (userStore.deviceInfo as any)?.metrics?.battery,
-    (userStore.deviceInfo as any)?.battery,
-    (userStore.deviceInfo as any)?.batteryValue,
-    boundInfo.value?.metrics?.battery,
-    boundInfo.value?.battery,
-    boundInfo.value?.batteryValue,
-    ring.healthData.value?.battery,
-    ring.healthData.value?.batteryValue,
-    userStore.latestMetrics?.battery,
-    userStore.healthData?.battery,
-    latestBattery.value?.metrics?.battery,
-    latestBattery.value?.metrics?.value,
-    latestBattery.value?.battery,
-    latestBattery.value?.value
-  )
-);
-const batteryStatusRaw = computed(() =>
-  getFirstMetricValue(
-    ring.metrics.value.batteryStatus,
-    ring.metrics.value.chargingStatusText,
-    (ring.deviceInfo.value as any)?.metrics?.batteryStatus,
-    (ring.deviceInfo.value as any)?.metrics?.chargingStatusText,
-    (ring.deviceInfo.value as any)?.batteryStatus,
-    (ring.deviceInfo.value as any)?.chargingStatusText,
-    (ringStore.deviceInfo as any)?.metrics?.batteryStatus,
-    (ringStore.deviceInfo as any)?.metrics?.chargingStatusText,
-    (ringStore.deviceInfo as any)?.batteryStatus,
-    (ringStore.deviceInfo as any)?.chargingStatusText,
-    (userStore.deviceInfo as any)?.metrics?.batteryStatus,
-    (userStore.deviceInfo as any)?.metrics?.chargingStatusText,
-    (userStore.deviceInfo as any)?.batteryStatus,
-    (userStore.deviceInfo as any)?.chargingStatusText,
-    boundInfo.value?.metrics?.batteryStatus,
-    boundInfo.value?.metrics?.chargingStatusText,
-    boundInfo.value?.batteryStatus,
-    boundInfo.value?.chargingStatusText,
-    ring.healthData.value?.batteryStatus,
-    ring.healthData.value?.chargingStatusText,
-    userStore.healthData?.batteryStatus,
-    userStore.healthData?.chargingStatusText,
-    latestBattery.value?.metrics?.batteryStatus,
-    latestBattery.value?.metrics?.chargingStatusText,
-    latestBattery.value?.batteryStatus,
-    latestBattery.value?.chargingStatusText
-  )
-);
+const batteryValue = computed(() => unifiedBattery.rawValue.value);
+const batteryStatusRaw = computed(() => unifiedBattery.status.value);
 const batteryText = computed(() => {
-  const directDisplay = singleReadResults.value.battery || formatBatteryStatusForDisplay(batteryValue.value, batteryStatusRaw.value, '');
-  return normalizeDeviceInfoDisplayText(directDisplay || getDevicePageBatteryCacheRecord()?.displayText || DEVICE_INFO_EMPTY_TEXT);
+  return normalizeDeviceInfoDisplayText(unifiedBattery.displayText.value || DEVICE_INFO_EMPTY_TEXT);
 });
 const batteryStatusText = computed(() => normalizeDeviceInfoDisplayText(normalizeHealthText(batteryStatusRaw.value, DEVICE_INFO_EMPTY_TEXT)));
 const firmwareText = computed(

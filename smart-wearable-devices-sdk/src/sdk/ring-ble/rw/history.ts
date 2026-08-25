@@ -52,6 +52,8 @@ const RW_HISTORY_AB_SLEEP_SDK_LOOP_MAX_READS = 32;
 const RW_HISTORY_AB_KEY_COMMAND_INTERVAL_MS = 180;
 const RW_HISTORY_PREFLIGHT_DELAY_MS = 500;
 const RW_HISTORY_PREFLIGHT_RESPONSE_TIMEOUT_MS = 2000;
+const RW_L19_HISTORY_NOTIFY_SETTLE_MS = 400;
+const RW_L19_HISTORY_FIRST_FRAME_TIMEOUT_MS = 1000;
 const RW_HISTORY_DEFAULT_MONITORING_INTERVAL_MINUTES = 60;
 const RING_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
@@ -100,29 +102,69 @@ export const syncRwHistoryFiles = async (
   const sinceTimestamp = getRwHistorySinceTimestamp(options);
   const readDetails = getRwHistoryReadDetails(options, sinceTimestamp, readAll, timeoutMs);
   const unexpectedResponses: RingParsedData[] = [];
-  watchForUnexpectedRwHistoryResponse(adapter, timeoutMs, readDetails, unexpectedResponses);
-  await runRwHistoryPreflight(adapter, options, readDetails);
+  const useL19Compatibility = Boolean(adapter.isL19HistoryDevice?.());
+  const l19SessionGeneration = useL19Compatibility ? adapter.beginL19HistorySession?.() : null;
 
-  if (isRwLastDataOnlyHistoryRequest(options)) {
+  try {
+  watchForUnexpectedRwHistoryResponse(adapter, timeoutMs, readDetails, unexpectedResponses);
+  if (useL19Compatibility) {
+    appendRwHistoryDiagnosticLog('history-preflight-skipped', {
+      ...readDetails,
+      reason: 'l19-history-compatibility'
+    });
+  } else {
+    await runRwHistoryPreflight(adapter, options, readDetails);
+  }
+
+  if (!useL19Compatibility && isRwLastDataOnlyHistoryRequest(options)) {
     return syncRwNativeLastDataOnly(adapter, options, sinceTimestamp, readAll, timeoutMs, readDetails, unexpectedResponses);
   }
 
-  const pendingInitialHistory = adapter.waitForParsedData(isRwInitialHistoryResponse, timeoutMs);
+  const pendingInitialHistory = adapter.waitForParsedData(
+    isRwInitialHistoryResponse,
+    useL19Compatibility
+      ? RW_L19_HISTORY_NOTIFY_SETTLE_MS + RW_L19_HISTORY_FIRST_FRAME_TIMEOUT_MS * 2 + 500
+      : timeoutMs
+  );
   pendingInitialHistory.catch(() => undefined);
   appendRwHistoryDiagnosticLog('history-initial-wait-start', {
     ...readDetails,
     primaryCommand: readAll ? '3601' : '3600',
     fallbackCommand: '3610'
   });
-  await sendRwLegacyLocalDataRead(adapter, readDetails);
-
-  const initialParsed = await waitForRwHistoryInitialWithFallback(
-    adapter,
-    pendingInitialHistory,
-    options,
-    readDetails,
-    unexpectedResponses
-  );
+  const initialParsed = useL19Compatibility
+    ? await waitForL19HistoryInitial(adapter, pendingInitialHistory, readDetails)
+    : await (async () => {
+        await sendRwLegacyLocalDataRead(adapter, readDetails);
+        return waitForRwHistoryInitialWithFallback(
+          adapter,
+          pendingInitialHistory,
+          options,
+          readDetails,
+          unexpectedResponses
+        );
+      })();
+  if (!initialParsed) {
+    const parsed: RingParsedData = {
+      type: 'local_data',
+      protocol: 'rw',
+      status: 'empty',
+      message: 'L19 history returned no valid first frame after one retry.',
+      records: [],
+      files: [],
+      readAll,
+      sinceTimestamp,
+      dataType: options.dataType,
+      dataTypes: normalizeRwHistoryDataTypes(options.dataTypes),
+      raw: []
+    };
+    appendRwHistoryDiagnosticLog('l19-history-no-first-frame-finished', {
+      ...readDetails,
+      attempts: 2,
+      status: 'empty'
+    });
+    return { parsed, records: [] };
+  }
   if (isRwLegacyLocalDataResponse(initialParsed)) {
     return mapRwLegacyLocalDataResult(initialParsed, options, sinceTimestamp, readAll, readDetails);
   }
@@ -219,6 +261,9 @@ export const syncRwHistoryFiles = async (
   });
 
   return { parsed, records };
+  } finally {
+    if (useL19Compatibility) adapter.endL19HistorySession?.(l19SessionGeneration);
+  }
 };
 
 const sendRwLegacyLocalDataRead = async (
@@ -227,10 +272,64 @@ const sendRwLegacyLocalDataRead = async (
 ) => {
   const readAll = Boolean(readDetails.readAll);
   const sinceTimestamp = Number(readDetails.sinceTimestamp || 0);
-  await adapter.sendBytes(
+  const writeHistoryBytes = adapter.isL19HistoryDevice?.() && adapter.sendL19HistoryBytes
+    ? adapter.sendL19HistoryBytes
+    : adapter.sendBytes;
+  await writeHistoryBytes(
     buildRwReadLocalDataCommand(sinceTimestamp, readAll),
     `history/read-local-data-${readAll ? 'full' : 'incremental'}`
   );
+};
+
+const waitForL19HistoryInitial = async (
+  adapter: LegacyRingAdapter,
+  pendingInitialHistory: Promise<RingParsedData>,
+  readDetails: Record<string, unknown>
+): Promise<RingParsedData | null> => {
+  await sleep(RW_L19_HISTORY_NOTIFY_SETTLE_MS);
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    let writeError = '';
+    try {
+      await sendRwLegacyLocalDataRead(adapter, readDetails);
+    } catch (error) {
+      writeError = formatRwHistoryError(error);
+    }
+
+    appendRwHistoryDiagnosticLog('l19-history-command-sent', {
+      ...readDetails,
+      attempt,
+      maxAttempts: 2,
+      writeType: 'platform-default',
+      writeError
+    });
+
+    const result = await Promise.race([
+      pendingInitialHistory.then(
+        (parsed) => ({ parsed }),
+        () => ({ parsed: null as RingParsedData | null })
+      ),
+      sleep(RW_L19_HISTORY_FIRST_FRAME_TIMEOUT_MS).then(() => ({ parsed: null as RingParsedData | null }))
+    ]);
+    if (result.parsed) {
+      appendRwHistoryDiagnosticLog('l19-history-first-frame', {
+        ...readDetails,
+        attempt,
+        response: summarizeRwHistoryInitialResponse(result.parsed)
+      });
+      return result.parsed;
+    }
+
+    appendRwHistoryDiagnosticLog('l19-history-first-frame-timeout', {
+      ...readDetails,
+      attempt,
+      maxAttempts: 2,
+      timeoutMs: RW_L19_HISTORY_FIRST_FRAME_TIMEOUT_MS,
+      writeError
+    });
+  }
+
+  return null;
 };
 
 const runRwHistoryPreflight = async (

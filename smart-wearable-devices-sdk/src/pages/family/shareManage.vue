@@ -2,6 +2,8 @@
 import { computed, ref } from 'vue';
 import { onPullDownRefresh, onShow } from '@dcloudio/uni-app';
 import { createFamilyInvite, deleteFamilyRelation, getFamilyGuardians, type FamilyGuardian } from '@/common/api/family';
+import { getBindInfo } from '@/common/api/device';
+import { hasBoundRingIdentity } from '@/utils/ringBinding';
 
 const loading = ref(false);
 const inviting = ref(false);
@@ -9,6 +11,8 @@ const guardians = ref<FamilyGuardian[]>([]);
 const inviteCode = ref('');
 const expireTime = ref('');
 const miniProgramCodeUrl = ref('');
+const bindingLoading = ref(true);
+const hasBoundDevice = ref(false);
 
 const hasGuardians = computed(() => guardians.value.length > 0);
 
@@ -30,6 +34,10 @@ function goBack() {
   goFamilyHome();
 }
 
+function goBindDevice() {
+  uni.navigateTo({ url: '/pagesA/mines/connectDevice' });
+}
+
 async function loadGuardians() {
   loading.value = true;
   try {
@@ -42,8 +50,24 @@ async function loadGuardians() {
   }
 }
 
+async function loadBinding() {
+  bindingLoading.value = true;
+  try {
+    hasBoundDevice.value = hasBoundRingIdentity(await getBindInfo({ refresh: true }));
+  } catch (error) {
+    console.warn('[family-share] load binding failed', error);
+    hasBoundDevice.value = false;
+  } finally {
+    bindingLoading.value = false;
+  }
+}
+
 async function createInvite() {
   if (inviting.value) return;
+  if (!hasBoundDevice.value) {
+    uni.showToast({ title: '请先绑定设备后再邀请亲友', icon: 'none' });
+    return;
+  }
   inviting.value = true;
   try {
     const result = await createFamilyInvite({ inviteType: 1 });
@@ -91,9 +115,11 @@ function cancelShare(item: FamilyGuardian) {
   });
 }
 
-onShow(loadGuardians);
+onShow(async () => {
+  await Promise.all([loadGuardians(), loadBinding()]);
+});
 onPullDownRefresh(async () => {
-  await loadGuardians();
+  await Promise.all([loadGuardians(), loadBinding()]);
   uni.stopPullDownRefresh();
 });
 </script>
@@ -123,8 +149,20 @@ onPullDownRefresh(async () => {
       <view class="invite-icon">邀</view>
       <view class="invite-title">邀请亲友关注你</view>
       <view class="invite-desc">一键生成 7 天有效的邀请。对方接受后即可查看你的健康概览。</view>
-      <button v-if="!inviteCode" class="primary-button" :loading="inviting" @click="createInvite">生成邀请</button>
-      <view v-else class="result-panel">
+      <button
+        v-if="!inviteCode"
+        class="primary-button"
+        :class="{ 'primary-button--disabled': !hasBoundDevice }"
+        :disabled="bindingLoading || !hasBoundDevice"
+        :loading="inviting || bindingLoading"
+        @click="createInvite"
+      >{{ hasBoundDevice ? '生成邀请' : '请先绑定设备' }}</button>
+      <view
+        v-if="!bindingLoading && !hasBoundDevice"
+        class="bind-guide"
+        @click="goBindDevice"
+      >去绑定设备</view>
+      <view v-if="inviteCode" class="result-panel">
         <view class="result-label">方式一：微信扫码进入小程序</view>
         <view class="qr-box">
           <image v-if="miniProgramCodeUrl" class="mini-code" :src="miniProgramCodeUrl" mode="aspectFit" />
@@ -146,5 +184,6 @@ onPullDownRefresh(async () => {
 .section-title,.invite-title{font-size:38rpx;font-weight:800;color:#172033}.section-desc,.invite-desc{margin-top:12rpx;font-size:28rpx;line-height:1.6;color:#7b8495}
 .state-text,.empty-row{padding:48rpx 0 18rpx;text-align:center;font-size:28rpx;color:#9aa2af}.guardian-list{margin-top:20rpx}.guardian-row{display:flex;align-items:center;padding:24rpx 0;border-top:1rpx solid #edf0f4}.avatar{display:flex;align-items:center;justify-content:center;width:84rpx;height:84rpx;border-radius:50%;background:#e8f0ff;color:#2e70fc;font-size:34rpx;font-weight:800}.guardian-info{flex:1;margin-left:20rpx}.guardian-name{font-size:31rpx;font-weight:700;color:#1c2434}.guardian-status{margin-top:7rpx;font-size:25rpx;color:#929aa7}.cancel-action{padding:14rpx 22rpx;border-radius:999rpx;background:#fff0f1;color:#e44952;font-size:27rpx}
 .invite-card{text-align:center}.invite-icon{display:flex;align-items:center;justify-content:center;width:98rpx;height:98rpx;margin:4rpx auto 22rpx;border-radius:30rpx;background:linear-gradient(135deg,#4e87ff,#2767f2);color:#fff;font-size:38rpx;font-weight:800}.primary-button{height:92rpx;margin-top:30rpx;border:0;border-radius:24rpx;background:#2e70fc;color:#fff;font-size:32rpx;font-weight:700;line-height:92rpx}.primary-button::after{border:0}.result-panel{margin-top:28rpx;padding:26rpx;border-radius:24rpx;background:#f6f8fc}.result-label{font-size:25rpx;color:#9098a6}.result-code{margin-top:8rpx;font-size:52rpx;font-weight:800;letter-spacing:6rpx;color:#172033}.result-expire{margin-top:8rpx;font-size:25rpx;color:#929aa7}.link-box{margin-top:22rpx;padding:20rpx;border-radius:16rpx;background:#fff;color:#6d7686;font-size:24rpx;line-height:1.5;word-break:break-all}.new-invite{padding-top:24rpx;color:#2e70fc;font-size:27rpx}
+.primary-button--disabled{background:#aebbd2;color:#f7f9fc}.bind-guide{padding-top:20rpx;color:#2e70fc;font-size:27rpx}
 .manual-label{margin-top:28rpx}.qr-box{display:flex;align-items:center;justify-content:center;width:420rpx;min-height:420rpx;margin:18rpx auto 10rpx;border-radius:22rpx;background:#fff}.mini-code{width:390rpx;height:390rpx}.code-loading{font-size:25rpx;color:#929aa7}
 </style>

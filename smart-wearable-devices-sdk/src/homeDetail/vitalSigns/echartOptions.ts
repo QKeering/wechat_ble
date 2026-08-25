@@ -83,7 +83,19 @@ export const baseOption = {
  * 生命体征详情和睡眠页复用同一批组件，因此在这里固定折线形态，
  * 避免各页面因局部 option 合并顺序不同而退化成带点折线或默认样式。
  */
-export const applyVitalSignsLineStyle = (option: any, color = '#ff5a5f') => {
+type VitalMetricKind = 'heartRate' | 'bloodOxygen' | 'hrv';
+
+const VITAL_METRIC_DISPLAY_RULES: Record<VitalMetricKind, { min: number; max: number; spike: number }> = {
+  heartRate: { min: 30, max: 220, spike: 45 },
+  bloodOxygen: { min: 70, max: 100, spike: 6 },
+  hrv: { min: 1, max: 300, spike: 120 }
+};
+
+export const applyVitalSignsLineStyle = (
+  option: any,
+  color = '#ff5a5f',
+  metric: VitalMetricKind = 'heartRate'
+) => {
   const series = option?.series?.[0];
   if (!series) return option;
 
@@ -96,16 +108,45 @@ export const applyVitalSignsLineStyle = (option: any, color = '#ff5a5f') => {
   // bars. Keep only real samples and encode the original bucket index as the
   // numeric X coordinate; this preserves the true position in the day without
   // ever sending a missing value to the renderer.
-  const normalizedSeriesData = sourceSeriesData.reduce((points: Array<[number, number]>, value: unknown, index: number) => {
+  const displayRule = VITAL_METRIC_DISPLAY_RULES[metric];
+  const rawPoints = sourceSeriesData.reduce((points: Array<[number, number]>, value: unknown, index: number) => {
     const rawValue = Array.isArray(value) ? value[1] : value;
     const rawX = Array.isArray(value) ? value[0] : index;
     const numeric = Number(rawValue);
     const numericX = Number(rawX);
-    if (rawValue !== null && rawValue !== '' && Number.isFinite(numeric) && numeric > 0 && Number.isFinite(numericX)) {
+    if (
+      rawValue !== null &&
+      rawValue !== '' &&
+      Number.isFinite(numeric) &&
+      numeric >= displayRule.min &&
+      numeric <= displayRule.max &&
+      Number.isFinite(numericX)
+    ) {
       points.push([numericX, numeric]);
     }
     return points;
   }, []);
+  const grouped = new Map<number, number[]>();
+  rawPoints.forEach(([x, value]) => grouped.set(x, [...(grouped.get(x) || []), value]));
+  const deduplicated = Array.from(grouped.entries())
+    .map(([x, values]) => {
+      const ordered = [...values].sort((a, b) => a - b);
+      const middle = Math.floor(ordered.length / 2);
+      const median = ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
+      return [x, median] as [number, number];
+    })
+    .sort((a, b) => a[0] - b[0]);
+  const normalizedSeriesData = deduplicated.filter((point, index, points) => {
+    if (index === 0 || index === points.length - 1) return true;
+    const previous = points[index - 1];
+    const following = points[index + 1];
+    const neighborsStable = Math.abs(previous[1] - following[1]) <= displayRule.spike / 2;
+    return !(
+      neighborsStable &&
+      Math.abs(point[1] - previous[1]) > displayRule.spike &&
+      Math.abs(point[1] - following[1]) > displayRule.spike
+    );
+  });
   const validPointCount = normalizedSeriesData.length;
 
   option.animation = true;
@@ -160,7 +201,12 @@ export const applyVitalSignsLineStyle = (option: any, color = '#ff5a5f') => {
   };
   option.series[0] = {
     ...series,
-    data: normalizedSeriesData,
+    // Keep Y values as plain numbers so older cached mini-program chart
+    // runtimes can still render the curve. The lightweight renderer uses the
+    // companion xPositions field when available to preserve the real time
+    // position; older runtimes safely ignore it and still draw the data.
+    data: normalizedSeriesData.map((point) => point[1]),
+    xPositions: normalizedSeriesData.map((point) => point[0]),
     type: 'line',
     smooth: 0.38,
     showSymbol: validPointCount === 1,

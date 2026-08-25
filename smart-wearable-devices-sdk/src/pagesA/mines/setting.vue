@@ -36,12 +36,10 @@ const activityDurationTarget = ref(DEFAULT_GOAL_VALUES.activity);
 const collectPeriodTarget = ref(DEFAULT_GOAL_VALUES.collect);
 
 const pickerRef = ref<any>(null);
-const modalPopup = ref<any>(null);
 const pickerValue = ref([0]);
 const pickerTitle = ref('');
 const pickerColumns = ref<string[][]>([[]]);
 const activePickerType = ref<PickerType>('sleep');
-const content = ref('确定恢复出厂设置吗？');
 
 const pickerOptions: Record<PickerType, string[]> = {
   sleep: ['5', '6', '7', '8', '9', '10', '11', '12'],
@@ -93,7 +91,15 @@ const toPositiveIntegerText = (value: unknown, fallback: string) => {
 
 const toSleepHourText = (data: Record<string, any>) => {
   const hourValue = getValueByKeys(data, ['sleepHour', 'sleep', 'sleepTarget', 'sleepHours', 'targetSleepHours']);
-  if (hourValue !== undefined) return toPositiveIntegerText(hourValue, sleepTarget.value);
+  if (hourValue !== undefined) {
+    const numeric = Number(hourValue);
+    // Older data stored the sleep target in minutes (for example 480), even
+    // though the current user_goal.sleep field and UI both use hours.
+    if (Number.isFinite(numeric) && numeric > 24) {
+      return String(Math.max(1, Math.round(numeric / 60)));
+    }
+    return toPositiveIntegerText(hourValue, sleepTarget.value);
+  }
   const minuteValue = getValueByKeys(data, ['sleepDuration', 'sleepDurationTarget', 'targetSleepMinutes']);
   const minutes = Number(minuteValue);
   if (Number.isFinite(minutes) && minutes > 0) return String(Math.max(1, Math.round(minutes / 60)));
@@ -208,6 +214,7 @@ const buildGoalPayload = () => {
   const acquisitionCycle = getGoalNumber(collectPeriodTarget.value, DEFAULT_GOAL_VALUES.collect);
 
   return {
+    sleep: sleepHour,
     sleepHour,
     step,
     calorie,
@@ -259,37 +266,6 @@ const handleOk = async () => {
     isSaving.value = false;
     await loadBoundInfo();
   }
-};
-
-const openConfirmBind = () => {
-  content.value = '确定恢复出厂设置吗？';
-  modalPopup.value?.open?.();
-};
-
-const confirmBind = async () => {
-  if (isBusy.value) return;
-  busyText.value = '恢复出厂中';
-  lastActionText.value = '';
-  try {
-    const ready = await ensureDeviceReady();
-    if (!ready) throw new Error('设备未连接，请重新连接后再试');
-    await ringBle.sendFactoryResetWithTimeCommand();
-    controller.clearBusinessData();
-    lastActionText.value = '恢复出厂命令已发送';
-    clearStatusLater();
-    uni.showToast({ title: '已发送', icon: 'success' });
-  } catch (error) {
-    lastActionText.value = formatBleErrorMessage(error, '恢复出厂失败');
-    clearStatusLater(4200);
-    uni.showToast({ title: lastActionText.value, icon: 'none' });
-  } finally {
-    busyText.value = '';
-    await loadBoundInfo();
-  }
-};
-
-const jumpOtaUpgrade = () => {
-  uni.navigateTo({ url: '/pagesA/mines/otaUpgrade' });
 };
 
 const scheduleInitialLoad = () => {
@@ -379,22 +355,6 @@ onUnmounted(() => {
       </view>
     </view>
 
-    <view>
-      <view class="mb-50 fs-36 pl-40 pr-40">通用设置</view>
-      <view @click="openConfirmBind">
-        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30">
-          <view class="fs-36">恢复出厂设置</view>
-          <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
-        </view>
-      </view>
-      <view @click="jumpOtaUpgrade">
-        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30">
-          <view class="fs-36">OTA升级</view>
-          <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
-        </view>
-      </view>
-    </view>
-
     <uv-picker
       ref="pickerRef"
       :defaultIndex="[pickerValue[0]]"
@@ -405,7 +365,6 @@ onUnmounted(() => {
       confirmColor="#2e70fc"
     ></uv-picker>
 
-    <uv-modal ref="modalPopup" :showCancelButton="true" align="center" :content="content" @confirm="confirmBind"></uv-modal>
     <view class="purchase-section p-30 demo">
       <view v-if="statusText" class="save-status fs-28 t-979797">{{ statusText }}</view>
       <uv-button

@@ -4,6 +4,10 @@ import { syncRwHistoryFiles } from '../rw/history';
 import { resolveRingProtocol } from '../protocolRegistry';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import {
+  BLUETOOTH_PRIVACY_REQUIRED_HINT,
+  isBluetoothPrivacyError
+} from '@/utils/wechatBluetoothPrivacy';
+import {
   claimLegacyBleHistoryExclusive,
   getLegacyBleHistoryExclusiveSnapshot,
   isLegacyBleHistoryExclusiveActive
@@ -60,6 +64,9 @@ export interface RefreshLegacyBusinessMetricsOptions {
   includeDeviceTime?: boolean;
   includeCollectPeriod?: boolean;
   includeDeviceInfo?: boolean;
+  includeBattery?: boolean;
+  includeFirmwareVersion?: boolean;
+  includeSoftwareVersion?: boolean;
   includeRealtimeMetrics?: boolean;
   realtimeMetricNames?: string[];
   includeHistorySnapshot?: boolean;
@@ -152,27 +159,15 @@ const showToast = (title: string) => {
   uni.showToast({ title, icon: 'none' });
 };
 
-const getLocation = () => {
-  return new Promise<unknown>((resolve, reject) => {
-    uni.getLocation({
-      type: 'gcj02',
-      success: resolve,
-      fail: reject
-    });
-  });
-};
-
-const getSetting = () => {
-  return new Promise<UniApp.GetSettingSuccessResult>((resolve, reject) => {
-    uni.getSetting({
-      success: resolve,
-      fail: reject
-    });
-  });
-};
-
-const hasLocationPermission = (setting: UniApp.GetSettingSuccessResult) => {
-  return Boolean(setting.authSetting?.['scope.userLocation']);
+const getBluetoothInitializationErrorMessage = (error: unknown) => {
+  if (isBluetoothPrivacyError(error)) return BLUETOOTH_PRIVACY_REQUIRED_HINT;
+  if (error instanceof Error && error.message) return error.message;
+  if (error && typeof error === 'object') {
+    const record = error as Record<string, unknown>;
+    const message = record.errMsg || record.message || record.msg;
+    if (message) return String(message);
+  }
+  return '蓝牙初始化失败';
 };
 
 export const ensureLegacyBluetoothReady = async (
@@ -185,20 +180,36 @@ export const ensureLegacyBluetoothReady = async (
   const isWeixin = systemInfo.uniPlatform === 'mp-weixin';
 
   try {
-    if (isWeixin) {
-      const setting = await getSetting();
-      if (!hasLocationPermission(setting)) {
-        await getLocation();
-      }
-    }
+    // Bluetooth privacy authorization is handled by adapter.initBluetooth().
+    // scope.userLocation is unrelated to opening the BLE adapter. Requiring
+    // getLocation here made a denied location prompt abort BLE before
+    // openBluetoothAdapter was ever called.
+    appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-init-start', {
+      platform: systemInfo.platform,
+      uniPlatform: systemInfo.uniPlatform,
+      isWeixin,
+      locationPreflight: 'skipped'
+    });
 
     const result = await adapter.initBluetooth();
     runtime?.onBluetoothReadyChange?.(true);
+    appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-init-success', {
+      platform: systemInfo.platform,
+      uniPlatform: systemInfo.uniPlatform
+    });
     return result;
-  } catch (error: any) {
+  } catch (error: unknown) {
     runtime?.onBluetoothReadyChange?.(false);
+    const message = getBluetoothInitializationErrorMessage(error);
+    appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-init-failed', {
+      platform: systemInfo.platform,
+      uniPlatform: systemInfo.uniPlatform,
+      privacyBlocked: isBluetoothPrivacyError(error),
+      message,
+      error
+    });
     if (showToastOnFail) {
-      showToast(error?.errMsg || '蓝牙初始化失败');
+      showToast(message);
     }
     throw error;
   }
@@ -457,7 +468,10 @@ export const autoReconnectLegacyRing = async (
       const readyStableIdentity = readyProtocol === 'rw' ? rwReadyStableIdentity : legacyReadyStableIdentity;
       const readyDevice: RingDeviceInfo = {
         ...connected,
-        mac: readyStableIdentity || connected.mac || deviceId,
+        mac:
+          readyProtocol === 'rw'
+            ? readyStableIdentity
+            : readyStableIdentity || connected.mac || deviceId,
         uniMacId: isColonSeparatedBleMac(readyStableIdentity)
           ? readyStableIdentity
           : readyProtocol === 'rw'
@@ -603,6 +617,7 @@ const readLegacyLocalDataUntilComplete = async (
   timeoutMs: number
 ) => {
   const chunks: RingParsedData[] = [];
+  const useL19Compatibility = Boolean(adapter.isL19HistoryDevice?.());
   const pendingLocalData = adapter.waitForParsedData((parsed) => {
     if (parsed.type !== 'local_data') return false;
     chunks.push(parsed);
@@ -615,19 +630,58 @@ const readLegacyLocalDataUntilComplete = async (
     activityPredicate: parsed => parsed.type === 'local_data',
     activityTimeoutMs: 6000
   });
+  // The command write itself can fail before we reach the await below. Attach a
+  // passive rejection observer so that the still-running waiter cannot surface
+  // as an unhandled rejection after the workflow has already failed.
+  pendingLocalData.catch(() => undefined);
 
-  await adapter.readLocalData(options);
+  const pendingL19FirstFrame = useL19Compatibility
+    ? adapter.waitForParsedData((parsed) => parsed.type === 'local_data', 1800, {
+        replayRecent: false
+      })
+    : null;
+  pendingL19FirstFrame?.catch(() => undefined);
 
   try {
+    if (useL19Compatibility) {
+      // L19/QKL19 behaves like the proven pre-SDK flow: Notify first, then a
+      // short settle window, and the history command is written without an
+      // explicit writeType by the legacy adapter.
+      await sleep(400);
+    }
+    await adapter.readLocalData(options);
+
+    if (useL19Compatibility && pendingL19FirstFrame) {
+      const firstFrame = await Promise.race([
+        pendingL19FirstFrame.then(() => true, () => false),
+        sleep(1000).then(() => false)
+      ]);
+      if (!firstFrame) {
+        appendRingDiagnosticLog('L19 BLE', 'legacy-l19-history-first-frame-retry', {
+          reason: 'no-valid-local-data-frame-after-first-write',
+          retry: 1,
+          maxRetries: 1,
+          sinceTimestamp: options.sinceTimestamp,
+          readAll: options.readAll
+        });
+        await adapter.readLocalData(options);
+      }
+    }
+
     await pendingLocalData;
+    return await combineLegacyLocalDataChunks(chunks);
   } catch (error) {
     if (chunks.length > 0) {
       return await combineLegacyLocalDataChunks(chunks, 'partial', error);
     }
     throw error;
+  } finally {
+    adapter.finishHistoryReadTrace?.('workflow-finished', {
+      chunkCount: chunks.length,
+      sinceTimestamp: options.sinceTimestamp,
+      readAll: options.readAll
+    });
   }
-
-  return await combineLegacyLocalDataChunks(chunks);
 };
 
 const isLegacyHistoryUploadSafeToDelete = (uploadResult: unknown) => {
@@ -864,6 +918,9 @@ export const refreshLegacyBusinessMetrics = async (
   const failed: Array<{ step: string; message: string }> = [];
   const hasTargetedRealtimeMetrics = Array.isArray(options.realtimeMetricNames) && options.realtimeMetricNames.length > 0;
   const includeDeviceInfo = options.includeDeviceInfo ?? !hasTargetedRealtimeMetrics;
+  const includeBattery = includeDeviceInfo && (options.includeBattery ?? true);
+  const includeFirmwareVersion = includeDeviceInfo && (options.includeFirmwareVersion ?? true);
+  const includeSoftwareVersion = includeDeviceInfo && (options.includeSoftwareVersion ?? true);
   const includeRealtimeMetrics = options.includeRealtimeMetrics ?? true;
   const includeDeviceTime = options.includeDeviceTime ?? !hasTargetedRealtimeMetrics;
   const includeCollectPeriod = options.includeCollectPeriod ?? !hasTargetedRealtimeMetrics;
@@ -897,13 +954,16 @@ export const refreshLegacyBusinessMetrics = async (
     }
   };
 
-  if (includeDeviceInfo) {
+  if (includeBattery) {
     await runStep(
       'battery',
       () => adapter.sendBatteryCommand(),
       () => adapter.waitForParsedData((parsed) => parsed.type === 'battery', timeoutMs)
     );
 
+  }
+
+  if (includeFirmwareVersion) {
     await runStep(
       'firmware',
       () => adapter.sendFirmwareVersion(),
@@ -914,6 +974,9 @@ export const refreshLegacyBusinessMetrics = async (
         )
     );
 
+  }
+
+  if (includeSoftwareVersion) {
     await runStep(
       'software',
       () => adapter.sendSoftwareVersion(),
@@ -992,6 +1055,9 @@ const refreshQkeerV2BusinessMetrics = async (
   const waitTimeoutMs = Math.min(timeoutMs, 6000);
   const historyWaitTimeoutMs = Math.min(timeoutMs, 5000);
   const includeDeviceInfo = options.includeDeviceInfo ?? true;
+  const includeBattery = includeDeviceInfo && (options.includeBattery ?? true);
+  const includeFirmwareVersion = includeDeviceInfo && (options.includeFirmwareVersion ?? true);
+  const includeSoftwareVersion = includeDeviceInfo && (options.includeSoftwareVersion ?? true);
   const includeRealtimeMetrics = options.includeRealtimeMetrics ?? true;
   const includeHistorySnapshot = options.includeHistorySnapshot ?? false;
   const todayZeroMs = new Date(new Date().toDateString()).getTime();
@@ -1013,19 +1079,32 @@ const refreshQkeerV2BusinessMetrics = async (
     }
   };
 
-  if (includeDeviceInfo) {
+  if (includeBattery) {
     await runStep(
       'battery',
       () => adapter.sendBatteryCommand(),
       () => adapter.waitForParsedData((parsed) => parsed.type === 'battery', waitTimeoutMs)
     );
 
+  }
+
+  if (includeFirmwareVersion) {
     await runStep(
       'firmware',
       () => adapter.sendFirmwareVersion(),
       () => adapter.waitForParsedData((parsed) => parsed.type === 'firmware_version', waitTimeoutMs)
     );
-    ok.push('software');
+  }
+  if (includeSoftwareVersion) {
+    await runStep(
+      'software',
+      () => adapter.sendSoftwareVersion(),
+      () =>
+        adapter.waitForParsedData(
+          (parsed) => parsed.type === 'softwareVersion' || parsed.type === 'firmware_version',
+          waitTimeoutMs
+        )
+    );
   }
 
   if (options.includeDeviceTime ?? true) {
@@ -1130,6 +1209,9 @@ const refreshRwBusinessMetrics = async (
   const ok: string[] = [];
   const failed: Array<{ step: string; message: string }> = [];
   const includeDeviceInfo = options.includeDeviceInfo ?? true;
+  const includeBattery = includeDeviceInfo && (options.includeBattery ?? true);
+  const includeFirmwareVersion = includeDeviceInfo && (options.includeFirmwareVersion ?? true);
+  const includeSoftwareVersion = includeDeviceInfo && (options.includeSoftwareVersion ?? true);
   const includeDeviceTime = options.includeDeviceTime ?? true;
   const includeRealtimeMetrics = options.includeRealtimeMetrics ?? true;
   const includeHistorySnapshot = options.includeHistorySnapshot ?? false;
@@ -1244,16 +1326,16 @@ const refreshRwBusinessMetrics = async (
     });
   };
 
-  const batteryWait = includeDeviceInfo
+  const batteryWait = includeBattery
     ? adapter.waitForParsedData((parsed) => parsed.type === 'battery', coreTimeoutMs)
     : Promise.resolve(null);
-  const firmwareWait = includeDeviceInfo
+  const firmwareWait = includeFirmwareVersion
     ? adapter.waitForParsedData(
         (parsed) => parsed.type === 'firmware_version' || parsed.type === 'hardwareVersion',
         coreTimeoutMs
       )
     : Promise.resolve(null);
-  const softwareWait = includeDeviceInfo
+  const softwareWait = includeSoftwareVersion
     ? adapter.waitForParsedData(
         (parsed) =>
           parsed.type === 'softwareVersion' ||
@@ -1304,12 +1386,20 @@ const refreshRwBusinessMetrics = async (
     emitRwHealthDataPending('collect_period', '\u6b63\u5728\u8bfb\u53d6\u76d1\u542c\u914d\u7f6e', 'requested');
   }
 
-  if (includeDeviceInfo) {
+  if (includeBattery) {
     await sendBestEffort('battery_command', () => adapter.sendBatteryCommand());
+  }
+  if (includeFirmwareVersion) {
     if (coreTimeoutMs >= 600) {
       await sleep(80);
     }
     await sendBestEffort('firmware_command', () => adapter.sendFirmwareVersion());
+  }
+  if (includeSoftwareVersion) {
+    if (coreTimeoutMs >= 600) {
+      await sleep(80);
+    }
+    await sendBestEffort('software_command', () => adapter.sendSoftwareVersion());
   }
 
   if (includeDeviceTime) {
@@ -1367,7 +1457,7 @@ const refreshRwBusinessMetrics = async (
     if (healthQuickWaitMs >= 600) {
       await sleep(80);
     }
-  } else if (includeDeviceInfo) {
+  } else if (includeBattery || includeFirmwareVersion || includeSoftwareVersion) {
     if (healthQuickWaitMs >= 600) {
       await sleep(80);
     }
@@ -1448,8 +1538,8 @@ const refreshRwBusinessMetrics = async (
       .catch(() => undefined);
   }
 
-  if (!includeDeviceInfo) {
-    ok.push('battery_cached', 'firmware_cached', 'software_cached');
+  if (!includeBattery) {
+    ok.push('battery_cached');
   } else if (batteryResult.status === 'fulfilled' && batteryResult.parsed) {
     emitParsedIfNotAlreadyEmitted(batteryResult.parsed, true);
     ok.push('battery');
@@ -1465,8 +1555,8 @@ const refreshRwBusinessMetrics = async (
     });
   }
 
-  if (!includeDeviceInfo) {
-    // Device info was intentionally skipped for a light foreground refresh.
+  if (!includeFirmwareVersion) {
+    ok.push('firmware_cached');
   } else if (firmwareResult.status === 'fulfilled' && firmwareResult.parsed) {
     emitParsedIfNotAlreadyEmitted(firmwareResult.parsed, true);
     ok.push('firmware');
@@ -1482,8 +1572,8 @@ const refreshRwBusinessMetrics = async (
     });
   }
 
-  if (!includeDeviceInfo) {
-    // Device info was intentionally skipped for a light foreground refresh.
+  if (!includeSoftwareVersion) {
+    ok.push('software_cached');
   } else if (softwareResult.status === 'fulfilled' && softwareResult.parsed) {
     emitParsedIfNotAlreadyEmitted(softwareResult.parsed, true);
     ok.push('software');

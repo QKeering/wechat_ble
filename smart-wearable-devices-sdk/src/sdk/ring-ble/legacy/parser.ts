@@ -59,17 +59,18 @@ const parseVersion = (bytes: Uint8Array, frameId: number, subcmd: number): RingP
 };
 
 const parseBattery = (bytes: Uint8Array, frameId: number): RingParsedData => {
-  const batteryLevel = bytes[4];
+  const batteryRawValue = bytes[4];
+  const batteryLevel = batteryRawValue >= 0 && batteryRawValue <= 100 ? batteryRawValue : null;
   let status = 'normal';
-  let value: string | number = batteryLevel;
+  let value: string | number = batteryRawValue;
 
-  if (batteryLevel === 101) {
+  if (batteryRawValue === 101) {
     status = 'charging';
     value = '充电中';
-  } else if (batteryLevel === 102) {
+  } else if (batteryRawValue === 102) {
     status = 'charged';
     value = '充电完成';
-  } else if (batteryLevel >= 0 && batteryLevel <= 100) {
+  } else if (batteryLevel != null) {
     value = `${batteryLevel}%`;
   } else {
     status = 'unknown';
@@ -80,6 +81,9 @@ const parseBattery = (bytes: Uint8Array, frameId: number): RingParsedData => {
     type: 'battery',
     frameId,
     value,
+    battery: batteryLevel,
+    batteryLevel,
+    batteryRawValue,
     status,
     timestamp: Date.now(),
     raw: Array.from(bytes)

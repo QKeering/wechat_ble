@@ -2033,6 +2033,20 @@ def _new_invite_code(db: Session) -> str:
 
 
 def create_invite(db: Session, inviter_user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    active_device = db.execute(
+        text(
+            """
+            select id
+            from device
+            where user_id=:user_id and del_flag=0 and mac is not null and mac<>''
+            order by update_time desc, create_time desc, id desc
+            limit 1
+            """
+        ),
+        {"user_id": inviter_user_id},
+    ).first()
+    if not active_device:
+        raise ValueError("请先绑定设备后再邀请亲友")
     invite_type = int(payload.get("inviteType") or payload.get("invite_type") or 1)
     target_phone = _normalize_phone(payload.get("targetPhone") or payload.get("target_phone")) or None
     if target_phone and len(target_phone) != 11:

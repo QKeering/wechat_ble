@@ -63,7 +63,9 @@ import {
   isBatteryChargingLike
 } from '@/utils/batteryDisplay';
 import { readBatteryDisplayCache, writeBatteryDisplayCache } from '@/utils/batteryCache';
+import { useUnifiedBatteryDisplay } from '@/composables/useUnifiedBatteryDisplay';
 import { isAnyDeviceSyncSessionRunning } from '@/utils/deviceSyncSession';
+import { QKEER_BUILD_INFO } from '@/utils/buildInfo';
 const {
   deviceInfo: ringDeviceInfo,
   isDeviceConnected,
@@ -78,7 +80,18 @@ const {
 } = useRingBLE();
 const userStore = useUserStore();
 const ringStore = useRingStore();
+const unifiedBattery = useUnifiedBatteryDisplay(userStore, ringStore);
 const controller = useRingBusinessController();
+const miniProgramVersionText = computed(() => {
+  try {
+    const runtimeVersion = String((uni as any).getAccountInfoSync?.()?.miniProgram?.version || '').trim();
+    if (runtimeVersion) return `小程序版本 v${runtimeVersion}`;
+  } catch {
+    // Development builds may not expose a WeChat release version.
+  }
+  const appVersion = String(QKEER_BUILD_INFO.appVersion || '').trim();
+  return `小程序版本 v${appVersion && appVersion !== 'unknown' ? appVersion : '0.1.0'}`;
+});
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
 const RING_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
@@ -2776,9 +2789,7 @@ const hasMineFirmwareSnapshot = () =>
       userStore.latestMetrics?.softwareVersion
   );
 const displayBatteryValue = computed(() => {
-  const directDisplay = formatBatteryStatusForDisplay(getMineRawBatteryValue(), getMineRawBatteryStatusValue(), '');
-  if (String(directDisplay || '').trim()) return directDisplay;
-  return getMineBatteryCacheRecord()?.displayText || '--';
+  return unifiedBattery.displayText.value || '--';
 });
 const getMineBatteryStatusValue = (item: Record<string, any> | null | undefined) =>
   item?.metrics?.chargingStatusText ??
@@ -2805,39 +2816,18 @@ function getMineBatteryCacheRecord() {
   return readBatteryDisplayCache(getMineBatteryCacheUserId(), getMineBatteryCacheMac());
 }
 const getMineRawBatteryValue = () =>
-  getFirstMetricValue(
-    getMineBatterySourceValue(latestBattery.value as Record<string, any> | null),
-    getMineBatterySourceValue(ringDeviceInfo.value as Record<string, any> | null),
-    getMineBatterySourceValue(ringStore.deviceInfo as Record<string, any> | null),
-    getMineBatterySourceValue(userStore.deviceInfo as Record<string, any> | null),
-    userStore.healthData?.battery,
-    userStore.latestMetrics?.battery
-  );
+  unifiedBattery.rawValue.value;
 const getMineRawBatteryStatusValue = () => {
-  const batteryItem = latestBattery.value as Record<string, any> | null;
-  return (
-    getMineBatteryStatusValue(batteryItem) ??
-    getMineBatteryStatusValue(ringDeviceInfo.value as Record<string, any> | null) ??
-    getMineBatteryStatusValue(ringStore.deviceInfo as Record<string, any> | null) ??
-    getMineBatteryStatusValue(userStore.deviceInfo as Record<string, any> | null) ??
-    userStore.healthData?.chargingStatusText ??
-    userStore.latestMetrics?.chargingStatusText ??
-    userStore.healthData?.batteryStatus ??
-    userStore.latestMetrics?.batteryStatus ??
-    ringStore.healthData?.chargingStatusText ??
-    ringStore.latestMetrics?.chargingStatusText ??
-    ringStore.healthData?.batteryStatus ??
-    ringStore.latestMetrics?.batteryStatus
-  );
+  return unifiedBattery.status.value;
 };
 const isMineBatteryCharging = computed(() => {
-  return isBatteryChargingLike(getMineRawBatteryValue(), getMineRawBatteryStatusValue());
+  return unifiedBattery.isCharging.value;
 });
 const batteryPercent = computed(() => {
   if (isMineBatteryCharging.value) return 100;
-  const value = getMineRawBatteryValue() ?? getMineBatteryCacheRecord()?.rawBattery;
-  if (value == null || value === '') return 0;
-  const num = Number(String(value).replace('%', '').trim());
+  const value = unifiedBattery.rawPercent.value;
+  if (value == null) return 0;
+  const num = Number(value);
   if (!Number.isFinite(num)) return 0;
   return Math.min(Math.max(Math.round(num), 0), 100);
 });
@@ -2866,6 +2856,12 @@ const shouldShowBatteryInfo = computed(() => {
   }
   return false;
 });
+const shouldShowLowBatteryHint = computed(() =>
+  shouldShowBatteryInfo.value &&
+  !isMineBatteryCharging.value &&
+  batteryPercent.value > 0 &&
+  batteryPercent.value <= 20
+);
 const shouldShowReconnectButton = computed(() => {
   // Show reconnect when a bound ring identity or ready connection exists.
   const info = bindInfo.value || {};
@@ -4325,6 +4321,7 @@ const handleMineRwL19Acceptance = async () => {
                   <view class="battery-cap"></view>
                 </view>
                 <view class="battery-level fs-40">{{ displayBatteryValue }}</view>
+                <view v-if="shouldShowLowBatteryHint" class="low-battery-hint">请及时充电</view>
               </view>
               <view v-else class="action-buttons">
                 <template v-if="shouldShowReconnectButton">
@@ -4461,6 +4458,7 @@ const handleMineRwL19Acceptance = async () => {
           <view class="mine-arrow"></view>
         </view>
       </view>
+      <view class="mini-program-version">{{ miniProgramVersionText }}</view>
     </view>
   </view>
 </template>
@@ -4476,6 +4474,14 @@ const handleMineRwL19Acceptance = async () => {
 }
 .menu-section {
   order: 10;
+}
+.mini-program-version {
+  order: 11;
+  padding: 34rpx 0 10rpx;
+  color: #a3a8b2;
+  font-size: 22rpx;
+  line-height: 1.4;
+  text-align: center;
 }
 .mine-bg-image {
   display: block;
@@ -4732,6 +4738,14 @@ const handleMineRwL19Acceptance = async () => {
   background: #4c76f1;
   border-radius: 0 3rpx 3rpx 0;
   margin-left: 2rpx;
+}
+
+.low-battery-hint {
+  margin-top: 8rpx;
+  color: #e8792e;
+  font-size: 22rpx;
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 .wave-progress-wrapper {

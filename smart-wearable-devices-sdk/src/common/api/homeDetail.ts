@@ -184,6 +184,13 @@ export const submitData = (params: submitDataType, config: SubmitDataRequestConf
   });
 };
 
+export const finalizeDataSyncSummary = (
+  params: { deviceMac?: string; uploadSessionId?: string; dates: string[] },
+  config: HttpRequestConfig = {}
+) => {
+  return (uni as any).$uv.http.post('/app/data/sync/summary/finalize', params, config);
+};
+
 export type RingHistoryRawFramesSubmitParams = {
   deviceMac: string;
   uploadSessionId?: string;

@@ -52,6 +52,11 @@
           <span>{{ scope.row.realBattery }}%</span>
         </template>
       </el-table-column>
+      <el-table-column label="显示电量" align="center" prop="displayBattery" width="110">
+        <template slot-scope="scope">
+          <span>{{ scope.row.displayBattery == null ? '-' : `${scope.row.displayBattery}%` }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="来源" align="center" prop="source" min-width="130" show-overflow-tooltip />
       <el-table-column label="记录时间" align="center" prop="recordTime" width="180">
         <template slot-scope="scope">

@@ -16,6 +16,8 @@ export type DeviceSyncDecision = {
   readSinceTimestamp: number;
   checkpointTimestamp: number;
   emptyReadTimestamp: number;
+  lastHistoryReadCompletedAt: number;
+  /** @deprecated Alias retained for diagnostics compatibility. */
   lastSyncSuccessAt: number;
   emptyReadUpdatedAt: number;
   elapsedSinceSuccessMs: number;
@@ -83,7 +85,10 @@ export const decideDeviceSync = (options: DecideDeviceSyncOptions = {}): DeviceS
     (options.autoLike !== false && !options.force && !isManualLikeTrigger(trigger));
   const checkpointTimestamp = getSafeTimestamp(options.checkpoint?.timestamp);
   const emptyReadTimestamp = getSafeTimestamp(options.checkpoint?.emptyReadTimestamp);
-  const lastSyncSuccessAt = Math.floor(Number(options.checkpoint?.updatedAt || 0));
+  const lastHistoryReadCompletedAt = Math.floor(
+    Number(options.checkpoint?.lastHistoryReadCompletedAt || 0)
+  );
+  const lastSyncSuccessAt = lastHistoryReadCompletedAt;
   const emptyReadUpdatedAt = Math.floor(Number(options.checkpoint?.emptyReadUpdatedAt || 0));
   const autoCooldownMs = Math.max(0, Math.floor(Number(options.autoCooldownMs || DEVICE_SYNC_AUTO_COOLDOWN_MS)));
   const emptyReadCooldownMs = Math.max(
@@ -110,6 +115,7 @@ export const decideDeviceSync = (options: DecideDeviceSyncOptions = {}): DeviceS
       readSinceTimestamp,
       checkpointTimestamp,
       emptyReadTimestamp,
+      lastHistoryReadCompletedAt,
       lastSyncSuccessAt,
       emptyReadUpdatedAt,
       elapsedSinceSuccessMs,
@@ -134,6 +140,7 @@ export const decideDeviceSync = (options: DecideDeviceSyncOptions = {}): DeviceS
       readSinceTimestamp,
       checkpointTimestamp,
       emptyReadTimestamp,
+      lastHistoryReadCompletedAt,
       lastSyncSuccessAt,
       emptyReadUpdatedAt,
       elapsedSinceSuccessMs,
@@ -149,6 +156,7 @@ export const decideDeviceSync = (options: DecideDeviceSyncOptions = {}): DeviceS
     readSinceTimestamp,
     checkpointTimestamp,
     emptyReadTimestamp,
+    lastHistoryReadCompletedAt,
     lastSyncSuccessAt,
     emptyReadUpdatedAt,
     elapsedSinceSuccessMs,

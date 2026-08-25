@@ -8,12 +8,12 @@ if (resolveRingProtocol({ name: 'HR-1234', advertisServiceUUIDs: ['0000180D-0000
   throw new Error('Legacy HR prefix should not be stolen by RW 180D fallback detection.');
 }
 
-if (resolveRingProtocol({ name: 'HR18N', advertisData: 'F802002105B0' }) !== 'rw') {
-  throw new Error('RW HR device with F802 manufacturer data should resolve to rw protocol.');
+if (resolveRingProtocol({ name: 'HR18N', advertisData: 'F802002105B0' }) !== 'legacy') {
+  throw new Error('F802 manufacturer data must not route an HR/L19 device into the RW protocol.');
 }
 
-if (resolveRingProtocol({ name: 'RW_RING', advertisData: 'F802002105B0' }) !== 'rw') {
-  throw new Error('RW device with F802 manufacturer data should resolve to rw protocol regardless of name prefix.');
+if (resolveRingProtocol({ name: 'RW_RING', advertisData: 'F802002105B0' }) !== 'legacy') {
+  throw new Error('Manufacturer data alone must not route an unknown device into the RW protocol.');
 }
 
 if (resolveRingProtocol({ name: 'SY03' }) !== 'rw') {
@@ -24,40 +24,40 @@ if (resolveRingProtocol({ name: 'BH3' }) !== 'rw') {
   throw new Error('BH3 should resolve to rw protocol.');
 }
 
-if (resolveRingProtocol({ advertisData: '0502008100523E000000051B8043443330336530303031' }) !== 'rw') {
-  throw new Error('RW advertis data containing 3E000000 MAC prefix should resolve to rw protocol.');
+if (resolveRingProtocol({ advertisData: '0502008100523E000000051B8043443330336530303031' }) !== 'legacy') {
+  throw new Error('An RW-like MAC marker without an SY/BH3 identity must remain on the legacy path.');
 }
 
 if (resolveRingProtocol({ name: 'BH3', advertisData: 'D6060200810052351000001191804344433303353130303030' }) !== 'rw') {
   throw new Error('Named BH3 advertis data should resolve to the RW ring protocol path.');
 }
 
-if (resolveRingProtocol({ advertisData: 'D6060200810052351000001191804344433303353130303030' }) !== 'rw') {
-  throw new Error('Unnamed RW advertis-only data should still resolve to rw protocol.');
+if (resolveRingProtocol({ advertisData: 'D6060200810052351000001191804344433303353130303030' }) !== 'legacy') {
+  throw new Error('Unnamed advertis-only data must remain legacy until an SY/BH3 identity is known.');
 }
 
-if (resolveRingProtocol({ advertisData: 'F811002105B0' }) !== 'rw') {
-  throw new Error('RW device with F811 manufacturer data should resolve to rw protocol even when name is empty.');
+if (resolveRingProtocol({ advertisData: 'F811002105B0' }) !== 'legacy') {
+  throw new Error('F811 manufacturer data alone must not route a device into the RW protocol.');
 }
 
-if (resolveRingProtocol({ advertisData: [0xf8, 0x11, 0x00, 0x21, 0x05, 0xb0] }) !== 'rw') {
-  throw new Error('RW device with array manufacturer data should resolve to rw protocol even when name is empty.');
+if (resolveRingProtocol({ advertisData: [0xf8, 0x11, 0x00, 0x21, 0x05, 0xb0] }) !== 'legacy') {
+  throw new Error('Array manufacturer data alone must not route a device into the RW protocol.');
 }
 
-if (resolveRingProtocol({ name: 'HR18N', advertisServiceUUIDs: ['0000180D-0000-1000-8000-00805F9B34FB'] }) !== 'rw') {
-  throw new Error('RW-like HR device with heart-rate service marker should resolve to rw protocol.');
+if (resolveRingProtocol({ name: 'HR18N', advertisServiceUUIDs: ['0000180D-0000-1000-8000-00805F9B34FB'] }) !== 'legacy') {
+  throw new Error('The shared heart-rate service marker must not route an HR/L19 device into RW.');
 }
 
 if (resolveRingProtocol({ name: 'Unknown Ring' }) !== 'legacy') {
   throw new Error('Unknown ring should default to legacy until a second-protocol detector is configured.');
 }
 
-if (resolveRingProtocol({ name: 'MUSLEEP_RING_001' }) !== 'qkeer-v2') {
-  throw new Error('QKeer V2 MUSLEEP_RING prefix should resolve to qkeer-v2.');
+if (resolveRingProtocol({ name: 'MUSLEEP_RING_001' }) !== 'legacy') {
+  throw new Error('An unregistered QKeer V2 prefix should remain on the legacy path.');
 }
 
-if (resolveRingProtocol({ advertisServiceUUIDs: ['0000F618-0000-1000-8000-00805F9B34FB'] }) !== 'qkeer-v2') {
-  throw new Error('QKeer V2 F618 advertised service should resolve to qkeer-v2.');
+if (resolveRingProtocol({ advertisServiceUUIDs: ['0000F618-0000-1000-8000-00805F9B34FB'] }) !== 'legacy') {
+  throw new Error('An unregistered F618 service marker should remain on the legacy path.');
 }
 
 const qkeerAdvertis = parseQkeerV2AdvertisInfo({
@@ -85,8 +85,8 @@ if (rwSy03Advertis?.macInfo !== '3E:00:00:00:05:1B' || rwBh3Advertis?.macInfo !=
   throw new Error(`RW advertis parser should expose stable MAC metadata: ${JSON.stringify({ rwSy03Advertis, rwBh3Advertis })}`);
 }
 
-if (resolveRingProtocol({ protocol: 'qkeer-v2', name: 'HR-1234' }) !== 'qkeer-v2') {
-  throw new Error('Explicit protocol should override detector rules.');
+if (resolveRingProtocol({ protocol: 'qkeer-v2', name: 'HR-1234' }) !== 'legacy') {
+  throw new Error('An unregistered protocol hint must not override the active detector rules.');
 }
 
 registerRingProtocolDetector({

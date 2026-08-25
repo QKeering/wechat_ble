@@ -79,7 +79,7 @@
       </el-table-column>
       <el-table-column label="固件" align="center" prop="fileUrl">
         <template slot-scope="scope">
-          <el-link :href="scope.row.fileUrl" :underline="false" target="_blank">
+          <el-link :href="getFirmwareUrl(scope.row.fileUrl)" :underline="false" target="_blank">
             <span class="el-icon-document"> {{ getFileName(scope.row.fileUrl) }} </span>
           </el-link>
         </template>
@@ -136,7 +136,14 @@
           </el-select>
         </el-form-item>
         <el-form-item label="固件包" prop="fileUrl">
-          <file-upload v-model="form.fileUrl" :fileType="['hex', 'bin', 'hex16']" action="/admin/device/ota/upload" :fileSize="10" :limit="1"/>
+          <file-upload
+            v-model="form.fileUrl"
+            :fileType="['hex', 'bin', 'hex16']"
+            action="/admin/device/ota/upload"
+            :fileSize="10"
+            :limit="1"
+            @upload-success="handleFirmwareUploadSuccess"
+          />
           <div class="el-upload__tip">只能上传 hex16/hex/bin 文件，且不超过 10MB</div>
         </el-form-item>
         <el-form-item label="更新文案">
@@ -220,6 +227,16 @@ export default {
     this.getList()
   },
   methods: {
+    handleFirmwareUploadSuccess(response) {
+      const fileSize = Number(response && response.fileSize)
+      this.$set(this.form, "fileSize", Number.isFinite(fileSize) ? fileSize : null)
+    },
+    getFirmwareUrl(fileUrl) {
+      if (!fileUrl || /^https?:\/\//i.test(fileUrl) || fileUrl.startsWith('/profile/')) {
+        return fileUrl
+      }
+      return `${process.env.VUE_APP_BASE_API}${fileUrl.startsWith('/') ? fileUrl : `/${fileUrl}`}`
+    },
     /** 查询OTA固件版本 列表 */
     getList() {
       this.loading = true

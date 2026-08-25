@@ -63,9 +63,32 @@ class RwSleepRawFallbackTests(unittest.TestCase):
         self.assertEqual(
             chart,
             [
-                {"time": "22:00", "value": "5", "sleepType": "LIGHT"},
-                {"time": "22:05", "value": "10", "sleepType": "DEEP"},
-                {"time": "22:15", "value": "5", "sleepType": "AWAKE"},
+                {
+                    "time": "22:00",
+                    "startTime": "22:00",
+                    "endTime": "22:05",
+                    "value": "3",
+                    "duration": 5,
+                    "stageCode": "3",
+                    "sleepStageCode": "3",
+                    "sleepStage": "LIGHT",
+                    "sleepStageName": "浅睡",
+                    "sleepType": "LIGHT",
+                    "sleepTypeName": "浅睡",
+                },
+                {
+                    "time": "22:05",
+                    "startTime": "22:05",
+                    "endTime": "22:15",
+                    "value": "4",
+                    "duration": 10,
+                    "stageCode": "4",
+                    "sleepStageCode": "4",
+                    "sleepStage": "DEEP",
+                    "sleepStageName": "深睡",
+                    "sleepType": "DEEP",
+                    "sleepTypeName": "深睡",
+                },
             ],
         )
 
@@ -79,7 +102,21 @@ class RwSleepRawFallbackTests(unittest.TestCase):
 
         self.assertEqual(values["LIGHT"], 5)
         self.assertEqual(values["DEEP"], 10)
-        self.assertEqual(values["AWAKE"], 5)
+        # Terminal awake points delimit the main session and are not counted as
+        # an in-session awake interval.
+        self.assertEqual(values["AWAKE"], 0)
+
+    def test_materially_longer_raw_sleep_replaces_truncated_segments(self):
+        record_values = {"AWAKE": 0, "REM": 40, "LIGHT": 150, "DEEP": 40, "NAP": 0}
+        raw_values = {"AWAKE": 0, "REM": 87, "LIGHT": 192, "DEEP": 40, "NAP": 0}
+
+        self.assertTrue(app_api.should_prefer_raw_sleep_values(record_values, raw_values))
+
+    def test_small_raw_sleep_difference_keeps_canonical_segments(self):
+        record_values = {"AWAKE": 10, "REM": 60, "LIGHT": 180, "DEEP": 60, "NAP": 0}
+        raw_values = {"AWAKE": 10, "REM": 65, "LIGHT": 185, "DEEP": 65, "NAP": 0}
+
+        self.assertFalse(app_api.should_prefer_raw_sleep_values(record_values, raw_values))
 
     def test_summary_steps_falls_back_to_health_raw_step_count(self):
         db = _FakeDb([

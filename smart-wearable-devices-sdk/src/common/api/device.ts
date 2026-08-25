@@ -254,6 +254,33 @@ const postAppApi = async (url: string, data: Record<string, any>, config: HttpRe
   throw new Error('HTTP client not initialized');
 };
 
+const putAppApi = async (
+  url: string,
+  data: Record<string, any> = {},
+  config: HttpRequestConfigCompat = {}
+) => {
+  const http = (uni as any)?.$uv?.http;
+  const requestConfig = {
+    ...config,
+    custom: {
+      toast: false,
+      ...(config.custom || {})
+    }
+  };
+  if (typeof http?.put === 'function') {
+    return http.put(url, data, requestConfig);
+  }
+  if (typeof http?.request === 'function') {
+    return http.request({
+      ...requestConfig,
+      url,
+      method: 'PUT',
+      data
+    });
+  }
+  throw new Error('HTTP client not initialized');
+};
+
 const getRemoteBindInfo = async (
   config: HttpRequestConfigCompat,
   useCache: boolean,
@@ -344,11 +371,40 @@ export const reportDeviceBatteryLog = async (
     mac?: string;
     deviceMac?: string;
     realBattery: number;
+    displayBattery?: number;
     recordTime?: string;
     source?: string;
   },
   config: HttpRequestConfigCompat = {}
 ) => postAppApi('/app/device/batteryLog', params as any, config);
+
+export const reportDeviceVersions = async (
+  params: {
+    mac?: string;
+    deviceMac?: string;
+    firmwareVersion?: string;
+    softwareVersion?: string;
+  },
+  config: HttpRequestConfigCompat = {}
+) => postAppApi('/app/device/version/report', params as any, config);
+
+export const reportOtaUpdate = async (
+  params: {
+    packageId: string | number;
+    mac: string;
+    versionKind?: 'firmware' | 'software';
+  },
+  config: HttpRequestConfigCompat = {}
+) => {
+  const query = [
+    `packageId=${encodeURIComponent(String(params.packageId))}`,
+    `mac=${encodeURIComponent(params.mac)}`,
+    params.versionKind ? `versionKind=${encodeURIComponent(params.versionKind)}` : ''
+  ]
+    .filter(Boolean)
+    .join('&');
+  return putAppApi(`/app/ota/package/updateCallback?${query}`, {}, config);
+};
 
 export const getBindInfo = async (
   params: GetBindInfoParams = {},

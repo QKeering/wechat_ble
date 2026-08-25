@@ -36,7 +36,8 @@ import { onLoad } from '@dcloudio/uni-app';
 import { useUserStore } from '@/stores/user';
 import RingOTAManager from '@/composables/ring-ota-manager';
 import { useRingBLE } from '@/composables/useRingBLE';
-import { getOtaInfo, getBindInfo } from '@/common/api/device';
+import { getOtaInfo, getBindInfo, reportOtaUpdate } from '@/common/api/device';
+import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 const userStore = useUserStore();
 
 // --- 配置常量 ---
@@ -108,7 +109,42 @@ const findReceivedMetricText = (...types) => {
   return '';
 };
 
-const versionInfo = computed(() => {
+const findReceivedSoftwareVersionText = () => {
+  for (const item of userStore.receivedData || []) {
+    const sourceType = String(item?.type || item?.sourceType || '').toLowerCase();
+    const text = pickText(
+      item?.softwareVersion,
+      item?.software_version,
+      item?.uiVersion,
+      item?.ui_version,
+      item?.metrics?.softwareVersion,
+      item?.metrics?.software_version,
+      item?.metrics?.uiVersion,
+      item?.metrics?.ui_version,
+      item?.parsed?.softwareVersion,
+      item?.parsed?.software_version,
+      item?.parsed?.uiVersion,
+      item?.parsed?.ui_version,
+      sourceType === 'softwareversion' || sourceType === 'software_version' || sourceType === 'uiversion' || sourceType === 'ui_version'
+        ? item?.value ?? item?.metrics?.value ?? item?.parsed?.value
+        : undefined
+    );
+    if (text) return text;
+  }
+  return '';
+};
+
+const softwareVersionInfo = computed(() =>
+  pickText(
+    findReceivedSoftwareVersionText(),
+    pickObjectText(userStore.latestMetrics, ['softwareVersion', 'software_version', 'uiVersion', 'ui_version']),
+    pickObjectText(userStore.healthData, ['softwareVersion', 'software_version', 'uiVersion', 'ui_version']),
+    pickObjectText(userStore.deviceInfo, ['softwareVersion', 'software_version', 'uiVersion', 'ui_version']),
+    pickObjectText(bindInfo.value, ['softwareVersion', 'software_version', 'uiVersion', 'ui_version'])
+  )
+);
+
+const legacyOtaVersionInfo = computed(() => {
   return pickText(
     findReceivedMetricText('firmware_version', 'firmwareVersion', 'hardwareVersion', 'hardware_version', 'softwareVersion', 'software_version'),
     pickObjectText(userStore.latestMetrics, [
@@ -158,8 +194,20 @@ const versionInfo = computed(() => {
   );
 });
 
+const versionInfo = computed(() => {
+  return pickText(softwareVersionInfo.value, legacyOtaVersionInfo.value);
+});
+
+const normalizeKnownOtaDeviceModel = (value) => {
+  const raw = pickText(value);
+  const normalized = raw.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (normalized.startsWith('qkeeringd25')) return 'QKeeRingD25';
+  if (normalized.startsWith('qkeeringl19') || normalized.startsWith('qkl19')) return 'QKeeRingL19';
+  return '';
+};
+
 const deviceModel = computed(() => {
-  return pickObjectText(userStore.deviceInfo, [
+  const explicitModel = pickObjectText(userStore.deviceInfo, [
     'deviceModel',
     'modelKey',
     'model',
@@ -174,17 +222,29 @@ const deviceModel = computed(() => {
     'productCode',
     'modelName'
   ]);
+  if (explicitModel) return explicitModel;
+
+  return normalizeKnownOtaDeviceModel(
+    pickObjectText(userStore.deviceInfo, ['name', 'deviceName', 'localName']) ||
+      pickObjectText(bindInfo.value, ['name', 'deviceName', 'localName'])
+  );
 });
 
 const buildFirmwareDownloadUrl = (url) => {
   const rawUrl = pickText(url);
   if (!rawUrl) return '';
-  if (/^https?:\/\//i.test(rawUrl)) return encodeURI(rawUrl);
+  if (/^https?:\/\//i.test(rawUrl)) {
+    const rewritten = rawUrl.replace(
+      /^(https?:\/\/sh\.qkeering\.com)(\/(?:admin\/files|profile\/ota)\/)/i,
+      '$1/api$2'
+    );
+    return encodeURI(rewritten);
+  }
 
   const apiBase = String(import.meta.env.VITE_API_BASE || '').replace(/\/+$/, '');
   let path = rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`;
   const isProdGateway = /^https:\/\/sh\.qkeering\.com$/i.test(apiBase);
-  if (isProdGateway && path.startsWith('/admin/files/')) {
+  if (isProdGateway && (path.startsWith('/admin/files/') || path.startsWith('/profile/ota/'))) {
     path = `/api${path}`;
   }
 
@@ -207,7 +267,32 @@ const downloadFirmware = (url) => {
       url,
       method: 'GET',
       responseType: 'text',
-      success: (res) => (res.statusCode === 200 ? resolve(res.data) : reject(new Error('固件下载失败'))),
+      success: (res) => {
+        if (res.statusCode !== 200) {
+          reject(new Error(`固件下载失败: HTTP ${res.statusCode}`));
+          return;
+        }
+        const content = typeof res.data === 'string' ? res.data.replace(/^\uFEFF/, '') : '';
+        const firstLine = content.split(/\r?\n/, 1)[0]?.trim() || '';
+        if (!firstLine.startsWith(':')) {
+          appendRingDiagnosticLog('RING OTA', 'ota-firmware-download-invalid-content', {
+            url,
+            statusCode: res.statusCode,
+            contentType: res.header?.['content-type'] || res.header?.['Content-Type'] || '',
+            contentLength: content.length,
+            contentPrefix: content.slice(0, 32)
+          });
+          reject(new Error('固件文件内容无效，请检查后台上传路径'));
+          return;
+        }
+        appendRingDiagnosticLog('RING OTA', 'ota-firmware-download-ready', {
+          url,
+          statusCode: res.statusCode,
+          contentLength: content.length,
+          firstRecordType: firstLine.slice(7, 9)
+        });
+        resolve(content);
+      },
       fail: () => reject(new Error('网络请求异常'))
     });
   });
@@ -215,7 +300,7 @@ const downloadFirmware = (url) => {
 
 /** 发送蓝牙命令 */
 const sendCommand = (deviceId, data) => {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     uni.writeBLECharacteristicValue({
       deviceId,
       serviceId: SERVICE_UUID,
@@ -224,7 +309,7 @@ const sendCommand = (deviceId, data) => {
       success: () => resolve(),
       fail: (err) => {
         console.warn('[BLE] 发送命令失败:', err);
-        resolve(); // 忽略错误
+        reject(new Error(`进入升级模式命令发送失败: ${err.errMsg || err.errCode || 'unknown'}`));
       }
     });
   });
@@ -241,14 +326,12 @@ const extractMacFromAdv = (advertisData) => {
 
   const bytes = new Uint8Array(advertisData);
 
-  // 尝试从广播数据末尾提取 6 字节 MAC（反序）
-  // 根据日志，MAC 位于广播数据的后 6 字节
-  if (bytes.length >= 6) {
-    // 取最后 6 字节并反序
-    const macBytes = Array.from(bytes.slice(-6)).reverse();
+  // APP 广播的 MAC 位于末尾 6 字节；BOOT 广播会在其后追加 00 00。
+  // 逐窗匹配，避免把 BOOT 广播 0405850500F005B00000 错解为
+  // 00:00:B0:05:F0:00，正确结果应为 B0:05:F0:00:05:85。
+  for (let offset = 0; offset <= bytes.length - 6; offset += 1) {
+    const macBytes = Array.from(bytes.slice(offset, offset + 6)).reverse();
     const mac = macBytes.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(':');
-
-    // 验证是否为有效的戒指 MAC (B0:05:F0 开头)
     if (mac.startsWith('B0:05:F0')) {
       return mac;
     }
@@ -338,10 +421,7 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
       const name = (device.name || device.localName || '').trim();
       const nameUpper = name.toUpperCase();
 
-      if (isBootMode) {
-        // BOOT 模式：匹配 PPLUSOTA 或目标 MAC
-        if (nameUpper === 'PPLUSOTA') return true;
-      } else {
+      if (!isBootMode) {
         // APP 模式：排除 PPLUSOTA，匹配名称前缀
         if (nameUpper === 'PPLUSOTA') return false;
         for (const prefix of SCAN_CONFIG.appNamePrefixes) {
@@ -366,9 +446,13 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
         if (deviceId === targetMac.toUpperCase().replace(/:/g, '')) {
           return true;
         }
+
+        // 指定了真实 BOOT MAC 时必须精确命中，不能被周围其他
+        // PPlusOTA 设备抢占。
+        return false;
       }
 
-      return false;
+      return isBootMode && nameUpper === 'PPLUSOTA';
     };
 
     const startScan = () => {
@@ -390,6 +474,12 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
                 otaState.value.statusText = `搜索重试 (${retryCount}/${SCAN_CONFIG.maxRetries})...`;
                 setTimeout(startScan, SCAN_CONFIG.retryDelay);
               } else if (rejectOnFail) {
+                appendRingDiagnosticLog('RING OTA', 'ota-scan-target-not-found', {
+                  mode,
+                  targetMac,
+                  retries: retryCount,
+                  timeoutMs: SCAN_CONFIG.timeout
+                });
                 reject(new Error('未找到设备，请确保设备处于正确模式'));
               } else {
                 resolve(null);
@@ -411,6 +501,13 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
                 uni.stopBluetoothDevicesDiscovery();
 
                 console.log(`[BLE] ✅ 匹配 ${mode}:`, name, device.deviceId, JSON.stringify(device));
+                appendRingDiagnosticLog('RING OTA', 'ota-scan-target-matched', {
+                  mode,
+                  targetMac,
+                  platformDeviceId: device.deviceId,
+                  name,
+                  advertisMac: extractMacFromAdv(device.advertisData)
+                });
                 const adv = device.advertisData;
                 console.log('[BOOT] adv byteLength =', adv ? adv.byteLength : null);
                 if (adv && adv.byteLength) {
@@ -455,10 +552,16 @@ const enterBootMode = async (deviceId) => {
     console.log('[OTA] 已发送 BOOT 命令');
   } catch (e) {
     console.warn('[OTA] BOOT 命令异常:', e);
+    appendRingDiagnosticLog('RING OTA', 'ota-enter-boot-failed', {
+      platformDeviceId: deviceId,
+      error: e?.message || String(e)
+    });
+    throw e;
   }
 
   otaState.value.statusText = '等待设备重启...';
-  await new Promise((r) => setTimeout(r, 5000));
+  // 尽快开始扫描，避免错过部分固件较短的 BOOT 广播窗口。
+  await new Promise((r) => setTimeout(r, 1500));
   await disconnectDevice(deviceId);
 };
 
@@ -481,15 +584,41 @@ const startOtaProcess = async () => {
     return;
   }
 
-  const currentDeviceId = userStore.deviceInfo?.deviceId;
-  const currentDeviceName = (userStore.deviceInfo?.name || '').toUpperCase().trim();
+  const currentDevice = userStore.deviceInfo || {};
+  const currentDeviceId = currentDevice.deviceId;
+  const currentDeviceName = (currentDevice.name || '').toUpperCase().trim();
   const isAlreadyInBootMode = currentDeviceName === 'PPLUSOTA';
-  const originalAppMac = isAlreadyInBootMode ? calculateAppMac(currentDeviceId) : currentDeviceId;
+  // 微信 BLE API 使用平台 deviceId；BOOT 扫描匹配必须使用戒指真实 MAC。
+  // 鸿蒙/iOS 的 platform deviceId 可能是随机地址，绝不能用于 MAC +1。
+  const canonicalDeviceMac = pickText(
+    currentDevice.uniMacId,
+    currentDevice.mac,
+    currentDevice.canonicalDeviceMac,
+    bindInfo.value?.uniMacId,
+    bindInfo.value?.mac,
+    bindInfo.value?.canonicalDeviceMac,
+    currentDeviceId
+  );
+  const boundCanonicalMac = pickText(
+    bindInfo.value?.uniMacId,
+    bindInfo.value?.mac,
+    bindInfo.value?.canonicalDeviceMac
+  );
+  const originalAppMac = isAlreadyInBootMode
+    ? boundCanonicalMac || calculateAppMac(canonicalDeviceMac)
+    : canonicalDeviceMac;
 
   console.log('[OTA] 设备:', currentDeviceName, currentDeviceId, '| 模式:', isAlreadyInBootMode ? 'BOOT' : 'APP');
 
   // 重置状态
   Object.assign(otaState.value, { isUpgrading: true, error: false, success: false, progress: 0 });
+  appendRingDiagnosticLog('RING OTA', 'ota-process-start', {
+    platformDeviceId: currentDeviceId,
+    canonicalDeviceMac,
+    currentDeviceName,
+    targetVersion: otaBaseInfo.value?.versionCode || '',
+    firmwareUrl: firmwareUrl.value
+  });
 
   try {
     // 1. 下载固件
@@ -506,9 +635,20 @@ const startOtaProcess = async () => {
       bootDeviceId = currentDeviceId;
       otaState.value.progress = 15;
     } else if (currentDeviceId) {
-      const targetBootMac = calculateBootMac(currentDeviceId);
+      const targetBootMac = calculateBootMac(originalAppMac);
       console.log('[OTA] 切换到 BOOT 模式, 目标:', targetBootMac);
-      await enterBootMode(currentDeviceId);
+      try {
+        await enterBootMode(currentDeviceId);
+      } catch (bootCommandError) {
+        // A previous failed attempt may already have left the ring in
+        // PPlusOTA mode. Fall through to an exact BOOT-MAC scan so the user
+        // can resume without first restoring APP mode.
+        appendRingDiagnosticLog('RING OTA', 'ota-enter-boot-command-fallback-scan', {
+          platformDeviceId: currentDeviceId,
+          targetBootMac,
+          error: bootCommandError?.message || String(bootCommandError)
+        });
+      }
       otaState.value.progress = 10;
       bootDeviceId = await scanAndConnect({ targetMac: targetBootMac, mode: 'BOOT' });
     } else {
@@ -527,6 +667,37 @@ const startOtaProcess = async () => {
 
     // 4. 升级成功
     console.log('[OTA] ✅ 升级成功');
+    const targetVersion = pickText(otaBaseInfo.value?.versionCode, otaBaseInfo.value?.version);
+    const packageId = otaBaseInfo.value?.id;
+    if (targetVersion) {
+      const versionPatch = { softwareVersion: targetVersion, uiVersion: targetVersion };
+      userStore.updateDeviceInfo({ ...userStore.deviceInfo, ...versionPatch });
+      bindInfo.value = { ...bindInfo.value, ...versionPatch };
+    }
+    if (packageId && originalAppMac) {
+      try {
+        await reportOtaUpdate({
+          packageId,
+          mac: originalAppMac,
+          versionKind: 'software'
+        });
+        appendRingDiagnosticLog('RING OTA', 'ota-version-cache-updated', {
+          packageId,
+          mac: originalAppMac,
+          targetVersion,
+          versionKind: 'software'
+        });
+      } catch (error) {
+        // OTA has already completed successfully. A cache update failure must
+        // not turn a successful device upgrade into a user-visible failure.
+        appendRingDiagnosticLog('RING OTA', 'ota-version-cache-update-failed', {
+          packageId,
+          mac: originalAppMac,
+          targetVersion,
+          error: error?.message || String(error)
+        });
+      }
+    }
     await disconnectDevice(bootDeviceId);
 
     const appMac = originalAppMac || calculateAppMac(bootDeviceId);
@@ -584,6 +755,13 @@ const startOtaProcess = async () => {
     });
   } catch (err) {
     console.error('[OTA] 失败:', err);
+    appendRingDiagnosticLog('RING OTA', 'ota-process-failed', {
+      platformDeviceId: currentDeviceId,
+      canonicalDeviceMac,
+      progress: otaState.value.progress,
+      statusText: otaState.value.statusText,
+      error: err?.message || String(err)
+    });
     otaState.value.error = true;
     otaState.value.statusText = `升级失败: ${err.message || '未知错误'}`;
   } finally {

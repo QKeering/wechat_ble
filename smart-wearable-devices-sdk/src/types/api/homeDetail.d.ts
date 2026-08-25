@@ -140,6 +140,16 @@ export type heartRateDetail = {
   newValue?: string; // 新值
   axisStartTime?: string; // 图表横轴开始时间
   axisEndTime?: string; // 图表横轴结束时间
+  displayMode?: 'real' | 'proxy' | 'empty'; // HRV 展示层：真值 / 代理趋势 / 空状态
+  hrvSource?: 'device_or_rr' | 'bpm_proxy' | 'sparse_bpm_proxy' | 'none';
+  proxyMs?: number | null; // 仅供内部质量评估，前端不得按真实 ms 展示
+  proxyQuality?: number;
+  statusText?: string;
+  tips?: string;
+  emptyReason?: string;
+  algorithmVersion?: string;
+  validBpmCount?: number;
+  proxyWindowCount?: number;
 };
 // 获取睡眠总览信息
 export type sleepOverview = {
@@ -262,11 +272,30 @@ export type stressDetail = {
   dailyAvgHrvValue?: string; // 每日平均HRV值
   avgStressValue?: number; // 平均压力值
   stressRange?: string; // 压力范围
+  hrvDisplay?: Pick<
+    heartRateDetail,
+    | 'displayMode'
+    | 'hrvSource'
+    | 'proxyMs'
+    | 'proxyQuality'
+    | 'statusText'
+    | 'tips'
+    | 'emptyReason'
+    | 'algorithmVersion'
+    | 'validBpmCount'
+    | 'proxyWindowCount'
+  >;
+  pressureDisplayMode?: 'real' | 'proxy' | 'empty';
+  pressureStatusText?: string;
+  pressureTips?: string;
+  pressureSource?: 'stress' | 'bpm_proxy' | 'none';
+  proxyQuality?: number;
 };
 // 获取压力比例
 export type stressProportion = {
   stressDuration?: Point[]; // 压力时长分布图表(分钟)
   stressProportionChart?: Point[]; // 压力比例图表
+  pressureDisplayMode?: 'real' | 'proxy' | 'empty';
 };
 // 获取压力总结
 export type stressSummaryType = {
@@ -283,4 +312,5 @@ export type stressSummaryType = {
   normalDuration?: number; // 正常时长（分钟）
   moderateStressDuration?: number; // 中等压力时长（分钟）
   highStressDuration?: number; // 高强度压力时长（分钟）
+  pressureDisplayMode?: 'real' | 'proxy' | 'empty';
 };
