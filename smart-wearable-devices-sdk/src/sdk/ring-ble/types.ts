@@ -72,6 +72,11 @@ export interface RingBoundDevice {
   mac?: string;
   name?: string;
   deviceName?: string;
+  /** User-facing product/model name. */
+  modelName?: string;
+  productName?: string;
+  /** BLE advertising name, for diagnostics and protocol matching only. */
+  bleName?: string;
   serviceId?: string;
   cmdCharId?: string;
   dataCharId?: string;
@@ -90,6 +95,9 @@ export interface RingBindPayload {
   dataServiceId?: string;
   uniMacId?: string;
   deviceName?: string;
+  modelName?: string;
+  productName?: string;
+  bleName?: string;
   protocol?: RingProtocolKind;
   advertis?: Record<string, any>;
   replace?: boolean;

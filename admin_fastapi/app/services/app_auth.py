@@ -19,6 +19,8 @@ LOGIN_TOKEN_KEY = "qkeer:login_tokens:"
 PHONE_CODE_KEY = "qkeer:app_phone_code:"
 DEVICE_LINK_SERVICE_KEY = "qkeer:device_link_service:"
 DEVICE_NAME_KEY = "qkeer:device_name:"
+DEVICE_BLE_NAME_KEY = "qkeer:device_ble_name:"
+DEVICE_IDENTITY_CLEANUP_KEY = "qkeer:device_identity_cleanup:v1:"
 H5_TICKET_KEY = "qkeer:h5_ticket:"
 H5_SESSION_TTL_SECONDS = 30 * 60
 

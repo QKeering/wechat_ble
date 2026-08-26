@@ -5,6 +5,7 @@ const RING_HISTORY_KEY = 'qkeer:ring-history-records';
 const RING_RAW_HISTORY_KEY = 'qkeer:ring-raw-history-frames:v1';
 const MAX_LOCAL_HISTORY_RECORDS = 200;
 const MAX_LOCAL_RAW_HISTORY_FRAMES = 1000;
+export const DEFAULT_RING_DISPLAY_NAME = '轻刻智能戒指';
 
 const readStorage = <T>(key: string, fallback: T): T => {
   try {
@@ -19,6 +20,34 @@ const writeStorage = (key: string, value: unknown) => {
 };
 
 type AnyRecord = Record<string, any>;
+
+const DEVICE_WRAPPING_QUOTES: Record<string, string> = {
+  '"': '"',
+  "'": "'",
+  '“': '”',
+  '‘': '’'
+};
+
+export const stripDeviceWrappingQuotes = (value: unknown) => {
+  let text = String(value ?? '').trim();
+  while (text.length >= 2 && DEVICE_WRAPPING_QUOTES[text[0]] === text[text.length - 1]) {
+    text = text.slice(1, -1).trim();
+  }
+  return text;
+};
+
+const sanitizeDeviceValue = (value: unknown): unknown => {
+  if (typeof value === 'string') return stripDeviceWrappingQuotes(value);
+  if (Array.isArray(value)) return value.map(sanitizeDeviceValue);
+  if (value && typeof value === 'object') {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return value;
+    return Object.fromEntries(Object.entries(value as AnyRecord).map(([key, item]) => [key, sanitizeDeviceValue(item)]));
+  }
+  return value;
+};
+
+const isBleOnlyDeviceName = (value: string) => /^HR\d+$/i.test(stripDeviceWrappingQuotes(value));
 
 export interface RingRawHistoryFrame {
   deviceKey: string;
@@ -60,7 +89,7 @@ const getStringField = (source: AnyRecord | null | undefined, ...keys: string[])
   for (const key of keys) {
     const value = getFieldValue(source, key);
     if (value === undefined || value === null) continue;
-    const text = String(value).trim();
+    const text = stripDeviceWrappingQuotes(value);
     if (text) return text;
   }
   return '';
@@ -68,7 +97,7 @@ const getStringField = (source: AnyRecord | null | undefined, ...keys: string[])
 
 export const normalizeRingBoundDevice = <T extends AnyRecord | null | undefined>(device: T): RingBoundDevice | null => {
   if (!device || typeof device !== 'object') return null;
-  const source = device as AnyRecord;
+  const source = sanitizeDeviceValue(device) as AnyRecord;
   const rawAdvertis = getFieldValue(source, 'advertis', 'advertise', 'advertisement', 'advertising');
   const advertis = rawAdvertis && typeof rawAdvertis === 'object' ? { ...(rawAdvertis as AnyRecord) } : undefined;
   const mac =
@@ -90,26 +119,35 @@ export const normalizeRingBoundDevice = <T extends AnyRecord | null | undefined>
     'wxDeviceId',
     'wx_device_id'
   );
-  const deviceName = getStringField(
+  const modelName = getStringField(source, 'modelName', 'model_name', 'productName', 'product_name');
+  const explicitBleName = getStringField(
     source,
-    'deviceName',
-    'device_name',
-    'name',
-    'localName',
-    'local_name',
     'bleName',
     'ble_name',
+    'localName',
+    'local_name',
     'bluetoothName',
     'bluetooth_name'
   );
+  const bleName =
+    explicitBleName ||
+    (getStringField(source, 'source') === 'remote' || modelName ? '' : getStringField(source, 'name', 'deviceName', 'device_name'));
+  const responseDisplayName = getStringField(source, 'deviceName', 'device_name', 'name');
+  const deviceName =
+    modelName ||
+    (responseDisplayName && responseDisplayName !== bleName && !isBleOnlyDeviceName(responseDisplayName) ? responseDisplayName : '') ||
+    DEFAULT_RING_DISPLAY_NAME;
   const normalizedAdvertis = advertis || mac ? { ...(advertis || {}), ...(mac ? { macInfo: getStringField(advertis, 'macInfo') || mac } : {}) } : undefined;
 
   return {
     ...source,
     mac: mac || source.mac,
     deviceId: deviceId || source.deviceId || '',
-    deviceName: deviceName || source.deviceName || source.name,
-    name: source.name || deviceName || source.deviceName,
+    modelName: modelName || source.modelName,
+    productName: modelName || source.productName,
+    deviceName,
+    name: deviceName,
+    bleName: bleName || source.bleName,
     serviceId: getStringField(source, 'serviceId', 'service_id') || source.serviceId,
     cmdCharId:
       getStringField(source, 'cmdCharId', 'cmd_char_id', 'writeCharId', 'write_char_id', 'writeCharacteristicId', 'write_characteristic_id') ||

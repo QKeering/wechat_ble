@@ -15,6 +15,7 @@ import { getRingDeviceStableIdentity, isSameRingDevice } from './useRingBleSdk';
 import type { UseRingBleSdkOptions } from './useRingBleSdk';
 import { getRwDiagnosticCommandLock, type RwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
 import { reportDeviceVersions } from '@/common/api/device';
+import { DEFAULT_RING_DISPLAY_NAME, stripDeviceWrappingQuotes } from '@/api/ringDevice';
 
 export interface UseRingBusinessControllerOptions extends UseRingBleSdkOptions {
   connectTimeoutMs?: number;
@@ -1849,9 +1850,12 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 };
 
 export function getRingBusinessDeviceName(device: RingDeviceInfo | Record<string, any>) {
-  const name = `${device.displayName || device.deviceName || device.name || device.localName || device.bleName || ''}`.trim();
-  if (name) return name;
-  return getRingDeviceStableIdentity(device as RingDeviceInfo) || '新设备';
+  const modelName = stripDeviceWrappingQuotes(device.modelName || device.productName);
+  if (modelName) return modelName;
+  const bleName = stripDeviceWrappingQuotes(device.bleName || device.localName || device.name);
+  const displayName = stripDeviceWrappingQuotes(device.displayName || device.deviceName);
+  if (displayName && displayName !== bleName && !/^HR\d+$/i.test(displayName)) return displayName;
+  return DEFAULT_RING_DISPLAY_NAME;
 }
 
 export function getRingBusinessDeviceTail(device: RingDeviceInfo | Record<string, any>) {

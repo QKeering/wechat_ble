@@ -56,7 +56,15 @@ const findRingStatusText = computed(() => {
   return '';
 });
 const connectionText = computed(() => (ring.isConnected.value ? '已连接' : '未连接'));
-const deviceName = computed(() => getFirstDeviceInfoValue(ring.currentDeviceName.value, boundInfo.value?.deviceName, boundInfo.value?.name));
+const deviceName = computed(() =>
+  getFirstDeviceInfoValue(
+    boundInfo.value?.modelName,
+    boundInfo.value?.productName,
+    boundInfo.value?.deviceName,
+    boundInfo.value?.name,
+    '轻刻智能戒指'
+  )
+);
 const deviceIdentity = computed(() => {
   const currentTail = ring.currentDeviceTail.value;
   if (currentTail && currentTail !== '-') return currentTail;

@@ -909,29 +909,10 @@ const completeAwarenessVisibleSyncAfterPartialHistory = (
   homeDataSyncing.value = true;
   legacyHomeHistoryPartialContinuationPending = true;
   const fallbackSinceTimestamp = Number(
-    (details?.checkpointTimestampAfterUpload as number | undefined) ||
-      (details?.fallbackSinceTimestamp as number | undefined) ||
+    (details?.fallbackSinceTimestamp as number | undefined) ||
+      (details?.checkpointTimestampAfterUpload as number | undefined) ||
       0
   );
-  const submittedCount = Number((details?.submitCount as number | undefined) || 0);
-  if (submittedCount > 0 && fallbackSinceTimestamp > 0) {
-    userStore.updateUploadingStatus('2');
-    userStore.updateIsSending(false);
-    homeDataSyncing.value = false;
-    legacyHomeHistoryPartialContinuationPending = false;
-    appendAwarenessDiagnosticLog('legacy-home-history-partial-continuation-deferred', {
-      protocol,
-      trigger,
-      reason: 'partial-history-uploaded-checkpoint-advanced-defer-next-session',
-      submitCount: submittedCount,
-      fallbackSinceTimestamp,
-      fallbackSinceText: formatUnixTimestampForLog(fallbackSinceTimestamp),
-      ...details,
-      snapshot: getAwarenessConnectionSnapshot()
-    });
-    finishAwarenessHomeSyncWithoutHistoryCooldown(`${trigger}:defer-next-session`);
-    return;
-  }
   const uploadFlushScheduled = requestOrScheduleLegacyLocalDataIncompleteFlush(trigger, protocol);
   const historyContinuationScheduled = scheduleLegacyHomeHistoryLongRetryAfterPartialUpload(trigger, protocol, {
     reason: trigger,
@@ -1346,7 +1327,15 @@ const getAwarenessHistoryProcessingSinceTimestamp = (isRwRing: boolean) => {
   return Math.max(0, getLegacyDefaultSleepWindowStartUnixTimestamp(new Date()));
 };
 const getAwarenessHistoryUploadSinceTimestamp = getAwarenessHistoryProcessingSinceTimestamp;
-const getAwarenessHistoryReadSinceTimestamp = getAwarenessHistoryProcessingSinceTimestamp;
+const getAwarenessHistoryReadSinceTimestamp = (isRwRing: boolean) => {
+  const readTimestamp = getAwarenessReadCheckpointTimestamp();
+  if (readTimestamp > 0) {
+    if (isRwRing) return readTimestamp;
+    return Math.max(0, readTimestamp - LEGACY_HISTORY_READ_CHECKPOINT_OVERLAP_SECONDS);
+  }
+  if (isRwRing) return 0;
+  return Math.max(0, getLegacyDefaultSleepWindowStartUnixTimestamp(new Date()));
+};
 const getLegacyHomeHistoryReadScopeKey = (deviceMac: string, date: string) =>
   `${normalizeHistoryCheckpointDeviceMac(deviceMac) || 'unknown-device'}:${date}`;
 const getLegacyHomeHistoryReadKey = (deviceMac: string, date: string, sinceTimestamp: number) =>
@@ -1492,7 +1481,7 @@ const getLegacyHomeHistoryReadTerminalForDevice = (deviceMac: string) => {
 };
 const isLegacyHomeHistoryReadTerminalComplete = (
   terminal?: { completed?: boolean; parsedComplete?: boolean } | null
-) => Boolean(terminal?.completed === true || terminal?.parsedComplete === true);
+) => Boolean(terminal?.completed === true && terminal?.parsedComplete === true);
 const getLegacyHomeHistoryReadRecordsForDevice = (deviceMac: string) => {
   const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
   if (!deviceMacNorm) return [] as Array<Record<string, any>>;
@@ -2453,7 +2442,15 @@ const closeLegacyLocalDataTerminalSkip = (snapshot: ReturnType<typeof getLegacyL
     snapshot.uploadDedupKey,
     terminalUploadedUntil
   );
-  const completedByTerminalSkip = Boolean(snapshot.deviceMac && !LEGACY_LOCAL_DATA_SKIP_WITHOUT_HISTORY_COMPLETE_REASONS.has(reason));
+  // A terminal watcher may observe a stable-but-partial snapshot after an upload
+  // has already been acknowledged.  Upload completion is not BLE history-read
+  // completion: only a snapshot carrying the explicit 0x36 completion marker is
+  // allowed to advance the read cursor or start the history cooldown.
+  const completedByTerminalSkip = Boolean(
+    snapshot.deviceMac &&
+      snapshot.completed === true &&
+      !LEGACY_LOCAL_DATA_SKIP_WITHOUT_HISTORY_COMPLETE_REASONS.has(reason)
+  );
   if (completedByTerminalSkip) {
     if (terminalMaxTimestamp > 0) {
       updateAwarenessDeviceHistoryReadCheckpoint(terminalMaxTimestamp, `legacy-local-data-terminal-skip:${reason}`);
@@ -2548,6 +2545,20 @@ const tryCloseLegacyLocalDataTerminalSkip = (
       snapshot: getAwarenessConnectionSnapshot()
     });
     return false;
+  }
+  const alreadyClosed = snapshot.deviceMacNorm
+    ? closedLegacyLocalDataUploadSessions.get(snapshot.deviceMacNorm)
+    : null;
+  if (
+    alreadyClosed &&
+    alreadyClosed.uploadSessionKey === getAwarenessHomeUploadSessionKey() &&
+    alreadyClosed.uploadDedupKey === snapshot.uploadDedupKey &&
+    Date.now() - alreadyClosed.completedAt <= LEGACY_LOCAL_DATA_CLOSED_SESSION_TTL_MS
+  ) {
+    // Watcher, page-show and upload-finally can observe the same immutable
+    // terminal snapshot. The first close owns all state transitions; later
+    // observations are successful no-ops instead of another close/log storm.
+    return true;
   }
   appendAwarenessDiagnosticLog('legacy-local-data-terminal-skip-close', {
     protocol,
@@ -6220,15 +6231,13 @@ watch(
             maxSubmittedTimestamp = Math.max(...submittedTimestamps);
           }
           const readCheckpointTimestampAfterUpload = legacyHistoryIncompleteAfterUpload
-            ? maxReceivedTimestamp
+            ? getAwarenessReadCheckpointTimestamp()
             : Math.max(maxReceivedTimestamp, Number(historyReadTerminal?.maxTimestamp || 0));
           const backendAckCheckpointTimestamp = maxSubmittedTimestamp;
-          if (readCheckpointTimestampAfterUpload > 0) {
+          if (!legacyHistoryIncompleteAfterUpload && readCheckpointTimestampAfterUpload > 0) {
             updateAwarenessDeviceHistoryReadCheckpoint(
               readCheckpointTimestampAfterUpload,
-              legacyHistoryIncompleteAfterUpload
-                ? 'legacy-local-data-upload-partial-read-complete'
-                : 'legacy-local-data-upload-read-complete'
+              'legacy-local-data-upload-read-complete'
             );
           }
           if (backendAckCheckpointTimestamp > 0) {
@@ -6305,6 +6314,7 @@ watch(
                 maxSubmittedTimestamp,
                 maxReceivedTimestamp,
                 checkpointTimestampAfterUpload,
+                fallbackSinceTimestamp: getAwarenessHistoryReadSinceTimestamp(false),
                 stableSnapshot: uploadSignatureSnapshot
               }
             );
@@ -6366,12 +6376,6 @@ watch(
                     'legacy-local-data-already-uploaded'
                   )
                 : getLegacyLocalDataSnapshotMaxTimestamp(alreadyUploadedStableSnapshot);
-            if (alreadyUploadedStableSnapshot.completed !== true && alreadyUploadedMaxTimestamp > 0) {
-              updateAwarenessDeviceHistoryReadCheckpoint(
-                alreadyUploadedMaxTimestamp,
-                'legacy-local-data-already-uploaded-partial-submitted-checkpoint-advanced'
-              );
-            }
             if (alreadyUploadedMaxTimestamp > 0) {
               completeLegacyLocalDataUploadSignature(alreadyUploadedStableSnapshot, alreadyUploadedMaxTimestamp);
               closeLegacyLocalDataUploadSession(
@@ -6404,8 +6408,8 @@ watch(
                 {
                   isRwRing,
                   deviceMac,
-                  fallbackSinceTimestamp: alreadyUploadedMaxTimestamp || uploadSinceTimestamp,
-                  fallbackSinceText: formatUnixTimestampForLog(alreadyUploadedMaxTimestamp || uploadSinceTimestamp),
+                  fallbackSinceTimestamp: getAwarenessHistoryReadSinceTimestamp(false),
+                  fallbackSinceText: formatUnixTimestampForLog(getAwarenessHistoryReadSinceTimestamp(false)),
                   stableSnapshot: alreadyUploadedStableSnapshot
                 }
               );
@@ -6533,12 +6537,6 @@ watch(
             noSubmitStableSnapshot.completed === true
               ? advanceLegacyLocalDataReadCheckpointFromSnapshot(noSubmitStableSnapshot, 'legacy-local-data-no-submit')
               : getLegacyLocalDataSnapshotMaxTimestamp(noSubmitStableSnapshot);
-          if (noSubmitStableSnapshot.completed !== true && noSubmitMaxTimestamp > 0) {
-            updateAwarenessDeviceHistoryReadCheckpoint(
-              noSubmitMaxTimestamp,
-              'legacy-local-data-no-submit-partial-checkpoint-advanced'
-            );
-          }
           // A terminal history frame set may contain only raw frames and no
           // parseable business records (9E reproduced this after a transport
           // drop). Close that exact snapshot even when its max timestamp is 0;
@@ -6576,8 +6574,8 @@ watch(
               {
                 isRwRing,
                 deviceMac,
-                fallbackSinceTimestamp: noSubmitMaxTimestamp || uploadSinceTimestamp,
-                fallbackSinceText: formatUnixTimestampForLog(noSubmitMaxTimestamp || uploadSinceTimestamp),
+                fallbackSinceTimestamp: getAwarenessHistoryReadSinceTimestamp(false),
+                fallbackSinceText: formatUnixTimestampForLog(getAwarenessHistoryReadSinceTimestamp(false)),
                 stableSnapshot: noSubmitStableSnapshot
               }
             );
@@ -6819,7 +6817,13 @@ const shouldSkipLegacyHomeHistoryByCloudCoverage = async (protocol: string, trig
   const deviceMac = getAwarenessCheckpointDeviceMac() || getAwarenessUploadDeviceMac();
   const normalizedDeviceMac = normalizeHistoryCheckpointDeviceMac(deviceMac);
   const date = formatLocalDate(new Date());
-  const checkpointTimestamp = getAwarenessLastReadTimestamp();
+  const checkpointTimestamp = getAwarenessReadCheckpointTimestamp();
+  const checkpointMeta = getDeviceHistoryCheckpointMeta(deviceMac, protocol);
+  const lastHistoryReadCompletedAt = Number(checkpointMeta?.lastHistoryReadCompletedAt || 0);
+  const recentCompleteHistoryRead =
+    lastHistoryReadCompletedAt > 0 &&
+    Date.now() - lastHistoryReadCompletedAt >= 0 &&
+    Date.now() - lastHistoryReadCompletedAt < AWARENESS_HOME_SYNC_COOLDOWN_MS;
   if (!normalizedDeviceMac) {
     appendAwarenessDiagnosticLog('legacy-home-cloud-coverage-skip-check-missing-device', {
       protocol,
@@ -6864,7 +6868,10 @@ const shouldSkipLegacyHomeHistoryByCloudCoverage = async (protocol: string, trig
       checkpointTimestamp > 0 &&
       latestTimestamp > 0 &&
       latestTimestamp >= Math.max(0, checkpointTimestamp - LEGACY_HISTORY_READ_CHECKPOINT_OVERLAP_SECONDS);
-    const shouldSkip = recordCount > 0 && backendFresh && checkpointCovered;
+    // Backend freshness proves that cached data can be rendered, not that the
+    // device has no unread tail. Skip BLE only when a recent complete 0x36
+    // session independently established that fact.
+    const shouldSkip = recordCount > 0 && backendFresh && checkpointCovered && recentCompleteHistoryRead;
 
     appendAwarenessDiagnosticLog('legacy-home-cloud-coverage-result', {
       protocol,
@@ -6879,17 +6886,14 @@ const shouldSkipLegacyHomeHistoryByCloudCoverage = async (protocol: string, trig
       checkpointCovered,
       coverageStatus,
       backendFresh,
+      recentCompleteHistoryRead,
+      lastHistoryReadCompletedAt,
       ageSeconds: Number.isFinite(ageSeconds) ? ageSeconds : undefined,
       shouldSkip,
       elapsedMs: Date.now() - startedAt,
       snapshot: getAwarenessConnectionSnapshot()
     });
 
-    if (shouldSkip && latestTimestamp > checkpointTimestamp) {
-      updateAwarenessDeviceHistoryReadCheckpoint(latestTimestamp, 'legacy-home-cloud-coverage-skip');
-      updateAwarenessDeviceHistoryDurableCheckpoint(latestTimestamp, 'legacy-home-cloud-coverage-skip');
-      updateAwarenessDeviceHistoryBackendAckCheckpoint(latestTimestamp, 'legacy-home-cloud-coverage-skip');
-    }
     return shouldSkip;
   } catch (error) {
     appendAwarenessDiagnosticLog('legacy-home-cloud-coverage-failed', {
@@ -8750,56 +8754,18 @@ const scheduleLegacyHomeHistoryLongRetry = (
     now - legacyLocalDataTimeoutFlushRequestedAt <= LEGACY_HOME_LONG_RETRY_SUPPRESS_AFTER_FLUSH_MS;
   const hasForegroundUploadWork =
     Boolean(legacyLocalDataUploadPromise || legacyLocalDataStablePromise || legacyLocalDataStableUploadScheduled);
-  const shouldSkipAlreadyCoveredPartial =
+  const partialSnapshotAlreadyHandled =
     hasSameDeviceUploadableSnapshot &&
     stableSnapshot.completed !== true &&
     stableSnapshot.submitCount <= 0 &&
-    context.allowWithUploadableSnapshot !== true &&
     (stableSnapshot.alreadyUploadedCount > 0 ||
       stableSnapshot.builtSubmitCount > 0 ||
       stableSnapshot.recordCount > 0);
-  if (shouldSkipAlreadyCoveredPartial) {
-    const advancedTimestamp = Math.max(
-      Number(stableSnapshot?.builtSubmitRange?.maxTimestamp || 0),
-      Number(stableSnapshot?.submitRange?.maxTimestamp || 0)
-    );
-    if (advancedTimestamp > 0) {
-      updateAwarenessDeviceHistoryReadCheckpoint(
-        advancedTimestamp,
-        'legacy-home-history-long-retry-skip-partial-submitted-checkpoint-advance'
-      );
-      if (stableSnapshot.alreadyUploadedCount > 0) {
-        updateAwarenessDeviceHistoryBackendAckCheckpoint(
-          advancedTimestamp,
-          'legacy-home-history-long-retry-skip-already-uploaded-backend-ack'
-        );
-      }
-    }
-    if (advancedTimestamp > 0) {
-      completeLegacyLocalDataUploadSignature(stableSnapshot, advancedTimestamp);
-      closeLegacyLocalDataUploadSession(context.deviceMac, stableSnapshot.uploadDedupKey, advancedTimestamp);
-    }
-    appendAwarenessDiagnosticLog('legacy-home-history-long-retry-skip', {
-      protocol,
-      reason: context.reason,
-      trigger,
-      skipReason: 'already-uploaded-or-no-submit-partial',
-      deviceMac: context.deviceMac,
-      normalizedDeviceMac: normalizedRetryDeviceMac,
-      historyReadKey: context.historyReadKey,
-      historyScopeKey: context.historyScopeKey,
-      sinceTimestamp: context.sinceTimestamp,
-      sinceText: formatUnixTimestampForLog(context.sinceTimestamp),
-      advancedTimestamp,
-      advancedText: formatUnixTimestampForLog(advancedTimestamp),
-      stableSnapshot,
-      snapshot: getAwarenessConnectionSnapshot()
-    });
-    return;
-  }
   const shouldSkipForForegroundUploadWork = hasForegroundUploadWork && context.allowForegroundUploadWork !== true;
   const shouldSkipForUploadableSnapshot =
-    hasSameDeviceUploadableSnapshot && context.allowWithUploadableSnapshot !== true;
+    hasSameDeviceUploadableSnapshot &&
+    !partialSnapshotAlreadyHandled &&
+    context.allowWithUploadableSnapshot !== true;
   const shouldSkipForRecentTimeoutFlush =
     hasRecentTimeoutFlushForDevice && context.allowAfterTimeoutFlush !== true;
   if (shouldSkipForForegroundUploadWork || shouldSkipForUploadableSnapshot || shouldSkipForRecentTimeoutFlush) {
@@ -8991,17 +8957,14 @@ const startLegacyHomeHistoryReadInBackground = (
   const now = Date.now();
   const bypassRecentReadGate = shouldBypassLegacyHomeHistoryRecentReadGate(reason, options);
   const historyCheckpointMeta = getDeviceHistoryCheckpointMeta(historyDeviceMac, protocol);
-  const historyProcessedCursor = Math.max(
-    Number(historyCheckpointMeta?.durableTimestamp || 0),
-    Number(historyCheckpointMeta?.backendAckTimestamp || historyCheckpointMeta?.timestamp || 0)
-  );
+  const historyReadCursor = Number(historyCheckpointMeta?.readTimestamp || 0);
   const historyPlannerCheckpoint = historyCheckpointMeta
     ? {
         ...historyCheckpointMeta,
-        // The planner previously read from backend ACK only. When an upload had
-        // already been staged durably but its HTTP ACK was still pending, this
-        // made the next BLE session fetch and process the same older records.
-        timestamp: historyProcessedCursor
+        // BLE continuation follows only a confirmed complete 0x36 read. A
+        // durable/ACK cursor owns upload dedupe, but must not hide the unread
+        // tail of a partial device history session.
+        timestamp: historyReadCursor
       }
     : historyCheckpointMeta;
   const historySyncDecision = decideDeviceSync({
@@ -10844,16 +10807,13 @@ const getLegacyHomeSyncPreflightDecision = (
 ) => {
   const deviceMac = getAwarenessCheckpointDeviceMac() || getAwarenessUploadDeviceMac();
   const checkpoint = getDeviceHistoryCheckpointMeta(deviceMac, protocol || 'legacy');
-  const processedCursor = Math.max(
-    Number(checkpoint?.durableTimestamp || 0),
-    Number(checkpoint?.backendAckTimestamp || checkpoint?.timestamp || 0)
-  );
+  const readCursor = Number(checkpoint?.readTimestamp || 0);
   return decideDeviceSync({
     trigger,
     checkpoint: checkpoint
       ? {
           ...checkpoint,
-          timestamp: processedCursor
+          timestamp: readCursor
         }
       : checkpoint,
     force: shouldBypassLegacyHomeHistoryRecentReadGate(trigger, options),

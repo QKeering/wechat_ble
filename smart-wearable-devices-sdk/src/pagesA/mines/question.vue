@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
 import { getfqaGuidList } from '@/common/api/userGuide';
 import type { FqaGuidItem } from '@/types/api/userGuides';
+import { getMiniProgramVersionText } from '@/utils/miniProgramVersion';
 
 type LocalFqaGuidItem = {
   id: string;
@@ -16,7 +17,7 @@ const showCommandDebugEntry = ref(false);
 const debugTapCount = ref(0);
 let debugTapTimer: ReturnType<typeof setTimeout> | null = null;
 
-const appVersion = 'v0.0.0';
+const miniProgramVersionText = computed(getMiniProgramVersionText);
 
 const localQuestionItems: LocalFqaGuidItem[] = [
   {
@@ -122,7 +123,7 @@ onLoad(async () => {
       </view>
     </view>
 
-    <view class="debug-version" @click="handleVersionTap">{{ appVersion }}</view>
+    <view class="debug-version" @click="handleVersionTap">{{ miniProgramVersionText }}</view>
   </view>
 </template>
 

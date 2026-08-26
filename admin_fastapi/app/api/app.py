@@ -3901,6 +3901,38 @@ def binding_conflict(message: str, reason_code: str, extra: dict | None = None) 
     return error(message, code=409, data=data)
 
 
+DEVICE_DISPLAY_NAME_FALLBACK = "轻刻智能戒指"
+# One-time production cleanup requested for the affected device. The Redis
+# marker makes the migration idempotent and keeps other devices untouched.
+DEVICE_IDENTITY_CACHE_RESET_MAC_NORMS = {"b006022511b0"}
+DEVICE_WRAPPING_QUOTE_PAIRS = {
+    '"': '"',
+    "'": "'",
+    "“": "”",
+    "‘": "’",
+}
+
+
+def clean_device_text(value) -> str:
+    """Trim whitespace and complete wrapping quote pairs from device text."""
+    if value is None:
+        return ""
+    result = str(value).strip()
+    while len(result) >= 2 and DEVICE_WRAPPING_QUOTE_PAIRS.get(result[0]) == result[-1]:
+        result = result[1:-1].strip()
+    return result
+
+
+def clean_device_response_values(value):
+    if isinstance(value, dict):
+        return {key: clean_device_response_values(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [clean_device_response_values(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(clean_device_response_values(item) for item in value)
+    return clean_device_text(value) if isinstance(value, str) else value
+
+
 def select_current_bound_device(db: Session, user_id: int):
     return db.execute(
         text(
@@ -3914,14 +3946,44 @@ def select_current_bound_device(db: Session, user_id: int):
     ).first()
 
 
+def migrate_dirty_device_identity_cache(row, user_id: int, db: Session, redis: Redis | None) -> bool:
+    if not row:
+        return False
+    row_data = dict(row._mapping)
+    mac_norm = normalize_device_mac_norm(row_data.get("mac"))
+    if mac_norm not in DEVICE_IDENTITY_CACHE_RESET_MAC_NORMS:
+        return False
+    marker_key = f"{app_auth.DEVICE_IDENTITY_CLEANUP_KEY}{mac_norm}"
+    if redis_get_text(redis, marker_key):
+        return False
+
+    db.execute(text("update device set device_name=null where id=:id and del_flag=0"), {"id": row_data.get("id")})
+    db.commit()
+    redis_delete_key(redis, f"{app_auth.DEVICE_NAME_KEY}{user_id}")
+    redis_delete_key(redis, f"{app_auth.DEVICE_BLE_NAME_KEY}{user_id}")
+    redis_delete_key(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user_id}")
+    redis_set_text(redis, marker_key, datetime.now(APP_TIMEZONE).isoformat(timespec="seconds"))
+    return True
+
+
 def build_bound_device_response(row, user_id: int, redis: Redis | None = None, service_id: str | None = None, device_name: str | None = None, payload: dict | None = None):
     if not row:
         return None
     data = camelize_dict(dict(row._mapping))
-    mac = data.get("mac") or data.get("deviceMac") or (payload or {}).get("mac")
-    resolved_service_id = service_id if service_id is not None else redis_get_text(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user_id}")
-    resolved_device_name = device_name if device_name is not None else redis_get_text(redis, f"{app_auth.DEVICE_NAME_KEY}{user_id}")
     payload = payload or {}
+    mac = clean_device_text(data.get("mac") or data.get("deviceMac") or payload.get("mac"))
+    resolved_service_id = clean_device_text(
+        service_id if service_id is not None else redis_get_text(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user_id}")
+    )
+    model_name = clean_device_text(data.get("modelName") or data.get("productName"))
+    display_name = model_name or clean_device_text(device_name) or DEVICE_DISPLAY_NAME_FALLBACK
+    ble_name = clean_device_text(
+        payload.get("bleName")
+        or payload.get("ble_name")
+        or payload.get("localName")
+        or payload.get("local_name")
+        or redis_get_text(redis, f"{app_auth.DEVICE_BLE_NAME_KEY}{user_id}")
+    )
     data.update(
         {
             "scope": "personal",
@@ -3930,18 +3992,21 @@ def build_bound_device_response(row, user_id: int, redis: Redis | None = None, s
             "mac": mac,
             "deviceMac": mac,
             "macNorm": normalize_device_mac_norm(mac),
-            "deviceName": resolved_device_name or data.get("deviceName") or data.get("name"),
-            "name": resolved_device_name or data.get("deviceName") or data.get("name"),
-            "serviceId": resolved_service_id or data.get("serviceId") or payload.get("serviceId"),
-            "protocol": payload.get("protocol") or data.get("protocol"),
+            "modelName": model_name or None,
+            "productName": model_name or None,
+            "deviceName": display_name,
+            "name": display_name,
+            "bleName": ble_name or None,
+            "serviceId": resolved_service_id or clean_device_text(data.get("serviceId") or payload.get("serviceId")),
+            "protocol": clean_device_text(payload.get("protocol") or data.get("protocol")),
             "bindingVersion": data.get("updateTime") or data.get("createTime") or datetime.now().isoformat(timespec="seconds"),
             "source": "remote",
         }
     )
     for key in ("deviceId", "uniMacId", "cmdCharId", "dataCharId", "dataServiceId", "advertis"):
         if payload.get(key) not in (None, ""):
-            data[key] = payload.get(key)
-    return data
+            data[key] = clean_device_response_values(payload.get(key))
+    return clean_device_response_values(data)
 
 
 def device_bind_log_table_available(db: Session) -> bool:
@@ -4372,11 +4437,11 @@ def resolve_active_upload_binding(db: Session, operator_user_id: int, device_mac
 def bind_info(user: dict = Depends(app_user), db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
     user_id = int(user["id"])
     row = select_current_bound_device(db, user_id)
-    service_id = redis_get_text(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}")
-    device_name = redis_get_text(redis, f"{app_auth.DEVICE_NAME_KEY}{user['id']}")
     if not row:
         return success(None, "not bound")
-    return success(build_bound_device_response(row, user_id, redis, service_id, device_name))
+    migrate_dirty_device_identity_cache(row, user_id, db, redis)
+    service_id = redis_get_text(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}")
+    return success(build_bound_device_response(row, user_id, redis, service_id))
 
 
 @router.get("/device/current")
@@ -4385,15 +4450,23 @@ def current_device(user: dict = Depends(app_user), db: Session = Depends(get_db)
 
 
 def bind_device_authoritatively(payload: dict, user: dict, db: Session, redis: Redis | None):
-    mac = str(payload.get("mac") or payload.get("deviceMac") or "").strip()
+    mac = clean_device_text(payload.get("mac") or payload.get("deviceMac"))
     mac_norm = normalize_device_mac_norm(mac)
     if not mac:
         return error("设备 MAC 不能为空")
     if len(mac_norm) < 6:
         return binding_conflict("设备 MAC 不合法", "INVALID_DEVICE_MAC")
     current_user_id = int(user["id"])
-    service_id = str(payload.get("serviceId") or payload.get("service_id") or "").strip()
-    device_name = str(payload.get("deviceName") or payload.get("device_name") or mac).strip()
+    service_id = clean_device_text(payload.get("serviceId") or payload.get("service_id"))
+    ble_name = clean_device_text(
+        payload.get("bleName")
+        or payload.get("ble_name")
+        or payload.get("localName")
+        or payload.get("local_name")
+        or payload.get("deviceName")
+        or payload.get("device_name")
+        or payload.get("name")
+    )
     replace = is_truthy_payload_value(payload.get("replace"))
 
     current_device = select_current_bound_device(db, current_user_id)
@@ -4401,14 +4474,17 @@ def bind_device_authoritatively(payload: dict, user: dict, db: Session, redis: R
     device_row = db.execute(
         text(
             f"""
-            select id, user_id from device
-            where {DEVICE_MAC_NORM_SQL}=:mac_norm and del_flag=0
-            order by id desc limit 1
+            select d.id, d.user_id, d.model_id, m.model_name
+            from device d left join device_model m on m.id=d.model_id
+            where lower(replace(replace(coalesce(d.mac,''), ':', ''), '-', ''))=:mac_norm and d.del_flag=0
+            order by d.id desc limit 1
             """
         ),
         {"mac_norm": mac_norm},
     ).first()
     device_data = dict(device_row._mapping) if device_row else {}
+    model_name = clean_device_text(device_data.get("model_name"))
+    device_name = model_name or DEVICE_DISPLAY_NAME_FALLBACK
 
     current_mac_norm = normalize_device_mac_norm(current_device_data.get("mac"))
     target_device_id = device_data.get("id")
@@ -4539,9 +4615,10 @@ def bind_device_authoritatively(payload: dict, user: dict, db: Session, redis: R
     redis_delete_key(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}")
     redis_set_text(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}", service_id)
     redis_delete_key(redis, f"{app_auth.DEVICE_NAME_KEY}{user['id']}")
-    redis_set_text(redis, f"{app_auth.DEVICE_NAME_KEY}{user['id']}", device_name)
+    redis_delete_key(redis, f"{app_auth.DEVICE_BLE_NAME_KEY}{user['id']}")
+    redis_set_text(redis, f"{app_auth.DEVICE_BLE_NAME_KEY}{user['id']}", ble_name)
     db.commit()
-    return success(build_bound_device_response(bound_row, current_user_id, redis, service_id, device_name, payload))
+    return success(build_bound_device_response(bound_row, current_user_id, redis, service_id, device_name, {**payload, "bleName": ble_name}))
 
 
 @router.post("/device/bind")
@@ -4568,7 +4645,7 @@ def bind_device_get(mac: str, serviceId: str = "", deviceName: str = "", user: d
 
 
 def unbind_device_authoritatively(payload: dict, user: dict, db: Session, redis: Redis | None):
-    mac = str(payload.get("mac") or payload.get("deviceMac") or "").strip()
+    mac = clean_device_text(payload.get("mac") or payload.get("deviceMac"))
     mac_norm = normalize_device_mac_norm(mac)
     if not mac_norm:
         return error("设备 MAC 不能为空")
@@ -4606,6 +4683,7 @@ def unbind_device_authoritatively(payload: dict, user: dict, db: Session, redis:
         )
     redis_delete_key(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user['id']}")
     redis_delete_key(redis, f"{app_auth.DEVICE_NAME_KEY}{user['id']}")
+    redis_delete_key(redis, f"{app_auth.DEVICE_BLE_NAME_KEY}{user['id']}")
     db.commit()
     return success((result.rowcount or 0) > 0)
 

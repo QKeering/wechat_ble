@@ -46,7 +46,7 @@ const ble = useRingBLE() as any;
 const logs = ref<DebugLog[]>([]);
 const runningKey = ref<CommandKey | ''>('');
 const logSeq = ref(0);
-const collectPeriodOptions = [60, 90, 120];
+const collectPeriodOptions = [20, 25, 30, 35, 40, 45, 50, 55, 60];
 const testingCollectPeriodMinutes = ref(0);
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
 
@@ -168,7 +168,11 @@ const batteryText = computed(() => {
 
 const deviceRows = computed(() => [
   ['连接状态', connectedText.value],
-  ['设备名称', currentDevice.value.name || currentDevice.value.deviceName || '-'],
+  ['产品名称', currentDevice.value.modelName || currentDevice.value.productName || currentDevice.value.deviceName || '轻刻智能戒指'],
+  [
+    'BLE 名称',
+    currentDevice.value.bleName || currentDevice.value.localName || currentDevice.value.bluetoothName || currentDevice.value.name || '-'
+  ],
   ['通信 deviceId', currentDevice.value.deviceId || '-'],
   ['MAC', currentDevice.value.mac || currentDevice.value.uniMacId || currentDevice.value.advertis?.macInfo || '-'],
   ['协议', currentDevice.value.protocol || '-'],
@@ -703,7 +707,7 @@ onBeforeUnmount(() => {
         <view class="period-test-head">
           <view>
             <view class="period-test-title">采集周期写入回读</view>
-            <view class="period-test-desc">分别写入 60 / 90 / 120 分钟，再读取设备中的实际值</view>
+            <view class="period-test-desc">20 至 60 分钟，每 5 分钟一档，写入后读取设备实际值</view>
           </view>
         </view>
         <view class="period-button-grid">

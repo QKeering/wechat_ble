@@ -1,4 +1,11 @@
-import { bindRingDevice, clearBoundRingDevice, getBoundRingDevice, normalizeRingBoundDevice, unbindRingDevice } from '@/api/ringDevice';
+import {
+  bindRingDevice,
+  clearBoundRingDevice,
+  getBoundRingDevice,
+  normalizeRingBoundDevice,
+  stripDeviceWrappingQuotes,
+  unbindRingDevice
+} from '@/api/ringDevice';
 import type { RingBindPayload } from '@/sdk/ring-ble';
 import type { DeviceInfo, DeviceModel } from '@/types/api/device';
 import { getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
@@ -63,7 +70,7 @@ const normalizeBindInfoResponse = (payload: unknown): DeviceInfo | null => {
   return null;
 };
 
-const normalizeBindIdentity = (value: unknown) => String(value || '').replace(/[^0-9a-fA-F]/g, '').toLowerCase();
+const normalizeBindIdentity = (value: unknown) => stripDeviceWrappingQuotes(value).replace(/[^0-9a-fA-F]/g, '').toLowerCase();
 
 const isSameBindIdentity = (left: DeviceInfo | null | undefined, right: DeviceInfo | null | undefined) => {
   const leftIdentity = getBoundRingIdentity(left as any);
@@ -76,7 +83,7 @@ const isSameBindIdentity = (left: DeviceInfo | null | undefined, right: DeviceIn
 };
 
 const normalizeBindMacText = (value: unknown) => {
-  const raw = String(value || '').trim();
+  const raw = stripDeviceWrappingQuotes(value);
   if (/^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(raw)) return raw.toUpperCase();
   const hex = raw.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
   if (hex.length !== 12) return '';
@@ -94,7 +101,7 @@ const getDeviceBindMac = (device: unknown) => {
 };
 
 const getDeviceCommunicationId = (device: DeviceInfo | null | undefined) =>
-  String(
+  stripDeviceWrappingQuotes(
     (device as Record<string, any> | null | undefined)?.deviceId ||
       (device as Record<string, any> | null | undefined)?.platformDeviceId ||
       (device as Record<string, any> | null | undefined)?.wxDeviceId ||
@@ -193,6 +200,14 @@ const mergeBoundRingDevice = (
     wxDeviceId: communicationDeviceId,
     bleDeviceId: communicationDeviceId,
     bluetoothDeviceId: communicationDeviceId,
+    modelName: normalizedRemote?.modelName || normalizedRemote?.productName || compatiblePayload?.modelName || compatibleLocal?.modelName,
+    productName: normalizedRemote?.productName || normalizedRemote?.modelName || compatiblePayload?.productName || compatibleLocal?.productName,
+    bleName:
+      normalizedRemote?.bleName ||
+      compatiblePayload?.bleName ||
+      compatiblePayload?.localName ||
+      compatibleLocal?.bleName ||
+      compatibleLocal?.localName,
     deviceName:
       normalizedRemote?.deviceName ||
       normalizedRemote?.name ||
@@ -335,20 +350,26 @@ const getRemoteBindInfo = async (
 
 export const bind = async (params: RingBindPayload, _config: HttpRequestConfigCompat = {}) => {
   const localBeforeRemote = await getBoundRingDevice();
-  const response = await postAppApi('/app/device/bind', params as any, _config);
+  const normalizedParams = (normalizeRingBoundDevice(params as any) || params) as RingBindPayload;
+  const response = await postAppApi('/app/device/bind', normalizedParams as any, _config);
   assertBackendSuccess(response);
   const remote = normalizeBindInfoResponse(response);
-  const authoritative = mergeBoundRingDevice(remote, localBeforeRemote as DeviceInfo | null, params);
+  const authoritative = mergeBoundRingDevice(remote, localBeforeRemote as DeviceInfo | null, normalizedParams);
   if (!hasBoundRingIdentity(authoritative)) {
     throw new Error('Backend binding response missing valid device info');
   }
-  const bindMac = getDeviceBindMac(authoritative) || getDeviceBindMac(params);
-  const bindDeviceId = getDeviceCommunicationId(normalizeRingBoundDevice(params as any) as DeviceInfo | null);
+  const bindMac = getDeviceBindMac(authoritative) || getDeviceBindMac(normalizedParams);
+  const bindDeviceId = getDeviceCommunicationId(normalizeRingBoundDevice(normalizedParams as any) as DeviceInfo | null);
   if (bindMac && bindDeviceId) {
     markDeviceIdentityCacheConnected({
       mac: bindMac,
       deviceId: bindDeviceId,
-      name: authoritative?.name || authoritative?.deviceName || (params as any).name || (params as any).deviceName,
+      name:
+        authoritative?.bleName ||
+        (normalizedParams as any).bleName ||
+        (normalizedParams as any).localName ||
+        (params as any).name ||
+        (params as any).deviceName,
       source: 'first-bind'
     });
   }
@@ -358,9 +379,10 @@ export const bind = async (params: RingBindPayload, _config: HttpRequestConfigCo
 };
 
 export const unbind = async (params: { mac: string }, _config: HttpRequestConfigCompat = {}) => {
-  const response = await postAppApi('/app/device/unbind', params as any, _config);
+  const normalizedParams = { ...params, mac: stripDeviceWrappingQuotes(params.mac) };
+  const response = await postAppApi('/app/device/unbind', normalizedParams as any, _config);
   assertBackendSuccess(response);
-  const result = await unbindRingDevice(params);
+  const result = await unbindRingDevice(normalizedParams);
   clearRemoteBindInfoCache();
   return result;
 };

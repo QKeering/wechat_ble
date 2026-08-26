@@ -40,13 +40,14 @@ const pickerValue = ref([0]);
 const pickerTitle = ref('');
 const pickerColumns = ref<string[][]>([[]]);
 const activePickerType = ref<PickerType>('sleep');
+const collectPeriodOptions = ['20', '25', '30', '35', '40', '45', '50', '55', '60'];
 
 const pickerOptions: Record<PickerType, string[]> = {
   sleep: ['5', '6', '7', '8', '9', '10', '11', '12'],
   step: ['4000', '6000', '8000', '10000', '12000', '15000', '20000'],
   calorie: ['100', '200', '300', '400', '500', '600', '800', '1000', '1200', '1500', '2000'],
   activity: ['15', '30', '45', '60', '90', '120'],
-  collect: ['20', '30', '60']
+  collect: collectPeriodOptions
 };
 
 const pickerTitleMap: Record<PickerType, string> = {
@@ -109,9 +110,8 @@ const toCollectPeriodText = (value: unknown, fallback = collectPeriodTarget.valu
   let numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
   if (numeric > 120) numeric = Math.round(numeric / 60);
-  if (numeric <= 20) return '20';
-  if (numeric <= 30) return '30';
-  return '60';
+  const normalizedMinutes = Math.min(60, Math.max(20, Math.round(numeric / 5) * 5));
+  return String(normalizedMinutes);
 };
 
 const loadBoundInfo = async () => {

@@ -66,6 +66,8 @@ const normalizeStoredDeviceHistoryCheckpoints = (stored: unknown): DeviceHistory
         (
           Number(item.timestamp) > 0 ||
           Number(item.readTimestamp) > 0 ||
+          Number(item.durableTimestamp) > 0 ||
+          Number(item.backendAckTimestamp) > 0 ||
           Number(item.emptyReadTimestamp) > 0 ||
           Number(item.lastHistoryReadCompletedAt) > 0
         )
@@ -77,7 +79,14 @@ const normalizeStoredDeviceHistoryCheckpoints = (stored: unknown): DeviceHistory
       // durable and acknowledged. Never move ACK beyond the durable fact.
       const durableTimestamp = storedDurableTimestamp > 0 ? storedDurableTimestamp : storedBackendAckTimestamp;
       const backendAckTimestamp = Math.min(storedBackendAckTimestamp, durableTimestamp);
-      const readTimestamp = Math.max(durableTimestamp, Math.floor(Number(item.readTimestamp || 0)));
+      // v1 checkpoints did not have a dedicated read cursor. Preserve their
+      // durable cursor during migration, but once readTimestamp exists it must
+      // remain independent: persisting/uploading a partial batch does not prove
+      // that the current BLE 0x36 history session reached its terminal frame.
+      const hasStoredReadTimestamp = Object.prototype.hasOwnProperty.call(item, 'readTimestamp');
+      const readTimestamp = hasStoredReadTimestamp
+        ? Math.floor(Number(item.readTimestamp || 0))
+        : durableTimestamp;
       return {
         key: String(item.key),
         deviceMac: String(item.deviceMac || ''),
@@ -129,6 +138,7 @@ const writeDeviceHistoryCheckpoints = (items: DeviceHistoryCheckpoint[]) => {
   const next = items
     .filter((item) => item && item.key && (
       item.backendAckTimestamp > 0 ||
+      item.durableTimestamp > 0 ||
       item.readTimestamp > 0 ||
       item.emptyReadTimestamp > 0 ||
       item.lastHistoryReadCompletedAt > 0
@@ -159,6 +169,7 @@ const writeDeviceHistoryCheckpointsAsync = async (items: DeviceHistoryCheckpoint
   const next = items
     .filter((item) => item && item.key && (
       item.backendAckTimestamp > 0 ||
+      item.durableTimestamp > 0 ||
       item.readTimestamp > 0 ||
       item.emptyReadTimestamp > 0 ||
       item.lastHistoryReadCompletedAt > 0
@@ -260,7 +271,9 @@ const setCheckpointStage = (
     ? Math.max(existing?.backendAckTimestamp || 0, numericTimestamp)
     : existing?.backendAckTimestamp || 0;
   const backendAckTimestamp = Math.min(requestedBackendAckTimestamp, durableTimestamp);
-  const readTimestamp = Math.max(existing?.readTimestamp || 0, stage === 'read' ? numericTimestamp : 0, durableTimestamp);
+  const readTimestamp = stage === 'read'
+    ? Math.max(existing?.readTimestamp || 0, numericTimestamp)
+    : existing?.readTimestamp || 0;
   const nextEmptyReadTimestamp = existingEmptyReadTimestamp > numericTimestamp ? existingEmptyReadTimestamp : 0;
   const deviceMacText = String(deviceMac || '');
   const nextItem: DeviceHistoryCheckpoint = {
@@ -317,7 +330,7 @@ export const setDeviceHistoryBackendAckCheckpointAsync = async (
     deviceMacNorm: normalizeHistoryCheckpointDeviceMac(deviceMacText),
     protocol: String(protocol || 'legacy').trim().toLowerCase() || 'legacy',
     timestamp: backendAckTimestamp,
-    readTimestamp: Math.max(existing?.readTimestamp || 0, durableTimestamp),
+    readTimestamp: existing?.readTimestamp || 0,
     durableTimestamp,
     backendAckTimestamp,
     emptyReadTimestamp: nextEmptyReadTimestamp,
@@ -370,7 +383,7 @@ export const setDeviceHistoryEmptyReadCheckpoint = (deviceMac: unknown, protocol
     deviceMacNorm: normalizeHistoryCheckpointDeviceMac(existing?.deviceMacNorm || deviceMacText),
     protocol: String(existing?.protocol || protocol || 'legacy').trim().toLowerCase() || 'legacy',
     timestamp: successfulTimestamp,
-    readTimestamp: existing?.readTimestamp || successfulTimestamp,
+    readTimestamp: existing?.readTimestamp || 0,
     durableTimestamp: existing?.durableTimestamp || successfulTimestamp,
     backendAckTimestamp: successfulTimestamp,
     emptyReadTimestamp,

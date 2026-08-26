@@ -82,7 +82,7 @@ export const resolveRingProtocol = (device?: RingDeviceInfo): RingProtocolKind =
 
   if (device.protocol === 'legacy') return 'legacy';
 
-  const name = `${device.name || device.localName || device.bleName || device.displayName || ''}`.toUpperCase();
+  const name = `${device.bleName || device.localName || device.name || device.displayName || ''}`.toUpperCase();
   const productId = `${device.productId || ''}`.toUpperCase();
   const services = normalizeAdvertisedServices(device);
 

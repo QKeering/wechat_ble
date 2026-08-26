@@ -3,6 +3,9 @@ export interface DeviceInfo {
   deviceId?: string;
   deviceName?: string;
   name?: string;
+  modelName?: string;
+  productName?: string;
+  bleName?: string;
   serviceId?: string;
   deviceSize?: string;
   deviceVersion?: string;
