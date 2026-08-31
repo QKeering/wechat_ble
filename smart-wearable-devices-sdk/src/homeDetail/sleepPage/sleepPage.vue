@@ -34,6 +34,7 @@ import {
 import DetailInfo from '@/components/DetailInfo.vue';
 import { usePopupFixer } from '@/hooks/usePopupFixer';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
+import { normalizeSleepScore, publishSleepOverviewUpdate } from '@/utils/sleepOverview';
 
 const { isPopupActive, fixedPageStyle } = usePopupFixer();
 const ringBleBridge = useRingBusinessHistoryPageSync();
@@ -971,6 +972,15 @@ const getSleepOverviewData = async (currentDate = new Date(), loadId?: number) =
   });
   if (res && isCurrentSleepPageLoad(loadId)) {
     sleepOverviewObj.value = res;
+    publishSleepOverviewUpdate({
+      date: isoDate,
+      overview: res,
+      source: 'sleep-page'
+    });
+    appendSleepPageDiagnosticLog('sleep-overview-published', {
+      date: isoDate,
+      score: normalizeSleepScore((res as any)?.sleepScore)
+    });
   }
 };
 // 获取心率详情

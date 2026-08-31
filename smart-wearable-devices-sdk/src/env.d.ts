@@ -21,6 +21,8 @@ interface QKeerBuildInfo {
   versionCode: string;
   gitCommit: string;
   gitBranch: string;
+  gitDirty: boolean;
+  workspaceDigest: string;
   buildTime: string;
   buildId: string;
 }

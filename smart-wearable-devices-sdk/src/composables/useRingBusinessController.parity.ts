@@ -276,18 +276,20 @@ controller.devices.value = [
   { deviceId: 'rw-bh3-underscore', name: 'BH3_001', protocol: 'rw' },
   { deviceId: 'v2-1', name: 'MUSLEEP_RING_01', protocol: 'qkeer-v2' },
   { deviceId: 'legacy-1', name: 'QKeeRingL19', protocol: 'legacy' },
+  { deviceId: 'legacy-quoted-hr18', name: '"HR18"', protocol: 'legacy' },
   { deviceId: 'other-1', name: 'Keyboard', protocol: 'legacy' }
 ];
 
 const businessNames = controller.businessDevices.value.map((device) => device.name);
 if (
-  businessNames.length !== 6 ||
+  businessNames.length !== 7 ||
   !businessNames.includes('SY03') ||
   !businessNames.includes('BH3') ||
   !businessNames.includes('BH3-001') ||
   !businessNames.includes('BH3_001') ||
   !businessNames.includes('MUSLEEP_RING_01') ||
   !businessNames.includes('QKeeRingL19') ||
+  !businessNames.includes('"HR18"') ||
   businessNames.includes('Keyboard')
 ) {
   throw new Error(`Business controller should include supported ring devices including BH3: ${JSON.stringify(businessNames)}`);

@@ -1,5 +1,12 @@
 import { LegacyRingCommand, getLegacyCommandPacket } from './commands';
-import { buildLegacyCommandBytes, concatBytes, numberToUint32LE, numberToUint64LE } from './protocol';
+import {
+  buildLegacyBloodOxygenMeasurementPayload,
+  buildLegacyCommandBytes,
+  buildLegacyHeartRateMeasurementPayload,
+  concatBytes,
+  numberToUint32LE,
+  numberToUint64LE
+} from './protocol';
 
 const assert = (condition: unknown, message: string) => {
   if (!condition) throw new Error(message);
@@ -9,7 +16,13 @@ const bytes = (input: Uint8Array) => Array.from(input);
 
 assert(JSON.stringify(bytes(buildLegacyCommandBytes(0x12, 0x00, { frameId: 0x7a }))) === JSON.stringify([0x00, 0x7a, 0x12, 0x00, 0x00]), 'battery command should match legacy bytes');
 
-assert(JSON.stringify(bytes(buildLegacyCommandBytes(0x31, 0x00, { frameId: 0x7b, payload: 0x1e }))) === JSON.stringify([0x00, 0x7b, 0x31, 0x00, 0x1e]), 'active measure command should match legacy bytes');
+assert(JSON.stringify(bytes(buildLegacyCommandBytes(0x31, 0x00, { frameId: 0x7b, payload: buildLegacyHeartRateMeasurementPayload() }))) === JSON.stringify([0x00, 0x7b, 0x31, 0x00, 0x1e, 0x32, 0x00, 0x01, 0x00]), 'active measure command should include the full legacy sampling configuration');
+
+assert(JSON.stringify(bytes(buildLegacyCommandBytes(0x31, 0x00, { frameId: 0x7b, payload: buildLegacyHeartRateMeasurementPayload() }))) === JSON.stringify([0x00, 0x7b, 0x31, 0x00, 0x1e, 0x32, 0x00, 0x01, 0x00]), 'wear preflight should use the complete formal heart-rate measurement payload');
+
+assert(JSON.stringify(bytes(buildLegacyCommandBytes(0x32, 0x00, { frameId: 0x7c, payload: buildLegacyBloodOxygenMeasurementPayload() }))) === JSON.stringify([0x00, 0x7c, 0x32, 0x00, 0x1e, 0x32, 0x00, 0x01]), 'blood-oxygen wear preflight should use the complete formal measurement payload');
+
+assert(JSON.stringify(bytes(buildLegacyCommandBytes(0x34, 0x00, { frameId: 0x7d, payload: 0x00 }))) === JSON.stringify([0x00, 0x7d, 0x34, 0x00, 0x00]), 'temperature wear preflight should reuse the formal legacy measurement command');
 
 assert(JSON.stringify(bytes(buildLegacyCommandBytes(0x37, 0x00, { frameId: 0x7c, payload: numberToUint32LE(1200) }))) === JSON.stringify([0x00, 0x7c, 0x37, 0x00, 0xb0, 0x04, 0x00, 0x00]), 'collect-period write should use uint32 little-endian');
 

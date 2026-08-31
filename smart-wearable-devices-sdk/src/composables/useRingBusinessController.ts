@@ -1850,11 +1850,10 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 };
 
 export function getRingBusinessDeviceName(device: RingDeviceInfo | Record<string, any>) {
+  const displayName = stripDeviceWrappingQuotes(device.displayName || device.deviceName || device.name);
+  if (displayName && !/^HR\d+$/i.test(displayName)) return displayName;
   const modelName = stripDeviceWrappingQuotes(device.modelName || device.productName);
   if (modelName) return modelName;
-  const bleName = stripDeviceWrappingQuotes(device.bleName || device.localName || device.name);
-  const displayName = stripDeviceWrappingQuotes(device.displayName || device.deviceName);
-  if (displayName && displayName !== bleName && !/^HR\d+$/i.test(displayName)) return displayName;
   return DEFAULT_RING_DISPLAY_NAME;
 }
 
@@ -1885,14 +1884,27 @@ export function getRingBusinessPlatformDeviceId(device: RingDeviceInfo | Record<
   return rawDeviceId;
 }
 
-function isBusinessRingDevice(device: RingDeviceInfo) {
-  const name = getRingBusinessDeviceName(device).toUpperCase();
-
+export function isBusinessRingDevice(device: RingDeviceInfo) {
   const protocol = device.protocol;
   if (protocol === 'rw' || protocol === 'qkeer-v2') return true;
 
   const legacyPrefixes = ['HR', 'IF', 'QK', 'QKEERING', 'PPLUS', 'MUSLEEP_RING', 'QKV2'];
-  return legacyPrefixes.some((prefix) => name.startsWith(prefix));
+  // Device recognition must use the raw BLE/model identity. The user-facing
+  // name is intentionally normalized to "轻刻智能戒指", which is unsuitable
+  // for protocol filtering and previously hid HR18/QKeeRing scan results.
+  const rawIdentityNames = [
+    device.bleName,
+    device.localName,
+    device.name,
+    device.displayName,
+    device.deviceName,
+    device.modelKey,
+    device.productModel,
+    device.productId
+  ]
+    .map((value) => stripDeviceWrappingQuotes(value).toUpperCase())
+    .filter(Boolean);
+  return rawIdentityNames.some((name) => legacyPrefixes.some((prefix) => name.startsWith(prefix)));
 }
 
 function getRingBusinessFallbackIdentity(device: RingDeviceInfo | Record<string, any>) {

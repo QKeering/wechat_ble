@@ -510,7 +510,7 @@ function toFirmwareParsed(data: Record<string, any>): RingParsedData | null {
 }
 
 function toActiveMeasureParsed(data: Record<string, any>): RingParsedData | null {
-  if (data?.heartRate == null) return null;
+  if (data?.heartRate == null && data?.status == null && data?.alarmFlags == null) return null;
   return {
     type: 'active_measure',
     protocol: 'qkeer-v2',
@@ -523,12 +523,13 @@ function toActiveMeasureParsed(data: Record<string, any>): RingParsedData | null
     anxietyLevel: data.anxietyLevel,
     alarmText: data.alarmText,
     alarmFlags: data.alarmFlags,
+    timestamp: Date.now(),
     raw: []
   };
 }
 
 function toOxygenMeasureParsed(data: Record<string, any>): RingParsedData | null {
-  if (data?.spo2 == null) return null;
+  if (data?.spo2 == null && data?.status == null && data?.alarmFlags == null) return null;
   return {
     type: 'active_OxyGenMeasure',
     protocol: 'qkeer-v2',
@@ -541,6 +542,7 @@ function toOxygenMeasureParsed(data: Record<string, any>): RingParsedData | null
     anxietyLevel: data.anxietyLevel,
     alarmText: data.alarmText,
     alarmFlags: data.alarmFlags,
+    timestamp: Date.now(),
     raw: []
   };
 }

@@ -38,6 +38,7 @@ import RingOTAManager from '@/composables/ring-ota-manager';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { getOtaInfo, getBindInfo, reportOtaUpdate } from '@/common/api/device';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
+import { formatBleErrorMessage } from '@/utils/bleError';
 const userStore = useUserStore();
 
 // --- 配置常量 ---
@@ -578,7 +579,7 @@ const startOtaProcess = async () => {
   }
   if (firmwareUrl.value === '' || firmwareUrl.value == null) {
     uni.showToast({
-      title: '无固件url,请在后台上传',
+      title: '未配置固件下载地址，请先在后台上传',
       icon: 'none'
     });
     return;
@@ -763,7 +764,7 @@ const startOtaProcess = async () => {
       error: err?.message || String(err)
     });
     otaState.value.error = true;
-    otaState.value.statusText = `升级失败: ${err.message || '未知错误'}`;
+    otaState.value.statusText = `升级失败：${formatBleErrorMessage(err, '请稍后重试')}`;
   } finally {
     otaState.value.isUpgrading = false;
     cleanup();
@@ -812,7 +813,7 @@ onLoad(async () => {
       Object.assign(otaState.value, {
         isUpgrading: false,
         progress: 0,
-        statusText: msg,
+        statusText: formatBleErrorMessage(msg, '暂无更新'),
         error: false,
         success: true
       });
@@ -836,9 +837,8 @@ onLoad(async () => {
       });
     }
   } catch (err) {
-    const errMsg = typeof err === 'string' ? err : err?.msg || '获取OTA信息失败';
     uni.showToast({
-      title: errMsg,
+      title: formatBleErrorMessage(err, '获取升级信息失败，请稍后重试'),
       icon: 'none',
       duration: 3000
     });

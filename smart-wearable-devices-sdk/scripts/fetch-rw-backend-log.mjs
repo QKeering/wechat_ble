@@ -7,6 +7,9 @@ const args = process.argv.slice(2);
 const limitArg = args.find((arg) => arg.startsWith('--limit='));
 const offsetArg = args.find((arg) => arg.startsWith('--offset='));
 const outputArg = args.find((arg) => arg.startsWith('--output='));
+const queryArg = args.find((arg) => arg.startsWith('--q='));
+const sourceArg = args.find((arg) => arg.startsWith('--source='));
+const eventArg = args.find((arg) => arg.startsWith('--event='));
 const pageMode = args.includes('--page');
 
 const limit = Math.min(2000, Math.max(1, Number(limitArg?.slice('--limit='.length)) || 2000));
@@ -16,6 +19,9 @@ const pathname = pageMode ? '/api/app/rw-debug/logs/page' : '/api/app/rw-debug/l
 const url = new URL(`https://sh.qkeering.com${pathname}`);
 url.searchParams.set('limit', String(limit));
 url.searchParams.set('offset', String(offset));
+if (queryArg) url.searchParams.set('q', queryArg.slice('--q='.length));
+if (sourceArg) url.searchParams.set('source', sourceArg.slice('--source='.length));
+if (eventArg) url.searchParams.set('event', eventArg.slice('--event='.length));
 url.searchParams.set('_ts', String(Date.now()));
 
 const fetchText = (targetUrl) =>

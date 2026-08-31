@@ -95,7 +95,7 @@ const parseActiveMeasure = (bytes: Uint8Array, frameId: number): RingParsedData 
   const heartRate = bytes[5];
   const heartRateVariability = bytes[6];
   const stressIndex = bytes[6];
-  const temperature = bytes[7];
+  const temperature = readInt16LE(bytes, 8);
 
   return {
     type: 'active_measure',
@@ -115,7 +115,7 @@ const parseBloodOxygen = (bytes: Uint8Array, frameId: number): RingParsedData =>
   const status = bytes[4];
   const heartRate = bytes[5];
   const bloodOxygen = bytes[6];
-  const temperature = bytes[7];
+  const temperature = readInt16LE(bytes, 7);
 
   return {
     type: 'active_OxyGenMeasure',
@@ -123,7 +123,7 @@ const parseBloodOxygen = (bytes: Uint8Array, frameId: number): RingParsedData =>
     status: measureStatusMap[status] || '未知',
     heartRate: heartRate > 0 ? heartRate : 0,
     bloodOxygen: bloodOxygen > 0 ? bloodOxygen : 0,
-    temperature: temperature > 0 ? `${temperature}°C` : null,
+    temperature: temperature > 0 ? `${(temperature / 100).toFixed(2)}°C` : null,
     bloodOxygenStatus: status,
     timestamp: Date.now(),
     raw: Array.from(bytes)
@@ -313,7 +313,10 @@ export const parseLegacyRingData = (bytes: Uint8Array): RingParsedData | null =>
   if (!RESPONSE_FRAME_TYPES.has(frameType)) return null;
 
   if (cmd === 0x11 && (subcmd === 0x00 || subcmd === 0x01)) return parseVersion(bytes, frameId, subcmd);
-  if (cmd === 0x12 && subcmd === 0x00) return parseBattery(bytes, frameId);
+  // L19 uses sub-command 0x00 for a battery query response and 0x02 for the
+  // unsolicited battery notification emitted after Notify is enabled.  Both
+  // frames carry the same battery/status byte at offset 4.
+  if (cmd === 0x12 && (subcmd === 0x00 || subcmd === 0x02)) return parseBattery(bytes, frameId);
   if (cmd === 0x31 && subcmd === 0x00) return parseActiveMeasure(bytes, frameId);
   if (cmd === 0x31 && subcmd === 0xff) return parseActiveMeasureProgress(bytes, frameId);
   if (cmd === 0x31 && subcmd === 0x02) return parseActiveMeasureControlAck(bytes, frameId);

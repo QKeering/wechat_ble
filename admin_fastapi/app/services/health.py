@@ -466,6 +466,17 @@ def enqueue_ring_history_raw_upload_job(
     normalized_device_mac = normalize_ring_history_device_mac(device_mac)
     device_mac_norm = normalize_ring_history_device_mac_key(normalized_device_mac)
     frame_list = [frame for frame in (frames or []) if isinstance(frame, dict)]
+    # Collapse repeated BLE frames before the durable queue. The frame
+    # sequence plus raw hash/content is stable across HTTP-only retries.
+    deduped_frames: dict[str, dict[str, Any]] = {}
+    for frame in frame_list:
+        raw_hex = normalize_ring_history_raw_hex(frame.get("rawHex") or frame.get("raw_hex") or frame.get("raw"))
+        frame_hash = str(frame.get("rawHash") or frame.get("raw_hash") or "").strip() or hashlib.sha256(
+            raw_hex.encode("utf-8")
+        ).hexdigest()
+        frame_seq = frame.get("maxSeq", frame.get("max_seq", frame.get("chunkIndex", frame.get("chunk_index", 0))))
+        deduped_frames[f"{frame_seq}:{frame_hash}"] = frame
+    frame_list = list(deduped_frames.values())
     if not upload_session_id:
         upload_session_id = hashlib.sha256(
             f"{user_id}:{device_mac_norm}:{datetime.now(HEALTH_TIMEZONE).timestamp()}".encode("utf-8")
@@ -473,6 +484,34 @@ def enqueue_ring_history_raw_upload_job(
     payload_json = json.dumps({"frames": frame_list}, ensure_ascii=False, default=str, separators=(",", ":"))
     payload_hash = hashlib.sha256(f"{user_id}:{device_mac_norm}:{payload_json}".encode("utf-8")).hexdigest()
     now = datetime.now(HEALTH_TIMEZONE).replace(tzinfo=None)
+    existing_session = db.execute(
+        text(
+            """
+            select id, status, retry_count, raw_frame_count, payload_hash
+            from ring_history_raw_upload_job
+            where upload_session_id=:upload_session_id
+            limit 1
+            """
+        ),
+        {"upload_session_id": upload_session_id},
+    ).mappings().first()
+    if existing_session:
+        # upload_session_id owns the first immutable snapshot. A later retry
+        # must observe the same job instead of overwriting 441 frames with 882.
+        return {
+            "rawQueued": True,
+            "rawStatus": existing_session.get("status") or "queued",
+            "uploadSessionId": upload_session_id,
+            "jobId": existing_session.get("id"),
+            "dataUserId": user_id,
+            "deviceMac": normalized_device_mac,
+            "deviceMacNorm": device_mac_norm,
+            "protocol": protocol,
+            "payloadHash": existing_session.get("payload_hash"),
+            "rawFrameCount": int(existing_session.get("raw_frame_count") or 0),
+            "retryCount": int(existing_session.get("retry_count") or 0),
+            "idempotentReplay": True,
+        }
     payload = {
         "upload_session_id": upload_session_id,
         "user_id": user_id,
@@ -504,16 +543,16 @@ def enqueue_ring_history_raw_upload_job(
               :raw_frame_count, :status, :retry_count, :error_msg, :create_time, :update_time
             )
             on duplicate key update
-              upload_session_id=values(upload_session_id),
+              upload_session_id=upload_session_id,
               upload_user_id=coalesce(values(upload_user_id), upload_user_id),
               binding_id=coalesce(values(binding_id), binding_id),
               binding_version=coalesce(values(binding_version), binding_version),
               protocol=coalesce(values(protocol), protocol),
-              payload_json=values(payload_json),
-              raw_frame_count=values(raw_frame_count),
-              status=case when status='success' then status else values(status) end,
-              retry_count=case when status='success' then retry_count else 0 end,
-              error_msg=null,
+              payload_json=payload_json,
+              raw_frame_count=raw_frame_count,
+              status=status,
+              retry_count=retry_count,
+              error_msg=error_msg,
               update_time=values(update_time)
             """
         ),

@@ -8,6 +8,7 @@ import { getMotionDetail } from '@/common/api/homeDetail';
 import type { motionDetail, Point } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
 import { MOTION_CALORIE_DISPLAY_UNIT, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+import { normalizeCalorieGoalKcal } from '@/utils/calorieGoal';
 const echarts = require('../../static/echarts.min.js');
 const list = ref(['日', '周', '月']);
 const current = ref<number>(0);
@@ -34,7 +35,7 @@ const motionCalorieKcal = computed(
       unit: (motionDetailData.value as any)?.calorieUnit
     }) || 0
 );
-const motionTargetCalorie = computed(() => Number(motionDetailData.value?.targetCalorie) || 500);
+const motionTargetCalorie = computed(() => normalizeCalorieGoalKcal(motionDetailData.value?.targetCalorie));
 
 const isHealthy = computed(() => healthNumber.value > 50);
 const activeIcon = computed(() => {

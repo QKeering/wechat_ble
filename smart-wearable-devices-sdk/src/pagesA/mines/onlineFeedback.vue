@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { onLoad } from '@dcloudio/uni-app';
+import { onLoad, onUnload } from '@dcloudio/uni-app';
 import { getBoundRingDevice } from '@/api/ringDevice';
 import {
   getCustomerServiceConfig,
@@ -10,6 +10,7 @@ import {
   type FeedbackSubmitResult
 } from '@/common/api/feedback';
 import { useUserStore } from '@/stores/user';
+import { formatBleErrorMessage } from '@/utils/bleError';
 
 type FeedbackCategoryOption = {
   value: FeedbackCategory;
@@ -18,6 +19,7 @@ type FeedbackCategoryOption = {
 
 const MAX_IMAGE_COUNT = 3;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+const DESCRIPTION_PLACEHOLDER = '请描述出现问题的页面、操作步骤、设备状态或提示内容，至少10个字';
 
 const categoryOptions: FeedbackCategoryOption[] = [
   { value: 'connect_failed', label: '连接不上' },
@@ -32,6 +34,8 @@ const categoryOptions: FeedbackCategoryOption[] = [
 
 const category = ref<FeedbackCategory | ''>('');
 const description = ref('');
+const descriptionFocused = ref(false);
+const keyboardHeight = ref(0);
 const contact = ref('');
 const imagePaths = ref<string[]>([]);
 const sourcePage = ref('');
@@ -49,6 +53,33 @@ const devicePreview = ref({
 const descriptionLength = computed(() => description.value.trim().length);
 const selectedCategoryLabel = computed(() => categoryOptions.find((item) => item.value === category.value)?.label || '');
 const canAddImage = computed(() => imagePaths.value.length < MAX_IMAGE_COUNT);
+const feedbackPageStyle = computed(() => ({
+  paddingBottom: keyboardHeight.value > 0 ? `${keyboardHeight.value + 24}px` : '56rpx'
+}));
+
+const scrollDescriptionIntoView = () => {
+  setTimeout(() => {
+    (uni.pageScrollTo as any)({
+      selector: '#feedback-description-card',
+      offsetTop: -12,
+      duration: 220
+    });
+  }, 80);
+};
+
+const handleDescriptionFocus = () => {
+  descriptionFocused.value = true;
+  scrollDescriptionIntoView();
+};
+
+const handleDescriptionBlur = () => {
+  descriptionFocused.value = false;
+};
+
+const handleKeyboardHeightChange = (event: { height?: number }) => {
+  keyboardHeight.value = Math.max(0, Number(event?.height) || 0);
+  if (keyboardHeight.value > 0 && descriptionFocused.value) scrollDescriptionIntoView();
+};
 
 const getFirstText = (source: Record<string, any>, keys: string[]) => {
   for (const key of keys) {
@@ -163,7 +194,7 @@ const handleSubmit = async () => {
     submitted.value = true;
   } catch (error: any) {
     uni.showToast({
-      title: error?.message || '提交失败，请稍后重试',
+      title: formatBleErrorMessage(error, '提交失败，请稍后重试'),
       icon: 'none'
     });
   } finally {
@@ -203,10 +234,10 @@ const saveCustomerServiceQr = () => {
   });
 };
 
-const backToFaq = () => {
+const backToPrevious = () => {
   uni.navigateBack({
     fail: () => {
-      uni.redirectTo({ url: '/pagesA/mines/question' });
+      uni.switchTab({ url: '/pages/mine/mine' });
     }
   });
 };
@@ -216,6 +247,7 @@ const goHome = () => {
 };
 
 onLoad(async (query = {}) => {
+  (uni as any).onKeyboardHeightChange?.(handleKeyboardHeightChange);
   sourcePage.value = String((query as any).source || '');
   sourceFaqId.value = String((query as any).faqId || '');
   sourceFaqTitle.value = decodeURIComponent(String((query as any).faqTitle || ''));
@@ -227,10 +259,14 @@ onLoad(async (query = {}) => {
   }
   await collectFeedbackContext();
 });
+
+onUnload(() => {
+  (uni as any).offKeyboardHeightChange?.(handleKeyboardHeightChange);
+});
 </script>
 
 <template>
-  <view class="feedback-page">
+  <view class="feedback-page" :style="feedbackPageStyle">
     <view v-if="submitted" class="success-card">
       <view class="success-icon">✓</view>
       <view class="success-title">反馈已提交</view>
@@ -251,7 +287,7 @@ onLoad(async (query = {}) => {
       </view>
       <button v-if="submitResult.customerServiceQr" class="secondary-button" @tap="saveCustomerServiceQr">保存客服二维码</button>
 
-      <button class="primary-button" @tap="backToFaq">返回常见问题</button>
+      <button class="primary-button" @tap="backToPrevious">返回上一页</button>
       <button class="secondary-button" @tap="goHome">返回首页</button>
     </view>
 
@@ -271,14 +307,19 @@ onLoad(async (query = {}) => {
         </view>
       </view>
 
-      <view class="section-card">
+      <view id="feedback-description-card" class="section-card">
         <view class="section-title">问题描述 <text class="required">*</text></view>
         <textarea
           v-model="description"
           class="description-input"
           maxlength="500"
-          placeholder="请描述出现问题的页面、操作步骤、设备状态或提示内容，至少10个字"
+          :placeholder="descriptionFocused ? '' : DESCRIPTION_PLACEHOLDER"
           placeholder-class="placeholder"
+          :adjust-position="true"
+          :cursor-spacing="48"
+          confirm-type="done"
+          @focus="handleDescriptionFocus"
+          @blur="handleDescriptionBlur"
         />
         <view class="counter" :class="{ invalid: descriptionLength > 500 }">{{ descriptionLength }}/500</view>
       </view>

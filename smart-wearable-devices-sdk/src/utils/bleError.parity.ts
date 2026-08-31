@@ -53,3 +53,15 @@ if (
 if (formatBleErrorMessage(new Error('request:fail net::ERR_CONNECTION_TIMED_OUT')) !== networkTimeoutHint) {
   throw new Error('Raw request timeout errors should keep the localized network timeout hint.');
 }
+
+if (formatBleErrorMessage(new Error('permission denied'), '操作失败，请重试') !== '操作权限未开启，请在系统设置中允许后重试') {
+  throw new Error('Permission errors should be shown in Chinese.');
+}
+
+if (formatBleErrorMessage(new Error('unexpected provider response'), '请求失败，请稍后重试') !== '请求失败，请稍后重试') {
+  throw new Error('Unknown English errors must fall back to a Chinese user-facing message.');
+}
+
+if (formatBleErrorMessage(new Error('unexpected provider response'), 'request failed') !== '操作未完成，请稍后重试') {
+  throw new Error('English fallback messages must not reach users.');
+}

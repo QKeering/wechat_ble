@@ -10,6 +10,7 @@ import {
 import { getRingDeviceStableIdentity, isSameRingDevice } from '@/composables/useRingBleSdk';
 import { deviceModelList, getBindInfo } from '@/common/api/device';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { showRingConnectionTroubleshootingPrompt } from '@/utils/ringConnectionTroubleshooting';
 import {
   BLUETOOTH_PRIVACY_REQUIRED_HINT,
   isBluetoothPrivacyError,
@@ -40,6 +41,8 @@ const directScan = ref(false);
 const scanTargetAutoConnectDone = ref(false);
 const POST_BINDING_REFRESH_STORAGE_KEY = 'qkeer_post_binding_refresh_at';
 let bluetoothPrivacyPromptShown = false;
+let scanFailurePromptShown = false;
+let scanFailureFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
 const showBluetoothPrivacyPrompt = () => {
   if (bluetoothPrivacyPromptShown) return;
@@ -244,6 +247,38 @@ const devices = computed(() => {
   });
 });
 
+const clearScanFailureFallback = () => {
+  if (!scanFailureFallbackTimer) return;
+  clearTimeout(scanFailureFallbackTimer);
+  scanFailureFallbackTimer = null;
+};
+
+const showScanFailurePrompt = (targetMissing: boolean) => {
+  if (scanFailurePromptShown || connecting.value || isWechatBluetoothPrivacyScopeBlocked()) return;
+  scanFailurePromptShown = true;
+  autoReconnectStatus.value = 'failed';
+  autoReconnectMessage.value = targetMissing
+    ? '未找到二维码对应的戒指，请靠近戒指后重试。'
+    : '未找到附近可用戒指，请确认戒指已激活并靠近手机。';
+  setTimeout(() => {
+    void showRingConnectionTroubleshootingPrompt();
+  }, 120);
+};
+
+const armScanFailureFallback = () => {
+  clearScanFailureFallback();
+  scanFailurePromptShown = false;
+  // 底层扫描默认 20 秒停止。某些 Harmony/iOS 机型不回写 isScanning，
+  // 页面在稍后独立验收结果，确保用户一定拿到排查入口。
+  scanFailureFallbackTimer = setTimeout(() => {
+    scanFailureFallbackTimer = null;
+    if (connecting.value || isReadyCurrentDevice()) return;
+    const targetMissing = Boolean(scanTarget.value) && !findScanTargetDevice();
+    const noDeviceFound = devices.value.length === 0;
+    if (targetMissing || noDeviceFound) showScanFailurePrompt(targetMissing);
+  }, 21000);
+};
+
 const scanBusinessDevices = (options: { force?: boolean; reason?: string } = {}) => {
   if (isWechatBluetoothPrivacyScopeBlocked()) {
     autoReconnectStatus.value = 'failed';
@@ -275,6 +310,7 @@ const scanBusinessDevices = (options: { force?: boolean; reason?: string } = {})
     force: options.force === true,
     snapshot: getConnectPageSnapshot()
   });
+  armScanFailureFallback();
   return ring.scanForBusinessDevices().catch((error) => {
     if (!isBluetoothPrivacyError(error) && !isWechatBluetoothPrivacyScopeBlocked()) throw error;
     stopScan();
@@ -329,6 +365,7 @@ const retryBoundReconnect = async () => {
     }
     autoReconnectStatus.value = 'failed';
     autoReconnectMessage.value = '未找到已绑定设备，或连接握手未完成。请靠近戒指后重试。';
+    void showRingConnectionTroubleshootingPrompt();
     appendConnectPageDiagnosticLog('connect-page-bound-reconnect-failed', {
       restored,
       snapshot: getConnectPageSnapshot()
@@ -339,6 +376,8 @@ const retryBoundReconnect = async () => {
     if (isBluetoothPrivacyError(error) || isWechatBluetoothPrivacyScopeBlocked()) {
       autoReconnectMessage.value = BLUETOOTH_PRIVACY_REQUIRED_HINT;
       showBluetoothPrivacyPrompt();
+    } else {
+      void showRingConnectionTroubleshootingPrompt();
     }
     appendConnectPageDiagnosticLog('connect-page-bound-reconnect-error', {
       message: autoReconnectMessage.value,
@@ -353,9 +392,12 @@ const handleSearchAreaClick = () => {
   if (isScanning.value) return;
   scanBusinessDevices({ force: true, reason: 'search-area-retry' });
 };
-const handleResultRetryClick = () => {
-  if (connecting.value || isScanning.value) return;
-  scanBusinessDevices({ force: true, reason: 'manual-reload' });
+const handleResultRetryClick = async () => {
+  if (connecting.value) return;
+  if (isScanning.value) {
+    await stopScan();
+  }
+  await scanBusinessDevices({ force: true, reason: 'manual-reload' });
 };
 const handleDirectScanRetryClick = () => {
   if (connecting.value || isScanning.value) return;
@@ -473,10 +515,7 @@ const confirmConnect = async () => {
       message: errorMessage,
       snapshot: getConnectPageSnapshot()
     });
-    uni.showToast({
-      title: `连接失败：${errorMessage}`,
-      icon: 'none'
-    });
+    void showRingConnectionTroubleshootingPrompt();
   } finally {
     connecting.value = false;
   }
@@ -503,6 +542,54 @@ watch(
   () => [devices.value.length, isScanning.value, connecting.value, boundInfoLoaded.value, scanTarget.value],
   () => {
     void tryAutoConnectScanTarget();
+  }
+);
+
+watch(
+  () => isScanning.value,
+  (scanning, previousScanning) => {
+    if (scanning) {
+      scanFailurePromptShown = false;
+      return;
+    }
+    if (!previousScanning || connecting.value || scanFailurePromptShown) return;
+    if (isWechatBluetoothPrivacyScopeBlocked()) return;
+
+    const targetMissing = Boolean(scanTarget.value) && !findScanTargetDevice();
+    const noDeviceFound = devices.value.length === 0;
+    if (!targetMissing && !noDeviceFound) return;
+
+    clearScanFailureFallback();
+    showScanFailurePrompt(targetMissing);
+  }
+);
+
+watch(
+  () => ring.isBluetoothReady.value,
+  (ready, previousReady) => {
+    if (!ready) {
+      if (boundInfoLoaded.value) {
+        autoReconnectStatus.value = 'failed';
+        autoReconnectMessage.value = '蓝牙未开启，开启后将自动重新连接。';
+      }
+      return;
+    }
+    if (previousReady !== false || !boundInfoLoaded.value) return;
+
+    autoReconnectMessage.value = hasBoundDevice.value
+      ? '蓝牙已恢复，正在自动重新连接绑定设备。'
+      : '蓝牙已恢复，正在重新搜索附近戒指。';
+    appendConnectPageDiagnosticLog('connect-page-bluetooth-available-recovery', {
+      hasBoundDevice: hasBoundDevice.value,
+      directScan: isDirectScanMode.value,
+      snapshot: getConnectPageSnapshot()
+    });
+    if (hasBoundDevice.value && !isDirectScanMode.value) {
+      void retryBoundReconnect();
+      return;
+    }
+    autoReconnectStatus.value = 'connecting';
+    void scanBusinessDevices({ force: true, reason: 'bluetooth-available-recovery' });
   }
 );
 
@@ -554,6 +641,7 @@ onLoad(async (query = {}) => {
   loadDeviceModelsSafely();
 });
 onUnload(() => {
+  clearScanFailureFallback();
   stopScan();
 });
 </script>
@@ -606,7 +694,12 @@ onUnload(() => {
       @click="handleSearchAreaClick"
     >
       <uv-image src="/static/images/mine/logo3.png" width="260rpx" height="260rpx" mode="aspectFit" observe-lazy-load></uv-image>
-      <view class="loading-title fs-36">{{ isScanning ? '正在搜索戒指…' : '搜索已结束，点击重新搜索' }}</view>
+      <view class="loading-title-row flex ai-center jc-center">
+        <view class="loading-title fs-36">{{ isScanning ? '正在搜索戒指…' : '搜索已结束，点击重新搜索' }}</view>
+        <view v-if="isScanning" class="loading-title-spinner">
+          <uv-loading-icon mode="circle" color="#2E70FC" size="22"></uv-loading-icon>
+        </view>
+      </view>
       <view class="loading-desc t-979797 mt-10">
         {{ isScanning ? '正在查找附近可用戒指，请保持戒指靠近手机。' : '未找到目标设备时，请靠近戒指后点这里重新搜索。' }}
       </view>
@@ -619,9 +712,11 @@ onUnload(() => {
       <view class="results-info flex jc-between ai-center">
         <!-- 结果头部 -->
         <!-- <view class="results flex ai-center" @click="startScan"> -->
-        <view class="results flex ai-center" :class="{ disabled: isScanning || connecting }" @click="handleResultRetryClick">
+        <view class="results flex ai-center" :class="{ disabled: connecting }" @click="handleResultRetryClick">
           <view class="results-title fs-36 mr-20">{{ copy.searchResult }}</view>
-          <uv-image src="/static/images/mine/reload.png" width="36rpx" height="36rpx" observe-lazy-load></uv-image>
+          <view class="result-reload-icon" :class="{ spinning: isScanning }">
+            <uv-image src="/static/images/mine/reload.png" width="36rpx" height="36rpx" observe-lazy-load></uv-image>
+          </view>
         </view>
 
         <!-- 筛选/跳转项 -->
@@ -751,6 +846,17 @@ onUnload(() => {
   color: #2e70fc;
 }
 
+.loading-title-row {
+  min-height: 52rpx;
+}
+
+.loading-title-spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 18rpx;
+}
+
 .retry-search-button {
   min-width: 200rpx;
   padding: 18rpx 34rpx;
@@ -764,6 +870,24 @@ onUnload(() => {
 
 .results.disabled {
   opacity: 0.55;
+}
+
+.result-reload-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56rpx;
+  height: 56rpx;
+  margin: -10rpx;
+  border-radius: 50%;
+}
+
+.result-reload-icon.spinning {
+  animation: bound-reconnect-spin 0.9s linear infinite;
+}
+
+.results:not(.disabled) .result-reload-icon:active {
+  background: #eef4ff;
 }
 
 .bound-title {

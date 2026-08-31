@@ -1,3 +1,5 @@
+import { formatBleErrorMessage } from './bleError';
+
 /**
  * 全局错误弹窗开关
  *
@@ -38,5 +40,5 @@ export const showErrorToast = (message: unknown): void => {
     const msg = (message as any).msg;
     if (typeof msg === 'string' && msg.trim()) text = msg;
   }
-  uni.$uv.toast(text);
+  uni.$uv.toast(formatBleErrorMessage(message, text));
 };

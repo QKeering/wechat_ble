@@ -93,6 +93,7 @@ export type vitalSignType = {
   hrvMax?: number;
   hrvChart?: Point[];
   spo2Avg?: number;
+  spo2Chart?: Point[];
   temperatureAvg?: number;
   stressAvg?: number;
   bloodSugar?: number;
@@ -212,14 +213,14 @@ export type motionOverview = {
   calorieUnit?: string; // 卡单位；后端统一返回“卡”，旧接口缺失时前端兜底
   motionTime?: number; // 运动时长
   targetStep?: number; // 目标步数
-  targetCalorie?: number; // 目标卡
+  targetCalorie?: number; // 热量目标（千卡）
   targetMotionTime?: number; // 目标运动时长
 };
 // 获取活动消耗卡
 export type motionCalorie = {
   totalCalorie?: number; // 总消耗卡
   calorieUnit?: string; // 卡单位；后端统一返回“卡”，旧接口缺失时前端兜底
-  targetCalorie?: number; // 目标消耗卡
+  targetCalorie?: number; // 热量消耗目标（千卡）
   motionCalorie?: number; // 活动消耗卡（必填）
   basalCalorie?: number; // 基础代谢消耗卡
   motionCalorieChart?: Point[]; // 活动消耗图表（数组，元素为 Point 类型）
@@ -238,7 +239,7 @@ export type motionIntensity = {
 export type motionDetail = {
   calorie?: number; // 运动卡
   calorieUnit?: string; // 卡单位
-  targetCalorie?: number; // 目标卡
+  targetCalorie?: number; // 热量目标（千卡）
   calorieChart?: Point[]; // 运动卡图表（数组，元素为 Point 类型）
   step?: number; // 步数
   targetStep?: number; // 目标步数

@@ -8,6 +8,7 @@ import { formatBleErrorMessage } from '@/utils/bleError';
 import { getBoundRingIdentityTail, hasBoundRingIdentity } from '@/utils/ringBinding';
 
 const LOCAL_RING_CONNECT_FAILED_FAQ = 'ring-connect-failed';
+const LOCAL_CHARGING_CASE_INDICATOR_GUIDE = 'charging-case-indicator';
 
 const content = ref<string>('');
 const loading = ref(false);
@@ -31,10 +32,19 @@ const {
 
 const ringConnectPossibleCauses = [
   '手机蓝牙未打开，或微信/小程序没有蓝牙权限。',
-  '戒指电量过低、距离手机太远，或戒指没有佩戴在可被搜索的范围内。',
+  '戒指可能没电，请将戒指放入充电仓充电 5 分钟后再连接。',
+  '戒指超过 24 小时未佩戴时可能进入休眠，请先放入充电仓激活，再重新连接。',
+  '戒指距离手机太远，或没有处于可被搜索的范围内。',
   '戒指正在被另一个手机、官方 App 或其他小程序占用连接。',
   '本地绑定缓存和后台绑定信息不一致，导致自动重连目标不正确。',
   '系统蓝牙通道短暂异常，可尝试关闭蓝牙后重新打开，或重启小程序。'
+];
+
+const chargingCaseIndicatorItems = [
+  '充电仓充电时，红灯闪烁；充满后，红灯常亮。',
+  '充电仓给戒指充电时，绿灯常亮。',
+  '充电仓电量不足时，绿灯闪烁；电量耗尽后，绿灯熄灭。',
+  '充电仓边充电边给戒指充电时，只显示红色指示灯：充电时红灯闪烁，充满后红灯常亮。'
 ];
 
 const decodeTitle = (title: string) => {
@@ -192,6 +202,18 @@ onLoad(async (e) => {
         <view class="result-detail">{{ selfCheckResult.detail }}</view>
         <view v-if="selfCheckResult.suggestions.length" class="result-suggestions">
           <view v-for="item in selfCheckResult.suggestions" :key="item" class="suggestion-item">{{ item }}</view>
+        </view>
+      </view>
+    </view>
+
+    <view v-else-if="localFaq === LOCAL_CHARGING_CASE_INDICATOR_GUIDE" class="faq-card">
+      <view class="faq-title">充电仓状态指示灯说明</view>
+      <view class="faq-desc">可以根据充电仓指示灯的颜色和闪烁状态判断当前工作状态。</view>
+      <view class="section-title">指示灯状态</view>
+      <view class="cause-list">
+        <view v-for="item in chargingCaseIndicatorItems" :key="item" class="cause-item">
+          <text class="cause-dot"></text>
+          <text>{{ item }}</text>
         </view>
       </view>
     </view>

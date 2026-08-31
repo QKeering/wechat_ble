@@ -4,7 +4,7 @@ export interface MotionCalorieNormalizeContext {
   unit?: unknown;
 }
 
-export const MOTION_CALORIE_DISPLAY_UNIT = '卡';
+export const MOTION_CALORIE_DISPLAY_UNIT = '千卡';
 
 const toFiniteNumber = (value: unknown) => {
   if (value == null || value === '') return null;

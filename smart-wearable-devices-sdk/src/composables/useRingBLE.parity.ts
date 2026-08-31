@@ -616,6 +616,10 @@ if (
 if (
   !sdkSource.includes('const initBluetooth = async') ||
   !sdkSource.includes('const startScanWithProtocol = async') ||
+  !sdkSource.includes("writeRwStoreLog('bluetooth-init-ready-reused'") ||
+  !sdkSource.includes("writeRwStoreLog('bluetooth-init-inflight-reused'") ||
+  !sdkSource.includes('if (adapter.protocol === protocol && isBluetoothReady.value)') ||
+  !sdkSource.includes('if (bluetoothInitProtocol === protocol)') ||
   !sdkSource.includes("return startScanWithProtocol('legacy', input)") ||
   !sdkSource.includes('await startScanWithProtocol(scanProtocol, {') ||
   !sdkSource.includes('const targetAdapter = await switchAdapter(protocol)') ||

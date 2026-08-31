@@ -1,7 +1,10 @@
 /**
  * 微信登录
  */
-export const wxLogin = (params, config = {}) => uni.$uv.http.post('/app/login/wxLogin', params, config)
+export const wxLogin = (params, config = {}) => {
+  const openIdCode = String(params?.openIdCode || params?.openidCode || '').trim()
+  return uni.$uv.http.post(`/app/login/wxLogin?openIdCode=${encodeURIComponent(openIdCode)}`, {}, config)
+}
 /**
  * 小程序手机号登录
  */

@@ -48,48 +48,58 @@ type itemType = {
   level: string;
   path: string;
   type?: string;
-  avg?: number;
-  current?: number;
+  avg?: number | null;
+  current?: number | null;
 };
 const pullDownRefresh = ref(false);
 const pullDownProgress = ref(0);
 const habitTrendText = computed(() => normalizeHealthText(healthSummary.value?.habitScore?.trend, '--'));
+const normalizeIndicatorScore = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === '') return null;
+  const score = Number(value);
+  if (!Number.isFinite(score) || score < 0 || score > 100) return null;
+  return score;
+};
+const getIndicatorLevel = (current: unknown) => {
+  const score = normalizeIndicatorScore(current);
+  return score == null ? '--' : normalizeHealthLevel('', score);
+};
 const sleepIndicators = computed<itemType[]>(() => [
   {
     name: '睡前准备',
     score: healthSummary.value?.sleep?.preparation?.score || 0,
-    level: normalizeHealthLevel(healthSummary.value?.sleep?.preparation?.level, healthSummary.value?.sleep?.preparation?.score || 0),
+    level: getIndicatorLevel(healthSummary.value?.sleep?.preparation?.current),
     path: '/pagesA/healths/indicatorDetail',
     type: 'sleepPrep',
-    avg: healthSummary.value?.sleep?.preparation?.avg || 0,
-    current: healthSummary.value?.sleep?.preparation?.current || 0
+    avg: normalizeIndicatorScore(healthSummary.value?.sleep?.preparation?.avg),
+    current: normalizeIndicatorScore(healthSummary.value?.sleep?.preparation?.current)
   },
   {
     name: '睡眠节律',
     score: healthSummary.value?.sleep?.rhythm?.score || 0,
-    level: normalizeHealthLevel(healthSummary.value?.sleep?.rhythm?.level, healthSummary.value?.sleep?.rhythm?.score || 0),
+    level: getIndicatorLevel(healthSummary.value?.sleep?.rhythm?.current),
     path: '/pagesA/healths/indicatorDetail',
     type: 'sleepRhythm',
-    avg: healthSummary.value?.sleep?.rhythm?.avg || 0,
-    current: healthSummary.value?.sleep?.rhythm?.current || 0
+    avg: normalizeIndicatorScore(healthSummary.value?.sleep?.rhythm?.avg),
+    current: normalizeIndicatorScore(healthSummary.value?.sleep?.rhythm?.current)
   },
   {
     name: '睡眠过程恢复',
     score: healthSummary.value?.sleep?.recovery?.score || 0,
-    level: normalizeHealthLevel(healthSummary.value?.sleep?.recovery?.level, healthSummary.value?.sleep?.recovery?.score || 0),
+    level: getIndicatorLevel(healthSummary.value?.sleep?.recovery?.current),
     path: '/pagesA/healths/indicatorDetail',
     type: 'sleepRecovery',
-    avg: healthSummary.value?.sleep?.recovery?.avg || 0,
-    current: healthSummary.value?.sleep?.recovery?.current || 0
+    avg: normalizeIndicatorScore(healthSummary.value?.sleep?.recovery?.avg),
+    current: normalizeIndicatorScore(healthSummary.value?.sleep?.recovery?.current)
   },
   {
     name: '睡眠激活',
     score: healthSummary.value?.sleep?.activation?.score || 0,
-    level: normalizeHealthLevel(healthSummary.value?.sleep?.activation?.level, healthSummary.value?.sleep?.activation?.score || 0),
+    level: getIndicatorLevel(healthSummary.value?.sleep?.activation?.current),
     path: '/pagesA/healths/indicatorDetail',
     type: 'wakeUpBoost',
-    avg: healthSummary.value?.sleep?.activation?.avg || 0,
-    current: healthSummary.value?.sleep?.activation?.current || 0
+    avg: normalizeIndicatorScore(healthSummary.value?.sleep?.activation?.avg),
+    current: normalizeIndicatorScore(healthSummary.value?.sleep?.activation?.current)
   }
 ]);
 
@@ -97,29 +107,29 @@ const activityIndicators = computed<itemType[]>(() => [
   {
     name: '久坐风险',
     score: healthSummary.value?.activity?.sedentaryRisk?.score || 0,
-    level: normalizeHealthLevel(healthSummary.value?.activity?.sedentaryRisk?.level, healthSummary.value?.activity?.sedentaryRisk?.score || 0),
+    level: getIndicatorLevel(healthSummary.value?.activity?.sedentaryRisk?.current),
     path: '/pagesA/healths/indicatorDetail',
     type: 'sedentaryRisk',
-    avg: healthSummary.value?.activity?.sedentaryRisk?.avg || 0,
-    current: healthSummary.value?.activity?.sedentaryRisk?.current || 0
+    avg: normalizeIndicatorScore(healthSummary.value?.activity?.sedentaryRisk?.avg),
+    current: normalizeIndicatorScore(healthSummary.value?.activity?.sedentaryRisk?.current)
   },
   {
     name: '活动强度',
     score: healthSummary.value?.activity?.activityRisk?.score || 0,
-    level: normalizeHealthLevel(healthSummary.value?.activity?.activityRisk?.level, healthSummary.value?.activity?.activityRisk?.score || 0),
+    level: getIndicatorLevel(healthSummary.value?.activity?.activityRisk?.current),
     path: '/pagesA/healths/indicatorDetail',
     type: 'activityIntensity',
-    avg: healthSummary.value?.activity?.activityRisk?.avg || 0,
-    current: healthSummary.value?.activity?.activityRisk?.current || 0
+    avg: normalizeIndicatorScore(healthSummary.value?.activity?.activityRisk?.avg),
+    current: normalizeIndicatorScore(healthSummary.value?.activity?.activityRisk?.current)
   },
   {
     name: '运动规律性',
     score: healthSummary.value?.activity?.exerciseRegularity?.score || 0,
-    level: normalizeHealthLevel(healthSummary.value?.activity?.exerciseRegularity?.level, healthSummary.value?.activity?.exerciseRegularity?.score || 0),
+    level: getIndicatorLevel(healthSummary.value?.activity?.exerciseRegularity?.current),
     path: '/pagesA/healths/indicatorDetail',
     type: 'exerciseRegularity',
-    avg: healthSummary.value?.activity?.exerciseRegularity?.avg || 0,
-    current: healthSummary.value?.activity?.exerciseRegularity?.current || 0
+    avg: normalizeIndicatorScore(healthSummary.value?.activity?.exerciseRegularity?.avg),
+    current: normalizeIndicatorScore(healthSummary.value?.activity?.exerciseRegularity?.current)
   }
 ]);
 
@@ -327,8 +337,10 @@ onPullDownRefresh(async () => {
           <view class="trend-compare mt-10 t-979797">相比前四周</view>
         </view>
         <score-progress-bar
-          :current-score="healthSummary?.habitScore?.score || 50"
-          :avg-score="(healthSummary?.habitScore?.score || 50) + (healthSummary?.habitScore?.trendValue || 0)"
+          :current-score="normalizeIndicatorScore(healthSummary?.habitScore?.score) ?? 0"
+          :avg-score="normalizeIndicatorScore((healthSummary?.habitScore?.score ?? 0) - (healthSummary?.habitScore?.trendValue ?? 0)) ?? 0"
+          :show-current-icon="normalizeIndicatorScore(healthSummary?.habitScore?.score) != null"
+          :show-avg-icon="normalizeIndicatorScore(healthSummary?.habitScore?.score) != null"
         />
       </view>
 
@@ -373,7 +385,13 @@ onPullDownRefresh(async () => {
                 <text class="score-level fs-36 ml-10">{{ item.level }}</text>
               </view>
             </view>
-            <score-progress-bar :styleVersion="2" :current-score="item.current || 50" :avg-score="item.avg || 50" />
+            <score-progress-bar
+              :styleVersion="2"
+              :current-score="item.current ?? 0"
+              :avg-score="item.avg ?? 0"
+              :show-current-icon="item.current != null"
+              :show-avg-icon="item.avg != null"
+            />
           </view>
         </view>
       </view>
@@ -405,7 +423,13 @@ onPullDownRefresh(async () => {
                 <text class="score-level fs-36 ml-10">{{ item.level }}</text>
               </view>
             </view>
-            <score-progress-bar :styleVersion="3" :current-score="item.current || 50" :avg-score="item.avg || 50" />
+            <score-progress-bar
+              :styleVersion="3"
+              :current-score="item.current ?? 0"
+              :avg-score="item.avg ?? 0"
+              :show-current-icon="item.current != null"
+              :show-avg-icon="item.avg != null"
+            />
           </view>
         </view>
       </view>

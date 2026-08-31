@@ -8,6 +8,29 @@ export interface BuildLegacyCommandOptions {
   payload?: LegacyCommandPayload;
 }
 
+// L19 protocol 0x31/0x32 requests are fixed-width structures. Keep waveform
+// and RR disabled for foreground values; enabling them produces a large stream
+// that is unnecessary for the UI and is less stable on low-MTU phones.
+export const LEGACY_REALTIME_MEASURE_DURATION_SECONDS = 30;
+export const LEGACY_REALTIME_MEASURE_FREQUENCY_HZ = 50;
+export const buildLegacyHeartRateMeasurementPayload = (
+  durationSeconds = LEGACY_REALTIME_MEASURE_DURATION_SECONDS
+) => new Uint8Array([
+  durationSeconds & 0xff,
+  LEGACY_REALTIME_MEASURE_FREQUENCY_HZ,
+  0x00, // waveform upload disabled
+  0x01, // progress upload enabled
+  0x00 // RR interval upload disabled
+]);
+export const buildLegacyBloodOxygenMeasurementPayload = (
+  durationSeconds = LEGACY_REALTIME_MEASURE_DURATION_SECONDS
+) => new Uint8Array([
+  durationSeconds & 0xff,
+  LEGACY_REALTIME_MEASURE_FREQUENCY_HZ,
+  0x00, // waveform upload disabled
+  0x01 // progress upload enabled
+]);
+
 const normalizePayload = (payload?: LegacyCommandPayload) => {
   if (payload === undefined) return new Uint8Array([0x00]);
   if (payload instanceof Uint8Array) return payload;

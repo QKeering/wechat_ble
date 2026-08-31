@@ -2,6 +2,7 @@
 // @ts-nocheck
 import { ref, computed } from 'vue';
 import type { sleepOverview, sleepSegment } from '@/types/api/homeDetail';
+import { normalizeSleepScore } from '@/utils/sleepOverview';
 
 const props = defineProps({
   sleepOverviewObj: {
@@ -16,12 +17,6 @@ const props = defineProps({
 
 // 睡眠评分因素展开状态
 const factorsExpanded = ref(false);
-
-const normalizeSleepScore = (value: unknown): number | null => {
-  const score = Number(value);
-  if (!Number.isFinite(score) || score <= 0 || score > 100) return null;
-  return Math.round(score);
-};
 
 const sleepScoreValue = computed(() => normalizeSleepScore(props.sleepOverviewObj?.sleepScore));
 

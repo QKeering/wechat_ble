@@ -2,7 +2,13 @@ import { computed, watch } from 'vue';
 import { useRingBleStoreSdk } from './useRingBleStoreSdk';
 import type { UseRingBleSdkOptions } from './useRingBleSdk';
 import { resolveRingProtocol, type RefreshLegacyBusinessMetricsResult, type RingDeviceInfo, type RwHealthDataName, type RwHistoryDataName } from '@/sdk/ring-ble';
-import type { RwHealthMonitoringConfig, RwUserProfile } from '@/sdk/ring-ble/rw/protocol';
+import { buildRwQkeerV2LastDataCommand, type RwHealthMonitoringConfig, type RwUserProfile } from '@/sdk/ring-ble/rw/protocol';
+import {
+  buildLegacyBloodOxygenMeasurementPayload,
+  buildLegacyCommandBytes,
+  buildLegacyHeartRateMeasurementPayload,
+  createLegacyFrameId
+} from '@/sdk/ring-ble/legacy/protocol';
 import { getRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import {
@@ -53,6 +59,17 @@ interface CompatReadLocalDataOptions {
   silentUploadStatus?: boolean;
   skipUpload?: boolean;
 }
+interface CompatDeviceInfoCommandOptions {
+  timeoutMs?: number;
+  retryReady?: boolean;
+}
+type LegacyWearMeasurementKind = 'heart_rate' | 'blood_oxygen' | 'temperature';
+type PendingLegacyWearMeasurement = {
+  kind: LegacyWearMeasurementKind;
+  frameId: number;
+  expiresAt: number;
+  completion: Promise<unknown>;
+};
 const DEFAULT_COMPAT_REFRESH_OPTIONS: CompatRefreshOptions = {
   includeDeviceTime: false,
   includeCollectPeriod: false
@@ -199,6 +216,36 @@ const createCompatRefreshFailure = (error: unknown): RefreshLegacyBusinessMetric
 
 export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const sdk = useRingBleStoreSdk(options);
+  let pendingLegacyWearMeasurement: PendingLegacyWearMeasurement | null = null;
+  const normalizeLegacyWearMeasurementKind = (name: unknown): LegacyWearMeasurementKind | null => {
+    const normalized = String(name || '').trim().toLowerCase().replace(/-/g, '_');
+    if (normalized === 'heart_rate' || normalized === 'hr' || normalized === 'hrv') return 'heart_rate';
+    if (normalized === 'blood_oxygen' || normalized === 'oxygen' || normalized === 'spo2') return 'blood_oxygen';
+    if (normalized === 'temperature' || normalized === 'body_temperature' || normalized === 'skin_temperature') return 'temperature';
+    return null;
+  };
+  const consumePendingLegacyWearMeasurement = (requestedNames: unknown[]) => {
+    if (!pendingLegacyWearMeasurement) return null;
+    if (
+      resolveRingProtocol(sdk.deviceInfo.value) !== 'legacy' ||
+      pendingLegacyWearMeasurement.expiresAt <= Date.now()
+    ) {
+      pendingLegacyWearMeasurement = null;
+      return null;
+    }
+    const matchedName = requestedNames.find(
+      (name) => normalizeLegacyWearMeasurementKind(name) === pendingLegacyWearMeasurement?.kind
+    );
+    if (matchedName == null) return null;
+    const reused = pendingLegacyWearMeasurement;
+    pendingLegacyWearMeasurement = null;
+    appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-measurement-reused', {
+      kind: reused.kind,
+      frameId: reused.frameId,
+      requestedName: String(matchedName)
+    });
+    return reused;
+  };
   const connectedDeviceId = computed(() => sdk.deviceInfo.value.deviceId || '');
   const healthData = computed(() => sdk.ringStore.healthData);
   const latestMetrics = computed(() => sdk.ringStore.latestMetrics);
@@ -234,6 +281,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     ([connected, deviceId, notifyEnabled], previous) => {
       const deviceChanged = Boolean(previous?.[1] && previous[1] !== deviceId);
       if (!connected || !deviceId || notifyEnabled === false || deviceChanged) {
+        pendingLegacyWearMeasurement = null;
         const previousKey = String(previous?.[1] || deviceId || '').toUpperCase();
         const currentKey = getCommunicationDeviceKey();
         const previousCleared = communicationReadyPromiseByDevice.delete(previousKey);
@@ -326,7 +374,11 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     );
   };
 
-  const enqueueDeviceInfoCommand = <T>(command: string, task: () => Promise<T>) => {
+  const enqueueDeviceInfoCommand = <T>(
+    command: string,
+    task: () => Promise<T>,
+    options: Pick<CompatDeviceInfoCommandOptions, 'retryReady'> = {}
+  ) => {
     const queuedAt = Date.now();
     const run = async () => {
       await waitForHistoryCommandWindow(command);
@@ -344,7 +396,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
         try {
           result = await (fastPath ? task() : runWithReady(task, command));
         } catch (directError) {
-          if (!fastPath) throw directError;
+          if (!fastPath || options.retryReady === false) throw directError;
           communicationReadyPromiseByDevice.delete(getCommunicationDeviceKey() || 'unknown-device');
           appendRingDiagnosticLog('L19 BLE', 'device-info-command-ready-retry', {
             command,
@@ -479,14 +531,75 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     };
   };
 
-  const refreshHealthData = (params?: CompatRefreshOptions) =>
-    runWithReady(async () => {
+  const refreshHealthData = (params?: CompatRefreshOptions) => {
+    const requestedMetricNames = Array.isArray(params?.realtimeMetricNames)
+      ? params.realtimeMetricNames
+      : [];
+    const reusedWearMeasurement = consumePendingLegacyWearMeasurement(requestedMetricNames);
+    if (reusedWearMeasurement) {
+      // 佩戴门禁已用同一条正式测量命令启动采集。页面继续等待它的
+      // 最终 Notify，这里不能再次启停设备测量。门禁发送命令前已挂好
+      // 最终结果 waiter，因此不会丢失设备紧接着返回的完成帧。
+      return reusedWearMeasurement.completion.then(
+        (record) => {
+          // waitForParsedData 会先于批量 store flush 完成。实时测量页面在 Promise
+          // 返回后会立即读取 store，若继续等待缓冲刷新就会把已经成功的测量误判为
+          // “无数据”。这里将同一条最终记录同步写入统一运行态；store 自身按指标键
+          // 去重，随后到达的正常缓冲 flush 不会产生重复业务数据。
+          const completedAt = Date.now();
+          const completedRecord =
+            record && typeof record === 'object'
+              ? {
+                  ...(record as Record<string, any>),
+                  timestamp:
+                    Number((record as Record<string, any>).timestamp) > 0
+                      ? Number((record as Record<string, any>).timestamp)
+                      : completedAt,
+                  receivedAt:
+                    Number((record as Record<string, any>).receivedAt) > 0
+                      ? Number((record as Record<string, any>).receivedAt)
+                      : completedAt
+                }
+              : record;
+          if (completedRecord && typeof completedRecord === 'object') {
+            sdk.ringStore.handleParsedData(completedRecord as any);
+          }
+          appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-measurement-completed', {
+            kind: reusedWearMeasurement.kind,
+            frameId: reusedWearMeasurement.frameId
+          });
+          return {
+            status: 'success' as const,
+            ok: requestedMetricNames.map((name) => String(name)),
+            failed: [],
+            record: completedRecord,
+            measurementCompleted: true
+          };
+        },
+        (error) => {
+          // 保持单次命令语义：等待超时后交给页面的无数据提示处理，不再
+          // fallback 发送第二条测量命令，避免设备处于采集中时被重复启动。
+          appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-measurement-timeout', {
+            kind: reusedWearMeasurement.kind,
+            frameId: reusedWearMeasurement.frameId,
+            error: error instanceof Error ? error.message : String(error || 'timeout')
+          });
+          return {
+            status: 'partial' as const,
+            ok: requestedMetricNames.map((name) => String(name)),
+            failed: []
+          };
+        }
+      );
+    }
+    return runWithReady(async () => {
       try {
         return await sdk.refreshBusinessMetrics(getCompatRefreshOptions(params));
       } catch (error) {
         return createCompatRefreshFailure(error);
       }
     });
+  };
   const syncHistoricalData = readLocalData;
   const cancelReadLocalData = () => sdk.clearDataListener?.();
   const syncAllHealthData = () => runWithReady(() => sdk.syncAllHealthData());
@@ -518,14 +631,16 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const setTimedTemperatureJL = (config: RwHealthMonitoringConfig) => runWithReady(() => sdk.setTimedTemperatureJL(config));
   const controlHealthDataJL = (name: CompatRwHealthDataName, enabled = true) =>
     runWithReady(() => sdk.controlHealthDataJL(normalizeCompatRwHealthDataName(name), enabled));
-  const readBattery = () =>
+  const readBattery = (options: CompatDeviceInfoCommandOptions = {}) =>
     enqueueDeviceInfoCommand('battery', async () => {
       // Writing 0x12 only proves that WeChat accepted the command.  The value
       // shown by the pages must come from the matching Notify response.  Start
       // the waiter before the write so a fast device response cannot be lost.
       const pendingBattery = sdk.waitForParsedData(
         (parsed) => parsed.type === 'battery',
-        DEFAULT_COMPAT_REFRESH_TIMEOUT_MS,
+        Number.isFinite(Number(options.timeoutMs)) && Number(options.timeoutMs) > 0
+          ? Number(options.timeoutMs)
+          : DEFAULT_COMPAT_REFRESH_TIMEOUT_MS,
         { replayRecent: false }
       );
       // If the write fails first, keep the waiter rejection observed while the
@@ -533,12 +648,181 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       pendingBattery.catch(() => undefined);
       await sdk.sendBatteryCommand();
       return pendingBattery;
-    });
+    }, { retryReady: options.retryReady });
   const readFirmwareVersion = () => enqueueDeviceInfoCommand('firmware-version', () => sdk.sendFirmwareVersion());
   const readSoftwareVersion = () => enqueueDeviceInfoCommand('software-version', () => sdk.sendSoftwareVersion());
-  const readHeartRate = () => runWithReady(() => sdk.sendActiveMeasureCommand());
-  const readBloodOxygen = () => runWithReady(() => sdk.sendOxyGenCommand());
-  const readBodyTemperature = () => runWithReady(() => sdk.sendBodyTemperatureCommand());
+  const readHeartRate = () => {
+    const reused = consumePendingLegacyWearMeasurement(['heart_rate']);
+    return reused ? reused.completion : runWithReady(() => sdk.sendActiveMeasureCommand());
+  };
+  const readBloodOxygen = () => {
+    const reused = consumePendingLegacyWearMeasurement(['blood_oxygen']);
+    return reused ? reused.completion : runWithReady(() => sdk.sendOxyGenCommand());
+  };
+  const readBodyTemperature = () => {
+    const reused = consumePendingLegacyWearMeasurement(['temperature']);
+    return reused ? reused.completion : runWithReady(() => sdk.sendBodyTemperatureCommand());
+  };
+  /**
+   * 在开始实时测量前主动读取当前佩戴状态。
+   *
+   * QKeer V2/RW 的 0x70（当天最后记录）回包包含独立的 isWorn 字节。
+   * L19/HR18 旧协议没有单独的佩戴查询，因此用本次指标的正式测量命令读取硬件状态码；
+   * 佩戴正确时继续复用这次已启动的测量，不再发送停止+重启命令。任何超时或未知状态都由上层
+   * 按 fail-closed 处理，禁止在没有确认佩戴时继续发送正式测量命令。
+   */
+  const queryCurrentWearState = async (
+    measurementKindOrTimeout: LegacyWearMeasurementKind | number = 'heart_rate',
+    timeoutMs = 8000
+  ) => {
+    const measurementKind =
+      typeof measurementKindOrTimeout === 'number' ? 'heart_rate' : measurementKindOrTimeout;
+    const requestedTimeoutMs =
+      typeof measurementKindOrTimeout === 'number' ? measurementKindOrTimeout : timeoutMs;
+    const protocol = resolveRingProtocol(sdk.deviceInfo.value);
+    const boundedTimeoutMs = Math.max(4000, Math.min(12000, Number(requestedTimeoutMs) || 8000));
+
+    if (protocol === 'legacy') {
+      // 启动回包既是佩戴状态，也表示这次正式测量已开始。
+      const probeConfig = measurementKind === 'blood_oxygen'
+        ? {
+            command: 0x32,
+            payload: buildLegacyBloodOxygenMeasurementPayload(),
+            type: 'active_OxyGenMeasure',
+            statusField: 'bloodOxygenStatus'
+          }
+        : measurementKind === 'temperature'
+          ? { command: 0x34, payload: 0x00, type: 'active_Temperature', statusField: 'temperatureStatus' }
+          : {
+              command: 0x31,
+              payload: buildLegacyHeartRateMeasurementPayload(),
+              type: 'active_measure',
+              statusField: 'heartbeatStatus'
+            };
+      const frameId = createLegacyFrameId();
+      const valuePromise = sdk.waitForParsedData(
+        (parsed) => {
+          if (parsed.type !== probeConfig.type || Number(parsed.frameId) !== frameId) return false;
+          if (measurementKind === 'heart_rate') return Number((parsed as Record<string, any>).heartRate) > 0;
+          if (measurementKind === 'blood_oxygen') return Number((parsed as Record<string, any>).bloodOxygen) > 0;
+          const temperature = Number.parseFloat(String((parsed as Record<string, any>).temperature || ''));
+          return Number.isFinite(temperature) && temperature > 0;
+        },
+        35_000,
+        { replayRecent: false }
+      );
+      valuePromise.catch(() => undefined);
+      // status=3 只表示“采集中”。6E 真机在约 10 秒、进度 30 时就会返回
+      // 非零心率，若此时结束本步，全面测量马上发送下一条命令并与仍在运行的
+      // 30 秒测量冲突。心率必须等进度 100（或明确回到 status=1）；血氧和
+      // 温度没有独立进度帧，必须等完成状态。
+      const finishedPromise = sdk.waitForParsedData(
+        (parsed) => {
+          if (Number(parsed.frameId) !== frameId) return false;
+          if (measurementKind === 'heart_rate') {
+            if (parsed.type === 'active_measure_progress') {
+              return Number((parsed as Record<string, any>).progress) >= 100;
+            }
+            return parsed.type === probeConfig.type && Number((parsed as Record<string, any>)[probeConfig.statusField]) === 0x01;
+          }
+          return parsed.type === probeConfig.type && Number((parsed as Record<string, any>)[probeConfig.statusField]) === 0x01;
+        },
+        38_000,
+        { replayRecent: false }
+      );
+      finishedPromise.catch(() => undefined);
+      const completionPromise = Promise.all([valuePromise, finishedPromise]).then(([valueRecord, finishedRecord]) => {
+        appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-measurement-finished', {
+          measurementKind,
+          frameId,
+          valueStatus: (valueRecord as Record<string, any>)[probeConfig.statusField],
+          finishedType: finishedRecord.type,
+          finishedStatus: (finishedRecord as Record<string, any>)[probeConfig.statusField],
+          progress: (finishedRecord as Record<string, any>).progress
+        });
+        return valueRecord;
+      });
+      completionPromise.catch(() => undefined);
+      const responsePromise = sdk.waitForParsedData(
+        (parsed) => {
+          if (parsed.type !== probeConfig.type) return false;
+          appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-probe-candidate', {
+            measurementKind,
+            expectedFrameId: frameId,
+            actualFrameId: parsed.frameId,
+            measurementStatus: (parsed as Record<string, any>)[probeConfig.statusField],
+            status: parsed.status
+          });
+          if (Number(parsed.frameId) !== frameId) return false;
+          const status = Number((parsed as Record<string, any>)[probeConfig.statusField]);
+          return status === 0x00 || status === 0x01 || status === 0x02 || status === 0x03;
+        },
+        Math.min(boundedTimeoutMs, 6000),
+        { replayRecent: false }
+      );
+      responsePromise.catch(() => undefined);
+      appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-probe-start', {
+        protocol,
+        measurementKind,
+        durationSeconds: measurementKind === 'temperature' ? undefined : 30,
+        frameId
+      });
+      await sdk.sendBytes(
+        buildLegacyCommandBytes(probeConfig.command, 0x00, { frameId, payload: probeConfig.payload }),
+        `wear-preflight/legacy-${measurementKind}`
+      );
+      const parsed = await responsePromise;
+      const status = Number((parsed as Record<string, any>)[probeConfig.statusField]);
+
+      const measurementStarted = measurementKind === 'temperature' ? status === 0x00 : status === 0x03;
+      pendingLegacyWearMeasurement = measurementStarted
+        ? { kind: measurementKind, frameId, expiresAt: Date.now() + 40_000, completion: completionPromise }
+        : null;
+      appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-probe-result', {
+        protocol,
+        measurementKind,
+        measurementReused: measurementStarted,
+        frameId,
+        measurementStatus: (parsed as Record<string, any>)[probeConfig.statusField],
+        status: parsed.status
+      });
+      const worn = measurementKind === 'temperature'
+        ? status === 0x00 || status === 0x01
+        : status === 0x01 || status === 0x03;
+      return {
+        supported: true,
+        protocol,
+        state: worn
+          ? ('worn' as const)
+          : measurementKind !== 'temperature' && status === 0x02
+            ? ('charging' as const)
+            : ('not_worn' as const),
+        record: parsed
+      };
+    }
+
+    const responsePromise = sdk.waitForParsedData(
+      (parsed) => parsed.type === 'qkeer_v2_last_data' && typeof parsed.isWorn === 'boolean',
+      boundedTimeoutMs,
+      { replayRecent: false }
+    );
+    // 命令发送失败时 waiter 仍会按自身超时结束；提前挂 catch 避免产生未处理拒绝。
+    responsePromise.catch(() => undefined);
+    if (protocol === 'rw') {
+      await sdk.sendBytes(buildRwQkeerV2LastDataCommand(), 'wear-preflight/rw-last-data');
+    } else if (protocol === 'qkeer-v2') {
+      await readBodyTemperature();
+    } else {
+      throw new Error('当前设备不支持佩戴状态查询');
+    }
+    const parsed = await responsePromise;
+    return {
+      supported: true,
+      protocol,
+      state: parsed.isWorn === true ? ('worn' as const) : ('not_worn' as const),
+      record: parsed
+    };
+  };
   const readDeviceTime = () => enqueueDeviceInfoCommand('device-time', () => sdk.readDeviceTime());
   // SDK 已按协议处理校时所需的 ready 策略；不要在兼容层再包一层恢复，
   // 否则 legacy 设备会在校时阶段重复恢复并阻塞历史读取。
@@ -814,6 +1098,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     sendActiveMeasureCommand: readHeartRate,
     sendOxyGenCommand: readBloodOxygen,
     sendBodyTemperatureCommand: readBodyTemperature,
+    queryCurrentWearState,
     readBattery,
     getBattery: readBattery,
     getBatteryInfo: readBattery,

@@ -3,6 +3,8 @@ const fallbackBuildInfo: QKeerBuildInfo = {
   versionCode: 'unknown',
   gitCommit: 'unknown',
   gitBranch: 'unknown',
+  gitDirty: false,
+  workspaceDigest: 'unknown',
   buildTime: 'unknown',
   buildId: 'unknown'
 };

@@ -747,16 +747,21 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
 
   const initBluetooth = async () => {
     registerConnectionStateListener();
-    const stateSnapshot = await getBluetoothAdapterStateSnapshot('init-bluetooth');
+    const openResult = await openBluetoothAdapter();
+    const stateSnapshot = await getBluetoothAdapterStateSnapshot('init-bluetooth-after-open');
     if (stateSnapshot.available) {
       runtime?.onBluetoothReadyChange?.(true);
-      rwBleLog('bluetooth-adapter-open-skipped', {
-        reason: 'adapter-already-available',
+      rwBleLog('bluetooth-adapter-state-after-open', {
+        reason: 'open-succeeded-state-confirmed',
         discovering: stateSnapshot.discovering
       });
       return stateSnapshot;
     }
-    return openBluetoothAdapter();
+    rwBleLog('bluetooth-adapter-state-after-open-unconfirmed', {
+      source: stateSnapshot.source,
+      error: stateSnapshot.error
+    });
+    return openResult;
   };
 
   const closeBluetoothAdapterQuietly = () => {
@@ -2321,7 +2326,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     return readLocalData({ readAll: true, dataType: _name });
   };
 
-  const writeAllMonitoringIntervals = (seconds = 1200) => {
+  const writeAllMonitoringIntervals = (seconds = 1800) => {
     const interval = secondsToRwIntervalMinutes(seconds);
     return sendSequential(
       RW_MONITORING_WRITE_KEYS.map((key) =>
@@ -2361,7 +2366,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     }
   };
 
-  const sendRwCollectPeriodSettingCommand = async (seconds = 1200) => {
+  const sendRwCollectPeriodSettingCommand = async (seconds = 1800) => {
     const quickCollectSetWait = waitForParsedData((parsed) => parsed.type === 'collect_period_set', 220);
     quickCollectSetWait.catch(() => undefined);
 

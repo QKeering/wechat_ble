@@ -3213,18 +3213,18 @@ if (getConnectionStateCallbackCount() !== 0 || bluetoothAdapterOpenCount !== 1) 
 }
 
 await openOnlyAdapter.initBluetooth();
-if (getConnectionStateCallbackCount() !== 1 || bluetoothAdapterOpenCount !== 1) {
+if (getConnectionStateCallbackCount() !== 1 || Number(bluetoothAdapterOpenCount) !== 2) {
   throw new Error(
-    `RW initBluetooth should register the listener and reuse an available adapter: ${JSON.stringify({ callbackCount: getConnectionStateCallbackCount(), bluetoothAdapterOpenCount })}`
+    `RW initBluetooth should register the listener and open before reading state: ${JSON.stringify({ callbackCount: getConnectionStateCallbackCount(), bluetoothAdapterOpenCount })}`
   );
 }
 
 bluetoothAdapterAvailable = false;
 const coldInitAdapter = createRwRingAdapter({ devices: { value: [] as any[] }, isScanning: { value: false } } as any);
 await coldInitAdapter.initBluetooth();
-if (getConnectionStateCallbackCount() !== 1 || Number(bluetoothAdapterOpenCount) !== 2 || !bluetoothAdapterAvailable) {
+if (getConnectionStateCallbackCount() !== 1 || Number(bluetoothAdapterOpenCount) !== 3 || !bluetoothAdapterAvailable) {
   throw new Error(
-    `RW initBluetooth should open an unavailable adapter exactly once: ${JSON.stringify({ callbackCount: getConnectionStateCallbackCount(), bluetoothAdapterOpenCount, bluetoothAdapterAvailable })}`
+    `RW initBluetooth should open before state check on every initialization: ${JSON.stringify({ callbackCount: getConnectionStateCallbackCount(), bluetoothAdapterOpenCount, bluetoothAdapterAvailable })}`
   );
 }
 

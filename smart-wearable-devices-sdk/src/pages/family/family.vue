@@ -11,6 +11,7 @@ import {
   updateFamilyRelation,
   type FamilyInvitePreview,
 } from '@/common/api/family'
+import { formatBleErrorMessage } from '@/utils/bleError'
 
 type AnyRecord = Record<string, any>
 const home = ref<AnyRecord>({ members: [] })
@@ -124,6 +125,16 @@ async function loadPage() {
 
 const goBack = () => uni.navigateBack()
 const goShare = () => uni.navigateTo({ url: '/pages/family/shareManage' })
+const goCareDetail = () => {
+  const member = selectedMember.value
+  if (!member) return
+  const params = [
+    `memberId=${encodeURIComponent(String(member.id || ''))}`,
+    `relationId=${encodeURIComponent(String(member.relationId || ''))}`,
+    `name=${encodeURIComponent(String(member.name || member.nickname || '亲友'))}`,
+  ]
+  uni.navigateTo({ url: `/pages/family/careDetail?${params.join('&')}` })
+}
 
 const safeDecode = (value: string) => {
   try { return decodeURIComponent(value) } catch { return value }
@@ -176,7 +187,7 @@ const confirmAcceptInvite = async (code = normalizedInviteCode.value) => {
     inviteError.value = ''
     await loadPage()
   } catch (error: any) {
-    uni.showToast({ title: error?.message || '接受失败，请稍后重试', icon: 'none' })
+    uni.showToast({ title: formatBleErrorMessage(error, '接受失败，请稍后重试'), icon: 'none' })
   } finally {
     inviteSubmitting.value = false
   }
@@ -219,7 +230,7 @@ const editMemberRemark = () => {
         member.name = displayName
         uni.showToast({ title: '备注已更新', icon: 'success' })
       } catch (error: any) {
-        uni.showToast({ title: error?.message || '修改失败，请稍后重试', icon: 'none' })
+        uni.showToast({ title: formatBleErrorMessage(error, '修改失败，请稍后重试'), icon: 'none' })
       } finally {
         remarkSubmitting.value = false
       }
@@ -311,6 +322,7 @@ onPullDownRefresh(loadPage)
             <text class="card-desc">{{ summary.lastSync }}</text>
           </view>
           <view class="health-actions">
+            <text class="detail-anchor" @tap.stop="goCareDetail">查看明细 ›</text>
             <text class="edit-remark" @tap.stop="editMemberRemark">修改备注</text>
             <view class="status" :class="{ online: summary.connected }">{{ summary.connected ? '设备在线' : '最近数据' }}</view>
           </view>
@@ -338,4 +350,5 @@ onPullDownRefresh(loadPage)
 
 <style lang="scss" scoped>
 .page{min-height:100vh;box-sizing:border-box;padding:0 28rpx 80rpx;background:linear-gradient(180deg,#dfeaff 0,#eef4f3 360rpx,#f1f3f6 720rpx)}.nav{height:176rpx;padding-top:70rpx;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between}.back,.nav-space{width:72rpx}.back{font-size:66rpx;line-height:1;color:#202938}.nav-title{font-size:36rpx;font-weight:800;color:#172033}.card,.state-card{margin-top:24rpx;padding:34rpx;border-radius:46rpx;background:#fff;box-shadow:0 14rpx 40rpx rgba(35,72,132,.06)}.grow{flex:1;min-width:0}.card-title{display:block;font-size:36rpx;font-weight:800;color:#111b2c}.card-desc{display:block;margin-top:8rpx;font-size:25rpx;line-height:1.45;color:#8b94a3}.invite-code-row{display:flex;align-items:center;margin-top:24rpx;padding:8rpx 10rpx 8rpx 28rpx;border-radius:28rpx;background:#f1f5fd}.invite-code-input{flex:1;height:72rpx;font-size:27rpx;color:#1f2937}.accept-button{width:128rpx;height:72rpx;margin:0;border:0;border-radius:26rpx;background:#2e70fc;color:#fff;font-size:28rpx;font-weight:700;line-height:72rpx;box-shadow:0 8rpx 22rpx rgba(46,112,252,.25)}.accept-button[disabled]{background:#b9c8e8;color:#f5f7fb;box-shadow:none}.accept-button::after,.scan-button::after,.pending-accept::after,.share-button::after{border:0}.scan-button{height:84rpx;margin:18rpx 0 0;border:0;border-radius:28rpx;background:#eff4ff;color:#286af1;font-size:27rpx;line-height:84rpx}.invite-preview{margin-top:18rpx;padding:20rpx 24rpx;border-radius:22rpx;background:#f7f9fc}.preview-title,.preview-desc{display:block}.preview-title{font-size:27rpx;font-weight:700;color:#293448}.preview-desc{margin-top:7rpx;font-size:24rpx;color:#818b9b}.invite-error{display:block;margin-top:14rpx;font-size:24rpx;color:#d95050}.pending-card{padding-bottom:20rpx}.pending-item{display:flex;align-items:center;padding:22rpx 0;border-bottom:1rpx solid #edf0f5}.pending-item:last-child{border-bottom:0}.pending-avatar{display:flex;align-items:center;justify-content:center;width:68rpx;height:68rpx;margin-right:18rpx;border-radius:50%;background:#eaf1ff;color:#2e70fc;font-size:28rpx;font-weight:700}.pending-name{display:block;font-size:29rpx;font-weight:700;color:#253044}.pending-accept{width:108rpx;height:64rpx;margin:0;border:0;border-radius:24rpx;background:#eff4ff;color:#2e70fc;font-size:25rpx;line-height:64rpx}.section-head{display:flex;align-items:flex-end;justify-content:space-between;margin:42rpx 8rpx 20rpx}.section-title{font-size:36rpx;font-weight:800;color:#172033}.member-tabs{display:flex;gap:16rpx;overflow-x:auto;padding-bottom:4rpx}.member-pill{flex:none;display:flex;align-items:center;padding:10rpx 24rpx 10rpx 10rpx;border:2rpx solid transparent;border-radius:999rpx;background:#fff;color:#697383;font-size:27rpx}.member-pill.active{border-color:#2e70fc;background:#edf3ff;color:#1f64ef;font-weight:700}.avatar{display:flex;align-items:center;justify-content:center;width:58rpx;height:58rpx;margin-right:12rpx;border-radius:50%;background:#e8eef9;color:#5573a6}.member-pill.active .avatar{background:#2e70fc;color:#fff}.health-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18rpx}.health-title{flex:1;min-width:0}.health-actions{display:flex;flex:none;flex-direction:column;align-items:flex-end;gap:10rpx}.edit-remark{padding:4rpx 2rpx;font-size:25rpx;line-height:1.4;color:#2e70fc}.status{padding:9rpx 17rpx;border-radius:999rpx;background:#f1f3f7;color:#8992a0;font-size:22rpx}.status.online{background:#e8f8ef;color:#27a865}.metric-grid{display:grid;grid-template-columns:1fr 1fr;gap:18rpx;margin-top:30rpx}.metric{box-sizing:border-box;min-height:124rpx;padding:24rpx;border-radius:22rpx;background:#f6f8fb}.metric-wide{grid-column:1/3}.metric-label,.metric-value{display:block}.metric-label{font-size:24rpx;color:#8b94a2}.metric-value{margin-top:12rpx;font-size:31rpx;font-weight:800;color:#1c2534}.metric-value.blue{color:#2e70fc}.permission-empty,.empty-friends,.center{display:flex;flex-direction:column;align-items:center;text-align:center}.permission-empty{margin-top:28rpx;padding:38rpx;border-radius:22rpx;background:#f7f9fc}.empty-icon{font-size:58rpx;color:#79a3ff}.empty-title,.state-title{margin-top:12rpx;font-size:30rpx;font-weight:800;color:#273142}.empty-desc,.state-desc{margin-top:10rpx;font-size:25rpx;color:#939ba8}.empty-orbit{display:flex;align-items:center;justify-content:center;width:106rpx;height:106rpx;border-radius:50%;background:#edf3ff;color:#2e70fc;font-size:48rpx}.share-card{margin-top:34rpx}.share-button{height:94rpx;margin:25rpx 0 0;border:0;border-radius:47rpx;background:#2e70fc;color:#fff;font-size:30rpx;font-weight:700;line-height:94rpx}.minor-button{height:72rpx;margin-top:25rpx;padding:0 38rpx;border:0;border-radius:999rpx;background:#2e70fc;color:#fff;font-size:26rpx;line-height:72rpx}.minor-button::after{border:0}.skeleton{height:26rpx;margin:18rpx 0;border-radius:12rpx;background:#eef1f6}.skeleton.wide{width:76%}.skeleton.short{width:42%}.skeleton-box{animation:pulse 1.2s infinite;background:#eef1f6}@keyframes pulse{50%{opacity:.55}}
+.detail-anchor{padding:4rpx 2rpx;font-size:25rpx;font-weight:800;line-height:1.4;color:#2e70fc}
 </style>

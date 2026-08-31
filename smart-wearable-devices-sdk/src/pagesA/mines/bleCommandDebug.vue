@@ -16,7 +16,9 @@ type CommandKey =
   | 'firmware'
   | 'software'
   | 'historyAll'
+  | 'wearMeasure'
   | 'collectPeriod'
+  | 'batteryMonitor'
   | 'factoryReset';
 
 type DebugLog = {
@@ -46,9 +48,13 @@ const ble = useRingBLE() as any;
 const logs = ref<DebugLog[]>([]);
 const runningKey = ref<CommandKey | ''>('');
 const logSeq = ref(0);
-const collectPeriodOptions = [20, 25, 30, 35, 40, 45, 50, 55, 60];
+const collectPeriodOptions = [20, 30];
 const testingCollectPeriodMinutes = ref(0);
+const batteryTestMode = ref<'passive' | 'polling' | ''>('');
+const batteryTestStopRequested = ref(false);
+let stopBatteryTestWait: (() => void) | null = null;
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
+const lastWearMeasureReport = ref<AnyRecord | null>(null);
 
 const unwrap = <T = unknown>(value: any): T => {
   if (value && typeof value === 'object' && 'value' in value) return value.value as T;
@@ -521,6 +527,400 @@ const runCollectPeriodTest = async (targetMinutes: number) => {
   }
 };
 
+const isHeartRateMeasureRecord = (record: AnyRecord) =>
+  record?.type === 'active_measure' ||
+  typeContains(record, ['active_measure', 'heartrate', 'heart_rate', 'hrv']);
+
+const getWearMeasureRecordSignature = (record: AnyRecord) =>
+  [
+    record?.type || record?.name || record?.event || '',
+    record?.frameId ?? record?.frame_id ?? '',
+    record?.heartbeatStatus ?? record?.metrics?.status ?? record?.status ?? '',
+    record?.heartRate ?? record?.metrics?.heartRate ?? '',
+    record?.heartRateVariability ?? record?.hrv ?? record?.metrics?.heartRateVariability ?? '',
+    Array.isArray(record?.raw) ? record.raw.join(',') : stringify(record?.raw ?? record?.payloadHex ?? '')
+  ].join('|');
+
+const summarizeWearMeasureRecord = (record: AnyRecord) => ({
+  type: record?.type || record?.name || record?.event || '-',
+  frameId: record?.frameId ?? record?.frame_id ?? '-',
+  heartbeatStatus: record?.heartbeatStatus ?? record?.metrics?.status ?? '-',
+  status: record?.status ?? record?.statusText ?? record?.message ?? '-',
+  isWorn: record?.isWorn ?? record?.is_worn ?? '-',
+  heartRate: record?.heartRate ?? record?.metrics?.heartRate ?? '-',
+  hrv: record?.heartRateVariability ?? record?.hrv ?? record?.metrics?.heartRateVariability ?? '-',
+  receivedAt: record?.receivedAt ?? record?.parsedAt ?? record?.timestamp ?? '-',
+  raw: record?.raw ?? record?.payloadHex ?? '-'
+});
+
+const isBatteryRecord = (record: AnyRecord) =>
+  typeContains(record, ['battery']) ||
+  record.battery !== undefined ||
+  record.batteryLevel !== undefined ||
+  record.batteryRawValue !== undefined ||
+  record.valueName === 'battery';
+
+const getBatteryRecordSignature = (record: AnyRecord) =>
+  [
+    getRecordTimestamp(record),
+    record.frameId ?? record.frame_id ?? '',
+    record.batteryRawValue ?? '',
+    Array.isArray(record.raw) ? record.raw.join(',') : stringify(record.raw ?? '')
+  ].join('|');
+
+const summarizeBatteryRecord = (record: AnyRecord) => {
+  const raw = Array.isArray(record.raw) ? record.raw : [];
+  const rawValue = Number(record.batteryRawValue ?? (raw.length > 4 ? raw[4] : Number.NaN));
+  const level = Number(record.battery ?? record.batteryLevel);
+  const status =
+    record.status ||
+    (rawValue === 101 ? 'charging' : rawValue === 102 ? 'charged' : Number.isFinite(level) ? 'normal' : 'unknown');
+  return {
+    receivedAt: formatClock(getRecordTimestamp(record) || Date.now()),
+    status,
+    statusText: status === 'charging' ? '充电中' : status === 'charged' ? '充电完成' : status === 'normal' ? '正常电量' : '未知',
+    batteryRawValue: Number.isFinite(rawValue) ? rawValue : null,
+    battery: Number.isFinite(level) ? level : null,
+    value: record.value ?? null,
+    frameId: record.frameId ?? record.frame_id ?? null,
+    raw
+  };
+};
+
+const waitBatteryTest = (timeoutMs: number) =>
+  new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      pendingTimers.delete(timer);
+      if (stopBatteryTestWait === finish) stopBatteryTestWait = null;
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    pendingTimers.add(timer);
+    stopBatteryTestWait = finish;
+  });
+
+const stopBatteryTest = () => {
+  batteryTestStopRequested.value = true;
+  stopBatteryTestWait?.();
+};
+
+const runBatteryIsolationTest = async (mode: 'passive' | 'polling') => {
+  if (runningKey.value) return;
+
+  const commandTarget: AnyRecord = {
+    ...currentDevice.value,
+    advertis: currentDevice.value.advertis ? { ...currentDevice.value.advertis } : undefined
+  };
+  const releaseCommandSession = tryClaimLegacyBleCommandSession(45000, {
+    reason: `ble-command-debug:battery-${mode}`,
+    caller: 'bleCommandDebug.runBatteryIsolationTest',
+    deviceId: commandTarget.deviceId || commandTarget.mac || commandTarget.uniMacId || ''
+  });
+  if (!releaseCommandSession) {
+    uni.showToast({ title: '设备正在同步，请稍后重试', icon: 'none' });
+    return;
+  }
+
+  const startedAt = Date.now();
+  const samples: AnyRecord[] = [];
+  const connectionChanges: AnyRecord[] = [];
+  const seen = new Set(mergedRecords.value.filter(isBatteryRecord).map(getBatteryRecordSignature));
+  let lastConnectionText = connectedText.value;
+  runningKey.value = 'batteryMonitor';
+  batteryTestMode.value = mode;
+  batteryTestStopRequested.value = false;
+
+  const testLabel = mode === 'passive' ? '充电状态纯监听' : '充电状态定时查询';
+  const recordBatterySample = (record: AnyRecord, source: '主动上报' | '命令查询') => {
+    const signature = getBatteryRecordSignature(record);
+    if (seen.has(signature)) return;
+    seen.add(signature);
+    const sample = { source, ...summarizeBatteryRecord(record) };
+    samples.push(sample);
+    pushLog(`${testLabel} - 收到电量帧`, 'success', sample);
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'battery-isolation-sample', {
+      mode,
+      deviceId: commandTarget.deviceId || '',
+      deviceMac: commandTarget.mac || commandTarget.uniMacId || '',
+      ...sample
+    });
+  };
+
+  const stopRecordWatch = watch(
+    mergedRecords,
+    (records) => {
+      records.forEach((record) => {
+        if (!isBatteryRecord(record)) return;
+        const timestamp = getRecordTimestamp(record);
+        if (timestamp && timestamp < startedAt - 500) return;
+        recordBatterySample(record, mode === 'passive' ? '主动上报' : '命令查询');
+      });
+    },
+    { deep: true }
+  );
+  const stopConnectionWatch = watch(connectedText, (value) => {
+    if (value === lastConnectionText) return;
+    const change = {
+      time: formatClock(),
+      from: lastConnectionText,
+      to: value,
+      elapsedMs: Date.now() - startedAt
+    };
+    lastConnectionText = value;
+    connectionChanges.push(change);
+    pushLog(`${testLabel} - 连接状态变化`, value === '已连接' ? 'success' : 'error', change);
+  });
+
+  pushLog(`${testLabel} - 开始`, 'info', {
+    durationSeconds: 30,
+    mode: mode === 'passive' ? '不发送任何命令，只观察设备主动通知' : '每5秒读取一次电量，不读取历史、不上传数据',
+    operation: '现在将戒指放入充电仓，再拿出充电仓',
+    deviceId: commandTarget.deviceId || '-',
+    mac: commandTarget.mac || commandTarget.uniMacId || '-'
+  });
+  appendRingDiagnosticLog('BLE COMMAND DEBUG', 'battery-isolation-start', {
+    mode,
+    deviceId: commandTarget.deviceId || '',
+    deviceMac: commandTarget.mac || commandTarget.uniMacId || ''
+  });
+
+  try {
+    if (mode === 'passive') {
+      await waitBatteryTest(30000);
+    } else {
+      const deadline = startedAt + 30000;
+      let sequence = 0;
+      while (!batteryTestStopRequested.value && Date.now() < deadline) {
+        sequence += 1;
+        try {
+          if (typeof ble.readBattery !== 'function') throw new Error('当前 BLE 适配器不支持电量读取');
+          const result = await ble.readBattery({ timeoutMs: 3500, retryReady: false });
+          if (result && isBatteryRecord(result)) recordBatterySample(result, '命令查询');
+        } catch (error) {
+          pushLog(`${testLabel} - 第${sequence}次查询失败`, 'error', {
+            connected: connectedText.value,
+            elapsedMs: Date.now() - startedAt,
+            error: stringify(error)
+          });
+        }
+        if (batteryTestStopRequested.value || Date.now() >= deadline) break;
+        await waitBatteryTest(Math.min(5000, Math.max(0, deadline - Date.now())));
+      }
+    }
+
+    const chargingSamples = samples.filter((item) => item.batteryRawValue === 101 || item.status === 'charging');
+    const chargedSamples = samples.filter((item) => item.batteryRawValue === 102 || item.status === 'charged');
+    const result = {
+      mode,
+      stoppedManually: batteryTestStopRequested.value,
+      elapsedMs: Date.now() - startedAt,
+      sampleCount: samples.length,
+      chargingSampleCount: chargingSamples.length,
+      chargedSampleCount: chargedSamples.length,
+      connectionChanges,
+      conclusion:
+        mode === 'passive'
+          ? chargingSamples.length || chargedSamples.length
+            ? '监听到充电状态，固件存在主动上报'
+            : '未监听到充电状态；请再执行定时查询测试'
+          : chargingSamples.length || chargedSamples.length
+            ? '查询命令可以读到充电状态'
+            : '查询命令未读到101/102，请对比原始帧与连接变化'
+    };
+    pushLog(`${testLabel} - 完成`, chargingSamples.length || chargedSamples.length ? 'success' : 'info', result);
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'battery-isolation-result', {
+      ...result,
+      deviceId: commandTarget.deviceId || '',
+      deviceMac: commandTarget.mac || commandTarget.uniMacId || ''
+    });
+    uni.showToast({ title: result.conclusion, icon: 'none', duration: 3000 });
+  } finally {
+    stopRecordWatch();
+    stopConnectionWatch();
+    stopBatteryTestWait = null;
+    releaseCommandSession();
+    runningKey.value = '';
+    batteryTestMode.value = '';
+    batteryTestStopRequested.value = false;
+  }
+};
+
+/**
+ * 复现业务页当前的真实链路：通信就绪 -> 佩戴前置门禁 -> 复用同一条心率测量 -> 最终数值。
+ * 测试过程中不读取历史、不上传健康数据；每个阶段及原始解析帧都会回传诊断日志。
+ */
+const runWearMeasureChainTest = async () => {
+  if (runningKey.value) return;
+
+  const commandTarget: AnyRecord = {
+    ...currentDevice.value,
+    advertis: currentDevice.value.advertis ? { ...currentDevice.value.advertis } : undefined
+  };
+  const releaseCommandSession = tryClaimLegacyBleCommandSession(45_000, {
+    reason: 'ble-command-debug:wear-measure',
+    caller: 'bleCommandDebug.runWearMeasureChainTest',
+    deviceId: commandTarget.deviceId || commandTarget.mac || commandTarget.uniMacId || ''
+  });
+  if (!releaseCommandSession) {
+    uni.showToast({ title: '设备正在同步，请稍后重试', icon: 'none' });
+    return;
+  }
+
+  runningKey.value = 'wearMeasure';
+  const startedAt = Date.now();
+  const capturedFrames: AnyRecord[] = [];
+  const initialSignatures = new Set(
+    mergedRecords.value.filter(isHeartRateMeasureRecord).map(getWearMeasureRecordSignature)
+  );
+  const capturedSignatures = new Set<string>();
+  let preflightResult: AnyRecord | null = null;
+  let measureResult: unknown = null;
+
+  const captureRecords = (records: AnyRecord[]) => {
+    records.filter(isHeartRateMeasureRecord).forEach((record) => {
+      const signature = getWearMeasureRecordSignature(record);
+      if (initialSignatures.has(signature) || capturedSignatures.has(signature)) return;
+      capturedSignatures.add(signature);
+      const sample = summarizeWearMeasureRecord(record);
+      capturedFrames.push(sample);
+      pushLog('佩戴门禁链路 - 收到心率帧', 'info', sample);
+      appendRingDiagnosticLog('BLE COMMAND DEBUG', 'wear-measure-chain-frame', {
+        elapsedMs: Date.now() - startedAt,
+        deviceId: commandTarget.deviceId || '',
+        deviceMac: commandTarget.mac || commandTarget.uniMacId || '',
+        ...sample
+      });
+    });
+  };
+  const stopCapture = watch(mergedRecords, captureRecords, { deep: true });
+
+  pushLog('佩戴门禁链路 - 开始测试', 'info', {
+    step: '通信就绪 -> 佩戴状态 -> 心率最终值',
+    deviceId: commandTarget.deviceId || '-',
+    mac: commandTarget.mac || commandTarget.uniMacId || '-',
+    protocol: commandTarget.protocol || '-',
+    note: '请正确佩戴并保持手部静止约30秒；测试不读取历史、不上传健康数据'
+  });
+  appendRingDiagnosticLog('BLE COMMAND DEBUG', 'wear-measure-chain-start', {
+    deviceId: commandTarget.deviceId || '',
+    deviceMac: commandTarget.mac || commandTarget.uniMacId || '',
+    protocol: commandTarget.protocol || ''
+  });
+
+  try {
+    const readyStartedAt = Date.now();
+    const ready = await ble.ensureCommunicationReady?.();
+    pushLog('佩戴门禁链路 - 通信就绪', ready ? 'success' : 'error', {
+      ready: Boolean(ready),
+      elapsedMs: Date.now() - readyStartedAt
+    });
+    if (!ready) throw new Error('设备通信未就绪');
+    if (typeof ble.queryCurrentWearState !== 'function') throw new Error('当前版本未提供佩戴门禁命令');
+
+    const preflightStartedAt = Date.now();
+    preflightResult = await ble.queryCurrentWearState('heart_rate', 8000);
+    const preflightLog = {
+      supported: preflightResult?.supported,
+      protocol: preflightResult?.protocol,
+      state: preflightResult?.state,
+      elapsedMs: Date.now() - preflightStartedAt,
+      record: summarizeWearMeasureRecord(preflightResult?.record || {})
+    };
+    pushLog(
+      '佩戴门禁链路 - 门禁结果',
+      preflightResult?.state === 'worn' ? 'success' : 'error',
+      preflightLog
+    );
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'wear-measure-chain-preflight', {
+      deviceId: commandTarget.deviceId || '',
+      deviceMac: commandTarget.mac || commandTarget.uniMacId || '',
+      ...preflightLog
+    });
+
+    if (preflightResult?.state !== 'worn') {
+      throw new Error(`佩戴门禁未放行：${String(preflightResult?.state || 'unknown')}`);
+    }
+
+    const measureStartedAt = Date.now();
+    measureResult = await ble.refreshHealthData?.({
+      includeDeviceTime: false,
+      includeCollectPeriod: false,
+      includeDeviceInfo: false,
+      includeRealtimeMetrics: true,
+      includeHistorySnapshot: false,
+      realtimeMetricNames: ['heart_rate'],
+      timeoutMs: 35_000
+    });
+    captureRecords(mergedRecords.value);
+    const directRecord = (measureResult as AnyRecord)?.record as AnyRecord | undefined;
+    const finalFrame = [...capturedFrames]
+      .reverse()
+      .find((record) => Number(record.heartRate) > 0) ||
+      (Number(directRecord?.heartRate) > 0 ? summarizeWearMeasureRecord(directRecord || {}) : undefined);
+    const succeeded = Boolean(finalFrame && Number(finalFrame.heartRate) > 0);
+    const report = {
+      succeeded,
+      elapsedMs: Date.now() - startedAt,
+      preflightState: preflightResult?.state || 'unknown',
+      measureElapsedMs: Date.now() - measureStartedAt,
+      measureResult,
+      frameCount: capturedFrames.length,
+      frames: capturedFrames,
+      finalHeartRate: finalFrame?.heartRate ?? null
+    };
+    lastWearMeasureReport.value = report;
+    pushLog(
+      succeeded ? '佩戴门禁链路 - 测试成功' : '佩戴门禁链路 - 未收到最终值',
+      succeeded ? 'success' : 'error',
+      report
+    );
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'wear-measure-chain-result', {
+      deviceId: commandTarget.deviceId || '',
+      deviceMac: commandTarget.mac || commandTarget.uniMacId || '',
+      ...report
+    });
+    uni.showToast({ title: succeeded ? `心率 ${finalFrame?.heartRate}` : '未收到最终心率', icon: succeeded ? 'success' : 'none' });
+  } catch (error) {
+    captureRecords(mergedRecords.value);
+    const report = {
+      succeeded: false,
+      elapsedMs: Date.now() - startedAt,
+      preflightState: preflightResult?.state || 'unknown',
+      measureResult,
+      frameCount: capturedFrames.length,
+      frames: capturedFrames,
+      error: stringify(error)
+    };
+    lastWearMeasureReport.value = report;
+    pushLog('佩戴门禁链路 - 测试失败', 'error', report);
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'wear-measure-chain-failed', {
+      deviceId: commandTarget.deviceId || '',
+      deviceMac: commandTarget.mac || commandTarget.uniMacId || '',
+      ...report
+    });
+    uni.showToast({ title: '门禁链路测试失败', icon: 'none' });
+  } finally {
+    stopCapture();
+    releaseCommandSession();
+    runningKey.value = '';
+  }
+};
+
+const copyWearMeasureReport = () => {
+  if (!lastWearMeasureReport.value) {
+    uni.showToast({ title: '请先执行测试', icon: 'none' });
+    return;
+  }
+  uni.setClipboardData({
+    data: stringify(lastWearMeasureReport.value),
+    success: () => uni.showToast({ title: '测试日志已复制', icon: 'success' })
+  });
+};
+
 const runCommand = async (config: CommandConfig) => {
   if (runningKey.value) return;
   // Keep an immutable identity for the whole command. A physical disconnect
@@ -605,7 +1005,7 @@ const runCommand = async (config: CommandConfig) => {
     return;
   }
   if (!config.matcher) {
-    pushLog(`${config.label} - 閰嶇疆閿欒`, 'error', 'matcher is required when skipWait is false');
+    pushLog(`${config.label} - 配置错误`, 'error', '当前命令缺少回执匹配规则');
     releaseCommandSession();
     runningKey.value = '';
     return;
@@ -666,6 +1066,7 @@ const handleFactoryReset = () => {
 };
 
 onBeforeUnmount(() => {
+  stopBatteryTest();
   pendingTimers.forEach((timer) => clearTimeout(timer));
   pendingTimers.clear();
 });
@@ -706,8 +1107,64 @@ onBeforeUnmount(() => {
       <view class="period-test">
         <view class="period-test-head">
           <view>
+            <view class="period-test-title">佩戴门禁与心率测量链路</view>
+            <view class="period-test-desc">按业务页顺序测试通信、佩戴状态、命令复用和最终心率回包</view>
+          </view>
+        </view>
+        <view class="battery-test-guide">
+          <text>请正确佩戴并保持手部静止约 30 秒。原始解析帧和阶段耗时会自动回传后台，不读取历史、不上传健康数据。</text>
+        </view>
+        <view class="battery-test-grid">
+          <button
+            class="period-test-btn"
+            :class="{ running: runningKey === 'wearMeasure' }"
+            :disabled="Boolean(runningKey)"
+            @click="runWearMeasureChainTest"
+          >
+            {{ runningKey === 'wearMeasure' ? '测试中...' : '测试佩戴 + 心率' }}
+          </button>
+          <button class="period-test-btn secondary" :disabled="!lastWearMeasureReport || Boolean(runningKey)" @click="copyWearMeasureReport">
+            复制测试日志
+          </button>
+        </view>
+      </view>
+
+      <view class="period-test">
+        <view class="period-test-head">
+          <view>
+            <view class="period-test-title">充电与电量隔离测试</view>
+            <view class="period-test-desc">不读取历史、不上传数据。测试开始后，将戒指放入充电仓，再拿出充电仓。</view>
+          </view>
+        </view>
+        <view class="battery-test-guide">
+          <text>先跑“纯监听”：收到 101/102 表示固件主动上报；再跑“定时查询”：可确认电量命令是否返回充电状态。</text>
+        </view>
+        <view class="battery-test-grid">
+          <button
+            class="period-test-btn"
+            :class="{ running: batteryTestMode === 'passive' }"
+            :disabled="Boolean(runningKey)"
+            @click="runBatteryIsolationTest('passive')"
+          >
+            {{ batteryTestMode === 'passive' ? '监听中...' : '纯监听 30 秒' }}
+          </button>
+          <button
+            class="period-test-btn"
+            :class="{ running: batteryTestMode === 'polling' }"
+            :disabled="Boolean(runningKey)"
+            @click="runBatteryIsolationTest('polling')"
+          >
+            {{ batteryTestMode === 'polling' ? '查询中...' : '定时查询 30 秒' }}
+          </button>
+          <button v-if="batteryTestMode" class="period-test-btn stop" @click="stopBatteryTest">停止测试</button>
+        </view>
+      </view>
+
+      <view class="period-test">
+        <view class="period-test-head">
+          <view>
             <view class="period-test-title">采集周期写入回读</view>
-            <view class="period-test-desc">20 至 60 分钟，每 5 分钟一档，写入后读取设备实际值</view>
+            <view class="period-test-desc">仅测试设备有效的 20 / 30 分钟，写入后读取设备实际值</view>
           </view>
         </view>
         <view class="period-button-grid">
@@ -914,6 +1371,23 @@ onBeforeUnmount(() => {
   margin-top: 22rpx;
 }
 
+.battery-test-guide {
+  margin-top: 18rpx;
+  padding: 18rpx 20rpx;
+  border-radius: 16rpx;
+  color: #475569;
+  background: #f8fafc;
+  font-size: 22rpx;
+  line-height: 1.55;
+}
+
+.battery-test-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14rpx;
+  margin-top: 22rpx;
+}
+
 .maintenance-button-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -940,6 +1414,11 @@ onBeforeUnmount(() => {
 
 .period-test-btn.danger {
   background: #ef4444;
+}
+
+.period-test-btn.stop {
+  grid-column: 1 / -1;
+  background: #f59e0b;
 }
 
 .empty {

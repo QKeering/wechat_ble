@@ -1,17 +1,53 @@
 <template>
   <view>
-    <web-view :src="url"></web-view>
+    <web-view :src="url" @message="handleWebViewMessage"></web-view>
   </view>
 </template>
 
 <script setup lang="ts">
-import { onLoad } from '@dcloudio/uni-app';
+import { onBackPress, onLoad } from '@dcloudio/uni-app';
 import { ref } from 'vue';
 import { useUserStore } from '@/stores/user';
 import { requestH5Ticket } from '@/common/api/aiLab';
 
 const userStore = useUserStore();
 const url = ref('');
+let leavingWebView = false;
+
+const leaveWebViewPage = () => {
+  if (leavingWebView) return;
+  leavingWebView = true;
+  const pages = getCurrentPages();
+  if (pages.length > 1) {
+    uni.navigateBack({
+      delta: 1,
+      fail: () => {
+        leavingWebView = false;
+      }
+    });
+    return;
+  }
+  uni.reLaunch({
+    url: '/pages/awareness/awareness',
+    fail: () => {
+      leavingWebView = false;
+    }
+  });
+};
+
+const handleWebViewMessage = (event: any) => {
+  const messages = Array.isArray(event?.detail?.data) ? event.detail.data : [];
+  const shouldLeave = messages.some((item: any) => {
+    const action = String(item?.action || item?.type || '').trim().toLowerCase();
+    return action === 'back' || action === 'close' || action === 'navigateback';
+  });
+  if (shouldLeave) leaveWebViewPage();
+};
+
+onBackPress(() => {
+  leaveWebViewPage();
+  return true;
+});
 
 // 获取当前日期字符串，格式：YYYYMMDD
 function getTodaysVersion() {

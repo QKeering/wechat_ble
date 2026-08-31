@@ -4,6 +4,7 @@ const echarts = require('../../../static/echarts.min.js');
 import { pressureOption } from '@/homeDetail/exercise/echartOptions';
 import type { motionOverview, motionSummary } from '@/types/api/homeDetail';
 import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+import { normalizeCalorieGoalKcal } from '@/utils/calorieGoal';
 
 const props = defineProps({
   motionOverviewObj: {
@@ -35,7 +36,7 @@ const toPositiveNumber = (...values: unknown[]) => {
 };
 const stepNumber = computed(() => toPositiveNumber(props.motionOverviewObj?.step, props.motionSummaryObj?.todayStep));
 const targetStep = computed(() => toPositiveNumber(props.motionOverviewObj?.targetStep) || 6000);
-const targetCalorie = computed(() => toPositiveNumber(props.motionOverviewObj?.targetCalorie) || 500);
+const targetCalorie = computed(() => normalizeCalorieGoalKcal(props.motionOverviewObj?.targetCalorie));
 const targetMotionTime = computed(() => toPositiveNumber(props.motionOverviewObj?.targetMotionTime) || 30);
 const motionTimeNumber = computed(() => toPositiveNumber(props.motionOverviewObj?.motionTime, props.motionSummaryObj?.motionTime));
 const calorieSourceUnit = computed(() => props.motionOverviewObj?.calorieUnit || props.motionSummaryObj?.calorieUnit || MOTION_CALORIE_DISPLAY_UNIT);

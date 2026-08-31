@@ -9,11 +9,23 @@ const readyDevice = {
   deviceId: 'platform-device-id',
   serviceId: 'service-id',
   cmdCharId: 'cmd-char-id',
-  dataCharId: 'data-char-id'
+  dataCharId: 'data-char-id',
+  notifyEnabled: true
 };
 
-if (!hasRingCommunicationReady(readyDevice) || hasRingCommunicationReady({ deviceId: 'platform-device-id' })) {
-  throw new Error('Ring connection status helper should require all communication fields before reporting ready.');
+const persistedDiscoveryOnlyDevice = {
+  deviceId: 'platform-device-id',
+  serviceId: 'cached-service-id',
+  cmdCharId: 'cached-cmd-char-id',
+  dataCharId: 'cached-data-char-id'
+};
+
+if (
+  !hasRingCommunicationReady(readyDevice) ||
+  hasRingCommunicationReady({ deviceId: 'platform-device-id' }) ||
+  hasRingCommunicationReady(persistedDiscoveryOnlyDevice)
+) {
+  throw new Error('Ring connection status helper should require a live Notify session before reporting ready.');
 }
 
 if (!hasAnyRingCommunicationReady({ deviceId: 'missing-fields' }, readyDevice)) {

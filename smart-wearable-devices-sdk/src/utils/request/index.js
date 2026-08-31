@@ -1,5 +1,6 @@
 import { useUserStore } from '@/stores/user';
 import { showErrorToast } from '@/utils/errorToast';
+import { formatBleErrorMessage } from '@/utils/bleError';
 export const Request = () => {
   const userStore = useUserStore();
   const successCodes = [0, 200];
@@ -12,13 +13,14 @@ export const Request = () => {
   const normalizeNetworkErrorMessage = (message = '') => {
     const raw = String(message || '').trim();
     const lower = raw.toLowerCase();
+    if (isRequestOkMessage(raw)) return raw;
     if (/err_connection_timed_out|timeout|time\s*out|fail:time\s*out|超时/.test(lower)) {
       return '网络请求超时，请稍后重试';
     }
     if (/request:fail|net::|err_|network|fail/.test(lower)) {
       return '网络连接异常，请稍后重试';
     }
-    return raw || '网络错误，请稍后重试';
+    return formatBleErrorMessage(raw, '服务暂时不可用，请稍后重试');
   };
 
   // 初始化请求配置

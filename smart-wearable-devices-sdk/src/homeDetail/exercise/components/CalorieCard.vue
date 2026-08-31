@@ -5,6 +5,7 @@ import { calorieOption } from '@/homeDetail/exercise/echartOptions';
 import type { motionCalorie, Point } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
 import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+import { normalizeCalorieGoalKcal } from '@/utils/calorieGoal';
 import { useUserStore } from '@/stores/user';
 const userStore = useUserStore();
 const props = defineProps({
@@ -160,7 +161,7 @@ const initChart = async () => {
 <template>
   <view class="p-30 bg-white r-50 mb-30">
     <view class="">
-      <text class="fs-36">全天卡</text>
+      <text class="fs-36">全天热量</text>
       <text class="fs-28">({{ calorieUnit }})</text>
       <slot></slot>
     </view>
@@ -169,7 +170,7 @@ const initChart = async () => {
         <view class="calorie-icon"></view>
         <view>
           <text class="fs-48">{{ hasTotalCalorie ? totalCalorieText : '00' }}</text>
-          <text class="fs-28 ml-10 t-979797">/{{ motionCalorieObj?.targetCalorie || 500 }}{{ calorieUnit }}</text>
+          <text class="fs-28 ml-10 t-979797">/{{ normalizeCalorieGoalKcal(motionCalorieObj?.targetCalorie) }}{{ calorieUnit }}</text>
         </view>
       </view>
     </view>
@@ -192,7 +193,7 @@ const initChart = async () => {
     <view class="flex ai-center jc-center mt-20">
       <l-echart ref="chartRef" @finished="initChart" style="width: 100%; height: 324rpx; margin: 0"></l-echart>
     </view>
-    <view class="fs-28 ta-c" style="color: #ff5d7c">全天卡目标，可通过修改活动卡目标，进行联动修改。</view>
+    <view class="fs-28 ta-c" style="color: #ff5d7c">全天热量目标，可在功能设置中修改。</view>
   </view>
 </template>
 

@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue';
 import { onLoad , onShow} from '@dcloudio/uni-app';
 import { addGirlHealth } from '@/common/api/homeDetail';
+import { formatBleErrorMessage } from '@/utils/bleError';
 
 const GIRL_HEALTH_PROFILE_UPDATED_STORAGE_KEY = 'qkeer_girl_health_profile_updated_at';
 const GIRL_HEALTH_PROFILE_EXISTS_STORAGE_KEY_PREFIX = 'qkeer_girl_health_profile_exists';
@@ -181,7 +182,7 @@ const submitQuestionnaire = async () => {
   } catch (err: any) {
     uni.hideLoading();
     uni.showToast({
-      title: err?.msg || err?.message || '提交失败，请重试',
+      title: formatBleErrorMessage(err, '提交失败，请重试'),
       icon: 'none',
       duration: 2000
     });

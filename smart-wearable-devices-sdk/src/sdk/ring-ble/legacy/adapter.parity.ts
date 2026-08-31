@@ -116,15 +116,15 @@ const state = {
 };
 const adapter = createLegacyRingAdapter(state as any);
 await adapter.initBluetooth();
-if (bluetoothAdapterOpenCount !== 0) {
-  throw new Error(`Legacy initBluetooth should reuse an already available adapter: ${bluetoothAdapterOpenCount}`);
+if (bluetoothAdapterOpenCount !== 1) {
+  throw new Error(`Legacy initBluetooth should open before reading adapter state: ${bluetoothAdapterOpenCount}`);
 }
 bluetoothAdapterAvailable = false;
 const coldAdapter = createLegacyRingAdapter({ devices: { value: [] }, isScanning: { value: false } } as any);
 await coldAdapter.initBluetooth();
-if (Number(bluetoothAdapterOpenCount) !== 1 || !bluetoothAdapterAvailable) {
+if (Number(bluetoothAdapterOpenCount) !== 2 || !bluetoothAdapterAvailable) {
   throw new Error(
-    `Legacy initBluetooth should open an unavailable adapter exactly once: ${JSON.stringify({ bluetoothAdapterOpenCount, bluetoothAdapterAvailable })}`
+    `Legacy initBluetooth should open before state check on every initialization: ${JSON.stringify({ bluetoothAdapterOpenCount, bluetoothAdapterAvailable })}`
   );
 }
 adapterStateCallbacks.length = 0;
@@ -210,9 +210,15 @@ if (
   connectedAfterMtuFailure.deviceId !== 'mtu-fail-id' ||
   connectedAfterMtuFailure.serviceId !== '0000BAE8-4F05-4503-8E65-3AF1F7329D1F' ||
   connectedAfterMtuFailure.cmdCharId !== 'legacy-write-char' ||
-  connectedAfterMtuFailure.dataCharId !== 'legacy-notify-char'
+  connectedAfterMtuFailure.dataCharId !== 'legacy-notify-char' ||
+  connectedAfterMtuFailure.notifyEnabled !== true
 ) {
   throw new Error(`Legacy/RW connect should continue after Android MTU negotiation fails: ${JSON.stringify(connectedAfterMtuFailure)}`);
+}
+
+const connectedFromGattCache = await mtuFailureAdapter.connectAndDiscover('mtu-fail-id', 'QKeeRingL19');
+if (connectedFromGattCache.notifyEnabled !== true) {
+  throw new Error(`Legacy GATT cache restore should retain live Notify readiness: ${JSON.stringify(connectedFromGattCache)}`);
 }
 
 export const legacyAdapterParityPassed = true;

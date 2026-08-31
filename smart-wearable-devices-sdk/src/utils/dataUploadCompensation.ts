@@ -646,11 +646,21 @@ const schedulePendingUploadSessionPersistence = <T = Record<string, any>>(
   return task;
 };
 
+const getRawFrameIdentity = (frame: RingRawHistoryFrame) => {
+  const frameSequence = Number.isFinite(Number(frame.maxSeq))
+    ? Number(frame.maxSeq)
+    : Number.isFinite(Number(frame.chunkIndex))
+      ? Number(frame.chunkIndex)
+      : 0;
+  const frameHash = frame.rawHash || `${frame.protocol || ''}|${frame.sourceType || ''}|${frame.rawHex || ''}`;
+  return `${frameSequence}:${frameHash}`;
+};
+
 const dedupeRawFrames = (frames: RingRawHistoryFrame[] = []) => {
   const keyed = new Map<string, RingRawHistoryFrame>();
   frames.forEach((frame) => {
     if (!frame || typeof frame !== 'object') return;
-    const key = frame.rawHash || `${frame.protocol || ''}|${frame.sourceType || ''}|${frame.rawHex || ''}`;
+    const key = getRawFrameIdentity(frame);
     if (!key.trim()) return;
     keyed.set(key, frame);
   });
@@ -1089,12 +1099,12 @@ const buildRawUploadSignature = (session: PendingUploadSession) => {
   const rawKeys = session.rawFrames
     .map((frame) => {
       if (!frame || typeof frame !== 'object') return '';
-      return frame.rawHash || `${frame.protocol || ''}|${frame.sourceType || ''}|${frame.rawHex || ''}`;
+      return getRawFrameIdentity(frame);
     })
-    .filter(Boolean);
-  const firstKey = rawKeys[0] || '';
-  const lastKey = rawKeys[rawKeys.length - 1] || '';
-  return `${session.deviceMacNorm || normalizeUploadDeviceMac(session.deviceMac)}|${session.protocol || ''}|${rawKeys.length}|${firstKey}|${lastKey}`;
+    .filter(Boolean)
+    .sort();
+  // HTTP-only retries are idempotent within one immutable upload transaction.
+  return `${session.uploadSessionId}|${rawKeys.join(',')}`;
 };
 
 const pruneRawUploadRecentSuccessAt = (now = Date.now()) => {

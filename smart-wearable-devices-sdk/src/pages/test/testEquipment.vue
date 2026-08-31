@@ -18,7 +18,7 @@ const handleConnect = async (deviceId) => {
     });
   } catch (err) {
     uni.showToast({
-      title: '连接失败: ' + err.message,
+      title: '连接失败，请检查蓝牙后重试',
       icon: 'none'
     });
     disconnect();

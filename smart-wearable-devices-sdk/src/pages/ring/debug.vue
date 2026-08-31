@@ -227,6 +227,7 @@ import {
 } from '@/sdk/ring-ble';
 import RingOTAManager from '@/composables/ring-ota-manager';
 import { getOtaInfo } from '@/common/api/device';
+import { formatBleErrorMessage } from '@/utils/bleError';
 
 const {
   devices,
@@ -278,7 +279,7 @@ const goBack = () => {
 };
 
 const toastError = (error: unknown, fallback: string) => {
-  const message = error instanceof Error ? error.message : `${(error as any)?.errMsg || fallback}`;
+  const message = formatBleErrorMessage(error, fallback);
   uni.showToast({ title: message, icon: 'none' });
 };
 
@@ -359,7 +360,7 @@ const handleConnect = async (device: RingDeviceInfo, forceProtocol?: RingProtoco
   const deviceName = device.displayName || device.name || device.localName || 'Unknown BLE';
 
   if (!deviceId) {
-    uni.showToast({ title: protocol === 'rw' ? '请重新搜索设备' : 'OK', icon: 'none' });
+    uni.showToast({ title: protocol === 'rw' ? '请重新搜索设备' : '未获取到设备标识', icon: 'none' });
     return;
   }
 
@@ -395,17 +396,17 @@ const handleConnect = async (device: RingDeviceInfo, forceProtocol?: RingProtoco
 
 const handleDisconnect = async () => {
   await disconnect();
-  uni.showToast({ title: 'OK', icon: 'none' });
+  uni.showToast({ title: '设备已断开', icon: 'none' });
 };
 
 const handleUnbind = async () => {
   await unbind();
-  uni.showToast({ title: 'OK', icon: 'none' });
+  uni.showToast({ title: '设备已解绑', icon: 'none' });
 };
 
 const handleCleanup = async () => {
   await cleanup();
-  uni.showToast({ title: 'OK', icon: 'none' });
+  uni.showToast({ title: '监听已清理', icon: 'none' });
 };
 
 const handleCheckConnection = async () => {
@@ -413,7 +414,7 @@ const handleCheckConnection = async () => {
   const serviceId = deviceInfo.value.serviceId;
 
   if (!deviceId) {
-    uni.showToast({ title: 'OK', icon: 'none' });
+    uni.showToast({ title: '暂无已连接设备', icon: 'none' });
     return;
   }
 
@@ -424,7 +425,7 @@ const handleCheckConnection = async () => {
 const handleReconnect = async () => {
   try {
     const success = await reconnect();
-    uni.showToast({ title: success ? 'Reconnect OK' : 'Reconnect failed', icon: 'none' });
+    uni.showToast({ title: success ? '重新连接成功' : '重新连接失败', icon: 'none' });
   } catch (error) {
     toastError(error, '重连失败');
   }
@@ -472,7 +473,7 @@ const handleRefreshBusinessMetrics = async () => {
 const handleUpdateDeviceTime = async () => {
   try {
     await updateDeviceTime();
-    uni.showToast({ title: 'OK', icon: 'none' });
+    uni.showToast({ title: '设备时间已校准', icon: 'none' });
   } catch (error) {
     toastError(error, '写入失败');
   }
@@ -496,9 +497,9 @@ const handleRwReadMonitoring = async (name: keyof typeof rwMonitoringKeys) => {
   try {
     await ensureDebugCommunicationReady();
     await sendBytes(buildRwReadHealthMonitoringCommand(rwMonitoringKeys[name]));
-    uni.showToast({ title: 'OK', icon: 'none' });
+    uni.showToast({ title: '监测配置读取成功', icon: 'none' });
   } catch (error) {
-    toastError(error, 'RW command failed');
+    toastError(error, '监测配置读取失败');
   }
 };
 
@@ -506,9 +507,9 @@ const handleRwReadHealthData = async (name: keyof typeof rwHealthDataKeys) => {
   try {
     await ensureDebugCommunicationReady();
     await sendBytes(buildRwControlHealthDataCommand(rwHealthDataKeys[name], true));
-    uni.showToast({ title: 'OK', icon: 'none' });
+    uni.showToast({ title: '健康数据命令发送成功', icon: 'none' });
   } catch (error) {
-    toastError(error, 'RW command failed');
+    toastError(error, '健康数据命令发送失败');
   }
 };
 
@@ -572,7 +573,7 @@ const handleRwLiveProbe = async () => {
     await runRwLiveProbeStep('心率', RwKey.HeartRate, 'heart_rate');
     await runRwLiveProbeStep('血氧', RwKey.BloodOxygen, 'blood_oxygen');
     appendRwSmokeLog('RW 实时探测：完成');
-    uni.showToast({ title: '实时数据 OK', icon: 'none' });
+    uni.showToast({ title: '实时数据读取成功', icon: 'none' });
   } catch (error) {
     const message = error instanceof Error ? error.message : `${(error as any)?.errMsg || error}`;
     appendRwSmokeLog(`RW 实时探测失败：${message}`);
@@ -607,7 +608,7 @@ const handleRwSmokeTest = async () => {
       (parsed) => parsed.type === 'rw_health_monitoring' && parsed.name === 'blood_sugar'
     );
     appendRwSmokeLog('RW 冒烟测试：完成');
-    uni.showToast({ title: 'OK', icon: 'none' });
+    uni.showToast({ title: '冒烟测试完成', icon: 'none' });
   } catch (error) {
     const message = error instanceof Error ? error.message : `${(error as any)?.errMsg || error}`;
     appendRwSmokeLog(`FAIL ${message}`);
@@ -621,9 +622,9 @@ const handleCheckOtaApi = async () => {
   try {
     const response = await getOtaInfo({ currentVersion: '1.0.0', deviceModel: 'ring' }, { custom: { returnAll: true } });
     const ok = 'code' in response && 'data' in response && 'msg' in response;
-    uni.showToast({ title: ok ? 'OTA API OK' : 'OTA API shape changed', icon: 'none' });
+    uni.showToast({ title: ok ? '升级接口正常' : '升级接口返回格式已变化', icon: 'none' });
   } catch (error) {
-    toastError(error, 'OTA API failed');
+    toastError(error, '升级接口请求失败');
   }
 };
 
@@ -631,9 +632,9 @@ const handleCheckOtaHex = () => {
   try {
     const manager = new RingOTAManager();
     const partitions = manager.parseHexFile(sampleHex);
-    uni.showToast({ title: `OTA HEX ${partitions.length}`, icon: 'none' });
+    uni.showToast({ title: `升级文件已解析，共${partitions.length}段`, icon: 'none' });
   } catch (error) {
-    toastError(error, 'OTA HEX failed');
+    toastError(error, '升级文件解析失败');
   }
 };
 </script>

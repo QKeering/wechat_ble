@@ -115,7 +115,6 @@ const currentPositionStyle = computed(() => {
 }
 
 .level-tag {
-  flex: 1; /* 每个标签占1/3宽度 */
   height: 80rpx;
   display: flex;
   align-items: center;
@@ -124,6 +123,16 @@ const currentPositionStyle = computed(() => {
   font-size: 24rpx;
   color: #01010180;
   background-color: #fff;
+}
+
+/* 状态阈值统一为：0-59 待改善、60-79 良好、80-100 优秀。 */
+.left-level {
+  flex: 3;
+}
+
+.middle-level,
+.right-level {
+  flex: 1;
 }
 
 /* 进度条容器 */
@@ -194,7 +203,7 @@ const currentPositionStyle = computed(() => {
   .progress-bar-bg {
     width: 100%;
     height: 100%;
-    background: linear-gradient(to right, #dbe4fd 0%, #dbe4fd 33.33%, #a3b8f5 33.33%, #a3b8f5 66.66%, #7091f4 66.66%, #7091f4 100%);
+    background: linear-gradient(to right, #dbe4fd 0%, #dbe4fd 60%, #a3b8f5 60%, #a3b8f5 80%, #7091f4 80%, #7091f4 100%);
   }
 }
 
@@ -215,7 +224,7 @@ const currentPositionStyle = computed(() => {
   .progress-bar-bg {
     width: 100%;
     height: 100%;
-    background: linear-gradient(to right, #dfddfb 0%, #dfddfb 33.33%, #9f9af4 33.33%, #9f9af4 66.66%, #6d66ea 66.66%, #6d66ea 100%);
+    background: linear-gradient(to right, #dfddfb 0%, #dfddfb 60%, #9f9af4 60%, #9f9af4 80%, #6d66ea 80%, #6d66ea 100%);
   }
 }
 
@@ -236,7 +245,7 @@ const currentPositionStyle = computed(() => {
   .progress-bar-bg {
     width: 100%;
     height: 100%;
-    background: linear-gradient(to right, #fff4d5 0%, #fff4d5 33.33%, #ffe397 33.33%, #ffe397 66.66%, #ffd258 66.66%, #ffd258 100%);
+    background: linear-gradient(to right, #fff4d5 0%, #fff4d5 60%, #ffe397 60%, #ffe397 80%, #ffd258 80%, #ffd258 100%);
   }
 }
 </style>

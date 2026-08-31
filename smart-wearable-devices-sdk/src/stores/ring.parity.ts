@@ -55,7 +55,8 @@ store.updateDeviceInfo({
   mac: '3E:00:00:00:05:1B',
   serviceId: '0000A00A-0000-1000-8000-00805F9B34FB',
   cmdCharId: '0000B002-0000-1000-8000-00805F9B34FB',
-  dataCharId: '0000B003-0000-1000-8000-00805F9B34FB'
+  dataCharId: '0000B003-0000-1000-8000-00805F9B34FB',
+  notifyEnabled: true
 } as any);
 await nextTick();
 store.updateIsConnected(false);
@@ -456,6 +457,7 @@ store.updateDeviceInfo({
   serviceId: '0000A00A-0000-1000-8000-00805F9B34FB',
   cmdCharId: '0000B002-0000-1000-8000-00805F9B34FB',
   dataCharId: '0000B003-0000-1000-8000-00805F9B34FB',
+  notifyEnabled: true,
   protocol: 'rw'
 } as any);
 await nextTick();
@@ -834,7 +836,8 @@ store.updateDeviceInfo({
   deviceId: 'rw-device',
   serviceId: '0000A00A-0000-1000-8000-00805F9B34FB',
   cmdCharId: '0000B002-0000-1000-8000-00805F9B34FB',
-  dataCharId: '0000B003-0000-1000-8000-00805F9B34FB'
+  dataCharId: '0000B003-0000-1000-8000-00805F9B34FB',
+  notifyEnabled: true
 } as any);
 if (!store.isConnected || store.reconnectStatus !== 'success' || store.reconnectResult !== true) {
   throw new Error('Ring store should mark a BLE device connected only after write and notify characteristics are ready.');
@@ -878,6 +881,7 @@ store.updateDeviceInfo({
   serviceId: '0000A00A-0000-1000-8000-00805F9B34FB',
   cmdCharId: '0000B002-0000-1000-8000-00805F9B34FB',
   dataCharId: '0000B003-0000-1000-8000-00805F9B34FB',
+  notifyEnabled: true,
   protocol: 'rw'
 } as any);
 if (

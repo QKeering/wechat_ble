@@ -40,6 +40,7 @@ import {
   isBluetoothPrivacyError,
   isWechatBluetoothPrivacyScopeBlocked
 } from '@/utils/wechatBluetoothPrivacy';
+import { hasRingCommunicationReady } from '@/utils/ringConnectionStatus';
 
 type CompatRwHealthDataName =
   | RwHealthDataName
@@ -270,7 +271,7 @@ const getFreshRuntimeScanMatchedMac = (device?: RingDeviceInfo | null) => {
 
 const hasRwNotifyDiscoverySnapshot = (device: RingDeviceInfo) => Array.isArray(device.notifyCandidates) && device.notifyCandidates.length > 0;
 
-const isCommunicationReadyDevice = (device: RingDeviceInfo) => Boolean(device.deviceId && device.serviceId && device.cmdCharId && device.dataCharId);
+const isCommunicationReadyDevice = (device: RingDeviceInfo) => hasRingCommunicationReady(device);
 
 const getRwStableConnectionIdentity = (device?: RingDeviceInfo | null, fallback?: unknown) => {
   if (device?.mac) return device.mac;
@@ -864,7 +865,6 @@ const shouldIgnoreRwReconnectDisconnectNoise = (device: RingDeviceInfo, expected
 // reopening the adapter/Notify path. RSSI is still probed before reuse, so a
 // stale Pinia snapshot cannot bypass reconnect recovery.
 const COMMUNICATION_READY_REUSE_LEASE_MS = 30000;
-
 export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   const devices = ref<RingDeviceInfo[]>([]);
   const deviceInfo = ref<RingDeviceInfo>({});
@@ -887,9 +887,18 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   let connectInFlightStartedAt = 0;
   let reconnectInFlight: Promise<boolean> | null = null;
   let reconnectInFlightStartedAt = 0;
+  let bluetoothUnavailableObserved = false;
+  let bluetoothAvailabilityRecoveryPromise: Promise<void> | null = null;
+  let scheduleBluetoothAvailabilityRecovery: () => void = () => undefined;
   let legacyDisconnectRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   let cancelLegacyDisconnectIdleWait: (() => void) | null = null;
   let legacyDisconnectRecoveryToken = 0;
+  // Some L19 firmware/phone combinations briefly drop GATT when the ring is
+  // placed in the charging case.  Keep that automatic recovery internal until
+  // Notify is restored and a fresh battery status has been read; exposing the
+  // intermediate disconnect as "reconnecting" makes a charging action look
+  // like a connection failure.
+  let legacySilentDisconnectRecoveryActive = false;
   let scheduleLegacyDisconnectRecovery: (target: RingDeviceInfo, reason: unknown) => void = () => undefined;
   let autoReconnectFailureCount = 0;
   let autoReconnectRetryAfter = 0;
@@ -1172,6 +1181,11 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       }
       if (resolveRingProtocol(deviceInfo.value) === 'legacy' || resolveRingProtocol(expectedConnectionDevice || {}) === 'legacy') {
         const isManualDisconnect = expectedConnectionDevice?.deviceId === '__cancelled_connection__';
+        const wasConnectedRuntime =
+          reconnectStatus.value === 'success' ||
+          reconnectResult.value === true ||
+          isCommunicationReadyDevice(deviceInfo.value) ||
+          Boolean(lastCommunicationReadyAt && Date.now() - lastCommunicationReadyAt <= 30000);
         const targetDevice = {
           ...deviceInfo.value,
           ...expectedConnectionDevice,
@@ -1182,15 +1196,19 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         const hasRecoverableTarget = Boolean(targetDevice.deviceId || targetDevice.mac || targetDevice.uniMacId);
         if (!isManualDisconnect && hasRecoverableTarget) {
           const exclusive = getLegacyBleHistoryExclusiveSnapshot(targetDevice);
+          legacySilentDisconnectRecoveryActive = wasConnectedRuntime;
           expectedConnectionDevice = targetDevice;
           deviceInfo.value = targetDevice;
           lastCommunicationReadyAt = 0;
-          reconnectStatus.value = 'reconnecting';
-          reconnectResult.value = null;
+          if (!legacySilentDisconnectRecoveryActive) {
+            reconnectStatus.value = 'reconnecting';
+            reconnectResult.value = null;
+          }
           writeRwStoreLog('legacy-physical-disconnect-recovery-scheduled', {
             reason,
             exclusive,
             uploadingStatus: uploadingStatus.value,
+            silent: legacySilentDisconnectRecoveryActive,
             target: summarizeRingDeviceForStoreLog(targetDevice)
           });
           scheduleLegacyDisconnectRecovery(targetDevice, reason);
@@ -1206,11 +1224,33 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     },
     onBluetoothReadyChange: (ready) => {
       isBluetoothReady.value = ready;
+      if (!ready) {
+        bluetoothUnavailableObserved = true;
+        return;
+      }
+      if (!bluetoothUnavailableObserved) return;
+
+      bluetoothUnavailableObserved = false;
+      scheduleBluetoothAvailabilityRecovery();
     },
     onReconnectStatusChange: (status) => {
+      if (legacySilentDisconnectRecoveryActive && (status === 'reconnecting' || status === 'failed')) {
+        writeRwStoreLog('legacy-silent-disconnect-recovery-status-suppressed', {
+          status,
+          current: summarizeRingDeviceForStoreLog(deviceInfo.value)
+        });
+        return;
+      }
       reconnectStatus.value = status;
     },
     onReconnectResultChange: (success) => {
+      if (legacySilentDisconnectRecoveryActive && success !== true) {
+        writeRwStoreLog('legacy-silent-disconnect-recovery-result-suppressed', {
+          success,
+          current: summarizeRingDeviceForStoreLog(deviceInfo.value)
+        });
+        return;
+      }
       reconnectResult.value = success;
     },
     onUploadingStatusChange: (status) => {
@@ -1224,6 +1264,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   };
 
   let adapter: LegacyRingAdapter = createRingBleFacade(state, runtime);
+  let bluetoothInitPromise: Promise<unknown> | null = null;
+  let bluetoothInitProtocol: RingProtocolKind | null = null;
 
   const switchAdapter = async (protocol: RingProtocolKind) => {
     if (adapter.protocol === protocol) return adapter;
@@ -1235,8 +1277,40 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   const isConnected = computed(() => isCommunicationReadyDevice(deviceInfo.value));
 
   const initBluetoothForProtocol = async (protocol: RingProtocolKind) => {
-    const targetAdapter = await switchAdapter(protocol);
-    return ensureLegacyBluetoothReady(targetAdapter, runtime);
+    if (adapter.protocol === protocol && isBluetoothReady.value) {
+      writeRwStoreLog('bluetooth-init-ready-reused', {
+        protocol,
+        reason: 'adapter-already-ready'
+      });
+      return true;
+    }
+
+    if (bluetoothInitPromise) {
+      if (bluetoothInitProtocol === protocol) {
+        writeRwStoreLog('bluetooth-init-inflight-reused', {
+          protocol,
+          reason: 'same-protocol-init-running'
+        });
+        return bluetoothInitPromise;
+      }
+      await bluetoothInitPromise.catch(() => undefined);
+      if (adapter.protocol === protocol && isBluetoothReady.value) return true;
+    }
+
+    const initTask = (async () => {
+      const targetAdapter = await switchAdapter(protocol);
+      return ensureLegacyBluetoothReady(targetAdapter, runtime);
+    })();
+    bluetoothInitPromise = initTask;
+    bluetoothInitProtocol = protocol;
+    try {
+      return await initTask;
+    } finally {
+      if (bluetoothInitPromise === initTask) {
+        bluetoothInitPromise = null;
+        bluetoothInitProtocol = null;
+      }
+    }
   };
 
   const initBluetooth = async () => {
@@ -1967,8 +2041,10 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
   const reconnectByScanning = async (target: RingDeviceInfo) => {
     const lifecycleToken = connectionLifecycleToken;
-    reconnectStatus.value = 'reconnecting';
-    reconnectResult.value = null;
+    if (!legacySilentDisconnectRecoveryActive) {
+      reconnectStatus.value = 'reconnecting';
+      reconnectResult.value = null;
+    }
     let scanStarted = false;
 
     try {
@@ -2316,7 +2392,12 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       });
     }
     setExpectedReconnectTarget(targetWithProtocol);
-    const targetAdapter = await switchAdapter(protocol);
+    // A persisted bound identity may become available after the first app
+    // bootstrap. Always finish adapter initialization before scanning or
+    // attempting a direct reconnect; otherwise HarmonyOS/slow Android stacks
+    // spend the whole scan budget in a runtime-not-ready state.
+    await initBluetoothForProtocol(protocol);
+    const targetAdapter = adapter;
     if (!isConnectionLifecycleCurrent(lifecycleToken)) {
       clearExpiredConnectionLifecycle();
       return false;
@@ -2445,8 +2526,10 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       return connected;
     } catch (error) {
       if (isBluetoothPrivacyError(error) || isWechatBluetoothPrivacyScopeBlocked()) {
-        reconnectStatus.value = 'failed';
-        reconnectResult.value = false;
+        if (!legacySilentDisconnectRecoveryActive) {
+          reconnectStatus.value = 'failed';
+          reconnectResult.value = false;
+        }
         writeRwStoreLog('reconnect-privacy-blocked-no-retry', {
           retryable: false,
           error: error instanceof Error ? error.message : String(error),
@@ -2484,6 +2567,14 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     cancelLegacyDisconnectIdleWait?.();
     cancelLegacyDisconnectIdleWait = null;
   };
+  const readLegacyBatteryAfterDisconnectRecovery = async () => {
+    // Register the waiter before writing: L19 can answer within one BLE event
+    // turn and a waiter created afterwards would miss the charging frame.
+    const pendingBattery = adapter.waitForParsedData((parsed) => parsed.type === 'battery', 1800);
+    pendingBattery.catch(() => undefined);
+    await adapter.sendBatteryCommand();
+    return pendingBattery;
+  };
   scheduleLegacyDisconnectRecovery = (target, reason) => {
     const recoveryToken = (legacyDisconnectRecoveryToken += 1);
     let recoveryAttempt = 0;
@@ -2493,8 +2584,11 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     const attemptRecovery = () => {
       if (recoveryToken !== legacyDisconnectRecoveryToken) return;
       if (isWechatBluetoothPrivacyScopeBlocked()) {
-        reconnectStatus.value = 'failed';
-        reconnectResult.value = false;
+        legacySilentDisconnectRecoveryActive = false;
+        if (!legacySilentDisconnectRecoveryActive) {
+          reconnectStatus.value = 'failed';
+          reconnectResult.value = false;
+        }
         clearLegacyDisconnectRecoveryWait();
         writeRwStoreLog('legacy-physical-disconnect-recovery-privacy-blocked', {
           retryable: false,
@@ -2542,8 +2636,11 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       }
 
       if (recoveryAttempt >= maxRecoveryAttempts) {
-        reconnectStatus.value = 'failed';
-        reconnectResult.value = false;
+        legacySilentDisconnectRecoveryActive = false;
+        if (!legacySilentDisconnectRecoveryActive) {
+          reconnectStatus.value = 'failed';
+          reconnectResult.value = false;
+        }
         clearLegacyDisconnectRecoveryWait();
         writeRwStoreLog('legacy-physical-disconnect-recovery-exhausted', {
           recoveryAttempt,
@@ -2567,7 +2664,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         target: summarizeRingDeviceForStoreLog(target)
       });
       void reconnect()
-        .then((success) => {
+        .then(async (success) => {
           if (recoveryToken !== legacyDisconnectRecoveryToken) return;
           writeRwStoreLog('legacy-physical-disconnect-recovery-result', {
             success,
@@ -2577,10 +2674,38 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
             current: summarizeRingDeviceForStoreLog(deviceInfo.value),
             communicationReady: isCommunicationReadyDevice(deviceInfo.value)
           });
+          if (success) {
+            let batteryResult: RingParsedData | null = null;
+            let batteryError = '';
+            try {
+              batteryResult = await readLegacyBatteryAfterDisconnectRecovery();
+            } catch (error) {
+              batteryError = error instanceof Error ? error.message : String(error);
+            }
+            if (recoveryToken !== legacyDisconnectRecoveryToken) return;
+            legacySilentDisconnectRecoveryActive = false;
+            reconnectStatus.value = 'success';
+            reconnectResult.value = true;
+            writeRwStoreLog('legacy-physical-disconnect-recovery-battery-result', {
+              success: Boolean(batteryResult),
+              battery: batteryResult ? summarizeParsedForStoreLog(batteryResult) : null,
+              message: batteryError,
+              recoveryAttempt,
+              target: summarizeRingDeviceForStoreLog(target),
+              current: summarizeRingDeviceForStoreLog(deviceInfo.value)
+            });
+            clearLegacyDisconnectRecoveryWait();
+            return;
+          }
+          if (!legacySilentDisconnectRecoveryActive) {
+      if (!legacySilentDisconnectRecoveryActive) {
+        reconnectStatus.value = 'failed';
+        reconnectResult.value = false;
+      }
+          }
           if (!success) {
-            reconnectStatus.value = 'failed';
-            reconnectResult.value = false;
             if (isWechatBluetoothPrivacyScopeBlocked()) {
+              legacySilentDisconnectRecoveryActive = false;
               clearLegacyDisconnectRecoveryWait();
               return;
             }
@@ -2590,8 +2715,10 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         })
         .catch((error) => {
           if (recoveryToken !== legacyDisconnectRecoveryToken) return;
-          reconnectStatus.value = 'failed';
-          reconnectResult.value = false;
+          if (!legacySilentDisconnectRecoveryActive) {
+            reconnectStatus.value = 'failed';
+            reconnectResult.value = false;
+          }
           writeRwStoreLog('legacy-physical-disconnect-recovery-failed', {
             target: summarizeRingDeviceForStoreLog(target),
             recoveryAttempt,
@@ -2599,6 +2726,9 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
             message: error instanceof Error ? error.message : String(error)
           });
           if (isBluetoothPrivacyError(error) || isWechatBluetoothPrivacyScopeBlocked()) {
+            legacySilentDisconnectRecoveryActive = false;
+            reconnectStatus.value = 'failed';
+            reconnectResult.value = false;
             clearLegacyDisconnectRecoveryWait();
             return;
           }
@@ -2627,6 +2757,89 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     return runReconnect(explicitTarget);
   };
   const autoConnectLastDevice = reconnect;
+  scheduleBluetoothAvailabilityRecovery = () => {
+    if (bluetoothAvailabilityRecoveryPromise) {
+      writeRwStoreLog('bluetooth-available-recovery-reuse-inflight', {
+        current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+        expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+      });
+      return;
+    }
+
+    const recoveryTask = (async () => {
+      writeRwStoreLog('bluetooth-available-recovery-start', {
+        current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+        expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice),
+        reconnectBackoffRemainingMs: Math.max(0, autoReconnectRetryAfter - Date.now())
+      });
+
+      // The previous failures happened while the OS adapter was unavailable.
+      // They must not keep the restored adapter behind the normal reconnect
+      // backoff, otherwise users still have to leave and reopen the page.
+      autoReconnectFailureCount = 0;
+      autoReconnectRetryAfter = 0;
+      await initBluetooth();
+
+      const connected = await reconnect().catch((error) => {
+        writeRwStoreLog('bluetooth-available-reconnect-failed', {
+          error: error instanceof Error ? error.message : String(error),
+          current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+          expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+        });
+        return false;
+      });
+      if (connected) {
+        writeRwStoreLog('bluetooth-available-recovery-result', {
+          success: true,
+          action: 'reconnected',
+          current: summarizeRingDeviceForStoreLog(deviceInfo.value)
+        });
+        return;
+      }
+
+      if (isWechatBluetoothPrivacyScopeBlocked()) {
+        writeRwStoreLog('bluetooth-available-recovery-result', {
+          success: false,
+          action: 'privacy-blocked'
+        });
+        return;
+      }
+
+      let rescanStarted = true;
+      await restartScan().catch((error) => {
+        rescanStarted = false;
+        writeRwStoreLog('bluetooth-available-rescan-failed', {
+          error: error instanceof Error ? error.message : String(error),
+          current: summarizeRingDeviceForStoreLog(deviceInfo.value)
+        });
+      });
+      writeRwStoreLog('bluetooth-available-recovery-result', {
+        success: false,
+        action: rescanStarted ? 'rescan-started' : 'rescan-failed',
+        scanning: isScanning.value,
+        current: summarizeRingDeviceForStoreLog(deviceInfo.value)
+      });
+    })();
+
+    bluetoothAvailabilityRecoveryPromise = recoveryTask;
+    void recoveryTask.then(
+      () => {
+        if (bluetoothAvailabilityRecoveryPromise === recoveryTask) {
+          bluetoothAvailabilityRecoveryPromise = null;
+        }
+      },
+      (error) => {
+        writeRwStoreLog('bluetooth-available-recovery-failed', {
+          error: error instanceof Error ? error.message : String(error),
+          current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+          expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+        });
+        if (bluetoothAvailabilityRecoveryPromise === recoveryTask) {
+          bluetoothAvailabilityRecoveryPromise = null;
+        }
+      }
+    );
+  };
   const registerGlobalListeners = async () => {
     const currentDevice = deviceInfo.value as RingDeviceInfo;
     const protocol = resolveRingProtocol(currentDevice);

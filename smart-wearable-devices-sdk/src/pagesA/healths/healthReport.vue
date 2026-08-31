@@ -2,16 +2,13 @@
 import { computed, ref } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
 
-type MetricKey = 'heartRate' | 'spo2' | 'temperature' | 'heartRateVariability' | 'stressIndex' | 'bloodSugar' | 'bloodPressure';
+type MetricKey = 'heartRate' | 'spo2' | 'temperature' | 'heartRateVariability';
 
 const metrics = ref<Record<MetricKey, string>>({
   heartRate: '',
   spo2: '',
   temperature: '',
-  heartRateVariability: '',
-  stressIndex: '',
-  bloodSugar: '',
-  bloodPressure: ''
+  heartRateVariability: ''
 });
 
 const metricCards = computed(() => [
@@ -22,6 +19,12 @@ const metricCards = computed(() => [
     unit: metrics.value.heartRate ? 'bpm' : ''
   },
   {
+    key: 'heartRateVariability',
+    label: 'HRV',
+    value: metrics.value.heartRateVariability || '-',
+    unit: metrics.value.heartRateVariability ? 'ms' : ''
+  },
+  {
     key: 'spo2',
     label: '血氧',
     value: metrics.value.spo2 || '-',
@@ -30,32 +33,8 @@ const metricCards = computed(() => [
   {
     key: 'temperature',
     label: '皮肤温度',
-    value: metrics.value.temperature || '设备未返回',
+    value: metrics.value.temperature || '-',
     unit: metrics.value.temperature ? '°C' : ''
-  },
-  {
-    key: 'heartRateVariability',
-    label: 'HRV',
-    value: metrics.value.heartRateVariability || '-',
-    unit: ''
-  },
-  {
-    key: 'stressIndex',
-    label: '压力',
-    value: metrics.value.stressIndex || '-',
-    unit: metrics.value.stressIndex ? '%' : ''
-  },
-  {
-    key: 'bloodSugar',
-    label: '血糖',
-    value: metrics.value.bloodSugar || '-',
-    unit: metrics.value.bloodSugar ? 'mmol/L' : ''
-  },
-  {
-    key: 'bloodPressure',
-    label: '血压',
-    value: metrics.value.bloodPressure || '-',
-    unit: metrics.value.bloodPressure ? 'mmHg' : ''
   }
 ]);
 
@@ -83,38 +62,6 @@ const getOptionMetric = (options: Record<string, unknown>, aliases: string[]) =>
   return '';
 };
 
-const normalizeBloodPressure = (...values: unknown[]) => {
-  for (const value of values) {
-    if (Array.isArray(value)) {
-      const normalized = normalizeBloodPressureParts(value[0], value[1]);
-      if (normalized) return normalized;
-      continue;
-    }
-    if (typeof value === 'string' && value.includes('/')) {
-      const [systolic, diastolic] = value.split('/');
-      const normalized = normalizeBloodPressureParts(systolic, diastolic);
-      if (normalized) return normalized;
-      continue;
-    }
-    if (value && typeof value === 'object') {
-      const record = value as Record<string, unknown>;
-      const normalized = normalizeBloodPressureParts(
-        record.systolic ?? record.high ?? record.highPressure ?? record.bloodPressureHigh ?? record.sbp,
-        record.diastolic ?? record.low ?? record.lowPressure ?? record.bloodPressureLow ?? record.dbp
-      );
-      if (normalized) return normalized;
-    }
-  }
-  return '';
-};
-
-const normalizeBloodPressureParts = (systolic: unknown, diastolic: unknown) => {
-  const normalizedSystolic = normalizeMetric(systolic);
-  const normalizedDiastolic = normalizeMetric(diastolic);
-  if (!normalizedSystolic && !normalizedDiastolic) return '';
-  return [normalizedSystolic, normalizedDiastolic].filter(Boolean).join('/');
-};
-
 const leftClick = () => {
   uni.switchTab({
     url: '/pages/health/health'
@@ -123,11 +70,6 @@ const leftClick = () => {
 
 onLoad((options = {}) => {
   const reportOptions = options as Record<string, unknown>;
-  const directBloodPressure = normalizeBloodPressure(
-    reportOptions.bloodPressure,
-    reportOptions.blood_pressure,
-    reportOptions.bp
-  );
   metrics.value = {
     heartRate: getOptionMetric(reportOptions, ['heartRate', 'heart_rate', 'heartRateValue', 'hr', 'HR']),
     spo2: getOptionMetric(reportOptions, [
@@ -141,15 +83,7 @@ onLoad((options = {}) => {
       'oxygenSaturation'
     ]),
     temperature: getOptionMetric(reportOptions, ['temperature', 'temp', 'bodyTemperature', 'body_temperature', 'bodyTemp', 'skinTemperature']),
-    heartRateVariability: getOptionMetric(reportOptions, ['heartRateVariability', 'heart_rate_variability', 'hrv', 'HRV']),
-    stressIndex: getOptionMetric(reportOptions, ['stressIndex', 'stress_index', 'stress']),
-    bloodSugar: getOptionMetric(reportOptions, ['bloodSugar', 'blood_sugar', 'glucose']),
-    bloodPressure:
-      directBloodPressure ||
-      normalizeBloodPressureParts(
-        reportOptions.systolic ?? reportOptions.high ?? reportOptions.highPressure ?? reportOptions.bloodPressureHigh ?? reportOptions.sbp,
-        reportOptions.diastolic ?? reportOptions.low ?? reportOptions.lowPressure ?? reportOptions.bloodPressureLow ?? reportOptions.dbp
-      )
+    heartRateVariability: getOptionMetric(reportOptions, ['heartRateVariability', 'heart_rate_variability', 'hrv', 'HRV'])
   };
 });
 </script>
@@ -182,7 +116,7 @@ onLoad((options = {}) => {
 
     <view class="tip-card">
       <text class="tip-title">说明</text>
-      <text class="tip-text">未显示的指标表示当前设备未返回实时数值，不会按 0 参与记录。</text>
+      <text class="tip-text">健康提醒仅供用户关注自身状态，不作为医疗诊断结论。如数据持续异常、出现明显变化或身体不适，请及时咨询专业医护人员。</text>
     </view>
   </view>
 </template>

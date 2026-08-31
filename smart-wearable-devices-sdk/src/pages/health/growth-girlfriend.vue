@@ -1,6 +1,6 @@
 <template>
   <view class="growth-page">
-    <uv-navbar placeholder leftIcon="arrow-left" title="Ai lab" bgColor="transparent" autoBack :leftIconColor="'#332b34'" :titleStyle="{ color: '#332b34' }"></uv-navbar>
+    <uv-navbar placeholder leftIcon="arrow-left" title="小轻智能体" bgColor="transparent" autoBack :leftIconColor="'#332b34'" :titleStyle="{ color: '#332b34' }"></uv-navbar>
     <view class="header">
       <text class="title">小轻，今天也在你身边</text>
       <text class="subtitle">AI融合多维健康大数据，生成你的专属状态洞察</text>
@@ -96,6 +96,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { chatWithGrowthGirlfriend, getGrowthGirlfriendContext, synthesizeGrowthSpeech, transcribeGrowthAudio } from '@/api';
 import { useRingBusinessData } from '@/composables/useRingBusinessData';
+import { formatBleErrorMessage } from '@/utils/bleError';
 
 const ringBusinessData = useRingBusinessData();
 const question = ref('');
@@ -265,7 +266,7 @@ const voiceErrorMessage = (message?: string) => {
   if (message.includes('time out') || message.includes('timeout') || message.includes('超时')) {
     return '识别时间较长，请稍后再试';
   }
-  return message;
+  return formatBleErrorMessage(message, '语音识别失败，请稍后再试');
 };
 
 const compactToastMessage = (message: string) => {
@@ -320,7 +321,7 @@ const submitQuestion = async () => {
     void playAnswer(false);
   } catch (error) {
     aiAnswer.value = `关于“${text}”，小轻先基于本地状态数据给你一个轻量建议：今天不要硬撑，先完成低压力任务，再根据恢复感安排重点事项。`;
-    uni.showToast({ title: error instanceof Error ? error.message : 'AI 请求失败', icon: 'none' });
+    uni.showToast({ title: formatBleErrorMessage(error, '智能体请求失败，请稍后重试'), icon: 'none' });
   } finally {
     isAnswering.value = false;
   }
@@ -387,7 +388,9 @@ onMounted(() => {
     isPressingVoice.value = false;
     recorderBusy = false;
     uni.hideLoading();
-    const message = error.errMsg?.includes('audio is recording') ? '上一段语音还在收尾，请稍后再按' : error.errMsg || '录音失败';
+    const message = error.errMsg?.includes('audio is recording')
+      ? '上一段语音还在收尾，请稍后再按'
+      : formatBleErrorMessage(error, '录音失败，请稍后重试');
     uni.showToast({ title: message, icon: 'none' });
   });
   audio = uni.createInnerAudioContext();
@@ -417,14 +420,14 @@ const playAnswer = async (showPendingToast = true) => {
     const result = await synthesizeGrowthSpeech(answerText.value);
     const source = result.audioUrl || (result.audioBase64 ? `data:audio/mp3;base64,${result.audioBase64}` : '');
     if (!source) {
-      if (showPendingToast) uni.showToast({ title: result.message || '语音播报待配置', icon: 'none' });
+      if (showPendingToast) uni.showToast({ title: formatBleErrorMessage(result.message, '语音播报暂不可用'), icon: 'none' });
       return;
     }
     if (!audio) audio = uni.createInnerAudioContext();
     audio.src = source;
     audio.play();
   } catch (error) {
-    if (showPendingToast) uni.showToast({ title: error instanceof Error ? error.message : '语音播报失败', icon: 'none' });
+    if (showPendingToast) uni.showToast({ title: formatBleErrorMessage(error, '语音播报失败，请稍后重试'), icon: 'none' });
   } finally {
     isSpeaking.value = false;
   }

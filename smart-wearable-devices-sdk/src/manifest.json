@@ -22,14 +22,10 @@
     },
     "lazyCodeLoading": "requiredComponents",
     "permission": {
-      "scope.userLocation": {
-        "desc": "用于蓝牙扫描附近的戒指设备"
-      },
       "scope.bluetooth": {
         "desc": "用于搜索并连接附近的智能戒指设备"
       }
     },
-    "requiredPrivateInfos": ["getLocation"],
     "usingComponents": true
   }
 }

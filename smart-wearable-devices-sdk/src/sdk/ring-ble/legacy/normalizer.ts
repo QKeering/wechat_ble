@@ -19,6 +19,7 @@ export const normalizeRingData = (parsed: RingParsedData): NormalizedRingData | 
         collectedAt,
         metrics: {
           battery: parsed.battery ?? parsed.value,
+          batteryRawValue: parsed.batteryRawValue,
           batteryStatus: parsed.batteryStatus ?? parsed.status ?? parsed.chargingStatusText,
           chargingStatus: parsed.chargingStatus,
           chargingStatusText: parsed.chargingStatusText

@@ -159,8 +159,14 @@ const showToast = (title: string) => {
   uni.showToast({ title, icon: 'none' });
 };
 
+const isBluetoothForegroundTimeout = (error: unknown) =>
+  error instanceof Error && /Bluetooth adapter foreground timeout/i.test(error.message);
+
 const getBluetoothInitializationErrorMessage = (error: unknown) => {
   if (isBluetoothPrivacyError(error)) return BLUETOOTH_PRIVACY_REQUIRED_HINT;
+  if (isBluetoothForegroundTimeout(error)) {
+    return '蓝牙初始化超时，请确认手机蓝牙已开启后重试';
+  }
   if (error instanceof Error && error.message) return error.message;
   if (error && typeof error === 'object') {
     const record = error as Record<string, unknown>;
@@ -191,7 +197,24 @@ export const ensureLegacyBluetoothReady = async (
       locationPreflight: 'skipped'
     });
 
-    const result = await adapter.initBluetooth();
+    let result: unknown;
+    try {
+      result = await adapter.initBluetooth();
+    } catch (initialError) {
+      const foregroundTimedOut = isBluetoothForegroundTimeout(initialError);
+      if (!foregroundTimedOut) throw initialError;
+      // The native open callback may arrive after the foreground budget. Give
+      // it one bounded recovery probe before surfacing the existing user hint.
+      appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-init-foreground-timeout-retry', {
+        retryDelayMs: 800,
+        platform: systemInfo.platform,
+        uniPlatform: systemInfo.uniPlatform
+      });
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      const recovered = await adapter.checkBluetoothState().catch(() => false);
+      if (!recovered) throw initialError;
+      result = { available: true, discovering: false, source: 'foreground-timeout-retry' };
+    }
     runtime?.onBluetoothReadyChange?.(true);
     appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-init-success', {
       platform: systemInfo.platform,
@@ -208,8 +231,20 @@ export const ensureLegacyBluetoothReady = async (
       message,
       error
     });
-    if (showToastOnFail) {
+    // A 3-second foreground timeout does not mean Bluetooth is unavailable.
+    // WeChat/HarmonyOS may deliver the native open callback later, and the
+    // adapter keeps that operation alive for background recovery. Do not show
+    // a disruptive startup toast for this recoverable condition. Explicit
+    // permission, disabled-Bluetooth and manual connection failures still use
+    // their normal user-facing hints.
+    if (showToastOnFail && !isBluetoothForegroundTimeout(error)) {
       showToast(message);
+    } else if (showToastOnFail) {
+      appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-init-timeout-toast-suppressed', {
+        platform: systemInfo.platform,
+        uniPlatform: systemInfo.uniPlatform,
+        reason: 'recoverable-late-native-callback'
+      });
     }
     throw error;
   }

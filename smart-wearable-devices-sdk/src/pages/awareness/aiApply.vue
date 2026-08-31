@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { applyAiLab } from '@/common/api/aiLab';
+import { formatBleErrorMessage } from '@/utils/bleError';
 
 const statusBarHeight = ref(0);
 const isSubmitting = ref(false);
@@ -54,10 +55,10 @@ const handleSuccess = () => {
 //   uni.$emit('refreshAiStatus');
 // };
 
-const handleFail = (msg: string = '申请失败') => {
+const handleFail = (msg: unknown = '申请失败') => {
   uni.hideLoading();
   uni.showToast({
-    title: msg,
+    title: formatBleErrorMessage(msg, '申请失败，请稍后重试'),
     icon: 'none',
     duration: 2000
   });
@@ -82,8 +83,7 @@ const handleApply = async () => {
       handleSuccess();
     }
   } catch (error: any) {
-    const msg = error?.msg || '';
-    handleFail(msg || '申请失败，请稍后重试');
+    handleFail(error);
   } finally {
     isSubmitting.value = false;
   }
@@ -114,7 +114,7 @@ const goBack = () => {
           <!-- <text class="icon-text">🧠</text> -->
           <uv-image src="/static/images/brain.png" width="100rpx" height="100rpx"></uv-image>
         </view>
-        <view class="ai-hero-title">AI智能体Lab</view>
+    <view class="ai-hero-title">AI智能体实验室</view>
         <view class="ai-hero-desc">
           基于QKeer轻刻Al戒指数据
           <br />
@@ -144,7 +144,7 @@ const goBack = () => {
             <text class="header-title">抢先体验新功能</text>
           </view>
           <view class="card-body">
-            <text class="body-text">QKeer轻刻Lab让您有机会在创新功能正式加入QKeer轻刻前，抢先体验并参与优化这些功能。</text>
+        <text class="body-text">轻刻体验中心让您有机会在创新功能正式上线前，抢先体验并参与优化。</text>
           </view>
         </view>
       </view>

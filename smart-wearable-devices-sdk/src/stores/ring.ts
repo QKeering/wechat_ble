@@ -11,6 +11,7 @@ import type {
 } from '@/sdk/ring-ble';
 import { buildRingBusinessMetrics, mergeRingBusinessMetricSnapshot, normalizeRingData, resolveRingProtocol } from '@/sdk/ring-ble';
 import { applyDeviceIdentityCacheToDevice, getDeviceIdentityCacheMacFromDevice } from '@/utils/deviceIdentityCache';
+import { hasRingCommunicationReady } from '@/utils/ringConnectionStatus';
 
 const LAST_READ_TIMESTAMP_KEY = 'qkeer:ring-last-read-timestamp';
 const NORMAL_MAC_KEY = 'qkeer:ring-normal-mac';
@@ -786,7 +787,7 @@ export const useRingStore = defineStore('ring', () => {
 });
 
 function hasReadyCommunicationFields(device: RingDeviceInfo) {
-  return Boolean(device.deviceId && device.serviceId && device.cmdCharId && device.dataCharId);
+  return hasRingCommunicationReady(device);
 }
 
 function normalizeStoreDeviceInfo(device: RingDeviceInfo) {

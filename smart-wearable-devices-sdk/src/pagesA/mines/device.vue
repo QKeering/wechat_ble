@@ -12,7 +12,7 @@ import { clearFrontendRingBindingState, getBoundRingIdentity, getBoundRingIdenti
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
-import { formatBatteryPercentForDisplay, formatBatteryStatusForDisplay, getRawBatteryPercent, isBatteryChargingLike } from '@/utils/batteryDisplay';
+import { formatBatteryPercentForDisplay, formatBatteryStatusForDisplay, isBatteryChargingLike } from '@/utils/batteryDisplay';
 import { readBatteryDisplayCache, writeBatteryDisplayCache } from '@/utils/batteryCache';
 import { useUnifiedBatteryDisplay } from '@/composables/useUnifiedBatteryDisplay';
 import { reportRealBatteryLog } from '@/utils/deviceBatteryLog';
@@ -34,6 +34,9 @@ const content = '你确定要解除绑定吗？';
 const FIND_RING_RED_LIGHT_DURATION_MS = 10000;
 const FIND_RING_COMMAND_TIMEOUT_MS = 5000;
 const FIND_RING_HINT_DURATION_MS = 3000;
+// Prefer the unsolicited battery Notify; query only after it has been quiet
+// for five minutes so opening this page does not disturb the BLE link.
+const DEVICE_INFO_BATTERY_PAGE_SHOW_INTERVAL_MS = 5 * 60 * 1000;
 
 const modalPopup = ref<any>(null);
 const boundInfo = ref<Record<string, any> | null>(null);
@@ -46,6 +49,7 @@ let findRingStopTimer: ReturnType<typeof setTimeout> | null = null;
 let findRingHintTimer: ReturnType<typeof setTimeout> | null = null;
 let activeFindRingCommandMode: FindRingCommandMode | null = null;
 let refreshDeviceInfoPromise: Promise<void> | null = null;
+let deviceInfoBatteryPageShowAt = 0;
 
 type FindRingCommandMode = 'rw-health-control' | 'oxygen-measure';
 
@@ -58,10 +62,10 @@ const findRingStatusText = computed(() => {
 const connectionText = computed(() => (ring.isConnected.value ? '已连接' : '未连接'));
 const deviceName = computed(() =>
   getFirstDeviceInfoValue(
-    boundInfo.value?.modelName,
-    boundInfo.value?.productName,
     boundInfo.value?.deviceName,
     boundInfo.value?.name,
+    boundInfo.value?.modelName,
+    boundInfo.value?.productName,
     '轻刻智能戒指'
   )
 );
@@ -81,19 +85,15 @@ const batteryStatusText = computed(() => normalizeDeviceInfoDisplayText(normaliz
 const firmwareText = computed(
   () =>
     getFirstDeviceInfoValue(
+      boundInfo.value?.firmwareVersion,
+      boundInfo.value?.firmware_version,
       singleReadResults.value.firmware,
       ring.metrics.value.firmwareVersion,
-      ring.metrics.value.hardwareVersion,
       ring.healthData.value?.firmwareVersion,
-      ring.healthData.value?.hardwareVersion,
       userStore.latestMetrics?.firmwareVersion,
-      userStore.latestMetrics?.hardwareVersion,
       userStore.healthData?.firmwareVersion,
-      userStore.healthData?.hardwareVersion,
       latestFirmware.value?.metrics?.firmwareVersion,
-      latestFirmware.value?.metrics?.hardwareVersion,
-      latestFirmware.value?.firmwareVersion,
-      latestFirmware.value?.hardwareVersion
+      latestFirmware.value?.firmwareVersion
     )
 );
 const softwareText = computed(
@@ -111,11 +111,26 @@ const softwareText = computed(
       latestFirmware.value?.metrics?.softwareVersion,
       latestFirmware.value?.metrics?.uiVersion,
       latestFirmware.value?.softwareVersion,
-      latestFirmware.value?.uiVersion
+      latestFirmware.value?.uiVersion,
+      boundInfo.value?.softwareVersion,
+      boundInfo.value?.software_version,
+      boundInfo.value?.uiVersion,
+      boundInfo.value?.ui_version
     )
 );
 const ringSizeText = computed(() => getFirstDeviceInfoValue(boundInfo.value?.deviceSize, boundInfo.value?.ringSize));
-const deviceVersionText = computed(() => getFirstDeviceInfoValue(boundInfo.value?.deviceVersion, boundInfo.value?.version));
+const deviceVersionText = computed(() =>
+  getFirstDeviceInfoValue(
+    boundInfo.value?.hardwareVersion,
+    boundInfo.value?.hardware_version,
+    ring.metrics.value.hardwareVersion,
+    ring.healthData.value?.hardwareVersion,
+    userStore.latestMetrics?.hardwareVersion,
+    userStore.healthData?.hardwareVersion,
+    latestFirmware.value?.metrics?.hardwareVersion,
+    latestFirmware.value?.hardwareVersion
+  )
+);
 const serialText = computed(() => getFirstDeviceInfoValue(boundInfo.value?.sn, boundInfo.value?.serialNumber));
 const deviceMacText = computed(() =>
   getFirstDeviceInfoValue(
@@ -150,7 +165,13 @@ const summarizeDevice = (device: Record<string, any> | null | undefined) => ({
   cmdCharId: device?.cmdCharId,
   dataServiceId: device?.dataServiceId,
   dataCharId: device?.dataCharId,
-  notifyEnabled: device?.notifyEnabled
+  notifyEnabled: device?.notifyEnabled,
+  deviceSize: device?.deviceSize ?? device?.ringSize,
+  deviceVersion: device?.deviceVersion ?? device?.version,
+  firmwareVersion: device?.firmwareVersion ?? device?.firmware_version,
+  hardwareVersion: device?.hardwareVersion ?? device?.hardware_version,
+  softwareVersion: device?.softwareVersion ?? device?.software_version,
+  serialNumber: device?.sn ?? device?.serialNumber
 });
 
 const getDevicePageSnapshot = () => ({
@@ -185,7 +206,7 @@ const appendDeviceDiagnosticLog = (event: string, details: Record<string, any> =
 const loadBoundInfo = async () => {
   if (!userStore.token) return;
   try {
-    const info = await getBindInfo();
+    const info = await getBindInfo({ refresh: true });
     const normalizedInfo = normalizeBoundInfoCommunicationDevice(info || null);
     boundInfo.value = normalizedInfo;
     appendDeviceDiagnosticLog('bound-info-loaded', {
@@ -206,12 +227,15 @@ const loadBoundInfo = async () => {
 
 const ensureDeviceReady = async () => {
   if (controller.isReady.value) return true;
-  // The app-wide BLE orchestrator owns reconnect/restore. A page refresh must
-  // never disturb the active history listener or physical connection.
-  appendDeviceDiagnosticLog('device-info-ready-check-deferred-to-global-connection', {
+  appendDeviceDiagnosticLog('device-info-ready-restore-start', {
     snapshot: getDevicePageSnapshot()
   });
-  return false;
+  const restored = await controller.restoreLastBusinessDevice({ refreshAfterRestore: false });
+  appendDeviceDiagnosticLog('device-info-ready-restore-result', {
+    restored,
+    snapshot: getDevicePageSnapshot()
+  });
+  return restored && controller.isReady.value;
 };
 
 const runDeviceInfoRefresh = async () => {
@@ -242,7 +266,7 @@ const runDeviceInfoRefresh = async () => {
     if (!ready) {
       lastActionText.value = '设备连接恢复中，已保留上次设备信息';
       appendDeviceDiagnosticLog('device-info-refresh-deferred-not-ready', {
-        reason: 'global-connection-orchestrator-owned'
+        reason: 'restore-last-business-device-failed'
       });
       return;
     }
@@ -344,18 +368,30 @@ const waitForFirstSuccessful = async <T,>(tasks: Array<Promise<T> | null | undef
   });
 };
 
-const readBatteryOnly = async () => {
+const readBatteryOnly = async (options: { silent?: boolean; source?: string } = {}) => {
   if (isBusy.value) return;
-  busyText.value = '读取电量中';
-  lastActionText.value = '';
+  const silent = options.silent === true;
+  if (!silent) {
+    busyText.value = '读取电量中';
+    lastActionText.value = '';
+  }
   const startedAt = Date.now();
   appendDeviceDiagnosticLog('battery-read-start', {
+    source: options.source || 'device-manual-read',
     snapshot: getDevicePageSnapshot()
   });
   try {
     const ready = await ensureDeviceReady();
     if (!ready) throw new Error('设备未连接，请重新连接后再试');
-    const directWaiter = waitForDirectParsedData((parsed) => parsed.type === 'battery' && getBatteryReadingValue(parsed) != null, 9000);
+    const directWaiter = waitForDirectParsedData(
+      (parsed) =>
+        parsed.type === 'battery' &&
+        (getBatteryReadingValue(parsed) != null ||
+          isBatteryChargingLike(getBatteryReadingValue(parsed), getBatteryReadingStatus(parsed)) ||
+          isBatteryChargedLike(getBatteryReadingValue(parsed)) ||
+          isBatteryChargedLike(getBatteryReadingStatus(parsed))),
+      9000
+    );
     const sharedWaiter = waitForSharedBattery(startedAt, 9000);
     sharedWaiter.catch(() => undefined);
     await controller.sendBatteryCommand();
@@ -365,22 +401,27 @@ const readBatteryOnly = async () => {
     const displayValue = formatBatteryStatusForDisplay(value, status, '-');
     if (value == null && displayValue === '-') throw new Error('设备返回的电量格式无效');
     singleReadResults.value = { ...singleReadResults.value, battery: displayValue };
-    writeDevicePageBatteryCache(value, status, 'device-manual-read');
-    reportDevicePageBatteryLog(value, 'device-manual-read');
-    lastActionText.value = `电量读取成功：${displayValue}`;
+    const source = options.source || 'device-manual-read';
+    writeDevicePageBatteryCache(value, status, source);
+    if (value != null) reportDevicePageBatteryLog(value, source);
+    if (!silent) lastActionText.value = `电量读取成功：${displayValue}`;
     appendDeviceDiagnosticLog('battery-read-result', {
+      source,
       value,
+      status,
       parsed,
       snapshot: getDevicePageSnapshot()
     });
   } catch (error) {
-    lastActionText.value = formatBleErrorMessage(error, '电量读取失败');
+    const message = formatBleErrorMessage(error, '电量读取失败');
+    if (!silent) lastActionText.value = message;
     appendDeviceDiagnosticLog('battery-read-failed', {
-      message: lastActionText.value,
+      source: options.source || 'device-manual-read',
+      message,
       snapshot: getDevicePageSnapshot()
     });
   } finally {
-    busyText.value = '';
+    if (!silent) busyText.value = '';
   }
 };
 
@@ -732,18 +773,6 @@ const reportDevicePageBatteryLog = (battery: unknown, source = 'device-info') =>
   });
 };
 
-watch(
-  () => {
-    const rawBattery = getRawBatteryPercent(batteryValue.value);
-    const mac = getDevicePageBatteryCacheMac();
-    return rawBattery == null ? '' : `${getDevicePageUserId()}|${mac}|${Math.round(rawBattery)}`;
-  },
-  (signature) => {
-    if (!signature) return;
-    writeDevicePageBatteryCache(batteryValue.value, batteryStatusRaw.value, 'device-info-display');
-    reportDevicePageBatteryLog(batteryValue.value, 'device-info-display');
-  }
-);
 
 const getDeviceIdFromInfo = (device: Record<string, any> | null | undefined) =>
   getFirstDeviceInfoValue(device?.deviceId, device?.platformDeviceId, device?.wxDeviceId, device?.bleDeviceId, device?.bluetoothDeviceId);
@@ -926,9 +955,21 @@ onShow(async () => {
     snapshot: getDevicePageSnapshot()
   });
   await loadBoundInfo();
-  if (ring.isConnected.value && (batteryValue.value == null || firmwareText.value === '-')) {
+  if (
+    hasBoundRingIdentity(boundInfo.value) &&
+    (batteryValue.value == null || firmwareText.value === '-' || ringSizeText.value === '-' || serialText.value === '-')
+  ) {
     void refreshDeviceInfo();
     return;
+  }
+  if (
+    hasBoundRingIdentity(boundInfo.value) &&
+    ring.isConnected.value &&
+    Date.now() - Number(unifiedBattery.observedAt.value || 0) >= DEVICE_INFO_BATTERY_PAGE_SHOW_INTERVAL_MS &&
+    Date.now() - deviceInfoBatteryPageShowAt >= DEVICE_INFO_BATTERY_PAGE_SHOW_INTERVAL_MS
+  ) {
+    deviceInfoBatteryPageShowAt = Date.now();
+    void readBatteryOnly({ silent: true, source: 'device-page-show' });
   }
   appendDeviceDiagnosticLog('page-show-ready', {
     snapshot: getDevicePageSnapshot()
@@ -979,10 +1020,6 @@ onUnload(() => {
           <view>{{ batteryText }}</view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
-          <view>电量状态</view>
-          <view>{{ batteryStatusText }}</view>
-        </view>
-        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
           <view>戒指大小</view>
           <view>{{ ringSizeText }}</view>
         </view>
@@ -995,10 +1032,6 @@ onUnload(() => {
           <view>{{ firmwareText }}</view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
-          <view>软件版本</view>
-          <view>{{ softwareText }}</view>
-        </view>
-        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
           <view>序列号</view>
           <view>{{ serialText }}</view>
         </view>
@@ -1007,7 +1040,7 @@ onUnload(() => {
           <view>{{ deviceNameText }}</view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
-          <view>Mac地址</view>
+          <view>MAC地址</view>
           <view class="flex ai-center">
             <view>{{ macText }}</view>
             <view class="copy-button" @click.stop="copyDeviceId">复制</view>

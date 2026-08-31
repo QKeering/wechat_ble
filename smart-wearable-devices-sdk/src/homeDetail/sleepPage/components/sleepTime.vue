@@ -731,7 +731,7 @@ const handleChartTouchMove = (e: any) => {
             <text class="sleep-time-summary-hour">{{ item.hours }}</text>
             <text class="sleep-time-summary-unit">h</text>
             <text class="sleep-time-summary-minute">{{ item.minutes }}</text>
-            <text class="sleep-time-summary-unit">min</text>
+            <text class="sleep-time-summary-unit">分钟</text>
           </view>
           <view class="sleep-time-summary-label">
             <view class="sleep-time-summary-dot" :style="{ backgroundColor: item.color }"></view>

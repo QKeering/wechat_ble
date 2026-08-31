@@ -11,7 +11,17 @@ interface RingConnectionStatusInput {
 
 export const hasRingCommunicationReady = (device: unknown) => {
   const value = (device || {}) as Record<string, unknown>;
-  return Boolean(value.deviceId && value.serviceId && value.cmdCharId && value.dataCharId);
+  // service/characteristic UUIDs are persisted by the backend so the next
+  // connection can reuse discovery metadata. They are not proof that the
+  // current mini-program process owns a live GATT/Notify session. All current
+  // adapters set notifyEnabled only after Notify is enabled successfully.
+  return Boolean(
+    value.deviceId &&
+      value.serviceId &&
+      value.cmdCharId &&
+      value.dataCharId &&
+      value.notifyEnabled === true
+  );
 };
 
 export const hasAnyRingCommunicationReady = (...devices: unknown[]) =>

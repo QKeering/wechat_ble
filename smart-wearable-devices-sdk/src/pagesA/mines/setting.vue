@@ -1,6 +1,6 @@
 <!-- 功能设置 -->
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from 'vue';
+import { computed, nextTick, onUnmounted, ref } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
 import { getBindInfo } from '@/common/api/device';
 import { getGoalInfo, updateGoalInfo } from '@/common/api/user';
@@ -8,11 +8,19 @@ import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingBusinessController } from '@/composables/useRingBusinessController';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { hasBoundRingIdentity } from '@/utils/ringBinding';
+import { useUserStore } from '@/stores/user';
+import {
+  DEFAULT_CALORIE_GOAL_KCAL,
+  buildCalorieGoalOptions,
+  getCalorieGoalRange,
+  normalizeCalorieGoalKcal
+} from '@/utils/calorieGoal';
 
 type PickerType = 'sleep' | 'step' | 'calorie' | 'activity' | 'collect';
 
 const controller = useRingBusinessController();
 const ringBle = useRingBLE();
+const userStore = useUserStore();
 const boundInfo = ref<Record<string, any> | null>(null);
 const busyText = ref('');
 const lastActionText = ref('');
@@ -24,9 +32,9 @@ let initialLoadTimer: any = null;
 const DEFAULT_GOAL_VALUES: Record<PickerType, string> = {
   sleep: '8',
   step: '8000',
-  calorie: '500',
+  calorie: String(DEFAULT_CALORIE_GOAL_KCAL),
   activity: '30',
-  collect: '60'
+  collect: '30'
 };
 
 const sleepTarget = ref(DEFAULT_GOAL_VALUES.sleep);
@@ -36,24 +44,29 @@ const activityDurationTarget = ref(DEFAULT_GOAL_VALUES.activity);
 const collectPeriodTarget = ref(DEFAULT_GOAL_VALUES.collect);
 
 const pickerRef = ref<any>(null);
+const pickerMounted = ref(true);
 const pickerValue = ref([0]);
 const pickerTitle = ref('');
 const pickerColumns = ref<string[][]>([[]]);
 const activePickerType = ref<PickerType>('sleep');
-const collectPeriodOptions = ['20', '25', '30', '35', '40', '45', '50', '55', '60'];
+const collectPeriodOptions = ['20', '30'];
 
-const pickerOptions: Record<PickerType, string[]> = {
+const calorieGoalRange = computed(() => getCalorieGoalRange(userStore.userInfo?.sex));
+const calorieGoalRangeText = computed(
+  () => `建议范围 ${calorieGoalRange.value.min}–${calorieGoalRange.value.max} 千卡`
+);
+const pickerOptions = computed<Record<PickerType, string[]>>(() => ({
   sleep: ['5', '6', '7', '8', '9', '10', '11', '12'],
   step: ['4000', '6000', '8000', '10000', '12000', '15000', '20000'],
-  calorie: ['100', '200', '300', '400', '500', '600', '800', '1000', '1200', '1500', '2000'],
+  calorie: buildCalorieGoalOptions(userStore.userInfo?.sex),
   activity: ['15', '30', '45', '60', '90', '120'],
   collect: collectPeriodOptions
-};
+}));
 
 const pickerTitleMap: Record<PickerType, string> = {
   sleep: '睡眠时长',
   step: '步数目标',
-  calorie: '卡目标',
+  calorie: '热量目标',
   activity: '活动时长目标',
   collect: '设备采集周期'
 };
@@ -110,8 +123,8 @@ const toCollectPeriodText = (value: unknown, fallback = collectPeriodTarget.valu
   let numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
   if (numeric > 120) numeric = Math.round(numeric / 60);
-  const normalizedMinutes = Math.min(60, Math.max(20, Math.round(numeric / 5) * 5));
-  return String(normalizedMinutes);
+  const normalizedMinutes = String(Math.round(numeric));
+  return collectPeriodOptions.includes(normalizedMinutes) ? normalizedMinutes : DEFAULT_GOAL_VALUES.collect;
 };
 
 const loadBoundInfo = async () => {
@@ -129,9 +142,12 @@ const loadGoalInfo = async () => {
     const data = unwrapApiData(result);
     sleepTarget.value = toSleepHourText(data);
     stepTarget.value = toPositiveIntegerText(getValueByKeys(data, ['step', 'stepTarget', 'targetStep', 'stepsTarget']), stepTarget.value);
-    calorieTarget.value = toPositiveIntegerText(
-      getValueByKeys(data, ['calorie', 'calorieTarget', 'targetCalorie', 'caloriesTarget', 'targetCalories']),
-      calorieTarget.value
+    calorieTarget.value = String(
+      normalizeCalorieGoalKcal(
+        getValueByKeys(data, ['calorie', 'calorieTarget', 'targetCalorie', 'caloriesTarget', 'targetCalories']),
+        DEFAULT_CALORIE_GOAL_KCAL,
+        userStore.userInfo?.sex
+      )
     );
     activityDurationTarget.value = toPositiveIntegerText(
       getValueByKeys(data, ['motionTime', 'activityDurationTarget', 'targetActivityDuration', 'targetMotionTime', 'motionTimeTarget']),
@@ -174,13 +190,31 @@ const setCurrentPickerValue = (type: PickerType, value: string) => {
   else collectPeriodTarget.value = value;
 };
 
-const openPicker = (type: PickerType) => {
+const openPicker = async (type: PickerType) => {
   activePickerType.value = type;
   pickerTitle.value = pickerTitleMap[type];
-  const columns = pickerOptions[type];
+  const currentValue = getCurrentPickerValue(type) || DEFAULT_GOAL_VALUES[type];
+  const columns = [...pickerOptions.value[type]];
+  if (!columns.includes(currentValue)) {
+    columns.push(currentValue);
+    columns.sort((left, right) => Number(left) - Number(right));
+  }
+  const currentIndex = columns.indexOf(currentValue);
   pickerColumns.value = [columns];
-  pickerValue.value = [Math.max(0, columns.indexOf(getCurrentPickerValue(type) || DEFAULT_GOAL_VALUES[type]))];
+  pickerValue.value = [Math.max(0, currentIndex)];
+
+  // 微信小程序的原生 picker-view 会保留上一次打开时的内部索引。
+  // 每次打开前重新挂载选择器，确保弹层初始值始终来自外层当前值。
+  pickerMounted.value = false;
+  await nextTick();
+  pickerMounted.value = true;
+  await nextTick();
   pickerRef.value?.open?.();
+};
+
+const onPickerChange = (event: any) => {
+  const indexs = Array.isArray(event?.indexs) ? event.indexs : null;
+  if (indexs?.length) pickerValue.value = [Number(indexs[0]) || 0];
 };
 
 const getPickerConfirmValue = (event: any) => {
@@ -272,8 +306,13 @@ const scheduleInitialLoad = () => {
   if (initialLoadTimer) {
     clearTimeout(initialLoadTimer);
   }
-  initialLoadTimer = setTimeout(() => {
+  initialLoadTimer = setTimeout(async () => {
     initialLoadTimer = null;
+    try {
+      await userStore.fetchUserInfo();
+    } catch {
+      // 使用本地已缓存的性别资料计算热量目标范围，不阻断目标读取。
+    }
     void Promise.all([loadBoundInfo(), loadGoalInfo()]);
   }, 60);
 };
@@ -322,8 +361,8 @@ onUnmounted(() => {
 
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('calorie')">
           <view style="width: 60%">
-            <text>卡目标</text>
-            <text class="t-979797 fs-24">（卡）</text>
+            <view><text>热量目标</text></view>
+            <text class="t-979797 fs-24">（千卡，{{ calorieGoalRangeText }}）</text>
           </view>
           <view class="flex ai-center">
             <text class="mr-20">{{ calorieTarget || '请选择' }}</text>
@@ -356,11 +395,12 @@ onUnmounted(() => {
     </view>
 
     <uv-picker
+      v-if="pickerMounted"
       ref="pickerRef"
-      :defaultIndex="[pickerValue[0]]"
+      :defaultIndex="pickerValue"
       :title="pickerTitle"
       :columns="pickerColumns"
-      v-model="pickerValue"
+      @change="onPickerChange"
       @confirm="onPickerConfirm"
       confirmColor="#2e70fc"
     ></uv-picker>

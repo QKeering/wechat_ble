@@ -12,11 +12,15 @@ if (weixin.lazyCodeLoading !== 'requiredComponents') {
   throw new Error(`mp-weixin lazyCodeLoading should be requiredComponents: ${weixin.lazyCodeLoading}`);
 }
 
-if (!Array.isArray(weixin.requiredPrivateInfos) || !weixin.requiredPrivateInfos.includes('getLocation')) {
-  throw new Error(`mp-weixin requiredPrivateInfos should include getLocation: ${JSON.stringify(weixin.requiredPrivateInfos)}`);
+if (Array.isArray(weixin.requiredPrivateInfos) && weixin.requiredPrivateInfos.includes('getLocation')) {
+  throw new Error(`mp-weixin requiredPrivateInfos should not include unused getLocation: ${JSON.stringify(weixin.requiredPrivateInfos)}`);
 }
 
-const locationDesc = weixin.permission?.['scope.userLocation']?.desc;
-if (!locationDesc || typeof locationDesc !== 'string') {
-  throw new Error('mp-weixin permission.scope.userLocation.desc is required for BLE scan permission flow.');
+if (weixin.permission?.['scope.userLocation']) {
+  throw new Error('mp-weixin permission.scope.userLocation should be removed because BLE scan does not use location data.');
+}
+
+const bluetoothDesc = weixin.permission?.['scope.bluetooth']?.desc;
+if (!bluetoothDesc || typeof bluetoothDesc !== 'string') {
+  throw new Error('mp-weixin permission.scope.bluetooth.desc is required for BLE scan permission flow.');
 }

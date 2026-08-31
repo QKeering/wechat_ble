@@ -931,6 +931,33 @@ def device_model_options(db: Session = Depends(get_db)):
     return success(system.rows(db, "select id, model_key, model_name, device_version from device_model where del_flag=0 order by id"))
 
 
+def enrich_device_binding_users(db: Session, rows: list[dict[str, Any]]) -> None:
+    """Attach readable binding information to admin device list rows."""
+    user_ids = sorted({int(row["userId"]) for row in rows if row.get("userId") not in (None, "")})
+    if not user_ids:
+        return
+
+    statement = text(
+        """
+        select id, code, nick_name, phone
+        from app_user
+        where id in :user_ids and del_flag=0
+        """
+    ).bindparams(bindparam("user_ids", expanding=True))
+    users = db.execute(statement, {"user_ids": user_ids}).all()
+    user_map = {int(user.id): user for user in users}
+    for row in rows:
+        user_id = row.get("userId")
+        if user_id in (None, ""):
+            continue
+        user = user_map.get(int(user_id))
+        if user is None:
+            continue
+        row["boundUserName"] = user.nick_name
+        row["boundUserCode"] = user.code
+        row["boundUserPhone"] = user.phone
+
+
 @router.put("/user/changeStatus")
 async def app_user_change_status(request: Request, db: Session = Depends(get_db)):
     payload = await request.json()
@@ -1766,6 +1793,7 @@ def generic_list(resource: str, request: Request, db: Session = Depends(get_db))
     rows, total = list_rows(db, config["table"], query, page_num, page_size, config.get("like", set()))
     if resource == "device":
         ensure_rows_qrcode(rows)
+        enrich_device_binding_users(db, rows)
     return table(rows, total)
 
 

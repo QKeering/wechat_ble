@@ -391,6 +391,15 @@ export const getFamilyDashboard = (params: { memberId: number }, config = {}): P
 export const getFamilyRelationDashboard = (relationId: number, config = {}): Promise<FamilyDashboard> =>
   (uni as any).$uv.http.get(`/app/family/elders/${relationId}/health/overview`, config);
 
+export const getFamilyRelationVitalSign = (relationId: number, params: { date?: string }, config = {}) =>
+  (uni as any).$uv.http.get(`/app/family/elders/${relationId}/health/heart-rate`, { params, ...config });
+
+export const getFamilyRelationSleepOverview = (relationId: number, params: { date?: string }, config = {}) =>
+  (uni as any).$uv.http.get(`/app/family/elders/${relationId}/health/sleep`, { params, ...config });
+
+export const getFamilyRelationMotionOverview = (relationId: number, params: { date?: string }, config = {}) =>
+  (uni as any).$uv.http.get(`/app/family/elders/${relationId}/health/motion`, { params, ...config });
+
 export const getFamilyAlerts = (params: { memberId: number }, config = {}): Promise<FamilyAlert[]> =>
   (uni as any).$uv.http.get('/app/family/alert/list', { params, ...config });
 

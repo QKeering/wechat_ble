@@ -12,12 +12,20 @@ const NETWORK_ERROR_RE = /request:fail|net::|err_connection|network|网络请求
 const NETWORK_TIMEOUT_RE = /err_connection_timed_out|timeout|time\s*out|超时/i;
 const BLUETOOTH_PRIVACY_RE =
   /api\s+scope\s+is\s+not\s+declared\s+in\s+the\s+privacy\s+agreement|scope\.bluetooth.*privacy|privacy.*scope\.bluetooth/i;
+const PERMISSION_DENIED_RE = /permission\s+denied|auth\s+deny|access\s+denied|not\s+authorized|unauthorized/i;
+const DEVICE_NOT_FOUND_RE = /device.*not\s+found|no\s+device|not\s+found.*device/i;
+const CONNECTION_FAILED_RE = /connect(?:ion)?.*(?:fail|failed|closed|disconnect)|disconnected/i;
+const SERVICE_NOT_READY_RE = /service.*not\s+found|characteristic.*not\s+found|no\s+service|no\s+characteristic/i;
+const INVALID_PARAMETER_RE = /invalid\s+(?:param|parameter|argument)|parameter\s+error/i;
+const USER_FACING_ALLOWED_ENGLISH_RE =
+  /\b(?:AI|BLE|MAC|HRV|OTA|SDK|ID|URL|JSON|iOS|QKeer|L19|RW|SN|bpm|cm|kg|MB)\b/gi;
 
 export const BLUETOOTH_PRIVACY_ERROR_HINT = '请先同意小程序隐私保护指引后使用蓝牙';
 
 export const formatBleErrorMessage = (error: unknown, fallback = '设备暂时无响应，请重试') => {
   const message = pickErrorMessage(error);
-  if (!message) return fallback;
+  const localizedFallback = localizeFallback(fallback);
+  if (!message) return localizedFallback;
 
   const errorCode = getBleErrorCode(error);
   if (errorCode === '112' || BLUETOOTH_PRIVACY_RE.test(message)) {
@@ -50,7 +58,27 @@ export const formatBleErrorMessage = (error: unknown, fallback = '设备暂时�
     return '设备通信参数协商失败，请重连后重试';
   }
 
-  return message;
+  if (PERMISSION_DENIED_RE.test(message)) {
+    return '操作权限未开启，请在系统设置中允许后重试';
+  }
+
+  if (DEVICE_NOT_FOUND_RE.test(message)) {
+    return '未找到设备，请重新搜索后重试';
+  }
+
+  if (SERVICE_NOT_READY_RE.test(message)) {
+    return '设备服务未就绪，请重新连接后重试';
+  }
+
+  if (CONNECTION_FAILED_RE.test(message)) {
+    return '设备连接失败，请靠近戒指后重试';
+  }
+
+  if (INVALID_PARAMETER_RE.test(message)) {
+    return '提交的信息无效，请检查后重试';
+  }
+
+  return hasUntranslatedEnglish(message) ? localizedFallback : message;
 };
 
 export const isExpectedBleRuntimeError = (error: unknown) => {
@@ -104,4 +132,17 @@ const normalizeMessage = (value: unknown): string => {
   const message = String(value).trim();
   if (EMPTY_MESSAGES.has(message)) return '';
   return message;
+};
+
+const hasUntranslatedEnglish = (message: string) => {
+  const withoutAllowedTerms = message.replace(USER_FACING_ALLOWED_ENGLISH_RE, '');
+  return /[A-Za-z]{2,}/.test(withoutAllowedTerms);
+};
+
+const localizeFallback = (fallback: string) => {
+  const normalized = normalizeMessage(fallback);
+  if (!normalized || hasUntranslatedEnglish(normalized)) {
+    return '操作未完成，请稍后重试';
+  }
+  return normalized;
 };

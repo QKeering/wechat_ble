@@ -6,6 +6,7 @@ import { getBoundRingDevice } from '@/api';
 import { getBoundRingIdentity } from '@/utils/ringBinding';
 import { getRingBusinessDeviceName, useRingBusinessController } from '@/composables/useRingBusinessController';
 import { getRingDeviceStableIdentity } from '@/composables/useRingBleSdk';
+import { formatBleErrorMessage } from '@/utils/bleError';
 
 const memberId = ref(0);
 const relationId = ref(0);
@@ -121,7 +122,7 @@ const searchDevices = async () => {
   try {
     await ring.scanForBusinessDevices();
   } catch (error: any) {
-    uni.showToast({ title: String(error?.message || '搜索设备失败，请检查蓝牙'), icon: 'none' });
+    uni.showToast({ title: formatBleErrorMessage(error, '搜索设备失败，请检查蓝牙'), icon: 'none' });
   }
 };
 
@@ -163,11 +164,12 @@ const submit = async () => {
     await submitBind();
     finishBind();
   } catch (error: any) {
-    const message = String(error?.msg || error?.message || error?.data?.msg || '');
-    if (message.includes('已绑定其他健康档案')) {
-      confirmForceBind(message || '该设备已绑定其他健康档案');
+    const rawMessage = String(error?.msg || error?.message || error?.data?.msg || '');
+    const message = formatBleErrorMessage(error, '绑定失败，请稍后重试');
+    if (rawMessage.includes('已绑定其他健康档案')) {
+      confirmForceBind(rawMessage || '该设备已绑定其他健康档案');
     } else {
-      uni.showToast({ title: message || '绑定失败，请稍后重试', icon: 'none' });
+      uni.showToast({ title: message, icon: 'none' });
     }
   } finally {
     submitting.value = false;

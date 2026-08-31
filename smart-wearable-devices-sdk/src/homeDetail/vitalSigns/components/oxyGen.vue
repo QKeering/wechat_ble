@@ -26,9 +26,17 @@ import {
   MIN_VITAL_MEASUREMENT_DURATION_MS,
   MAX_VITAL_MEASUREMENT_DURATION_MS
 } from '@/utils/measurementDuration';
+import {
+  ensureRingWornBeforeMeasurement,
+  getRingMeasurementRecords,
+  resolveRingWearState,
+  showRingWearGuidance,
+  type RingWearState
+} from '@/utils/ringWearGate';
+import { showRingConnectionTroubleshootingPrompt } from '@/utils/ringConnectionTroubleshooting';
 const userStore = useUserStore();
 const ringStore = useRingStore();
-const { sendOxyGenCommand, refreshHealthData } = useRingBLE();
+const { sendOxyGenCommand, refreshHealthData, waitForParsedData, queryCurrentWearState } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
 const echarts = require('../../../static/echarts.min.js');
 const props = defineProps({
@@ -219,18 +227,87 @@ let measureTimeout: any = null;
 let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
 let measureStartedAt = 0;
-let userReceivedCursor = 0;
-let ringReceivedCursor = 0;
+let wearGatePending = false;
+let measurementRunToken = 0;
+let wearConfirmedForRun = false;
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
-const getStoreReceivedCursor = (store: { receivedData?: unknown[] }) =>
-  Array.isArray(store.receivedData) ? store.receivedData.length : 0;
 const getLatestSpo2ReadingFromStores = () =>
-  getLatestSpo2Reading(userStore, measureStartedAt, userReceivedCursor) ||
-  getLatestSpo2Reading(ringStore, measureStartedAt, ringReceivedCursor);
+  getLatestSpo2Reading(userStore, measureStartedAt) || getLatestSpo2Reading(ringStore, measureStartedAt);
+const getCurrentBloodOxygenWearState = () => {
+  const userMeasurementRecords = getRingMeasurementRecords(userStore.receivedData || [], measureStartedAt);
+  const ringMeasurementRecords = getRingMeasurementRecords(ringStore.receivedData || [], measureStartedAt);
+  const normalizedMeasurementRecords = getRingMeasurementRecords(ringStore.normalizedData || [], measureStartedAt);
+  const state = resolveRingWearState([...userMeasurementRecords, ...ringMeasurementRecords, ...normalizedMeasurementRecords]);
+  if (state === 'not_worn' || state === 'charging') return state;
+  return state === 'worn' || wearConfirmedForRun ? 'worn' : state;
+};
 const clearMeasureCompleteTimer = () => {
   if (!measureCompleteTimer) return;
   clearTimeout(measureCompleteTimer);
   measureCompleteTimer = null;
+};
+const stopMeasureForWearGate = async (wearState: Exclude<RingWearState, 'unknown' | 'worn'> | 'no_data') => {
+  if (measureStatus.value !== 'measuring' || wearGatePending) return;
+  measurementRunToken += 1;
+  wearGatePending = true;
+  if (measureTimeout) {
+    clearTimeout(measureTimeout);
+    measureTimeout = null;
+  }
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
+  popup.value?.close?.();
+  measureStatus.value = 'idle';
+  measureStartedAt = 0;
+  wearConfirmedForRun = false;
+  if (isRwDevice()) {
+    await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
+  }
+  showRingWearGuidance(wearState);
+  wearGatePending = false;
+};
+const startDirectBloodOxygenWearGate = (runToken: number) => {
+  const pendingStatus = waitForParsedData(
+    (parsed: any) => {
+      if (runToken !== measurementRunToken || measureStatus.value !== 'measuring') return false;
+      const sourceType = String(parsed?.sourceType || parsed?.type || parsed?.raw?.type || '');
+      if (sourceType === 'active_OxyGenMeasure') {
+        const wearState = resolveRingWearState([parsed]);
+        return wearState === 'not_worn' || wearState === 'charging';
+      }
+      const name = String(parsed?.name || parsed?.metrics?.name || parsed?.raw?.name || '').toLowerCase();
+      const statusCode = Number(parsed?.statusCode ?? parsed?.metrics?.statusCode ?? parsed?.raw?.statusCode);
+      return (
+        ['rw_health_data_ack', 'rw_health_data'].includes(sourceType) &&
+        /blood[_-]?oxygen|spo2|oxygen/.test(name) &&
+        statusCode === 0x31
+      );
+    },
+    MAX_VITAL_MEASUREMENT_DURATION_MS,
+    { replayRecent: false }
+  );
+  pendingStatus
+    .then((parsed: any) => {
+      if (runToken !== measurementRunToken || measureStatus.value !== 'measuring') return;
+      const wearState = resolveRingWearState([parsed]);
+      if (wearState === 'not_worn' || wearState === 'charging') {
+        void stopMeasureForWearGate(wearState);
+        return;
+      }
+      // RW NACK 当前固件没有更细的佩戴码，但可以确定本轮没有有效血氧。
+      measurementRunToken += 1;
+      if (measureTimeout) {
+        clearTimeout(measureTimeout);
+        measureTimeout = null;
+      }
+      clearMeasureCompleteTimer();
+      popup.value?.close?.();
+      measureStatus.value = 'idle';
+      measureStartedAt = 0;
+      void stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
+      showRingWearGuidance('no_data');
+    })
+    .catch(() => undefined);
 };
 const startMeasureFallbackTimer = () => {
   if (measureTimeout) {
@@ -245,6 +322,18 @@ const startMeasureFallbackTimer = () => {
 };
 const completeMeasureWithLatestReading = async () => {
   if (measureStatus.value !== 'measuring' || isMeasureCompletePending) return;
+  const wearState = getCurrentBloodOxygenWearState();
+  if (wearState === 'not_worn' || wearState === 'charging') {
+    await stopMeasureForWearGate(wearState);
+    return;
+  }
+  if (wearState !== 'worn') {
+    if (Date.now() - measureStartedAt >= MAX_VITAL_MEASUREMENT_DURATION_MS - 250) {
+      await stopMeasureForWearGate('no_data');
+    }
+    return;
+  }
+  if (!getLatestSpo2ReadingFromStores()) return;
   const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt);
   if (remainingMs > 0) {
     isMeasureCompletePending = true;
@@ -288,10 +377,12 @@ const startMeasure = async () => {
   }
   measurePopup.value?.close?.();
   if (!getSubmitDeviceMac(userStore, isIOS.value)) {
-    uni.showToast({ title: '请先连接设备', icon: 'none' });
-    (uni as any).$uv.route('/pagesA/mines/connectDevice');
+    await showRingConnectionTroubleshootingPrompt();
     return;
   }
+
+  if (!(await ensureRingWornBeforeMeasurement(() => queryCurrentWearState('blood_oxygen')))) return;
+  wearConfirmedForRun = true;
 
   // 清除可能残留的旧定时器
   if (measureTimeout) {
@@ -299,14 +390,16 @@ const startMeasure = async () => {
   }
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  wearGatePending = false;
 
   measureStatus.value = 'measuring';
-  userReceivedCursor = getStoreReceivedCursor(userStore);
-  ringReceivedCursor = getStoreReceivedCursor(ringStore);
+  measurementRunToken += 1;
+  const runToken = measurementRunToken;
   measureStartedAt = Date.now();
 
   await showMeasureWaitingPopup();
   startMeasureFallbackTimer();
+  startDirectBloodOxygenWearGate(runToken);
   // 发送测量命令
   try {
     if (isRwDevice()) {
@@ -327,15 +420,30 @@ const startMeasure = async () => {
     await completeMeasureWhenLatestReadingReady();
   } catch (error) {
     if (measureStatus.value !== 'measuring') return;
+    // 命令 Promise 可能在 watcher 执行前因 NACK/超时拒绝。
+    // 先用本轮回包判断佩戴状态，不要先清空 measureStartedAt。
+    const wearState = getCurrentBloodOxygenWearState();
+    if (wearState === 'not_worn' || wearState === 'charging') {
+      await stopMeasureForWearGate(wearState);
+      return;
+    }
     popup.value?.close();
     if (isRwDevice()) {
       await stopActiveRwMeasurement('RW VITAL');
     }
     measureStatus.value = 'idle';
+    measurementRunToken += 1;
     measureStartedAt = 0;
-    userReceivedCursor = 0;
-    ringReceivedCursor = 0;
-    uni.showToast({ title: formatBleErrorMessage(error, '测量指令发送失败'), icon: 'none' });
+    wearConfirmedForRun = false;
+    const errorText = formatBleErrorMessage(error, '测量指令发送失败');
+    const isConnectionFailure =
+      !userStore.isConnected || /连接|蓝牙|GATT|服务未就绪|not connected|10003|10004|10006/i.test(errorText);
+    if (isConnectionFailure) {
+      await showRingConnectionTroubleshootingPrompt();
+    } else {
+      // 设备已连接但本轮没有有效血氧，给出佩戴指引，不用技术错误提示覆盖门禁。
+      showRingWearGuidance('no_data');
+    }
     return;
   }
 
@@ -345,12 +453,18 @@ const startMeasure = async () => {
 };
 // 监听 userStore.receivedData 变化,
 watch(
-  () => [userStore.receivedData, userStore.latestMetrics, userStore.healthData],
+  () => [userStore.receivedData, userStore.latestMetrics, userStore.healthData, ringStore.receivedData, ringStore.normalizedData],
   (newData) => {
     if (measureStatus.value !== 'measuring') return;
 
+    const wearState = getCurrentBloodOxygenWearState();
+    if (wearState === 'not_worn' || wearState === 'charging') {
+      void stopMeasureForWearGate(wearState);
+      return;
+    }
+
     const latestReading = getLatestSpo2ReadingFromStores();
-    if (latestReading) {
+    if (wearState === 'worn' && latestReading) {
       void completeMeasureWithLatestReading();
       return;
     }
@@ -366,7 +480,7 @@ watch(
       // 无效数据（包括 0）跳过，由 latest?.bloodOxygen > 0 判断
       if (!(latest?.bloodOxygen > 0)) {
         measureStatus.value = 'idle';
-        uni.showToast({ title: '设备未返回有效测量值', icon: 'none' });
+        showRingWearGuidance('no_data');
         return;
       }
 
@@ -420,11 +534,15 @@ const jumpDetail = () => {
 };
 onLoad(() => {});
 onShow(async () => {
+  measurementRunToken += 1;
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  wearGatePending = false;
+  wearConfirmedForRun = false;
   measureStatus.value = 'idle';
 });
 onUnload(() => {
+  measurementRunToken += 1;
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }

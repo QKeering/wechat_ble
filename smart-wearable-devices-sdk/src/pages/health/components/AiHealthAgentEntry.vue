@@ -21,7 +21,7 @@ const emit = defineEmits<{
 <template>
   <view class="ai-health-agent-entry" @tap="emit('tap')">
     <view class="entry-copy">
-      <view class="entry-title">AI健康智能体</view>
+      <view class="entry-title">小轻AI健康智能体</view>
       <view class="entry-subtitle">会听你说，也更懂你的状态</view>
 
       <view class="entry-features">

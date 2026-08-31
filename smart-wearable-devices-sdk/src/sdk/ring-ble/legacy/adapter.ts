@@ -16,8 +16,10 @@ import {
   releaseLegacyBleCommandSessions
 } from './commandSession';
 import {
+  buildLegacyBloodOxygenMeasurementPayload,
   buildLegacyCommandByName,
   buildLegacyCommandBytes,
+  buildLegacyHeartRateMeasurementPayload,
   concatBytes,
   createLegacyFrameId,
   getLegacyPlatformType,
@@ -956,16 +958,25 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
   const initBluetooth = async () => {
     registerConnectionStateListener();
-    const stateSnapshot = await getBluetoothAdapterStateSnapshot('init-bluetooth');
+    // getBluetoothAdapterState before openBluetoothAdapter produces the
+    // removable "not init" noise seen on real devices. Open first; the
+    // existing foreground timeout/retry path still surfaces a user hint when
+    // the OS genuinely does not finish initialization.
+    const openResult = await openBluetoothAdapter();
+    const stateSnapshot = await getBluetoothAdapterStateSnapshot('init-bluetooth-after-open');
     if (stateSnapshot.available) {
       runtime?.onBluetoothReadyChange?.(true);
-      appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-adapter-open-skipped', {
-        reason: 'adapter-already-available',
+      appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-adapter-state-after-open', {
+        reason: 'open-succeeded-state-confirmed',
         discovering: stateSnapshot.discovering
       });
       return stateSnapshot;
     }
-    return openBluetoothAdapter();
+    appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-adapter-state-after-open-unconfirmed', {
+      source: stateSnapshot.source,
+      error: stateSnapshot.error
+    });
+    return openResult;
   };
 
   const checkBluetoothState = async () => {
@@ -1398,7 +1409,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         dataCharId: cached.dataCharId,
         writeType: legacyCommandWriteType
       });
-      return deviceInfo;
+      return { ...deviceInfo, notifyEnabled: true };
     } catch (error) {
       invalidateGattProfile(deviceId, sourceDevice);
       appendRingDiagnosticLog('L19 BLE', 'legacy-gatt-cache-invalidated', {
@@ -1522,7 +1533,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       appConnect: 'skipped-pre-sdk-flow'
     });
 
-    return deviceInfo;
+    return { ...deviceInfo, notifyEnabled: true };
   };
 
   const checkByRSSI = (deviceId: string) => {
@@ -2272,8 +2283,14 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     setupDataListener,
     clearDataListener,
     sendBatteryCommand: () => sendNamedCommand(LegacyRingCommand.Battery),
-    sendActiveMeasureCommand: () => sendNamedCommand(LegacyRingCommand.ActiveMeasure, 0x1e),
-    sendOxyGenCommand: () => sendNamedCommand(LegacyRingCommand.BloodOxygen, 0x1e),
+    sendActiveMeasureCommand: () => sendNamedCommand(
+      LegacyRingCommand.ActiveMeasure,
+      buildLegacyHeartRateMeasurementPayload()
+    ),
+    sendOxyGenCommand: () => sendNamedCommand(
+      LegacyRingCommand.BloodOxygen,
+      buildLegacyBloodOxygenMeasurementPayload()
+    ),
     sendBodyTemperatureCommand: () => sendNamedCommand(LegacyRingCommand.BodyTemperature, 0x00),
     sendFirmwareVersion: () => sendNamedCommand(LegacyRingCommand.HardwareVersion),
     sendSoftwareVersion: () => sendNamedCommand(LegacyRingCommand.SoftwareVersion),
@@ -2284,7 +2301,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     updateDeviceTime,
     sendAppConnectCommand,
     establishAppConnectSession,
-    sendCollectPeriodSettingCommand: (seconds = 1200) => sendNamedCommand(LegacyRingCommand.SetCollectPeriod, numberToUint32LE(seconds)),
+    sendCollectPeriodSettingCommand: (seconds = 1800) => sendNamedCommand(LegacyRingCommand.SetCollectPeriod, numberToUint32LE(seconds)),
     readCollectPeriodCommand: () => sendNamedCommand(LegacyRingCommand.ReadCollectPeriod),
     sendResetCommand: () => sendNamedCommand(LegacyRingCommand.FactoryReset),
     sendFactoryResetWithTimeCommand,

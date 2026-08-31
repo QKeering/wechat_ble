@@ -25,8 +25,15 @@ import {
   MIN_VITAL_MEASUREMENT_DURATION_MS,
   MAX_VITAL_MEASUREMENT_DURATION_MS
 } from '@/utils/measurementDuration';
+import {
+  ensureRingWornBeforeMeasurement,
+  getRingMeasurementRecords,
+  resolveRingWearState,
+  showRingWearGuidance,
+  type RingWearState
+} from '@/utils/ringWearGate';
 const userStore = useUserStore();
-const { sendActiveMeasureCommand, refreshHealthData } = useRingBLE();
+const { sendActiveMeasureCommand, refreshHealthData, queryCurrentWearState } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
 const echarts = require('../../../static/echarts.min.js');
 const props = defineProps({
@@ -243,11 +250,32 @@ let measureTimeout: any = null;
 let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
 let measureStartedAt = 0;
+let wearGatePending = false;
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
+const getCurrentHrvWearState = () =>
+  resolveRingWearState(getRingMeasurementRecords(userStore.receivedData || [], measureStartedAt));
 const clearMeasureCompleteTimer = () => {
   if (!measureCompleteTimer) return;
   clearTimeout(measureCompleteTimer);
   measureCompleteTimer = null;
+};
+const stopMeasureForWearGate = async (wearState: Exclude<RingWearState, 'unknown' | 'worn'> | 'no_data') => {
+  if (measureStatus.value !== 'measuring' || wearGatePending) return;
+  wearGatePending = true;
+  if (measureTimeout) {
+    clearTimeout(measureTimeout);
+    measureTimeout = null;
+  }
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
+  popup1.value?.close?.();
+  measureStatus.value = 'idle';
+  measureStartedAt = 0;
+  if (isRwDevice()) {
+    await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
+  }
+  showRingWearGuidance(wearState);
+  wearGatePending = false;
 };
 const startMeasureFallbackTimer = () => {
   if (measureTimeout) {
@@ -262,6 +290,18 @@ const startMeasureFallbackTimer = () => {
 };
 const completeMeasureWithLatestReading = async () => {
   if (measureStatus.value !== 'measuring' || isMeasureCompletePending) return;
+  const wearState = getCurrentHrvWearState();
+  if (wearState === 'not_worn' || wearState === 'charging') {
+    await stopMeasureForWearGate(wearState);
+    return;
+  }
+  if (wearState !== 'worn') {
+    if (Date.now() - measureStartedAt >= MAX_VITAL_MEASUREMENT_DURATION_MS - 250) {
+      await stopMeasureForWearGate('no_data');
+    }
+    return;
+  }
+  if (!getLatestHrvReading(userStore, measureStartedAt)) return;
   const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt);
   if (remainingMs > 0) {
     isMeasureCompletePending = true;
@@ -306,12 +346,15 @@ const startMeasure = async () => {
     return;
   }
 
+  if (!(await ensureRingWornBeforeMeasurement(() => queryCurrentWearState('heart_rate')))) return;
+
   // 清除可能残留的旧定时器
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  wearGatePending = false;
 
   measureStatus.value = 'measuring';
   measureStartedAt = Date.now();
@@ -359,19 +402,19 @@ watch(
   (newData) => {
     if (measureStatus.value !== 'measuring') return;
 
+    const wearState = getCurrentHrvWearState();
+    if (wearState === 'not_worn' || wearState === 'charging') {
+      void stopMeasureForWearGate(wearState);
+      return;
+    }
+
     const latestReading = getLatestHrvReading(userStore, measureStartedAt);
 
-    if (latestReading) {
+    if (wearState === 'worn' && latestReading) {
       void completeMeasureWithLatestReading();
       return;
     }
 
-    // 检查是否有已完成的测量（即使数据无效），由 measureStatus watch 中的 latest?.heartRateVariability 判断跳过
-    const hasCompletedMeasure = Array.isArray(userStore.receivedData) &&
-      (userStore.receivedData as any[]).some((d) => d.type === 'active_measure' && d.heartbeatStatus !== 0x03);
-    if (hasCompletedMeasure) {
-      void completeMeasureWithLatestReading();
-    }
   },
   { deep: true }
 );
@@ -383,7 +426,7 @@ watch(
       const latest: any = getLatestHrvReading(userStore, measureStartedAt);
       if (!latest?.heartRateVariability) {
         measureStatus.value = 'idle';
-        uni.showToast({ title: '设备未返回有效测量值', icon: 'none' });
+        showRingWearGuidance('no_data');
         return;
       }
 
@@ -431,6 +474,7 @@ onLoad(() => {});
 onShow(async () => {
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  wearGatePending = false;
   measureStatus.value = 'idle';
 });
 onUnload(() => {

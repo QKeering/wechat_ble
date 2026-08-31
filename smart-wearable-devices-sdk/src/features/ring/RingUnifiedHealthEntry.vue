@@ -107,7 +107,7 @@
     <view class="panel ai-lab-panel">
       <view class="panel-head">
         <view>
-          <text class="panel-title">AI Lab</text>
+          <text class="panel-title">AI实验室</text>
           <text class="ai-lab-subtitle">基于健康数据的智能体验</text>
         </view>
         <text class="panel-meta">L3</text>

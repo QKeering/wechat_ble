@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { onLoad } from '@dcloudio/uni-app'
 import { acceptFamilyInvite, getFamilyInvitePreview, type FamilyInvitePreview } from '@/common/api/family'
+import { formatBleErrorMessage } from '@/utils/bleError'
 
 const inviteCode = ref('')
 const preview = ref<FamilyInvitePreview | null>(null)
@@ -38,7 +39,7 @@ const confirmAccept = async () => {
     uni.showToast({ title: '已接受邀请', icon: 'success' })
     setTimeout(() => uni.redirectTo({ url: '/pages/family/family' }), 800)
   } catch (error: any) {
-    uni.showToast({ title: error?.message || '接受失败，请稍后重试', icon: 'none' })
+    uni.showToast({ title: formatBleErrorMessage(error, '接受失败，请稍后重试'), icon: 'none' })
   } finally {
     submitting.value = false
   }

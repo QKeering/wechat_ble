@@ -1,4 +1,5 @@
 import json
+import hashlib
 import random
 import string
 import time
@@ -20,7 +21,7 @@ PHONE_CODE_KEY = "qkeer:app_phone_code:"
 DEVICE_LINK_SERVICE_KEY = "qkeer:device_link_service:"
 DEVICE_NAME_KEY = "qkeer:device_name:"
 DEVICE_BLE_NAME_KEY = "qkeer:device_ble_name:"
-DEVICE_IDENTITY_CLEANUP_KEY = "qkeer:device_identity_cleanup:v1:"
+DEVICE_IDENTITY_CLEANUP_KEY = "qkeer:device_identity_cleanup:v2:"
 H5_TICKET_KEY = "qkeer:h5_ticket:"
 H5_SESSION_TTL_SECONDS = 30 * 60
 
@@ -53,13 +54,27 @@ def default_code(phone: str | None = None) -> str:
     return "RING" + tail + "".join(random.choice(string.digits) for _ in range(4))
 
 
+def shadow_phone_for_open_id(open_id: str | None) -> str:
+    """Return a stable, non-real 11-digit phone used by phone-NOT-NULL schemas."""
+    normalized = str(open_id or "").strip()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    suffix = int(digest[:16], 16) % 10_000_000_000
+    return f"9{suffix:010d}"
+
+
+def is_shadow_phone(value: Any) -> bool:
+    normalized = str(value or "").strip()
+    return len(normalized) == 11 and normalized.isdigit() and normalized.startswith("9")
+
+
 def create_user(db: Session, open_id: str | None = None, phone: str | None = None) -> dict[str, Any]:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    stored_phone = str(phone or "").strip() or shadow_phone_for_open_id(open_id)
     tail = (phone or open_id or "0000")[-4:]
     values = {
         "code": default_code(phone or open_id),
         "open_id": open_id,
-        "phone": phone,
+        "phone": stored_phone,
         "nick_name": f"用户{tail}",
         "sex": 2,
         "birthday": date(1990, 1, 1),
@@ -85,7 +100,7 @@ def create_user(db: Session, open_id: str | None = None, phone: str | None = Non
 def init_user_defaults(db: Session, user_id: int) -> None:
     if db.execute(text("select count(*) from user_goal where user_id=:user_id"), {"user_id": user_id}).scalar() == 0:
         db.execute(
-            text("insert into user_goal(user_id, sleep, step, calorie, motion_time) values(:user_id, 8, 8000, 300, 30)"),
+            text("insert into user_goal(user_id, sleep, step, calorie, motion_time) values(:user_id, 8, 8000, 2000, 30)"),
             {"user_id": user_id},
         )
     if db.execute(text("select count(*) from user_card_config where user_id=:user_id"), {"user_id": user_id}).scalar() == 0:
@@ -211,6 +226,9 @@ def login_by_phone(db: Session, redis: Redis | None, phone: str, code: str | Non
 
 
 def login_by_open_id(db: Session, redis: Redis | None, open_id: str, ip: str | None = None) -> str:
+    open_id = str(open_id or "").strip()
+    if not open_id:
+        raise AppAuthError("openid不能为空")
     user = user_by_open_id(db, open_id)
     if not user:
         user = create_user(db, open_id=open_id)

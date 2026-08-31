@@ -17,12 +17,6 @@
           @keyup.enter.native="handleQuery"
         />
       </el-form-item>
-      <el-form-item label="在线状态" prop="online">
-        <el-select v-model="queryParams.online" placeholder="在线状态" clearable>
-          <el-option label="离线" value="0" />
-          <el-option label="在线" value="1" />
-        </el-select>
-      </el-form-item>
       <el-form-item>
         <el-button type="primary" icon="el-icon-search" size="mini" @click="handleQuery">搜索</el-button>
         <el-button icon="el-icon-refresh" size="mini" @click="resetQuery">重置</el-button>
@@ -77,13 +71,16 @@
     <el-table v-loading="loading" :data="deviceList" @selection-change="handleSelectionChange">
       <el-table-column type="selection" width="55" align="center" />
       <el-table-column label="设备编号" align="center" prop="id" />
-      <!-- 如果未绑定用户，则显示未绑定 -->
-      <!--<el-table-column label="绑定用户编号" align="center" prop="userId" width="120">-->
-      <!--  <template slot-scope="scope">-->
-      <!--    <span v-if="scope.row.userId">{{ scope.row.userId }}</span>-->
-      <!--    <span v-else>未绑定</span>-->
-      <!--  </template>-->
-      <!--</el-table-column>-->
+      <el-table-column label="绑定用户" align="center" min-width="180">
+        <template slot-scope="scope">
+          <div v-if="scope.row.userId" class="bound-user-cell">
+            <span>{{ scope.row.boundUserName || scope.row.boundUserCode || ('用户' + scope.row.userId) }}</span>
+            <span class="bound-user-meta">ID：{{ scope.row.userId }}</span>
+            <span v-if="scope.row.boundUserPhone" class="bound-user-meta">{{ scope.row.boundUserPhone }}</span>
+          </div>
+          <span v-else class="text-muted">未绑定</span>
+        </template>
+      </el-table-column>
       <el-table-column label="设备型号" align="center" prop="modelKey" min-width="150" />
       <el-table-column label="设备名称" align="center" prop="deviceName" min-width="150" />
       <el-table-column label="设备大小" align="center" prop="deviceSize" min-width="150" />
@@ -102,18 +99,14 @@
           />
         </template>
       </el-table-column>
-      <el-table-column label="在线状态" align="center" prop="online" />
-      <el-table-column prop="online" label="状态" width="80">
-        <template slot-scope="scope">
-          <el-tag type="danger" v-if="scope.row.online === 0">离线</el-tag>
-          <el-tag type="success" v-if="scope.row.online === 1">在线</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="设备电量" align="center" prop="battery" />
-      <el-table-column label="最后同步地址" align="center" prop="lastSyncAddress" min-width="100"/>
       <el-table-column label="最后同步时间" align="center" prop="lastSyncTime" width="180">
         <template slot-scope="scope">
-          <span>{{ parseTime(scope.row.lastSyncTime, '{y}-{m}-{d}') }}</span>
+          <span>{{ scope.row.lastSyncTime ? parseTime(scope.row.lastSyncTime) : '-' }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="入库时间" align="center" prop="createTime" width="180">
+        <template slot-scope="scope">
+          <span>{{ scope.row.createTime ? parseTime(scope.row.createTime) : '-' }}</span>
         </template>
       </el-table-column>
       <el-table-column label="操作" align="center" class-name="small-padding fixed-width" fixed="right" width="200">
@@ -249,7 +242,6 @@ export default {
         pageSize: 10,
         deviceName: null,
         mac: null,
-        online: null,
       },
       // 表单参数
       form: {},
@@ -408,3 +400,17 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+.bound-user-cell {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.5;
+}
+
+.bound-user-meta,
+.text-muted {
+  color: #909399;
+  font-size: 12px;
+}
+</style>

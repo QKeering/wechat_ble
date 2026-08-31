@@ -1,10 +1,9 @@
 <script setup>
 import { ref } from 'vue';
 import { onPageScroll } from '@dcloudio/uni-app';
-import { wechatLogin } from '@/common/api/login';
+import { wxLogin } from '@/common/api/login';
 import { useUserStore } from '@/stores/user';
 import { formatBleErrorMessage } from '@/utils/bleError';
-import { getWechatProfileForNickname } from '@/utils/wechatProfile';
 
 const userStore = useUserStore();
 
@@ -48,42 +47,33 @@ const finishLogin = async (response, loginOptions = {}) => {
   }, 300);
 };
 
-const handleGetPhoneNumber = async (event) => {
+const handleWechatLogin = async () => {
   if (isLoggingIn.value) return;
   if (!agreementChecked.value) {
     showToast('请先同意用户协议');
     return;
   }
 
-  const phoneCode = event?.code || event?.detail?.code;
-  const errMsg = event?.errMsg || event?.detail?.errMsg || '';
-  if (!phoneCode) {
-    showToast(errMsg.includes('deny') ? '授权已取消' : '未获取到手机号授权');
-    return;
-  }
-
   isLoggingIn.value = true;
   try {
-    const wxProfile = await getWechatProfileForNickname();
     uni.showLoading({ title: '登录中' });
     const wxResult = await withTimeout(wx.login(), 10000, '登录凭证获取超时');
     if (!wxResult?.code) {
       throw new Error('登录凭证获取失败');
     }
     const response = await withTimeout(
-      wechatLogin(
+      wxLogin(
         {
-          openidCode: wxResult.code,
-          phoneCode
+          openIdCode: wxResult.code
         },
         { custom: { auth: false } }
       ),
       15000,
-      '授权登录超时，请稍后重试'
+      '微信登录超时，请稍后重试'
     );
-    await finishLogin(response, { wxProfile });
+    await finishLogin(response);
   } catch (error) {
-    showToast(getErrorMessage(error, '授权登录失败'));
+    showToast(getErrorMessage(error, '微信登录失败'));
   } finally {
     isLoggingIn.value = false;
     uni.hideLoading();
@@ -125,7 +115,7 @@ const leftClick = () => {
       </view>
 
       <view class="login-actions">
-        <button class="login-btn login-btn-primary" :disabled="isLoggingIn" hover-class="none" open-type="getPhoneNumber" @getphonenumber="handleGetPhoneNumber">
+        <button class="login-btn login-btn-primary" :disabled="isLoggingIn" hover-class="none" @click="handleWechatLogin">
           {{ isLoggingIn ? '登录中...' : '快捷登录' }}
         </button>
         <button class="login-mobile-entry" :disabled="isLoggingIn" hover-class="none" @click="handleMobileLoginEntry">手机验证登录</button>

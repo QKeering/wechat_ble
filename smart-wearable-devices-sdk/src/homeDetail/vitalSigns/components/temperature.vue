@@ -16,8 +16,15 @@ import {
   MIN_VITAL_MEASUREMENT_DURATION_MS,
   MAX_VITAL_MEASUREMENT_DURATION_MS
 } from '@/utils/measurementDuration';
+import {
+  ensureRingWornBeforeMeasurement,
+  getRingMeasurementRecords,
+  resolveRingWearState,
+  showRingWearGuidance,
+  type RingWearState
+} from '@/utils/ringWearGate';
 const userStore = useUserStore();
-const { sendBodyTemperatureCommand, refreshHealthData } = useRingBLE();
+const { sendBodyTemperatureCommand, refreshHealthData, queryCurrentWearState } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
 const echarts = require('../../../static/echarts.min.js');
 const props = defineProps({
@@ -42,11 +49,37 @@ let measureTimeout: any = null;
 let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
 let measureStartedAt = 0;
+let wearGatePending = false;
+let wearConfirmedForRun = false;
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
+const getCurrentTemperatureWearState = () => {
+  const state = resolveRingWearState(getRingMeasurementRecords(userStore.receivedData || [], measureStartedAt));
+  if (state === 'not_worn' || state === 'charging') return state;
+  return state === 'worn' || wearConfirmedForRun ? 'worn' : state;
+};
 const clearMeasureCompleteTimer = () => {
   if (!measureCompleteTimer) return;
   clearTimeout(measureCompleteTimer);
   measureCompleteTimer = null;
+};
+const stopMeasureForWearGate = async (wearState: Exclude<RingWearState, 'unknown' | 'worn'> | 'no_data') => {
+  if (measureStatus.value !== 'measuring' || wearGatePending) return;
+  wearGatePending = true;
+  if (measureTimeout) {
+    clearTimeout(measureTimeout);
+    measureTimeout = null;
+  }
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
+  popup.value?.close?.();
+  measureStatus.value = 'idle';
+  measureStartedAt = 0;
+  wearConfirmedForRun = false;
+  if (isRwDevice()) {
+    await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
+  }
+  showRingWearGuidance(wearState);
+  wearGatePending = false;
 };
 const startMeasureFallbackTimer = () => {
   if (measureTimeout) {
@@ -61,6 +94,18 @@ const startMeasureFallbackTimer = () => {
 };
 const completeMeasureWithLatestReading = async () => {
   if (measureStatus.value !== 'measuring' || isMeasureCompletePending) return;
+  const wearState = getCurrentTemperatureWearState();
+  if (wearState === 'not_worn' || wearState === 'charging') {
+    await stopMeasureForWearGate(wearState);
+    return;
+  }
+  if (wearState !== 'worn') {
+    if (Date.now() - measureStartedAt >= MAX_VITAL_MEASUREMENT_DURATION_MS - 250) {
+      await stopMeasureForWearGate('no_data');
+    }
+    return;
+  }
+  if (!getLatestTemperatureReading(userStore, measureStartedAt)) return;
   const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt);
   if (remainingMs > 0) {
     isMeasureCompletePending = true;
@@ -111,12 +156,16 @@ const startMeasure = async () => {
     return;
   }
 
+  if (!(await ensureRingWornBeforeMeasurement(() => queryCurrentWearState('temperature')))) return;
+  wearConfirmedForRun = true;
+
   // 清除可能残留的旧定时器
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  wearGatePending = false;
 
   measureStatus.value = 'measuring';
   measureStartedAt = Date.now();
@@ -151,6 +200,7 @@ const startMeasure = async () => {
     }
     measureStatus.value = 'idle';
     measureStartedAt = 0;
+    wearConfirmedForRun = false;
     uni.showToast({ title: formatBleErrorMessage(error, '测量指令发送失败'), icon: 'none' });
     return;
   }
@@ -165,15 +215,24 @@ watch(
   (newData) => {
     if (measureStatus.value !== 'measuring') return;
 
+    const currentMeasurementRecords = getRingMeasurementRecords(userStore.receivedData || [], measureStartedAt);
+    const wearState = resolveRingWearState(currentMeasurementRecords);
+    if (wearState === 'not_worn' || wearState === 'charging') {
+      void stopMeasureForWearGate(wearState);
+      return;
+    }
+
     const latestReading = getLatestTemperatureReading(userStore, measureStartedAt);
     // 如果完成测量, 则更新温度
-    const hasCompletedStatus = (userStore.receivedData || []).some((d) => d.type === 'active_Temperature' && d.temperatureStatus === 0x01);
-    if (latestReading) {
+    const hasCompletedStatus = currentMeasurementRecords.some(
+      (d: any) => d.type === 'active_Temperature' && d.temperatureStatus === 0x01
+    );
+    if (wearState === 'worn' && latestReading) {
       // 关闭测量定时器
       void completeMeasureWithLatestReading();
       return;
     }
-    if (hasCompletedStatus) {
+    if (wearState === 'worn' && hasCompletedStatus) {
       // 关闭测量定时器
       // uni.hideLoading();
       void completeMeasureWithLatestReading();
@@ -194,7 +253,7 @@ watch(
       const latest: any = getLatestTemperatureReading(userStore, measureStartedAt);
       if (!latest?.temperature) {
         measureStatus.value = 'idle';
-        uni.showToast({ title: '设备未返回有效测量值', icon: 'none' });
+        showRingWearGuidance('no_data');
         return;
       }
 
@@ -245,6 +304,8 @@ onShow(async () => {
   // 防止测量完成后返回到该页时，measureText重复跳转
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  wearGatePending = false;
+  wearConfirmedForRun = false;
   measureStatus.value = 'idle';
 });
 onUnload(() => {

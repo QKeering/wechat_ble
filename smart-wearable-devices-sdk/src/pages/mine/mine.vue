@@ -57,15 +57,11 @@ import CustomSteps from '@/components/customSteps.vue';
 import { clearFrontendRingBindingState, getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
 import { clearRwDiagnosticCommandLock, setRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
-import {
-  formatBatteryStatusForDisplay,
-  getRawBatteryPercent,
-  isBatteryChargingLike
-} from '@/utils/batteryDisplay';
-import { readBatteryDisplayCache, writeBatteryDisplayCache } from '@/utils/batteryCache';
 import { useUnifiedBatteryDisplay } from '@/composables/useUnifiedBatteryDisplay';
+import { writeBatteryDisplayCache } from '@/utils/batteryCache';
 import { isAnyDeviceSyncSessionRunning } from '@/utils/deviceSyncSession';
 import { getMiniProgramVersionText } from '@/utils/miniProgramVersion';
+import { showRingConnectionTroubleshootingPrompt } from '@/utils/ringConnectionTroubleshooting';
 const {
   deviceInfo: ringDeviceInfo,
   isDeviceConnected,
@@ -74,6 +70,7 @@ const {
   initBluetooth,
   ensureCommunicationReady,
   refreshHealthData,
+  sendBatteryCommand,
   sendBytes,
   waitForParsedData,
   waitForRwCompatHistoryIdle
@@ -96,6 +93,12 @@ const MINE_SHOW_SLEEP_PROTOCOL_PROBE = true;
 const MINE_SLEEP_PROTOCOL_PROBE_ISOLATION_LOCK = false;
 const MINE_SLEEP_PROTOCOL_PROBE_ISOLATION_OWNER = 'mine-sleep-probe-isolation';
 const RING_HISTORY_REPORT_RECENT_EVENT_COUNT = 8;
+let manualReconnectFailureCount = 0;
+const manualReconnectBusy = ref(false);
+// Battery Notify is the primary source. Only query the device when no fresh
+// Notify/cache update has arrived for five minutes.
+const MINE_BATTERY_PAGE_SHOW_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+const MINE_BATTERY_PAGE_SHOW_TIMEOUT_MS = 3000;
 const MINE_PROTOCOL_PROBE_DIAGNOSTIC_LOCK_TTL_MS = 10 * 60 * 1000;
 const MINE_PROTOCOL_PROBE_HISTORY_IDLE_TIMEOUT_MS = 20000;
 const MINE_PROTOCOL_PROBE_SINGLE_HISTORY_IDLE_TIMEOUT_MS = 45000;
@@ -223,8 +226,8 @@ const menuList: MineMenuItem[] = [
   },
   {
     icon: '/static/images/mine/menu04.png',
-    title: '\u5e38\u89c1\u95ee\u9898',
-    path: '/pagesA/mines/question'
+    title: '\u5728\u7ebf\u53cd\u9988',
+    path: '/pagesA/mines/onlineFeedback?source=mine_menu'
   }
 ];// const pullDownProgress// const pullDownProgress = ref(0);
 const minePageNavigating = ref(false);
@@ -2567,6 +2570,9 @@ const isLoading = computed(() =>
     isReconnecting: userStore.isReconnecting === true || ringStore.isReconnecting === true
   })
 );
+// 左侧蓝牙状态与右侧重连按钮必须使用同一份“正在连接”判定。
+// 自动恢复连接和用户手动重连任一进行中时，两边都显示连接中/重连中。
+const isReconnectDisplayLoading = computed(() => isLoading.value || manualReconnectBusy.value);
 const mineBluetoothStatus = computed(() => {
   if (isConnectedStatus.value) {
     return {
@@ -2575,7 +2581,7 @@ const mineBluetoothStatus = computed(() => {
       textColor: '#4C76F1'
     };
   }
-  if (isLoading.value) {
+  if (isReconnectDisplayLoading.value) {
     return {
       iconPath: '/static/images/mine/bluetooth01.png',
       text: '连接中',
@@ -2782,15 +2788,6 @@ const hasMineFirmwareSnapshot = () =>
 const displayBatteryValue = computed(() => {
   return unifiedBattery.displayText.value || '--';
 });
-const getMineBatteryStatusValue = (item: Record<string, any> | null | undefined) =>
-  item?.metrics?.chargingStatusText ??
-  item?.metrics?.batteryStatus ??
-  item?.metrics?.chargingStatus ??
-  item?.chargingStatusText ??
-  item?.chargeStatusText ??
-  item?.batteryStatus ??
-  item?.chargingStatus ??
-  item?.status;
 const getMineBatteryCacheUserId = () => {
   const userInfo = (userStore.userInfo || {}) as Record<string, any>;
   return String(userInfo.id || userInfo.user_id || userInfo.userId || userInfo.uid || (userStore as any).userId || 'anonymous');
@@ -2803,13 +2800,87 @@ const getMineBatteryCacheMac = () =>
   userStore.normalMac ||
   userStore.iosMacId ||
   '';
-function getMineBatteryCacheRecord() {
-  return readBatteryDisplayCache(getMineBatteryCacheUserId(), getMineBatteryCacheMac());
-}
-const getMineRawBatteryValue = () =>
-  unifiedBattery.rawValue.value;
-const getMineRawBatteryStatusValue = () => {
-  return unifiedBattery.status.value;
+let mineBatteryPageShowRefreshAt = 0;
+let mineBatteryPageShowRefreshPromise: Promise<void> | null = null;
+
+const refreshMineBatteryOnPageShow = (reason: string) => {
+  if (mineBatteryPageShowRefreshPromise) {
+    appendMineDiagnosticLog('battery-page-show-refresh-skip', { reason, skipReason: 'single-flight' });
+    return mineBatteryPageShowRefreshPromise;
+  }
+  const now = Date.now();
+  const observedAt = Number(unifiedBattery.observedAt.value || 0);
+  if (observedAt > 0 && now - observedAt < MINE_BATTERY_PAGE_SHOW_REFRESH_INTERVAL_MS) {
+    appendMineDiagnosticLog('battery-page-show-refresh-skip', {
+      reason,
+      skipReason: 'fresh-notify',
+      observedAgeMs: Math.max(0, now - observedAt)
+    });
+    return null;
+  }
+  if (now - mineBatteryPageShowRefreshAt < MINE_BATTERY_PAGE_SHOW_REFRESH_INTERVAL_MS) {
+    appendMineDiagnosticLog('battery-page-show-refresh-skip', { reason, skipReason: 'throttled' });
+    return null;
+  }
+  const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(ringDeviceInfo.value);
+  if (
+    historyExclusive.active ||
+    historySyncBusy.value ||
+    userStore.isSending === true ||
+    isAnyDeviceSyncSessionRunning(getMineBatteryCacheUserId(), getMineBatteryCacheMac()) ||
+    isAnyDeviceSyncSessionRunning(getMineBatteryCacheUserId())
+  ) {
+    appendMineDiagnosticLog('battery-page-show-refresh-skip', {
+      reason,
+      skipReason: historyExclusive.active ? 'history-exclusive' : 'device-sync-active'
+    });
+    return null;
+  }
+  if (!hasMineCommunicationReady()) {
+    appendMineDiagnosticLog('battery-page-show-refresh-skip', { reason, skipReason: 'not-ready' });
+    return null;
+  }
+
+  mineBatteryPageShowRefreshAt = now;
+  appendMineDiagnosticLog('battery-page-show-refresh-start', {
+    reason,
+    snapshot: getMineConnectionSnapshot()
+  });
+  mineBatteryPageShowRefreshPromise = sendBatteryCommand({
+    timeoutMs: MINE_BATTERY_PAGE_SHOW_TIMEOUT_MS,
+    retryReady: false
+  })
+    .then((parsed) => {
+      const item = (parsed || {}) as Record<string, any>;
+      const battery = item.battery ?? item.batteryLevel ?? item.value;
+      const status = item.status ?? item.batteryStatus ?? item.chargingStatusText;
+      const cached = writeBatteryDisplayCache({
+        userId: getMineBatteryCacheUserId(),
+        mac: getMineBatteryCacheMac(),
+        battery,
+        status,
+        source: 'mine-page-show-battery-read',
+        nowMs: Number(item.timestamp || Date.now())
+      });
+      appendMineDiagnosticLog('battery-page-show-refresh-result', {
+        reason,
+        battery,
+        batteryRawValue: item.batteryRawValue,
+        status,
+        displayText: cached?.displayText || unifiedBattery.displayText.value,
+        raw: item.raw
+      });
+    })
+    .catch((error) => {
+      appendMineDiagnosticLog('battery-page-show-refresh-failed', {
+        reason,
+        message: formatBleErrorMessage(error, '电量暂未返回')
+      });
+    })
+    .finally(() => {
+      mineBatteryPageShowRefreshPromise = null;
+    });
+  return mineBatteryPageShowRefreshPromise;
 };
 const isMineBatteryCharging = computed(() => {
   return unifiedBattery.isCharging.value;
@@ -2822,26 +2893,15 @@ const batteryPercent = computed(() => {
   if (!Number.isFinite(num)) return 0;
   return Math.min(Math.max(Math.round(num), 0), 100);
 });
-watch(
-  () => {
-    const rawBattery = getRawBatteryPercent(getMineRawBatteryValue());
-    const mac = getMineBatteryCacheMac();
-    const userId = getMineBatteryCacheUserId();
-    return rawBattery == null ? '' : `${userId}|${mac}|${Math.round(rawBattery)}`;
-  },
-  (signature) => {
-    if (!signature) return;
-    writeBatteryDisplayCache({
-      userId: getMineBatteryCacheUserId(),
-      mac: getMineBatteryCacheMac(),
-      battery: getMineRawBatteryValue(),
-      status: getMineRawBatteryStatusValue(),
-      source: 'mine-display'
-    });
-  }
-);
 // Whether cached battery info can be shown.
 const shouldShowBatteryInfo = computed(() => {
+  // A legacy L19 may emit the charging notification immediately before some
+  // phone stacks report a transient GATT disconnect. Charging is a real device
+  // state and must remain visible while background recovery runs; otherwise
+  // the UI incorrectly replaces "充电中" with a reconnect button.
+  if (isMineBatteryCharging.value) {
+    return true;
+  }
   if (isConnectedStatus.value) {
     return true;
   }
@@ -3250,8 +3310,12 @@ const restoreMineDeviceSnapshot = async (options: { refreshAfterRestore?: boolea
 };
 
 const connectAgain = async () => {
-  if (isLoading.value) return;
+  // 页面自动恢复连接可能会让全局 isLoading 短暂保持 true。这里不能因此吞掉
+  // 用户第一次点击，否则真机表现会整体晚一轮（第二次才提示、第三次才弹窗）。
+  if (manualReconnectBusy.value) return;
+  manualReconnectBusy.value = true;
   appendMineDiagnosticLog('manual-reconnect-start', {
+    previousFailureCount: manualReconnectFailureCount,
     snapshot: getMineConnectionSnapshot()
   });
   try {
@@ -3269,6 +3333,8 @@ const connectAgain = async () => {
     userStore.updateIsManualReconnecting(false);
     userStore.updateIsConnected(true);
     userStore.updateReconnectingStatus('2');
+    manualReconnectFailureCount = 0;
+    manualReconnectBusy.value = false;
     appendMineDiagnosticLog('manual-reconnect-skip-auto-refresh', {
       reason: 'manual-reconnect-only-connect',
       snapshot: getMineConnectionSnapshot()
@@ -3278,6 +3344,8 @@ const connectAgain = async () => {
       snapshot: getMineConnectionSnapshot()
     });
   } catch (error) {
+    manualReconnectFailureCount += 1;
+    manualReconnectBusy.value = false;
     userStore.updateIsManualReconnecting(false);
     userStore.updateReconnectingStatus('0');
     userStore.updateIsSending(false);
@@ -3286,11 +3354,24 @@ const connectAgain = async () => {
       snapshot: getMineConnectionSnapshot()
     });
     logMineBleIssue(error, '\u91cd\u8fde\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u8bbe\u5907\u72b6\u6001');
-    uni.showToast({
-      title: formatBleErrorMessage(error, '\u8bbe\u5907\u6682\u672a\u6062\u590d'),
-      icon: 'none',
-      duration: 3000
-    });
+    if (manualReconnectFailureCount >= 2) {
+      appendMineDiagnosticLog('manual-reconnect-troubleshooting-prompt', {
+        failureCount: manualReconnectFailureCount,
+        snapshot: getMineConnectionSnapshot()
+      });
+      await showRingConnectionTroubleshootingPrompt();
+    } else {
+      // BLE 初始化/自动连接内部可能仍留有 loading；先关闭并让出一个 UI tick，
+      // 确保第一次失败提示在真机上不会被遮住。
+      uni.hideLoading();
+      setTimeout(() => {
+        uni.showToast({
+          title: formatBleErrorMessage(error, '\u91cd\u8fde\u5931\u8d25\uff0c\u8bf7\u9760\u8fd1\u6212\u6307\u540e\u91cd\u8bd5'),
+          icon: 'none',
+          duration: 3000
+        });
+      }, 80);
+    }
   }
 };
 onShow(async () => {
@@ -3374,6 +3455,10 @@ onShow(async () => {
             reason: 'page-show-only-read-backend',
             snapshot: getMineConnectionSnapshot()
           });
+          // Passive battery Notify is authoritative. This call only performs a
+          // low-frequency fallback read after five minutes without a fresh
+          // battery observation and never restarts history synchronization.
+          void refreshMineBatteryOnPageShow('already-connected');
         } else {
           await restoreMineDeviceSnapshot();
         }
@@ -4317,12 +4402,12 @@ const handleMineRwL19Acceptance = async () => {
               <view v-else class="action-buttons">
                 <template v-if="shouldShowReconnectButton">
                   <uv-button
-                    :text="'\u70b9\u51fb\u91cd\u8fde'"
+                    :text="isReconnectDisplayLoading ? '\u91cd\u8fde\u4e2d...' : '\u70b9\u51fb\u91cd\u8fde'"
                     shape="circle"
                     color="#2E70FC"
                     loadingMode="circle"
-                    :loading="isLoading"
-                    :loadingText="isLoading ? '\u91cd\u8fde\u4e2d...' : '\u70b9\u51fb\u91cd\u8fde'"
+                    :loading="manualReconnectBusy"
+                    :loadingText="'\u91cd\u8fde\u4e2d...'"
                     :customTextStyle="{ 'font-size': '28rpx' }"
                     :customStyle="{
                       padding: '38rpx 0',

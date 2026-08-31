@@ -31,7 +31,14 @@ import {
   MIN_VITAL_MEASUREMENT_DURATION_MS,
   MAX_VITAL_MEASUREMENT_DURATION_MS
 } from '@/utils/measurementDuration';
-const { sendActiveMeasureCommand, refreshHealthData, ensureCommunicationReady } = useRingBLE();
+import {
+  ensureRingWornBeforeMeasurement,
+  getRingMeasurementRecords,
+  resolveRingWearState,
+  showRingWearGuidance,
+  type RingWearState
+} from '@/utils/ringWearGate';
+const { sendActiveMeasureCommand, refreshHealthData, ensureCommunicationReady, queryCurrentWearState } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
 const userStore = useUserStore();
 const echarts = require('../../../static/echarts.min.js');
@@ -225,19 +232,19 @@ watch(
   (newData) => {
     if (measureStatus.value !== 'measuring') return;
 
+    const wearState = getCurrentHeartRateWearState();
+    if (wearState === 'not_worn' || wearState === 'charging') {
+      void stopMeasureForWearGate(wearState);
+      return;
+    }
+
     const latestReading = getLatestHeartRateReading(userStore, measureStartedAt);
 
-    if (latestReading) {
+    if (wearState === 'worn' && latestReading) {
       void completeMeasureWithLatestReading();
       return;
     }
 
-    // 检查是否有已完成的测量（即使数据无效），由 measureStatus watch 中的 latest?.heartRate 判断跳过
-    const hasCompletedMeasure = Array.isArray(userStore.receivedData) &&
-      (userStore.receivedData as any[]).some((d) => d.type === 'active_measure' && d.heartbeatStatus !== 0x03);
-    if (hasCompletedMeasure) {
-      void completeMeasureWithLatestReading();
-    }
   },
   { deep: true }
 );
@@ -249,7 +256,7 @@ watch(
       const latest: any = getLatestHeartRateReading(userStore, measureStartedAt);
       if (!latest?.heartRate) {
         measureStatus.value = 'idle';
-        uni.showToast({ title: '设备未返回有效测量值', icon: 'none' });
+        showRingWearGuidance('no_data');
         return;
       }
 
@@ -288,9 +295,26 @@ let measureTimeout: any = null;
 let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
 let measureStartedAt = 0;
+let wearGatePending = false;
+let wearConfirmedForRun = false;
+let legacyMeasurementCompleted = false;
 const HEART_RATE_READY_TIMEOUT_MS = 12000;
 const measureChange = (e: any) => {};
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
+const getCurrentHeartRateWearState = () => {
+  const state = resolveRingWearState(getRingMeasurementRecords(userStore.receivedData || [], measureStartedAt));
+  if (state === 'not_worn' || state === 'charging') return state;
+  return state === 'worn' || wearConfirmedForRun ? 'worn' : state;
+};
+const isCurrentLegacyHeartRateMeasurementFinished = () => {
+  if (isRwDevice()) return true;
+  if (legacyMeasurementCompleted) return true;
+  return getRingMeasurementRecords(userStore.receivedData || [], measureStartedAt).some(
+    (record: any) =>
+      (record.type === 'active_measure_progress' && Number(record.progress) >= 100) ||
+      (record.type === 'active_measure' && Number(record.heartbeatStatus) === 0x01)
+  );
+};
 const getHeartRateMeasureSnapshot = () => ({
   deviceMac: getSubmitDeviceMac(userStore, isIOS.value),
   protocol: resolveRingProtocol(userStore.deviceInfo as any),
@@ -323,6 +347,26 @@ const clearMeasureCompleteTimer = () => {
   clearTimeout(measureCompleteTimer);
   measureCompleteTimer = null;
 };
+const stopMeasureForWearGate = async (wearState: Exclude<RingWearState, 'unknown' | 'worn'> | 'no_data') => {
+  if (measureStatus.value !== 'measuring' || wearGatePending) return;
+  wearGatePending = true;
+  if (measureTimeout) {
+    clearTimeout(measureTimeout);
+    measureTimeout = null;
+  }
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
+  popup.value?.close?.();
+  measureStatus.value = 'idle';
+  measureStartedAt = 0;
+  wearConfirmedForRun = false;
+  legacyMeasurementCompleted = false;
+  if (isRwDevice()) {
+    await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
+  }
+  showRingWearGuidance(wearState);
+  wearGatePending = false;
+};
 const startMeasureFallbackTimer = () => {
   if (measureTimeout) {
     clearTimeout(measureTimeout);
@@ -336,6 +380,21 @@ const startMeasureFallbackTimer = () => {
 };
 const completeMeasureWithLatestReading = async () => {
   if (measureStatus.value !== 'measuring' || isMeasureCompletePending) return;
+  const wearState = getCurrentHeartRateWearState();
+  if (wearState === 'not_worn' || wearState === 'charging') {
+    await stopMeasureForWearGate(wearState);
+    return;
+  }
+  if (wearState !== 'worn') {
+    if (Date.now() - measureStartedAt >= MAX_VITAL_MEASUREMENT_DURATION_MS - 250) {
+      await stopMeasureForWearGate('no_data');
+    }
+    return;
+  }
+  // legacy 在进度约 30 时已经会返回非零心率，但设备的 30 秒测量仍在进行。
+  // 必须等进度 100/完成状态后再关闭页面测量，避免把中间值误当最终值。
+  if (!isCurrentLegacyHeartRateMeasurementFinished()) return;
+  if (!getLatestHeartRateReading(userStore, measureStartedAt)) return;
   const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt);
   if (remainingMs > 0) {
     isMeasureCompletePending = true;
@@ -395,12 +454,20 @@ const startMeasure = async () => {
   }
   uni.hideLoading();
 
+  if (!(await ensureRingWornBeforeMeasurement(() => queryCurrentWearState('heart_rate')))) {
+    appendRingDiagnosticLog('VITAL HEART', 'heart-rate-wear-preflight-blocked', getHeartRateMeasureSnapshot());
+    return;
+  }
+  wearConfirmedForRun = true;
+  legacyMeasurementCompleted = false;
+
   // 清除可能残留的旧定时器
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  wearGatePending = false;
 
   measureStatus.value = 'measuring';
   measureStartedAt = Date.now();
@@ -425,7 +492,10 @@ const startMeasure = async () => {
       await completeMeasureWithLatestReading();
       return;
     }
-    await requestMetricRefresh(refreshHealthData, sendActiveMeasureCommand, { expectedSteps: 'heart_rate' });
+    const refreshResult: any = await requestMetricRefresh(refreshHealthData, sendActiveMeasureCommand, {
+      expectedSteps: 'heart_rate'
+    });
+    legacyMeasurementCompleted = Boolean(refreshResult?.measurementCompleted || refreshResult?.record);
     appendRingDiagnosticLog('VITAL HEART', 'heart-rate-command-dispatch-result', {
       ...getHeartRateMeasureSnapshot(),
       elapsedMs: Date.now() - measureStartedAt
@@ -439,6 +509,8 @@ const startMeasure = async () => {
     }
     measureStatus.value = 'idle';
     measureStartedAt = 0;
+    wearConfirmedForRun = false;
+    legacyMeasurementCompleted = false;
     appendRingDiagnosticLog('VITAL HEART', 'heart-rate-command-dispatch-failed', {
       ...getHeartRateMeasureSnapshot(),
       error: formatBleErrorMessage(error, '测量指令发送失败')
@@ -455,6 +527,9 @@ onLoad(async () => {});
 onShow(async () => {
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  wearGatePending = false;
+  wearConfirmedForRun = false;
+  legacyMeasurementCompleted = false;
   measureStatus.value = 'idle';
 });
 onUnload(() => {
@@ -525,7 +600,13 @@ onUnload(() => {
       </view>
     </uv-popup>
     <uv-popup round="20" ref="measurePopup" mode="center" @change="measureChange">
-      <Action :agreementChecked="agreementChecked" @update:agreementChecked="agreementChecked = $event" @confirm="startMeasure" @close="measurePopup?.close()" />
+      <Action
+        tipText="测量时绿灯将亮起30-60秒"
+        :agreementChecked="agreementChecked"
+        @update:agreementChecked="agreementChecked = $event"
+        @confirm="startMeasure"
+        @close="measurePopup?.close()"
+      />
     </uv-popup>
   </view>
 </template>

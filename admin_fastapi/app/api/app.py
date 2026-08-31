@@ -667,6 +667,19 @@ def resolved_sleep_awake_count(
     return sleep_awake_segment_count(intervals)
 
 
+DEFAULT_CALORIE_GOAL_KCAL = 2000
+MIN_CALORIE_GOAL_KCAL = 1200
+MAX_CALORIE_GOAL_KCAL = 3500
+
+
+def normalize_calorie_goal(value, fallback: int = DEFAULT_CALORIE_GOAL_KCAL) -> int:
+    try:
+        calorie = int(value or 0)
+    except (TypeError, ValueError):
+        calorie = 0
+    return calorie if MIN_CALORIE_GOAL_KCAL <= calorie <= MAX_CALORIE_GOAL_KCAL else fallback
+
+
 def user_goal_targets(db: Session, user_id: int) -> dict[str, int]:
     row = db.execute(
         text("select step, calorie, motion_time from user_goal where user_id=:user_id limit 1"),
@@ -683,7 +696,7 @@ def user_goal_targets(db: Session, user_id: int) -> dict[str, int]:
 
     return {
         "targetStep": positive_int("step", 8000),
-        "targetCalorie": positive_int("calorie", 300),
+        "targetCalorie": normalize_calorie_goal(data.get("calorie")),
         "targetMotionTime": positive_int("motion_time", 30),
     }
 
@@ -1641,6 +1654,7 @@ def build_vital_sign_payload(db: Session, user_id: int, date_value: str | None) 
         "hrvChart": raw_points(db, user_id, date_value, "hrv"),
         "hrvDisplay": hrv_display,
         "spo2Avg": spo2_avg,
+        "spo2Chart": raw_points(db, user_id, date_value, "spo2"),
         "temperatureAvg": temperature_avg,
         "stressAvg": stress_avg,
         "bloodSugar": blood_sugar_avg,
@@ -3444,9 +3458,12 @@ async def phone_login(request: Request, db: Session = Depends(get_db), redis: Re
 @router.post("/login/wxLogin")
 def wx_login(openIdCode: str, request: Request, db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
     try:
-        token = app_auth.login_by_open_id(db, redis, openIdCode, request_ip(request))
+        open_id = wechat_open_id(str(openIdCode or "").strip())
+        token = app_auth.login_by_open_id(db, redis, open_id, request_ip(request))
         return success({"token": token}, "鐧诲綍鎴愬姛")
     except app_auth.AppAuthError as exc:
+        return error(str(exc))
+    except RuntimeError as exc:
         return error(str(exc))
 
 
@@ -3520,7 +3537,10 @@ def user_agreement(db: Session = Depends(get_db)):
 
 @router.get("/user/getInfo")
 def user_info(user: dict = Depends(app_user)):
-    return success(user)
+    public_user = dict(user)
+    if app_auth.is_shadow_phone(public_user.get("phone")):
+        public_user["phone"] = ""
+    return success(public_user)
 
 
 @router.put("/user/update")
@@ -3553,7 +3573,19 @@ def user_goal_info(user: dict = Depends(app_user), db: Session = Depends(get_db)
         app_auth.init_user_defaults(db, int(user["id"]))
         db.commit()
         row = db.execute(text("select * from user_goal where user_id=:user_id limit 1"), {"user_id": user["id"]}).first()
-    return success(camelize_dict(dict(row._mapping)) if row else None)
+    if not row:
+        return success(None)
+    row_data = dict(row._mapping)
+    normalized_calorie = normalize_calorie_goal(row_data.get("calorie"))
+    if row_data.get("calorie") != normalized_calorie:
+        db.execute(
+            text("update user_goal set calorie=:calorie where user_id=:user_id"),
+            {"calorie": normalized_calorie, "user_id": user["id"]},
+        )
+        db.commit()
+        row_data["calorie"] = normalized_calorie
+    result = camelize_dict(row_data)
+    return success(result)
 
 
 @router.put("/user/goal/update")
@@ -3561,6 +3593,14 @@ async def user_goal_update(request: Request, user: dict = Depends(app_user), db:
     payload = await request.json()
     table = get_table("user_goal")
     values = clean_payload(table, payload)
+    if "calorie" in values:
+        try:
+            calorie = int(values["calorie"])
+        except (TypeError, ValueError):
+            return error("热量目标必须为整数千卡")
+        if calorie < MIN_CALORIE_GOAL_KCAL or calorie > MAX_CALORIE_GOAL_KCAL:
+            return error(f"热量目标需设置在 {MIN_CALORIE_GOAL_KCAL}-{MAX_CALORIE_GOAL_KCAL} 千卡之间")
+        values["calorie"] = calorie
     values["user_id"] = user["id"]
     existing = db.execute(text("select id from user_goal where user_id=:user_id"), {"user_id": user["id"]}).scalar()
     if existing:
@@ -3923,6 +3963,10 @@ def clean_device_text(value) -> str:
     return result
 
 
+def is_ble_only_device_name(value) -> bool:
+    return bool(re.fullmatch(r"HR\d+", clean_device_text(value), flags=re.IGNORECASE))
+
+
 def clean_device_response_values(value):
     if isinstance(value, dict):
         return {key: clean_device_response_values(item) for key, item in value.items()}
@@ -3957,8 +4001,10 @@ def migrate_dirty_device_identity_cache(row, user_id: int, db: Session, redis: R
     if redis_get_text(redis, marker_key):
         return False
 
-    db.execute(text("update device set device_name=null where id=:id and del_flag=0"), {"id": row_data.get("id")})
-    db.commit()
+    stored_device_name = clean_device_text(row_data.get("device_name"))
+    if is_ble_only_device_name(stored_device_name):
+        db.execute(text("update device set device_name=null where id=:id and del_flag=0"), {"id": row_data.get("id")})
+        db.commit()
     redis_delete_key(redis, f"{app_auth.DEVICE_NAME_KEY}{user_id}")
     redis_delete_key(redis, f"{app_auth.DEVICE_BLE_NAME_KEY}{user_id}")
     redis_delete_key(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user_id}")
@@ -3976,7 +4022,19 @@ def build_bound_device_response(row, user_id: int, redis: Redis | None = None, s
         service_id if service_id is not None else redis_get_text(redis, f"{app_auth.DEVICE_LINK_SERVICE_KEY}{user_id}")
     )
     model_name = clean_device_text(data.get("modelName") or data.get("productName"))
-    display_name = model_name or clean_device_text(device_name) or DEVICE_DISPLAY_NAME_FALLBACK
+    stored_device_name = clean_device_text(data.get("deviceName") or data.get("name"))
+    stored_display_name = "" if is_ble_only_device_name(stored_device_name) else stored_device_name
+    requested_device_name = clean_device_text(device_name)
+    requested_display_name = "" if is_ble_only_device_name(requested_device_name) else requested_device_name
+    display_name = stored_display_name or requested_display_name or model_name or DEVICE_DISPLAY_NAME_FALLBACK
+    device_size = data.get("deviceSize") if data.get("deviceSize") is not None else data.get("ringSize")
+    firmware_version = clean_device_text(data.get("firmwareVersion") or data.get("firmware_version"))
+    hardware_version = clean_device_text(data.get("hardwareVersion") or data.get("hardware_version"))
+    software_version = clean_device_text(
+        data.get("softwareVersion") or data.get("software_version") or data.get("uiVersion") or data.get("ui_version")
+    )
+    device_version = clean_device_text(data.get("deviceVersion") or data.get("version") or hardware_version)
+    serial_number = clean_device_text(data.get("sn") or data.get("serialNumber") or data.get("serial_number"))
     ble_name = clean_device_text(
         payload.get("bleName")
         or payload.get("ble_name")
@@ -3997,6 +4055,15 @@ def build_bound_device_response(row, user_id: int, redis: Redis | None = None, s
             "deviceName": display_name,
             "name": display_name,
             "bleName": ble_name or None,
+            "deviceSize": device_size,
+            "ringSize": device_size,
+            "firmwareVersion": firmware_version or None,
+            "hardwareVersion": hardware_version or None,
+            "softwareVersion": software_version or None,
+            "deviceVersion": device_version or None,
+            "version": device_version or None,
+            "sn": serial_number or None,
+            "serialNumber": serial_number or None,
             "serviceId": resolved_service_id or clean_device_text(data.get("serviceId") or payload.get("serviceId")),
             "protocol": clean_device_text(payload.get("protocol") or data.get("protocol")),
             "bindingVersion": data.get("updateTime") or data.get("createTime") or datetime.now().isoformat(timespec="seconds"),
@@ -4474,7 +4541,7 @@ def bind_device_authoritatively(payload: dict, user: dict, db: Session, redis: R
     device_row = db.execute(
         text(
             f"""
-            select d.id, d.user_id, d.model_id, m.model_name
+            select d.id, d.user_id, d.model_id, d.device_name, m.model_name
             from device d left join device_model m on m.id=d.model_id
             where lower(replace(replace(coalesce(d.mac,''), ':', ''), '-', ''))=:mac_norm and d.del_flag=0
             order by d.id desc limit 1
@@ -4484,7 +4551,8 @@ def bind_device_authoritatively(payload: dict, user: dict, db: Session, redis: R
     ).first()
     device_data = dict(device_row._mapping) if device_row else {}
     model_name = clean_device_text(device_data.get("model_name"))
-    device_name = model_name or DEVICE_DISPLAY_NAME_FALLBACK
+    stored_device_name = clean_device_text(device_data.get("device_name"))
+    device_name = ("" if is_ble_only_device_name(stored_device_name) else stored_device_name) or model_name or DEVICE_DISPLAY_NAME_FALLBACK
 
     current_mac_norm = normalize_device_mac_norm(current_device_data.get("mac"))
     target_device_id = device_data.get("id")
@@ -5068,11 +5136,35 @@ def family_sleep_overview(memberId: int, request: Request, user: dict = Depends(
     nap = values["NAP"]
     total_sleep_time = rem + light + deep + nap
     awake_count = resolved_sleep_awake_count(db, user_id, date_value, records, prefer_raw_sleep)
+    trend_end = date.fromisoformat(date_value)
+    trend_7d = []
+    for offset in range(6, -1, -1):
+        trend_date = trend_end - timedelta(days=offset)
+        trend_date_value = trend_date.isoformat()
+        trend_records = sleep_records(db, user_id, trend_date_value)
+        trend_values, _ = resolved_sleep_values(db, user_id, trend_date_value, trend_records)
+        trend_7d.append({
+            "date": trend_date_value,
+            "sleepDuration": (
+                trend_values["REM"]
+                + trend_values["LIGHT"]
+                + trend_values["DEEP"]
+                + trend_values["NAP"]
+            ),
+        })
     return localized_success({
         "sleepDuration": str(total_sleep_time),
         "sleepQuality": str(int(calculate_sleep_efficiency(awake, rem, light, deep, nap))),
         "sleepScore": calculate_sleep_score(awake, rem, light, deep, nap),
         "awakeCount": awake_count,
+        "deepSleepDuration": deep,
+        "lightSleepDuration": light,
+        "remSleepDuration": rem,
+        "napSleepDuration": nap,
+        "awakeDuration": awake,
+        "sleepStartTime": start_time,
+        "sleepEndTime": end_time,
+        "trend7d": trend_7d,
         "algorithm": {},
     })
 

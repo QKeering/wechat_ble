@@ -133,9 +133,11 @@ export const normalizeRingBoundDevice = <T extends AnyRecord | null | undefined>
     explicitBleName ||
     (getStringField(source, 'source') === 'remote' || modelName ? '' : getStringField(source, 'name', 'deviceName', 'device_name'));
   const responseDisplayName = getStringField(source, 'deviceName', 'device_name', 'name');
+  const isRemoteResponse = getStringField(source, 'source') === 'remote';
   const deviceName =
-    modelName ||
+    (isRemoteResponse ? responseDisplayName : '') ||
     (responseDisplayName && responseDisplayName !== bleName && !isBleOnlyDeviceName(responseDisplayName) ? responseDisplayName : '') ||
+    modelName ||
     DEFAULT_RING_DISPLAY_NAME;
   const normalizedAdvertis = advertis || mac ? { ...(advertis || {}), ...(mac ? { macInfo: getStringField(advertis, 'macInfo') || mac } : {}) } : undefined;
 

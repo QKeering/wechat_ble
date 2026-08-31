@@ -96,10 +96,11 @@ export const requestMetricRefresh = async (
       timeoutMs: options.timeoutMs ?? REALTIME_MEASURE_TIMEOUT_MS
     });
     if (shouldFallbackMetricRefresh(result, options.expectedSteps, options.acceptPending)) {
-      await fallbackCommand();
+      return await fallbackCommand();
     }
+    return result;
   } catch {
-    await fallbackCommand();
+    return await fallbackCommand();
   }
 };
 

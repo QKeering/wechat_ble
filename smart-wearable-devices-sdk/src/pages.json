@@ -101,6 +101,14 @@
           }
         },
         {
+          "path": "careDetail",
+          "style": {
+            "navigationBarTitleText": "亲友健康明细",
+            "navigationStyle": "custom",
+            "enablePullDownRefresh": true
+          }
+        },
+        {
           "path": "bindDevice",
           "style": {
             "navigationBarTitleText": "绑定父母设备",
