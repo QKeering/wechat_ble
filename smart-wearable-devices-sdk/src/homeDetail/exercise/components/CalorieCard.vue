@@ -16,10 +16,14 @@ const props = defineProps({
   sleepDurationMinutes: {
     type: Number,
     default: 0
+  },
+  goalInfo: {
+    type: Object as () => Record<string, any>,
+    default: () => ({})
   }
 });
 watch(
-  () => [props.motionCalorieObj, props.sleepDurationMinutes],
+  () => [props.motionCalorieObj, props.sleepDurationMinutes, props.goalInfo],
   async (newVal, oldVal) => {
     if (newVal !== oldVal) {
       await initChart();
@@ -33,9 +37,16 @@ const toPositiveNumber = (value: unknown) => {
   const numeric = Number(String(value).replace(/[^\d.-]/g, ''));
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
 };
+const targetCalorie = computed(() =>
+  normalizeCalorieGoalKcal(
+    toPositiveNumber(props.goalInfo?.calorie) ||
+      toPositiveNumber(props.goalInfo?.calorieTarget) ||
+      props.motionCalorieObj?.targetCalorie
+  )
+);
 const normalizeCalorie = (value: unknown) =>
   normalizeMotionCalorieKcal(value, {
-    targetCalorie: props.motionCalorieObj?.targetCalorie,
+    targetCalorie: targetCalorie.value,
     unit: props.motionCalorieObj?.calorieUnit
   }) || 0;
 const calorieUnit = computed(() => MOTION_CALORIE_DISPLAY_UNIT);
@@ -170,7 +181,7 @@ const initChart = async () => {
         <view class="calorie-icon"></view>
         <view>
           <text class="fs-48">{{ hasTotalCalorie ? totalCalorieText : '00' }}</text>
-          <text class="fs-28 ml-10 t-979797">/{{ normalizeCalorieGoalKcal(motionCalorieObj?.targetCalorie) }}{{ calorieUnit }}</text>
+          <text class="fs-28 ml-10 t-979797">/{{ targetCalorie }}{{ calorieUnit }}</text>
         </view>
       </view>
     </view>

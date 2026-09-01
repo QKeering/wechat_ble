@@ -23,7 +23,7 @@ from app.api.app import (
 from app.core.responses import success
 from app.db.redis import get_redis
 from app.db.session import get_db
-from app.services import health
+from app.services import ai_growth, health
 from app.services import app_auth
 
 
@@ -38,7 +38,13 @@ async def create_h5_session_ticket(
     redis=Depends(get_redis),
 ):
     payload = await request.json()
-    return success(app_auth.create_h5_ticket(redis, user, str(payload.get("sceneId") or "")))
+    app_access_token = str(request.headers.get("Authorization") or request.headers.get("token") or "").strip()
+    return success(app_auth.create_h5_ticket(
+        redis,
+        user,
+        str(payload.get("sceneId") or ""),
+        app_access_token,
+    ))
 
 
 @auth_router.post("/h5/auth/exchange")
@@ -315,13 +321,55 @@ def _insight_dimensions(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]
 
 
 @router.get("/insight/overview")
-def h5_insight_overview(user: dict = Depends(app_user), db: Session = Depends(get_db)):
-    items = recent_summaries(db, int(user["id"]), 7)
+def h5_insight_overview(
+    days: int = Query(default=7, ge=1, le=30),
+    user: dict = Depends(app_user),
+    db: Session = Depends(get_db),
+):
+    items = recent_summaries(db, int(user["id"]), days)
     return success({
         "dimensions": _insight_dimensions(items),
         "lastSyncTime": (items[0].get("updateTime") if items else None),
         "dataCompleteness": "complete" if len(items) >= 5 else ("partial" if items else "missing"),
+        "observationWindow": {
+            "days": days,
+            "validDays": len(items),
+            "missingDays": max(0, days - len(items)),
+        },
         "disclaimer": "指标仅作趋势观察，异常持续或身体明显不适时请咨询专业医生。",
+    })
+
+
+@router.get("/insight/lifestyle-summary")
+def h5_lifestyle_summary(
+    days: int = Query(default=7, ge=3, le=30),
+    user: dict = Depends(app_user),
+    db: Session = Depends(get_db),
+):
+    items = recent_summaries(db, int(user["id"]), days)
+    report_data = [
+        {
+            "date": str(item.get("recordDate") or ""),
+            "sleepScore": _integer(item.get("sleepScore")),
+            "sleepMinutes": _integer(item.get("sleepTotalTime") or item.get("sleepTotalMinutes")),
+            "stressScore": _integer(item.get("stressScore")),
+            "stressAvg": _number(item.get("stressAvg")),
+            "motionScore": _integer(item.get("motionScore")),
+            "steps": _integer(item.get("stepCount")),
+        }
+        for item in reversed(items)
+        if any(item.get(key) is not None for key in (
+            "sleepScore", "sleepTotalTime", "sleepTotalMinutes", "stressScore", "stressAvg", "motionScore", "stepCount"
+        ))
+    ]
+    try:
+        result = ai_growth.lifestyle_summary(report_data, days)
+    except ai_growth.GrowthAIError:
+        result = {"text": ai_growth.fallback_lifestyle_summary(report_data), "provider": "fallback", "model": "local-rule", "status": "provider_error"}
+    return success({
+        "text": result["text"], "validDays": len(report_data), "days": days,
+        "modelStatus": result.get("status"),
+        "disclaimer": "仅作生活方式趋势参考，不替代医疗诊断或治疗。",
     })
 
 

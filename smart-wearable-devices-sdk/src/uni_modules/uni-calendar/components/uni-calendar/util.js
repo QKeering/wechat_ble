@@ -6,7 +6,8 @@ class Calendar {
 		selected,
 		startDate,
 		endDate,
-		range
+		range,
+		adjacentMonthSelectable
 	} = {}) {
 		// 当前日期
 		this.date = this.getDate(new Date()) // 当前初入日期
@@ -17,6 +18,8 @@ class Calendar {
 		// 范围结束
 		this.endDate = endDate
 		this.range = range
+		// 相邻月份的补位日期默认可选，仍统一受开始、结束日期范围约束。
+		this.adjacentMonthSelectable = Boolean(adjacentMonthSelectable)
 		// 多选状态
 		this.cleanMultipleStatus()
 		// 每周日期
@@ -116,12 +119,8 @@ class Calendar {
 		let dateArr = []
 		for (let i = firstDay; i > 0; i--) {
 			const beforeDate = new Date(full.year, full.month - 1, -i + 1).getDate()
-			dateArr.push({
-				date: beforeDate,
-				month: full.month - 1,
-				lunar: this.getlunar(full.year, full.month - 1, beforeDate),
-				disable: true
-			})
+			const adjacentDate = this.getDate(new Date(full.year, Number(full.month) - 2, beforeDate))
+			dateArr.push(this._getAdjacentMonthDay(adjacentDate))
 		}
 		return dateArr
 	}
@@ -197,14 +196,29 @@ class Calendar {
 	_getNextMonthDays(surplus, full) {
 		let dateArr = []
 		for (let i = 1; i < surplus + 1; i++) {
-			dateArr.push({
-				date: i,
-				month: Number(full.month) + 1,
-				lunar: this.getlunar(full.year, Number(full.month) + 1, i),
-				disable: true
-			})
+			const adjacentDate = this.getDate(new Date(full.year, Number(full.month), i))
+			dateArr.push(this._getAdjacentMonthDay(adjacentDate))
 		}
 		return dateArr
+	}
+
+	_getAdjacentMonthDay(dateInfo) {
+		let enabledByRange = true
+		if (this.startDate) enabledByRange = enabledByRange && this.dateCompare(this.startDate, dateInfo.fullDate)
+		if (this.endDate) enabledByRange = enabledByRange && this.dateCompare(dateInfo.fullDate, this.endDate)
+		const info = this.selected && this.selected.find((item) => this.dateEqual(dateInfo.fullDate, item.date))
+		const data = {
+			fullDate: dateInfo.fullDate,
+			year: dateInfo.year,
+			month: dateInfo.month,
+			date: Number(dateInfo.date),
+			lunar: this.getlunar(dateInfo.year, Number(dateInfo.month), Number(dateInfo.date)),
+			disable: !this.adjacentMonthSelectable || !enabledByRange,
+			isDay: this.date.fullDate === dateInfo.fullDate,
+			isOtherMonth: true
+		}
+		if (info) data.extraInfo = info
+		return data
 	}
 
 	/**

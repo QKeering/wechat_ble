@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { onHide, onLoad, onUnload } from '@dcloudio/uni-app';
+import { onBackPress, onHide, onLoad, onUnload } from '@dcloudio/uni-app';
 import { useUserStore } from '@/stores/user';
 import { useRingBLE } from '@/composables/useRingBLE';
 import {
@@ -16,9 +16,7 @@ import {
 } from '@/composables/useRingMetricReadings';
 import { isRwForegroundMetric, useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
 import { formatBleErrorMessage, isExpectedBleRuntimeError } from '@/utils/bleError';
-import { getRemainingVitalMeasurementMs } from '@/utils/measurementDuration';
-import { showRingConnectionTroubleshootingPrompt } from '@/utils/ringConnectionTroubleshooting';
-import { ensureRingWornBeforeMeasurement, resolveRingWearState } from '@/utils/ringWearGate';
+import { resolveRingWearState } from '@/utils/ringWearGate';
 import { submitData } from '@/common/api/homeDetail';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
 import type { submitDataType } from '@/types/api/homeDetail';
@@ -31,6 +29,8 @@ const {
   sendActiveMeasureCommand,
   sendBodyTemperatureCommand,
   queryCurrentWearState,
+  clearPendingLegacyWearMeasurement,
+  waitForLegacyWearMeasurementIdle,
   refreshHealthData
 } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
@@ -38,7 +38,12 @@ const userStore = useUserStore();
 
 const measureStatus = ref<'idle' | 'measuring_hr' | 'measuring_hrv' | 'measuring_spo2' | 'measuring_temp' | 'completed'>('idle');
 const wearCheckStatus = ref<'idle' | 'checking' | 'worn'>('idle');
-const measurementGuidance = ref('');
+type MeasurementPreflightStage = 'connecting' | 'settling' | 'checking_wear' | 'measuring' | 'failed' | 'completed';
+const preflightStage = ref<MeasurementPreflightStage>('connecting');
+const measurementFailureTitle = ref('');
+const measurementFailureMessage = ref('');
+const isStartingMeasurement = ref(false);
+const isRetryQueued = ref(false);
 const heartRate = ref<number | null>(null);
 const heartRateVariability = ref<number | null>(null);
 const stressIndex = ref<number | null>(null);
@@ -53,19 +58,34 @@ let progressAnimationTimer: ReturnType<typeof setInterval> | null = null;
 let progressIntervals: ReturnType<typeof setInterval>[] = [];
 let measureTimeout: ReturnType<typeof setTimeout> | null = null;
 let rwAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
-let completionDelayTimer: ReturnType<typeof setTimeout> | null = null;
+let measurePhaseTimer: ReturnType<typeof setTimeout> | null = null;
+let flowTimeout: ReturnType<typeof setTimeout> | null = null;
 let measureStartedAt = 0;
 let measureStepStartedAt = 0;
 let measureStepReceivedDataStartIndex = 0;
 let measurementRunToken = 0;
-let guidanceVisible = false;
+let isCompletingMeasurement = false;
 
 const DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS = 35000;
-const RW_OPTIONAL_TEMPERATURE_TIMEOUT_MS = 8000;
-const RW_FULL_MEASURE_STEP_MIN_ACTIVE_MS = 6000;
+// 全面测量按“底层命令窗口”推进，而不是收到首帧就切换下一项。
+// 心率与 HRV 复用同一条 30 秒命令；血氧保持 30 秒；温度至少采集 20 秒。
+const HEART_HRV_MEASUREMENT_WINDOW_MS = 30_000;
+const HEART_HRV_UI_PHASE_MS = 15_000;
+const SPO2_MEASUREMENT_WINDOW_MS = 30_000;
+const TEMPERATURE_MEASUREMENT_WINDOW_MS = 20_000;
+const CONNECTION_READY_TIMEOUT_MS = 20_000;
+const WEAR_CHECK_TIMEOUT_MS = 10_000;
+const PREVIOUS_MEASUREMENT_SETTLE_TIMEOUT_MS = 12_000;
+// 用户在测量中主动重试时，旧固件没有可靠的强制停止指令。
+// 保持现有 BLE 连接，等待当前采集窗口自然释放后再复用同一连接启动下一轮。
+const RETRY_MEASUREMENT_SETTLE_TIMEOUT_MS = 45_000;
+const FULL_MEASUREMENT_TIMEOUT_MS = 180_000;
 
 const measureStatusText = computed(() => {
-  if (measurementGuidance.value) return '请正确佩戴戒指';
+  if (preflightStage.value === 'failed') return measurementFailureTitle.value || '测量未完成';
+  if (preflightStage.value === 'settling') return '正在结束上次测量';
+  if (preflightStage.value === 'checking_wear') return '正在确认佩戴';
+  if (preflightStage.value === 'connecting') return '正在连接设备';
   const statusMap = {
     idle: '准备测量',
     measuring_hr: '正在测量心率',
@@ -78,9 +98,11 @@ const measureStatusText = computed(() => {
 });
 
 const measureHintText = computed(() => {
-  if (measurementGuidance.value) return measurementGuidance.value;
+  if (preflightStage.value === 'failed') return measurementFailureMessage.value;
+  if (preflightStage.value === 'settling') return '正在等待戒指结束上一轮测量，请稍候';
+  if (preflightStage.value === 'checking_wear') return '请正确佩戴戒指并保持手部静止';
+  if (preflightStage.value === 'connecting') return '正在连接戒指，请稍候';
   if (measureStatus.value === 'completed') return '检测完成，正在整理报告';
-  if (measureStatus.value === 'idle') return '正在连接设备，请稍候';
   return '请保持手部静止，戒指贴合手指，测量期间不要退出页面';
 });
 
@@ -159,19 +181,8 @@ const getLatestStressData = (since = measureStartedAt) => getLatestStressReading
 const getLatestBloodSugarData = (since = measureStartedAt) => getLatestBloodSugarReading(userStore, since);
 const getLatestBloodPressureData = (since = measureStartedAt) => getLatestBloodPressureReading(userStore, since);
 const getLatestTemperatureData = (since = measureStartedAt) => getLatestTemperatureReading(userStore, since);
-const hasRwAnyRealtimeCoreData = () => Boolean(getLatestHeartRateData()?.heartRate || getLatestSpo2Data()?.bloodOxygen);
-
 const resolveWearCheckResult = (records: any[]) => resolveRingWearState(records);
 const getCurrentStepRecords = () => (userStore.receivedData || []).slice(measureStepReceivedDataStartIndex);
-const isLegacyHeartStepFinished = (records = getCurrentStepRecords()) =>
-  records.some(
-    (data: any) =>
-      (data.type === 'active_measure_progress' && Number(data.progress) >= 100) ||
-      (data.type === 'active_measure' && Number(data.heartbeatStatus) === 0x01)
-  );
-const isLegacyOxygenStepFinished = (records = getCurrentStepRecords()) =>
-  records.some((data: any) => data.type === 'active_OxyGenMeasure' && Number(data.bloodOxygenStatus) === 0x01);
-
 const clearRealtimeMeasurementRecords = () => {
   userStore.receivedData = (userStore.receivedData || []).filter(
     (data: any) => !['active_measure', 'active_OxyGenMeasure', 'active_Temperature'].includes(data.type)
@@ -195,16 +206,23 @@ const clearRwAdvanceTimer = () => {
   rwAdvanceTimer = null;
 };
 
-const clearCompletionDelayTimer = () => {
-  if (!completionDelayTimer) return;
-  clearTimeout(completionDelayTimer);
-  completionDelayTimer = null;
+const clearMeasurePhaseTimer = () => {
+  if (!measurePhaseTimer) return;
+  clearTimeout(measurePhaseTimer);
+  measurePhaseTimer = null;
+};
+
+const clearFlowTimeout = () => {
+  if (!flowTimeout) return;
+  clearTimeout(flowTimeout);
+  flowTimeout = null;
 };
 
 const clearMeasurementTimers = () => {
   clearMeasureTimeout();
   clearRwAdvanceTimer();
-  clearCompletionDelayTimer();
+  clearMeasurePhaseTimer();
+  clearFlowTimeout();
   if (progressAnimationTimer) {
     clearInterval(progressAnimationTimer);
     progressAnimationTimer = null;
@@ -214,14 +232,18 @@ const clearMeasurementTimers = () => {
 
 const stopMeasurementFlow = () => {
   measurementRunToken += 1;
+  isRetryQueued.value = false;
+  isCompletingMeasurement = false;
   clearMeasurementTimers();
   void stopActiveRwMeasurement('RW PAGE');
+  clearPendingLegacyWearMeasurement();
   wearCheckStatus.value = 'idle';
   measureStatus.value = 'idle';
 };
 
 const resetMeasurementFlowForNewRun = async () => {
   measurementRunToken += 1;
+  isCompletingMeasurement = false;
   clearMeasurementTimers();
   measureStartedAt = 0;
   measureStepStartedAt = 0;
@@ -229,11 +251,47 @@ const resetMeasurementFlowForNewRun = async () => {
   measureProgress.value = 0;
   wearCheckStatus.value = 'idle';
   measureStatus.value = 'idle';
-  await stopActiveRwMeasurement('RW PAGE').catch(() => undefined);
+  preflightStage.value = 'settling';
+  measurementFailureTitle.value = '';
+  measurementFailureMessage.value = '';
+  clearPendingLegacyWearMeasurement();
+  await withTimeout(stopActiveRwMeasurement('RW PAGE'), 4_000, '清理上一轮测量超时').catch(() => undefined);
+};
+
+const withTimeout = <T>(task: Promise<T>, timeoutMs: number, message: string) => {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([task, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  }) as Promise<T>;
+};
+
+const setMeasurementFailure = (title: string, message: string) => {
+  measurementRunToken += 1;
+  isRetryQueued.value = false;
+  isCompletingMeasurement = false;
+  clearMeasurementTimers();
+  void stopActiveRwMeasurement('RW PAGE');
+  clearPendingLegacyWearMeasurement();
+  wearCheckStatus.value = 'idle';
+  measureStatus.value = 'idle';
+  measureProgress.value = 0;
+  measurementFailureTitle.value = title;
+  measurementFailureMessage.value = message;
+  preflightStage.value = 'failed';
+};
+
+const armFullMeasurementTimeout = (runToken: number) => {
+  clearFlowTimeout();
+  flowTimeout = setTimeout(() => {
+    if (runToken !== measurementRunToken || preflightStage.value === 'completed') return;
+    setMeasurementFailure('测量超时', '本次测量未能在规定时间内完成，请保持戒指贴合手指后重新测量。');
+  }, FULL_MEASUREMENT_TIMEOUT_MS);
 };
 
 const showMeasurementGuidance = (kind: 'not_worn' | 'charging' | 'no_data') => {
-  if (guidanceVisible) return;
   const guidance = {
     not_worn: {
       title: '请先正确佩戴戒指',
@@ -248,53 +306,37 @@ const showMeasurementGuidance = (kind: 'not_worn' | 'charging' | 'no_data') => {
       content: '请确认戒指已戴在手指根部，传感器贴合皮肤，并保持手部静止后重新测量。'
     }
   }[kind];
-
-  stopMeasurementFlow();
-  measureProgress.value = 0;
-  measurementGuidance.value = guidance.content;
-  guidanceVisible = true;
-  uni.showModal({
-    title: guidance.title,
-    content: guidance.content,
-    confirmText: '重新测量',
-    cancelText: '稍后再试',
-    success: (result) => {
-      guidanceVisible = false;
-      if (result.confirm) {
-        void handleMeasure();
-        return;
-      }
-      uni.navigateBack();
-    },
-    fail: () => {
-      guidanceVisible = false;
-    }
-  });
+  setMeasurementFailure(guidance.title, guidance.content);
 };
 
-const sendMeasurementCommand = async (task: () => Promise<unknown>, expectedSteps: string | string[]) => {
+const sendMeasurementCommand = async (
+  task: () => Promise<unknown>,
+  expectedSteps: string | string[],
+  minActiveMs: number
+) => {
   try {
     const expectedMetric = Array.isArray(expectedSteps) ? expectedSteps[0] : expectedSteps;
     if (isRwDevice() && isRwForegroundMetric(expectedMetric)) {
       await runRwForegroundMeasurement(expectedMetric, {
         startedAt: measureStepStartedAt || measureStartedAt,
-        minActiveMs: RW_FULL_MEASURE_STEP_MIN_ACTIVE_MS,
+        minActiveMs,
         measureStatus: () => measureStatus.value,
         source: 'RW PAGE'
       });
-      return;
+      return true;
     }
     await requestMetricRefresh(refreshHealthData, task, { expectedSteps });
+    return true;
   } catch (error) {
     if (!isExpectedBleRuntimeError(error)) {
       formatBleErrorMessage(error);
     }
     if (wearCheckStatus.value === 'checking') {
       showMeasurementGuidance('no_data');
-      return;
+      return false;
     }
-    stopMeasurementFlow();
-    uni.showToast({ title: '测量指令发送失败', icon: 'none' });
+    setMeasurementFailure('测量指令发送失败', '戒指未能开始本轮测量，请保持设备连接后重新测量。');
+    return false;
   }
 };
 
@@ -315,13 +357,15 @@ const quickProgressToCompletionPending = () => {
   }, 50);
 };
 
-const advanceRwMeasureSoon = (next: () => void, delay = 300) => {
+const advanceMeasureAtWindowEnd = (next: () => void, minActiveMs: number, delay = 300) => {
   clearMeasureTimeout();
-  clearAllProgressIntervals();
-  clearRwAdvanceTimer();
-  const stepRemainingMs = isRwDevice() ? Math.max(0, RW_FULL_MEASURE_STEP_MIN_ACTIVE_MS - (Date.now() - measureStepStartedAt)) : 0;
+  // Promise 回调与 store watcher 可能同时发现有效值；只保留第一次推进计划，
+  // 避免重复重置定时器导致阶段等待时间被不断延长。
+  if (rwAdvanceTimer) return;
+  const stepRemainingMs = Math.max(0, minActiveMs - (Date.now() - measureStepStartedAt));
   rwAdvanceTimer = setTimeout(() => {
     rwAdvanceTimer = null;
+    clearAllProgressIntervals();
     next();
   }, Math.max(delay, stepRemainingMs));
 };
@@ -352,6 +396,27 @@ const beginMeasurementStep = (status: typeof measureStatus.value) => {
   measureStepReceivedDataStartIndex = (userStore.receivedData || []).length;
 };
 
+const freezeHeartHrvWindowResults = (startedAt = measureStepStartedAt) => {
+  const latestHeartRate = normalizeIntegerMetric(getLatestHeartRateData(startedAt)?.heartRate);
+  const latestHrv = normalizeIntegerMetric(getLatestHrvData(startedAt)?.heartRateVariability);
+  const latestStress = normalizeIntegerMetric(
+    getLatestStressData(startedAt)?.stressIndex ?? getLatestStressData(startedAt)?.stress
+  );
+  if (latestHeartRate != null) heartRate.value = latestHeartRate;
+  if (latestHrv != null) heartRateVariability.value = latestHrv;
+  if (latestStress != null) stressIndex.value = latestStress;
+};
+
+const freezeSpo2WindowResult = (startedAt = measureStepStartedAt) => {
+  const latestSpo2 = normalizeIntegerMetric(getLatestSpo2Data(startedAt)?.bloodOxygen);
+  if (latestSpo2 != null) spo2Value.value = latestSpo2;
+};
+
+const freezeTemperatureWindowResult = (startedAt = measureStepStartedAt) => {
+  const latestTemperature = normalizeTemperatureMetric(getLatestTemperatureData(startedAt)?.temperature);
+  if (latestTemperature != null) temperature.value = latestTemperature;
+};
+
 const startHrMeasurement = () => {
   const runToken = measurementRunToken;
   // handleMeasure 的硬件前置门禁已确认本轮正确佩戴。不能在正式复用同一条
@@ -362,70 +427,115 @@ const startHrMeasurement = () => {
   const stepStartedAt = measureStepStartedAt;
   measureProgress.value = 0;
   clearAllProgressIntervals();
-  void sendMeasurementCommand(sendActiveMeasureCommand, 'heart_rate').then(() => {
+  clearMeasurePhaseTimer();
+  if (!isRwDevice()) {
+    measurePhaseTimer = setTimeout(() => {
+      measurePhaseTimer = null;
+      if (runToken !== measurementRunToken || measureStatus.value !== 'measuring_hr') return;
+      startHrvMeasurement();
+    }, HEART_HRV_UI_PHASE_MS);
+  }
+  void sendMeasurementCommand(
+    sendActiveMeasureCommand,
+    isRwDevice() ? 'heart_rate' : ['heart_rate', 'hrv'],
+    HEART_HRV_MEASUREMENT_WINDOW_MS
+  ).then((started) => {
     if (
+      started &&
       runToken === measurementRunToken &&
-      isRwDevice() &&
-      measureStatus.value === 'measuring_hr' &&
-      resolveWearCheckResult((userStore.receivedData || []).slice(measureStepReceivedDataStartIndex)) === 'worn' &&
-      getLatestHeartRateData(stepStartedAt)?.heartRate
+      (isRwDevice() ? measureStatus.value === 'measuring_hr' : ['measuring_hr', 'measuring_hrv'].includes(measureStatus.value))
     ) {
       wearCheckStatus.value = 'worn';
-      startHrvMeasurement();
+      advanceMeasureAtWindowEnd(() => {
+        if (isRwDevice()) {
+          if (measureStatus.value !== 'measuring_hr') return;
+          freezeHeartHrvWindowResults(stepStartedAt);
+          startHrvMeasurement();
+          return;
+        }
+        if (!['measuring_hr', 'measuring_hrv'].includes(measureStatus.value)) return;
+        freezeHeartHrvWindowResults(stepStartedAt);
+        startSpo2Measurement();
+      }, HEART_HRV_MEASUREMENT_WINDOW_MS);
     }
   });
   pushProgressInterval(25, 'measuring_hr');
   measureTimeout = setTimeout(() => {
-    if (runToken !== measurementRunToken || measureStatus.value !== 'measuring_hr') return;
+    if (runToken !== measurementRunToken || !['measuring_hr', 'measuring_hrv'].includes(measureStatus.value)) return;
     if (wearCheckStatus.value === 'checking') {
       showMeasurementGuidance('no_data');
       return;
     }
-    startHrvMeasurement();
+    freezeHeartHrvWindowResults(stepStartedAt);
+    if (isRwDevice() && measureStatus.value === 'measuring_hr') startHrvMeasurement();
+    else startSpo2Measurement();
   }, DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS);
 };
 
 const startHrvMeasurement = () => {
+  if (measureStatus.value !== 'measuring_hr') return;
+  measureProgress.value = Math.max(measureProgress.value, 25);
+  clearAllProgressIntervals();
+  if (!isRwDevice()) {
+    // 旧协议 HRV 与心率来自同一条正式测量命令。这里只切换 UI 阶段，
+    // 不重置采集起点，也绝不再次下发命令。
+    measureStatus.value = 'measuring_hrv';
+    pushProgressInterval(50, 'measuring_hrv');
+    return;
+  }
+
   const runToken = measurementRunToken;
   beginMeasurementStep('measuring_hrv');
   const stepStartedAt = measureStepStartedAt;
-  clearAllProgressIntervals();
   clearMeasureTimeout();
-  void sendMeasurementCommand(sendActiveMeasureCommand, 'hrv').then(() => {
-    if (
-      runToken === measurementRunToken &&
-      isRwDevice() &&
-      measureStatus.value === 'measuring_hrv' &&
-      getLatestHrvData(stepStartedAt)?.heartRateVariability
-    ) {
+  void sendMeasurementCommand(
+    sendActiveMeasureCommand,
+    'hrv',
+    HEART_HRV_MEASUREMENT_WINDOW_MS
+  ).then((started) => {
+    if (!started || runToken !== measurementRunToken || measureStatus.value !== 'measuring_hrv') return;
+    advanceMeasureAtWindowEnd(() => {
+      if (measureStatus.value !== 'measuring_hrv') return;
+      freezeHeartHrvWindowResults(stepStartedAt);
       startSpo2Measurement();
-    }
+    }, HEART_HRV_MEASUREMENT_WINDOW_MS, 500);
   });
   pushProgressInterval(50, 'measuring_hrv');
   measureTimeout = setTimeout(() => {
-    if (runToken === measurementRunToken && measureStatus.value === 'measuring_hrv') startSpo2Measurement();
+    if (runToken !== measurementRunToken || measureStatus.value !== 'measuring_hrv') return;
+    freezeHeartHrvWindowResults(stepStartedAt);
+    startSpo2Measurement();
   }, DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS);
 };
 
 const startSpo2Measurement = () => {
   const runToken = measurementRunToken;
+  clearMeasurePhaseTimer();
   beginMeasurementStep('measuring_spo2');
   const stepStartedAt = measureStepStartedAt;
   clearAllProgressIntervals();
   clearMeasureTimeout();
-  void sendMeasurementCommand(sendOxyGenCommand, 'blood_oxygen').then(() => {
+  void sendMeasurementCommand(
+    sendOxyGenCommand,
+    'blood_oxygen',
+    SPO2_MEASUREMENT_WINDOW_MS
+  ).then((started) => {
     if (
+      started &&
       runToken === measurementRunToken &&
-      isRwDevice() &&
-      measureStatus.value === 'measuring_spo2' &&
-      getLatestSpo2Data(stepStartedAt)?.bloodOxygen
+      measureStatus.value === 'measuring_spo2'
     ) {
-      startTemperatureMeasurement();
+      advanceMeasureAtWindowEnd(() => {
+        if (measureStatus.value !== 'measuring_spo2') return;
+        freezeSpo2WindowResult(stepStartedAt);
+        startTemperatureMeasurement();
+      }, SPO2_MEASUREMENT_WINDOW_MS, 500);
     }
   });
   pushProgressInterval(75, 'measuring_spo2');
   measureTimeout = setTimeout(() => {
     if (runToken === measurementRunToken && measureStatus.value === 'measuring_spo2') {
+      freezeSpo2WindowResult(stepStartedAt);
       startTemperatureMeasurement();
     }
   }, DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS);
@@ -437,44 +547,60 @@ const startTemperatureMeasurement = () => {
   const stepStartedAt = measureStepStartedAt;
   clearAllProgressIntervals();
   clearMeasureTimeout();
-  void sendMeasurementCommand(sendBodyTemperatureCommand, 'temperature').then(() => {
+  void sendMeasurementCommand(
+    sendBodyTemperatureCommand,
+    'temperature',
+    TEMPERATURE_MEASUREMENT_WINDOW_MS
+  ).then((started) => {
     if (
+      started &&
       runToken === measurementRunToken &&
-      isRwDevice() &&
       measureStatus.value === 'measuring_temp' &&
-      getLatestTemperatureData(stepStartedAt)?.temperature
+      (isRwDevice() || getCurrentStepRecords().some(
+        (data: any) => data.type === 'active_Temperature' && data.temperatureStatus === 0x01
+      ))
     ) {
-      completeMeasurement();
+      quickProgressToCompletionPending();
+      advanceMeasureAtWindowEnd(() => {
+        if (measureStatus.value !== 'measuring_temp') return;
+        freezeTemperatureWindowResult(stepStartedAt);
+        void completeMeasurement();
+      }, TEMPERATURE_MEASUREMENT_WINDOW_MS, 500);
     }
   });
   pushProgressInterval(99, 'measuring_temp');
   measureTimeout = setTimeout(() => {
-    if (runToken === measurementRunToken && measureStatus.value === 'measuring_temp') completeMeasurement();
-  }, isRwDevice() && hasRwAnyRealtimeCoreData() ? RW_OPTIONAL_TEMPERATURE_TIMEOUT_MS : DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS);
+    if (runToken === measurementRunToken && measureStatus.value === 'measuring_temp') {
+      freezeTemperatureWindowResult(stepStartedAt);
+      void completeMeasurement();
+    }
+  }, DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS);
 };
 
-const completeMeasurement = () => {
-  if (measureStatus.value === 'completed') return;
-  const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt);
-  if (remainingMs > 0) {
-    if (completionDelayTimer) return;
-    completionDelayTimer = setTimeout(() => {
-      completionDelayTimer = null;
-      completeMeasurement();
-    }, remainingMs);
-    return;
-  }
+const completeMeasurement = async () => {
+  if (measureStatus.value === 'completed' || isCompletingMeasurement) return;
+  isCompletingMeasurement = true;
+  const runToken = measurementRunToken;
   clearMeasureTimeout();
   clearRwAdvanceTimer();
-  clearCompletionDelayTimer();
+  clearMeasurePhaseTimer();
   if (progressAnimationTimer) {
     clearInterval(progressAnimationTimer);
     progressAnimationTimer = null;
   }
   clearAllProgressIntervals();
-  void stopActiveRwMeasurement('RW PAGE');
+  clearFlowTimeout();
+  // 先释放当前协议的测量占用，再把页面置为完成；结果页不能早于 BLE 资源释放。
+  await withTimeout(stopActiveRwMeasurement('RW PAGE'), 4_000, '结束测量超时').catch(() => undefined);
+  if (runToken !== measurementRunToken) {
+    isCompletingMeasurement = false;
+    return;
+  }
+  clearPendingLegacyWearMeasurement();
   measureProgress.value = 100;
   measureStatus.value = 'completed';
+  preflightStage.value = 'completed';
+  isCompletingMeasurement = false;
 };
 
 watch(
@@ -496,79 +622,41 @@ watch(
       wearCheckStatus.value = 'worn';
     }
 
-    if (
-      isRwDevice() &&
-      wearCheckStatus.value === 'worn' &&
-      measureStatus.value === 'measuring_hr' &&
-      getLatestHeartRateData(measureStepStartedAt)?.heartRate
-    ) {
-      measureProgress.value = Math.max(measureProgress.value, 25);
-      advanceRwMeasureSoon(() => {
-        if (measureStatus.value === 'measuring_hr') startHrvMeasurement();
-      });
-      return;
-    }
-
-    if (isRwDevice() && measureStatus.value === 'measuring_hrv' && getLatestHrvData(measureStepStartedAt)?.heartRateVariability) {
-      measureProgress.value = Math.max(measureProgress.value, 50);
-      advanceRwMeasureSoon(() => {
-        if (measureStatus.value === 'measuring_hrv') startSpo2Measurement();
-      }, 500);
-      return;
-    }
-
     if (isRwDevice() && measureStatus.value === 'measuring_spo2' && getLatestSpo2Data(measureStepStartedAt)?.bloodOxygen) {
       measureProgress.value = Math.max(measureProgress.value, 75);
-      advanceRwMeasureSoon(() => {
-        if (measureStatus.value === 'measuring_spo2') startTemperatureMeasurement();
-      }, 500);
+      const stepStartedAt = measureStepStartedAt;
+      advanceMeasureAtWindowEnd(() => {
+        if (measureStatus.value !== 'measuring_spo2') return;
+        freezeSpo2WindowResult(stepStartedAt);
+        startTemperatureMeasurement();
+      }, SPO2_MEASUREMENT_WINDOW_MS, 500);
       return;
     }
 
     if (isRwDevice() && measureStatus.value === 'measuring_temp' && getLatestTemperatureData(measureStepStartedAt)?.temperature) {
       quickProgressToCompletionPending();
-      advanceRwMeasureSoon(() => {
-        if (measureStatus.value === 'measuring_temp') completeMeasurement();
-      }, 500);
+      const stepStartedAt = measureStepStartedAt;
+      advanceMeasureAtWindowEnd(() => {
+        if (measureStatus.value !== 'measuring_temp') return;
+        freezeTemperatureWindowResult(stepStartedAt);
+        void completeMeasurement();
+      }, TEMPERATURE_MEASUREMENT_WINDOW_MS, 500);
       return;
     }
 
     if (isRwDevice()) return;
 
     if (
-      measureStatus.value === 'measuring_hr' &&
-      wearCheckStatus.value === 'worn' &&
-      isLegacyHeartStepFinished(currentStepRecords) &&
-      getLatestHeartRateData(measureStepStartedAt)?.heartRate
-    ) {
-      measureProgress.value = Math.max(measureProgress.value, 25);
-      advanceRwMeasureSoon(() => {
-        if (measureStatus.value === 'measuring_hr') startHrvMeasurement();
-      });
-      return;
-    }
-
-    if (
-      measureStatus.value === 'measuring_hrv' &&
-      isLegacyHeartStepFinished(currentStepRecords) &&
-      getLatestHrvData(measureStepStartedAt)?.heartRateVariability
-    ) {
-      measureProgress.value = Math.max(measureProgress.value, 50);
-      advanceRwMeasureSoon(() => {
-        if (measureStatus.value === 'measuring_hrv') startSpo2Measurement();
-      }, 500);
-      return;
-    }
-
-    if (
       measureStatus.value === 'measuring_spo2' &&
-      isLegacyOxygenStepFinished(currentStepRecords) &&
       getLatestSpo2Data(measureStepStartedAt)?.bloodOxygen
     ) {
       measureProgress.value = Math.max(measureProgress.value, 75);
-      advanceRwMeasureSoon(() => {
-        if (measureStatus.value === 'measuring_spo2') startTemperatureMeasurement();
-      }, 500);
+      const stepStartedAt = measureStepStartedAt;
+      advanceMeasureAtWindowEnd(() => {
+        if (measureStatus.value !== 'measuring_spo2') return;
+        freezeSpo2WindowResult(stepStartedAt);
+        startTemperatureMeasurement();
+      }, SPO2_MEASUREMENT_WINDOW_MS, 500);
       return;
     }
 
@@ -577,38 +665,31 @@ watch(
     );
     if (
       measureStatus.value === 'measuring_temp' &&
-      (getLatestTemperatureData(measureStepStartedAt)?.temperature || hasCompletedTemperature)
+      hasCompletedTemperature
     ) {
       quickProgressToCompletionPending();
-      advanceRwMeasureSoon(() => {
-        if (measureStatus.value === 'measuring_temp') completeMeasurement();
-      }, 500);
+      const stepStartedAt = measureStepStartedAt;
+      advanceMeasureAtWindowEnd(() => {
+        if (measureStatus.value !== 'measuring_temp') return;
+        freezeTemperatureWindowResult(stepStartedAt);
+        void completeMeasurement();
+      }, TEMPERATURE_MEASUREMENT_WINDOW_MS, 500);
     }
   },
   { deep: true }
 );
 
 const hydrateReportMetrics = () => {
-  const latestHrData: any = getLatestHeartRateData();
-  const latestHrvData: any = getLatestHrvData();
   const latestStressData: any = getLatestStressData();
   const latestBloodSugarData: any = getLatestBloodSugarData();
   const latestBloodPressureData: any = getLatestBloodPressureData();
-  const latestSpo2Data: any = getLatestSpo2Data();
-  const latestTempData: any = getLatestTemperatureData();
 
-  const latestHeartRate = normalizeIntegerMetric(latestHrData?.heartRate);
-  const latestHrv = normalizeIntegerMetric(latestHrvData?.heartRateVariability);
-  const latestSpo2 = normalizeIntegerMetric(latestSpo2Data?.bloodOxygen);
-  const latestTemperature = normalizeTemperatureMetric(latestTempData?.temperature);
-  if (latestHeartRate != null) heartRate.value = latestHeartRate;
-  if (latestHrv != null) heartRateVariability.value = latestHrv;
-  if (latestStressData?.stressIndex) stressIndex.value = latestStressData.stressIndex;
+  // 四项核心结果已经在各自采集窗口结束时冻结，报告阶段不能再从 store
+  // 读取窗口外的迟到帧覆盖本轮最终结果。
+  if (stressIndex.value == null && latestStressData?.stressIndex) stressIndex.value = latestStressData.stressIndex;
   if (latestBloodSugarData?.bloodSugar) bloodSugar.value = latestBloodSugarData.bloodSugar;
   if (latestBloodPressureData?.systolic) systolic.value = latestBloodPressureData.systolic;
   if (latestBloodPressureData?.diastolic) diastolic.value = latestBloodPressureData.diastolic;
-  if (latestSpo2 != null) spo2Value.value = latestSpo2;
-  if (latestTemperature != null) temperature.value = latestTemperature;
 };
 
 const resetMeasurementValues = () => {
@@ -667,23 +748,21 @@ watch(
   async (newStatus, oldStatus) => {
     if (newStatus !== 'completed' || oldStatus === 'completed') return;
 
-    const latestHrData: any = getLatestHeartRateData();
-    const latestHrvData: any = getLatestHrvData();
     const latestStressData: any = getLatestStressData();
     const latestBloodSugarData: any = getLatestBloodSugarData();
     const latestBloodPressureData: any = getLatestBloodPressureData();
-    const latestSpo2Data: any = getLatestSpo2Data();
-    const latestTempData: any = getLatestTemperatureData();
     const measurementRecord: submitDataType['dataList'][number] = {
       recordTime: formatRecordTime(new Date())
     };
-    const latestHeartRate = normalizeIntegerMetric(latestHrData?.heartRate);
-    const latestHrv = normalizeIntegerMetric(latestHrvData?.heartRateVariability);
-    const latestSpo2 = normalizeIntegerMetric(latestSpo2Data?.bloodOxygen);
-    const latestTemperature = normalizeTemperatureMetric(latestTempData?.temperature);
+    // 核心指标只使用各采集窗口结束时冻结的最终值。
+    const latestHeartRate = heartRate.value;
+    const latestHrv = heartRateVariability.value;
+    const latestSpo2 = spo2Value.value;
+    const latestTemperature = temperature.value;
     if (latestHeartRate != null) measurementRecord.heartRate = latestHeartRate;
     if (latestHrv != null) measurementRecord.hrv = latestHrv;
-    if (latestStressData?.stressIndex) measurementRecord.stress = latestStressData.stressIndex;
+    if (stressIndex.value != null) measurementRecord.stress = stressIndex.value;
+    else if (latestStressData?.stressIndex) measurementRecord.stress = latestStressData.stressIndex;
     if (latestBloodSugarData?.bloodSugar) measurementRecord.bloodSugar = latestBloodSugarData.bloodSugar;
     if (latestBloodPressureData?.systolic) measurementRecord.systolic = latestBloodPressureData.systolic;
     if (latestBloodPressureData?.diastolic) measurementRecord.diastolic = latestBloodPressureData.diastolic;
@@ -700,14 +779,10 @@ watch(
       return;
     }
 
-    if (latestHeartRate != null) heartRate.value = latestHeartRate;
-    if (latestHrv != null) heartRateVariability.value = latestHrv;
-    if (latestStressData?.stressIndex) stressIndex.value = latestStressData.stressIndex;
+    if (stressIndex.value == null && latestStressData?.stressIndex) stressIndex.value = latestStressData.stressIndex;
     if (latestBloodSugarData?.bloodSugar) bloodSugar.value = latestBloodSugarData.bloodSugar;
     if (latestBloodPressureData?.systolic) systolic.value = latestBloodPressureData.systolic;
     if (latestBloodPressureData?.diastolic) diastolic.value = latestBloodPressureData.diastolic;
-    if (latestSpo2 != null) spo2Value.value = latestSpo2;
-    if (latestTemperature != null) temperature.value = latestTemperature;
 
     uni.showLoading({ title: '提交数据中...', mask: false });
     try {
@@ -739,34 +814,100 @@ const formatRecordTime = (date: Date) => {
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 };
 
-const handleMeasure = async () => {
+const handleMeasure = async (forceRestart = false) => {
+  if (isStartingMeasurement.value) return;
+  isStartingMeasurement.value = true;
+  isRetryQueued.value = false;
   const { deviceId, serviceId } = userStore.deviceInfo;
+  let runToken = measurementRunToken;
   try {
+    // 重新测量只清理测量会话和计时器，严禁主动断开 BLE、关闭 Notify 或重新扫描。
+    // 下方连接检查在当前连接健康时会直接复用已有 GATT 连接。
     await resetMeasurementFlowForNewRun();
-    measurementGuidance.value = '';
+    runToken = measurementRunToken;
+    armFullMeasurementTimeout(runToken);
     resetMeasurementValues();
     clearRealtimeMeasurementRecords();
 
+    preflightStage.value = 'settling';
+    const settleTimeoutMs = forceRestart
+      ? RETRY_MEASUREMENT_SETTLE_TIMEOUT_MS
+      : PREVIOUS_MEASUREMENT_SETTLE_TIMEOUT_MS;
+    const previousMeasurementSettled = await withTimeout(
+      waitForLegacyWearMeasurementIdle(settleTimeoutMs),
+      settleTimeoutMs + 1_000,
+      '等待上一轮测量结束超时'
+    );
+    if (runToken !== measurementRunToken) return;
+    if (!previousMeasurementSettled) {
+      setMeasurementFailure(
+        '设备正在结束上一轮测量',
+        '戒指仍在结束上一轮采集，请稍候片刻后重新测量。'
+      );
+      return;
+    }
+
+    preflightStage.value = 'connecting';
     if (deviceId) {
-      const alreadyConnected = await isDeviceConnected(deviceId, serviceId || '');
+      const alreadyConnected = await withTimeout(
+        isDeviceConnected(deviceId, serviceId || ''),
+        CONNECTION_READY_TIMEOUT_MS,
+        '连接状态检查超时'
+      );
       if (!alreadyConnected) {
-        const restored = await autoConnectLastDevice();
+        const restored = await withTimeout(
+          autoConnectLastDevice(),
+          CONNECTION_READY_TIMEOUT_MS,
+          '连接戒指超时'
+        );
         if (!restored) {
-          await showRingConnectionTroubleshootingPrompt();
+          setMeasurementFailure('戒指连接失败', '未能连接戒指，请确认戒指有电且靠近手机后重新测量。');
           return;
         }
       }
     } else {
-      const restored = await autoConnectLastDevice();
+      const restored = await withTimeout(
+        autoConnectLastDevice(),
+        CONNECTION_READY_TIMEOUT_MS,
+        '连接戒指超时'
+      );
       if (!restored) {
-        await showRingConnectionTroubleshootingPrompt();
+        setMeasurementFailure('戒指连接失败', '未能连接戒指，请确认戒指有电且靠近手机后重新测量。');
         return;
       }
     }
 
-    await ensureCommunicationReady();
-    if (!(await ensureRingWornBeforeMeasurement(() => queryCurrentWearState('heart_rate')))) return;
+    await withTimeout(ensureCommunicationReady(), CONNECTION_READY_TIMEOUT_MS, '设备通信初始化超时');
+    if (runToken !== measurementRunToken) return;
+
+    preflightStage.value = 'checking_wear';
+    wearCheckStatus.value = 'checking';
+    const wearResult = await withTimeout(
+      queryCurrentWearState('heart_rate', WEAR_CHECK_TIMEOUT_MS),
+      WEAR_CHECK_TIMEOUT_MS + 1_000,
+      '佩戴状态确认超时'
+    );
+    if (runToken !== measurementRunToken) return;
+    if (!wearResult.supported || wearResult.state !== 'worn') {
+      const wearRecord = (wearResult.record || {}) as Record<string, any>;
+      const wearStatus = Number(
+        wearRecord.heartbeatStatus ??
+          wearRecord.bloodOxygenStatus ??
+          wearRecord.temperatureStatus ??
+          wearRecord.metrics?.status ??
+          wearRecord.raw?.heartbeatStatus ??
+          wearRecord.raw?.bloodOxygenStatus
+      );
+      if (wearStatus === 0x04) {
+        setMeasurementFailure('设备繁忙', '戒指仍在结束上一轮测量，请稍候片刻后重新测量。');
+      } else {
+        showMeasurementGuidance(wearResult.state === 'charging' ? 'charging' : wearResult.state === 'not_worn' ? 'not_worn' : 'no_data');
+      }
+      return;
+    }
+
     wearCheckStatus.value = 'worn';
+    preflightStage.value = 'measuring';
     // 建立本轮测量基线必须晚于连接和通信初始化，避免初始化阶段返回的缓存/历史指标被当成本次测量结果。
     clearRealtimeMeasurementRecords();
     resetMeasurementValues();
@@ -774,13 +915,50 @@ const handleMeasure = async () => {
     measureStartedAt = Date.now();
     startHrMeasurement();
   } catch (error) {
-    if (!isExpectedBleRuntimeError(error)) {
-      formatBleErrorMessage(error);
+    // 用户在前置流程中再次点了重新测量时，旧流程的异常属于已取消会话，
+    // 不能覆盖排队中的新一轮状态或把按钮重新变成失败态。
+    if (runToken !== measurementRunToken) return;
+    const message = formatBleErrorMessage(error);
+    if (!isExpectedBleRuntimeError(error)) formatBleErrorMessage(error);
+    if (preflightStage.value === 'checking_wear') {
+      setMeasurementFailure('佩戴状态确认失败', `${message}，请保持戒指贴合手指后重新测量。`);
+    } else if (preflightStage.value !== 'failed') {
+      setMeasurementFailure('戒指连接失败', `${message}，请确认戒指靠近手机后重新测量。`);
     }
-    // 自动重连成功后仍可能在 GATT/通知初始化阶段失败。
-    // 这些失败也属于“连接不上”，统一给用户可操作的排查入口。
-    await showRingConnectionTroubleshootingPrompt();
+  } finally {
+    isStartingMeasurement.value = false;
+    if (isRetryQueued.value) {
+      isRetryQueued.value = false;
+      void handleMeasure(true);
+    }
   }
+};
+
+const handleRetryMeasurement = () => {
+  if (isRetryQueued.value) return;
+  if (isStartingMeasurement.value) {
+    // 前置连接、旧采集窗口释放和佩戴门禁都是异步步骤，不能并发启动第二套命令。
+    // 先使当前运行令牌失效；待当前 await 返回到 finally 后，再复用现有连接启动排队的新一轮。
+    isRetryQueued.value = true;
+    measurementRunToken += 1;
+    isCompletingMeasurement = false;
+    clearMeasurementTimers();
+    clearPendingLegacyWearMeasurement();
+    void stopActiveRwMeasurement('RW PAGE');
+    wearCheckStatus.value = 'idle';
+    measureStatus.value = 'idle';
+    measureProgress.value = 0;
+    measurementFailureTitle.value = '';
+    measurementFailureMessage.value = '';
+    preflightStage.value = 'settling';
+    return;
+  }
+  void handleMeasure(true);
+};
+
+const handleBack = () => {
+  stopMeasurementFlow();
+  uni.navigateBack();
 };
 
 onLoad(async () => {
@@ -794,13 +972,24 @@ onUnload(() => {
   measureStepStartedAt = 0;
 });
 
+onBackPress(() => {
+  stopMeasurementFlow();
+  return false;
+});
+
 onHide(async () => {
   // Keep measurement alive while WeChat briefly hides the page during native BLE callbacks.
 });
 </script>
 <template>
   <view class="measure-page">
-    <uv-navbar placeholder leftIcon="" title="全面测量" bgColor="#f1f3f6"></uv-navbar>
+    <uv-navbar
+      placeholder
+      leftIcon="arrow-left"
+      title="全面测量"
+      bgColor="#f1f3f6"
+      @leftClick="handleBack"
+    ></uv-navbar>
 
     <view class="measure-hero">
       <view class="measure-hero-copy">
@@ -839,6 +1028,29 @@ onHide(async () => {
           </view>
         </view>
       </view>
+    </view>
+
+    <view v-if="preflightStage === 'failed'" class="measure-actions">
+      <button class="measure-action measure-action--primary" hover-class="measure-action--pressed" @click="handleRetryMeasurement">
+        重新测量
+      </button>
+      <button class="measure-action measure-action--secondary" hover-class="measure-action--pressed" @click="handleBack">
+        返回
+      </button>
+    </view>
+
+    <view v-else-if="preflightStage !== 'completed'" class="measure-retry">
+      <button
+        class="measure-action measure-action--secondary"
+        hover-class="measure-action--pressed"
+        :disabled="isRetryQueued"
+        @click="handleRetryMeasurement"
+      >
+        {{ isRetryQueued ? '正在重新测量' : '重新测量' }}
+      </button>
+      <text class="measure-retry__hint">
+        {{ preflightStage === 'settling' ? '保持戒指连接，等待上一轮采集释放后自动重试' : '保持戒指连接，仅重置本轮测量' }}
+      </text>
     </view>
 
   </view>
@@ -1016,6 +1228,57 @@ onHide(async () => {
 .step-desc {
   color: #8b95a5;
   font-size: 26rpx;
+}
+
+.measure-actions {
+  display: flex;
+  gap: 20rpx;
+  margin-top: 28rpx;
+}
+
+.measure-action {
+  flex: 1;
+  height: 88rpx;
+  margin: 0;
+  border-radius: 22rpx;
+  font-size: 30rpx;
+  font-weight: 600;
+  line-height: 88rpx;
+}
+
+.measure-action::after {
+  border: 0;
+}
+
+.measure-action--primary {
+  background: #2e70fc;
+  color: #ffffff;
+}
+
+.measure-action--secondary {
+  border: 2rpx solid #b9cbff;
+  background: #ffffff;
+  color: #2e70fc;
+}
+
+.measure-action--pressed {
+  opacity: 0.78;
+}
+
+.measure-retry {
+  margin-top: 28rpx;
+  text-align: center;
+}
+
+.measure-retry .measure-action {
+  width: 100%;
+}
+
+.measure-retry__hint {
+  display: block;
+  margin-top: 12rpx;
+  color: #8b95a5;
+  font-size: 24rpx;
 }
 
 @keyframes float {

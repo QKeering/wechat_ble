@@ -14,10 +14,14 @@ const props = defineProps({
   motionSummaryObj: {
     type: Object as () => motionSummary,
     default: () => ({})
+  },
+  goalInfo: {
+    type: Object as () => Record<string, any>,
+    default: () => ({})
   }
 });
 watch(
-  () => props.motionOverviewObj,
+  () => [props.motionOverviewObj, props.motionSummaryObj, props.goalInfo],
   async (newVal, oldVal) => {
     if (newVal !== oldVal) {
       await initPie();
@@ -35,9 +39,22 @@ const toPositiveNumber = (...values: unknown[]) => {
   return 0;
 };
 const stepNumber = computed(() => toPositiveNumber(props.motionOverviewObj?.step, props.motionSummaryObj?.todayStep));
-const targetStep = computed(() => toPositiveNumber(props.motionOverviewObj?.targetStep) || 6000);
-const targetCalorie = computed(() => normalizeCalorieGoalKcal(props.motionOverviewObj?.targetCalorie));
-const targetMotionTime = computed(() => toPositiveNumber(props.motionOverviewObj?.targetMotionTime) || 30);
+const targetStep = computed(
+  () => toPositiveNumber(props.goalInfo?.step, props.goalInfo?.stepTarget, props.motionOverviewObj?.targetStep) || 8000
+);
+const targetCalorie = computed(() =>
+  normalizeCalorieGoalKcal(
+    toPositiveNumber(props.goalInfo?.calorie, props.goalInfo?.calorieTarget, props.motionOverviewObj?.targetCalorie)
+  )
+);
+const targetMotionTime = computed(
+  () =>
+    toPositiveNumber(
+      props.goalInfo?.motionTime,
+      props.goalInfo?.activityDurationTarget,
+      props.motionOverviewObj?.targetMotionTime
+    ) || 30
+);
 const motionTimeNumber = computed(() => toPositiveNumber(props.motionOverviewObj?.motionTime, props.motionSummaryObj?.motionTime));
 const calorieSourceUnit = computed(() => props.motionOverviewObj?.calorieUnit || props.motionSummaryObj?.calorieUnit || MOTION_CALORIE_DISPLAY_UNIT);
 const calorieUnit = computed(() => MOTION_CALORIE_DISPLAY_UNIT);

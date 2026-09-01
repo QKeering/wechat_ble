@@ -83,6 +83,7 @@
 	 * @property {Boolean} clearDate = [true|false] 弹窗模式是否清空上次选择内容
 	 * @property {Array} selected 打点，期待格式[{date: '2019-06-27', info: '签到', data: { custom: '自定义信息', name: '自定义消息头',xxx:xxx... }}]
 	 * @property {Boolean} showMonth 是否选择月份为背景
+	 * @property {Boolean} adjacentMonthSelectable 是否允许选择日历网格中的相邻月份日期
 	 * @event {Function} change 日期改变，`insert :ture` 时生效
 	 * @event {Function} confirm 确认选择`insert :false` 时生效
 	 * @event {Function} monthSwitch 切换月份时触发
@@ -129,6 +130,10 @@
 				default: true
 			},
 			clearDate: {
+				type: Boolean,
+				default: true
+			},
+			adjacentMonthSelectable: {
 				type: Boolean,
 				default: true
 			}
@@ -204,6 +209,7 @@
 				startDate: this.startDate,
 				endDate: this.endDate,
 				range: this.range,
+				adjacentMonthSelectable: this.adjacentMonthSelectable,
 			})
 			this.init(this.date)
 		},
@@ -314,6 +320,13 @@
 			 */
 			choiceDate(weeks) {
 				if (weeks.disable) return
+				if (weeks.isOtherMonth && weeks.fullDate && !this.range) {
+					this.setDate(weeks.fullDate)
+					this.calendar = this.cale.getInfo(weeks.fullDate)
+					this.monthSwitch()
+					this.change()
+					return
+				}
 				this.calendar = weeks
 				// 设置多选
 				this.cale.setMultiple(this.calendar.fullDate)

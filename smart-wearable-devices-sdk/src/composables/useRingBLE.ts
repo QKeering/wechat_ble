@@ -1,4 +1,4 @@
-import { computed, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useRingBleStoreSdk } from './useRingBleStoreSdk';
 import type { UseRingBleSdkOptions } from './useRingBleSdk';
 import { resolveRingProtocol, type RefreshLegacyBusinessMetricsResult, type RingDeviceInfo, type RwHealthDataName, type RwHistoryDataName } from '@/sdk/ring-ble';
@@ -64,6 +64,15 @@ interface CompatDeviceInfoCommandOptions {
   retryReady?: boolean;
 }
 type LegacyWearMeasurementKind = 'heart_rate' | 'blood_oxygen' | 'temperature';
+export type VitalMeasurementLockKind = LegacyWearMeasurementKind | 'hrv';
+type VitalMeasurementLockState = {
+  token: string;
+  deviceKey: string;
+  kind: VitalMeasurementLockKind;
+  protocol: ReturnType<typeof resolveRingProtocol>;
+  startedAt: number;
+  expiresAt: number;
+};
 type PendingLegacyWearMeasurement = {
   kind: LegacyWearMeasurementKind;
   frameId: number;
@@ -77,6 +86,9 @@ const DEFAULT_COMPAT_REFRESH_OPTIONS: CompatRefreshOptions = {
 const DEFAULT_COMPAT_REFRESH_TIMEOUT_MS = 3500;
 const RW_COMPAT_REFRESH_TIMEOUT_MS = 35000;
 const RW_COMPAT_SCAN_TIMEOUT_MS = 12000;
+const LEGACY_WEAR_MEASUREMENT_BUSY_WINDOW_MS = 40_000;
+const LEGACY_WEAR_MEASUREMENT_BUSY_RETRY_MS = 5_000;
+const VITAL_MEASUREMENT_LOCK_FALLBACK_MS = 65_000;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const RING_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
@@ -85,6 +97,46 @@ let rwCompatHistoryQueue: Promise<unknown> = Promise.resolve();
 let rwCompatHistoryQueueDepth = 0;
 const communicationReadyPromiseByDevice = new Map<string, Promise<boolean>>();
 const deviceInfoCommandQueueByDevice = new Map<string, Promise<unknown>>();
+// 旧协议没有经过验证的强制停止命令。记录固件占用窗口，确保页面重试时先等待
+// 上一轮正式测量自然结束，避免再次下发命令后收到 status=4（设备繁忙）。
+const legacyWearMeasurementBusyUntilByDevice = new Map<string, number>();
+// 生命体征页的多个卡片会分别创建 useRingBLE 实例，因此测量锁必须放在模块级共享。
+// 测量期间阻止其他指标重复下发命令。窗口内的合法数值只作为候选结果，
+// 必须等完整采集窗口结束、最终结果已确定后才释放小程序侧占用；异常由超时保护兜底。
+const activeVitalMeasurementLock = ref<VitalMeasurementLockState | null>(null);
+let activeVitalMeasurementLockTimer: ReturnType<typeof setTimeout> | null = null;
+
+const clearActiveVitalMeasurementLockTimer = () => {
+  if (!activeVitalMeasurementLockTimer) return;
+  clearTimeout(activeVitalMeasurementLockTimer);
+  activeVitalMeasurementLockTimer = null;
+};
+
+const releaseActiveVitalMeasurementLock = (
+  reason: string,
+  options: { token?: string; deviceKey?: string } = {}
+) => {
+  const current = activeVitalMeasurementLock.value;
+  if (!current) return false;
+  if (options.token && current.token !== options.token) return false;
+  if (options.deviceKey && current.deviceKey !== options.deviceKey) return false;
+  clearActiveVitalMeasurementLockTimer();
+  activeVitalMeasurementLock.value = null;
+  appendRingDiagnosticLog('VITAL LOCK', 'measurement-lock-released', {
+    reason,
+    deviceKey: current.deviceKey,
+    kind: current.kind,
+    heldMs: Date.now() - current.startedAt
+  });
+  return true;
+};
+
+const scheduleActiveVitalMeasurementLockRelease = (lock: VitalMeasurementLockState) => {
+  clearActiveVitalMeasurementLockTimer();
+  activeVitalMeasurementLockTimer = setTimeout(() => {
+    releaseActiveVitalMeasurementLock('fallback-timeout', { token: lock.token });
+  }, Math.max(0, lock.expiresAt - Date.now()) + 20);
+};
 
 const isNodeRuntime = () => Boolean((globalThis as any).process?.versions?.node);
 
@@ -217,6 +269,150 @@ const createCompatRefreshFailure = (error: unknown): RefreshLegacyBusinessMetric
 export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const sdk = useRingBleStoreSdk(options);
   let pendingLegacyWearMeasurement: PendingLegacyWearMeasurement | null = null;
+  const getLegacyWearMeasurementDeviceKey = () => {
+    const currentDevice = sdk.deviceInfo.value;
+    return String(
+      currentDevice.deviceId || currentDevice.mac || currentDevice.advertis?.macInfo || 'legacy-ring'
+    ).toUpperCase();
+  };
+  const getActiveVitalMeasurementLock = () => {
+    const current = activeVitalMeasurementLock.value;
+    if (!current) return null;
+    if (current.expiresAt <= Date.now()) {
+      releaseActiveVitalMeasurementLock('expired', { token: current.token });
+      return null;
+    }
+    return current.deviceKey === getLegacyWearMeasurementDeviceKey() ? current : null;
+  };
+  const vitalMeasurementLock = computed(() => getActiveVitalMeasurementLock());
+  const isVitalMeasurementLocked = computed(() => Boolean(vitalMeasurementLock.value));
+  const vitalMeasurementLockKind = computed(() => vitalMeasurementLock.value?.kind || null);
+  const acquireVitalMeasurementLock = (
+    kind: VitalMeasurementLockKind,
+    fallbackMs?: number
+  ) => {
+    const deviceKey = getLegacyWearMeasurementDeviceKey();
+    const current = getActiveVitalMeasurementLock();
+    if (current) {
+      appendRingDiagnosticLog('VITAL LOCK', 'measurement-lock-rejected', {
+        deviceKey,
+        requestedKind: kind,
+        activeKind: current.kind,
+        remainingMs: Math.max(0, current.expiresAt - Date.now())
+      });
+      return null;
+    }
+    // 切换设备后旧锁不应阻塞新设备。
+    if (activeVitalMeasurementLock.value?.deviceKey !== deviceKey) {
+      releaseActiveVitalMeasurementLock('device-changed');
+    }
+    const protocol = resolveRingProtocol(sdk.deviceInfo.value);
+    const durationMs = Math.max(
+      1000,
+      Number(fallbackMs) || VITAL_MEASUREMENT_LOCK_FALLBACK_MS
+    );
+    const now = Date.now();
+    const lock: VitalMeasurementLockState = {
+      token: `${now}-${Math.random().toString(36).slice(2, 10)}`,
+      deviceKey,
+      kind,
+      protocol,
+      startedAt: now,
+      expiresAt: now + durationMs
+    };
+    activeVitalMeasurementLock.value = lock;
+    scheduleActiveVitalMeasurementLockRelease(lock);
+    appendRingDiagnosticLog('VITAL LOCK', 'measurement-lock-acquired', {
+      deviceKey,
+      kind,
+      protocol,
+      fallbackMs: durationMs
+    });
+    return lock.token;
+  };
+  const releaseVitalMeasurementLock = (token: string, reason = 'page-release') =>
+    releaseActiveVitalMeasurementLock(reason, { token });
+  const getLegacyWearMeasurementBusyRemainingMs = () => {
+    if (resolveRingProtocol(sdk.deviceInfo.value) !== 'legacy') return 0;
+    return Math.max(
+      0,
+      (legacyWearMeasurementBusyUntilByDevice.get(getLegacyWearMeasurementDeviceKey()) || 0) - Date.now()
+    );
+  };
+  const syncVitalMeasurementLockWithLegacyBusy = (token: string) => {
+    const current = getActiveVitalMeasurementLock();
+    if (!current || current.token !== token || current.protocol !== 'legacy') return 0;
+    const remainingMs = getLegacyWearMeasurementBusyRemainingMs();
+    // 固件已空闲不等于页面事务已完成。调用方会在失败退出或最终结果落定时明确释放。
+    if (remainingMs <= 0) return 0;
+    const nextLock = {
+      ...current,
+      // 固件繁忙窗口只负责延长事务锁，不能把页面完整测量的兜底时间缩短。
+      expiresAt: Math.max(current.expiresAt, Date.now() + remainingMs)
+    };
+    activeVitalMeasurementLock.value = nextLock;
+    scheduleActiveVitalMeasurementLockRelease(nextLock);
+    return remainingMs;
+  };
+  const clearPendingLegacyWearMeasurement = () => {
+    pendingLegacyWearMeasurement = null;
+  };
+  const completeVitalMeasurement = (token: string, reason = 'measurement-window-completed') => {
+    const current = getActiveVitalMeasurementLock();
+    if (!current || current.token !== token) return false;
+
+    // 只有完整采集窗口结束、最终结果已确定后才能释放本轮测量资源。
+    // 这里只清理小程序侧的等待器、繁忙窗口和共享锁，保留 BLE 连接供后续同步复用。
+    clearPendingLegacyWearMeasurement();
+    legacyWearMeasurementBusyUntilByDevice.delete(current.deviceKey);
+    const released = releaseActiveVitalMeasurementLock(reason, { token });
+    appendRingDiagnosticLog('VITAL LOCK', 'measurement-resource-released', {
+      deviceKey: current.deviceKey,
+      kind: current.kind,
+      protocol: current.protocol,
+      reason,
+      released
+    });
+    return released;
+  };
+  const markLegacyWearMeasurementBusy = (durationMs = LEGACY_WEAR_MEASUREMENT_BUSY_WINDOW_MS) => {
+    if (resolveRingProtocol(sdk.deviceInfo.value) !== 'legacy') return;
+    const deviceKey = getLegacyWearMeasurementDeviceKey();
+    const nextBusyUntil = Date.now() + durationMs;
+    legacyWearMeasurementBusyUntilByDevice.set(
+      deviceKey,
+      Math.max(legacyWearMeasurementBusyUntilByDevice.get(deviceKey) || 0, nextBusyUntil)
+    );
+  };
+  const waitForLegacyWearMeasurementIdle = async (timeoutMs = 12_000) => {
+    clearPendingLegacyWearMeasurement();
+    if (resolveRingProtocol(sdk.deviceInfo.value) !== 'legacy') return true;
+
+    const deviceKey = getLegacyWearMeasurementDeviceKey();
+    const busyUntil = legacyWearMeasurementBusyUntilByDevice.get(deviceKey) || 0;
+    const remainingMs = busyUntil - Date.now();
+    if (remainingMs <= 0) {
+      legacyWearMeasurementBusyUntilByDevice.delete(deviceKey);
+      return true;
+    }
+
+    const boundedTimeoutMs = Math.max(0, Math.min(45_000, Number(timeoutMs) || 0));
+    const waitMs = Math.min(remainingMs + 250, boundedTimeoutMs);
+    appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-previous-measurement-settle-start', {
+      deviceKey,
+      remainingMs,
+      timeoutMs: boundedTimeoutMs
+    });
+    if (waitMs > 0) await sleep(waitMs);
+    const settled = Date.now() >= busyUntil;
+    if (settled) legacyWearMeasurementBusyUntilByDevice.delete(deviceKey);
+    appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-previous-measurement-settle-result', {
+      deviceKey,
+      settled,
+      waitedMs: waitMs
+    });
+    return settled;
+  };
   const normalizeLegacyWearMeasurementKind = (name: unknown): LegacyWearMeasurementKind | null => {
     const normalized = String(name || '').trim().toLowerCase().replace(/-/g, '_');
     if (normalized === 'heart_rate' || normalized === 'hr' || normalized === 'hrv') return 'heart_rate';
@@ -282,6 +478,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       const deviceChanged = Boolean(previous?.[1] && previous[1] !== deviceId);
       if (!connected || !deviceId || notifyEnabled === false || deviceChanged) {
         pendingLegacyWearMeasurement = null;
+        releaseActiveVitalMeasurementLock(deviceChanged ? 'device-changed' : 'device-disconnected');
         const previousKey = String(previous?.[1] || deviceId || '').toUpperCase();
         const currentKey = getCommunicationDeviceKey();
         const previousCleared = communicationReadyPromiseByDevice.delete(previousKey);
@@ -537,9 +734,9 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       : [];
     const reusedWearMeasurement = consumePendingLegacyWearMeasurement(requestedMetricNames);
     if (reusedWearMeasurement) {
-      // 佩戴门禁已用同一条正式测量命令启动采集。页面继续等待它的
-      // 最终 Notify，这里不能再次启停设备测量。门禁发送命令前已挂好
-      // 最终结果 waiter，因此不会丢失设备紧接着返回的完成帧。
+      // 佩戴门禁已用同一条正式测量命令启动采集。页面继续等待同一 frameId
+      // 的首个合法指标值，这里不能再次启停设备测量。门禁发送命令前已挂好
+      // waiter，因此不会丢失设备紧接着返回的数值帧。
       return reusedWearMeasurement.completion.then(
         (record) => {
           // waitForParsedData 会先于批量 store flush 完成。实时测量页面在 Promise
@@ -703,42 +900,30 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       const valuePromise = sdk.waitForParsedData(
         (parsed) => {
           if (parsed.type !== probeConfig.type || Number(parsed.frameId) !== frameId) return false;
-          if (measurementKind === 'heart_rate') return Number((parsed as Record<string, any>).heartRate) > 0;
-          if (measurementKind === 'blood_oxygen') return Number((parsed as Record<string, any>).bloodOxygen) > 0;
+          if (measurementKind === 'heart_rate') {
+            const heartRate = Number((parsed as Record<string, any>).heartRate);
+            return heartRate >= 25 && heartRate <= 240;
+          }
+          if (measurementKind === 'blood_oxygen') {
+            const bloodOxygen = Number((parsed as Record<string, any>).bloodOxygen);
+            return bloodOxygen >= 70 && bloodOxygen <= 100;
+          }
           const temperature = Number.parseFloat(String((parsed as Record<string, any>).temperature || ''));
-          return Number.isFinite(temperature) && temperature > 0;
+          return Number.isFinite(temperature) && temperature >= 25 && temperature <= 45;
         },
         35_000,
         { replayRecent: false }
       );
       valuePromise.catch(() => undefined);
-      // status=3 只表示“采集中”。6E 真机在约 10 秒、进度 30 时就会返回
-      // 非零心率，若此时结束本步，全面测量马上发送下一条命令并与仍在运行的
-      // 30 秒测量冲突。心率必须等进度 100（或明确回到 status=1）；血氧和
-      // 温度没有独立进度帧，必须等完成状态。
-      const finishedPromise = sdk.waitForParsedData(
-        (parsed) => {
-          if (Number(parsed.frameId) !== frameId) return false;
-          if (measurementKind === 'heart_rate') {
-            if (parsed.type === 'active_measure_progress') {
-              return Number((parsed as Record<string, any>).progress) >= 100;
-            }
-            return parsed.type === probeConfig.type && Number((parsed as Record<string, any>)[probeConfig.statusField]) === 0x01;
-          }
-          return parsed.type === probeConfig.type && Number((parsed as Record<string, any>)[probeConfig.statusField]) === 0x01;
-        },
-        38_000,
-        { replayRecent: false }
-      );
-      finishedPromise.catch(() => undefined);
-      const completionPromise = Promise.all([valuePromise, finishedPromise]).then(([valueRecord, finishedRecord]) => {
-        appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-measurement-finished', {
+      // B7/6E 固件在正确佩戴时会持续返回 status=3（采集中），但不一定返回
+      // status=1 或进度 100。完成条件必须以“同一 frameId 的首个合法指标值”为准，
+      // 否则已经拿到数值仍会空等约 30 秒并被上层超时。门禁命令本身就是正式
+      // 测量命令，后续页面只复用这个 Promise，不会重复发送同一项测量命令。
+      const completionPromise = valuePromise.then((valueRecord) => {
+        appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-measurement-value-ready', {
           measurementKind,
           frameId,
-          valueStatus: (valueRecord as Record<string, any>)[probeConfig.statusField],
-          finishedType: finishedRecord.type,
-          finishedStatus: (finishedRecord as Record<string, any>)[probeConfig.statusField],
-          progress: (finishedRecord as Record<string, any>).progress
+          measurementStatus: (valueRecord as Record<string, any>)[probeConfig.statusField]
         });
         return valueRecord;
       });
@@ -755,28 +940,64 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
           });
           if (Number(parsed.frameId) !== frameId) return false;
           const status = Number((parsed as Record<string, any>)[probeConfig.statusField]);
-          return status === 0x00 || status === 0x01 || status === 0x02 || status === 0x03;
+          return status === 0x00 || status === 0x01 || status === 0x02 || status === 0x03 || status === 0x04;
         },
         Math.min(boundedTimeoutMs, 6000),
         { replayRecent: false }
       );
       responsePromise.catch(() => undefined);
+      const measurementDeviceKey = getLegacyWearMeasurementDeviceKey();
+      // 部分固件会在采集结束时返回 status=1，此时只清除“固件繁忙”状态。
+      // 页面测量仍是一个整体事务，必须等最终值、弹层和结果页处理完成后再释放共享锁。
+      const terminalStatusPromise = sdk.waitForParsedData(
+        (parsed) =>
+          parsed.type === probeConfig.type &&
+          Number(parsed.frameId) === frameId &&
+          Number((parsed as Record<string, any>)[probeConfig.statusField]) === 0x01,
+        LEGACY_WEAR_MEASUREMENT_BUSY_WINDOW_MS,
+        { replayRecent: false }
+      );
+      terminalStatusPromise.then(
+        () => {
+          legacyWearMeasurementBusyUntilByDevice.delete(measurementDeviceKey);
+        },
+        () => undefined
+      );
       appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-probe-start', {
         protocol,
         measurementKind,
         durationSeconds: measurementKind === 'temperature' ? undefined : 30,
         frameId
       });
-      await sdk.sendBytes(
-        buildLegacyCommandBytes(probeConfig.command, 0x00, { frameId, payload: probeConfig.payload }),
-        `wear-preflight/legacy-${measurementKind}`
-      );
+      markLegacyWearMeasurementBusy();
+      try {
+        await sdk.sendBytes(
+          buildLegacyCommandBytes(probeConfig.command, 0x00, { frameId, payload: probeConfig.payload }),
+          `wear-preflight/legacy-${measurementKind}`
+        );
+      } catch (error) {
+        legacyWearMeasurementBusyUntilByDevice.delete(getLegacyWearMeasurementDeviceKey());
+        throw error;
+      }
       const parsed = await responsePromise;
       const status = Number((parsed as Record<string, any>)[probeConfig.statusField]);
 
       const measurementStarted = measurementKind === 'temperature' ? status === 0x00 : status === 0x03;
+      if (status === 0x04) {
+        legacyWearMeasurementBusyUntilByDevice.set(
+          getLegacyWearMeasurementDeviceKey(),
+          Date.now() + LEGACY_WEAR_MEASUREMENT_BUSY_RETRY_MS
+        );
+      } else if (!measurementStarted) {
+        legacyWearMeasurementBusyUntilByDevice.delete(getLegacyWearMeasurementDeviceKey());
+      }
       pendingLegacyWearMeasurement = measurementStarted
-        ? { kind: measurementKind, frameId, expiresAt: Date.now() + 40_000, completion: completionPromise }
+        ? {
+            kind: measurementKind,
+            frameId,
+            expiresAt: Date.now() + LEGACY_WEAR_MEASUREMENT_BUSY_WINDOW_MS,
+            completion: completionPromise
+          }
         : null;
       appendRingDiagnosticLog('WEAR GATE', 'legacy-wear-probe-result', {
         protocol,
@@ -792,7 +1013,9 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       return {
         supported: true,
         protocol,
-        state: worn
+        state: status === 0x04
+          ? ('unknown' as const)
+          : worn
           ? ('worn' as const)
           : measurementKind !== 'temperature' && status === 0x02
             ? ('charging' as const)
@@ -1099,6 +1322,16 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     sendOxyGenCommand: readBloodOxygen,
     sendBodyTemperatureCommand: readBodyTemperature,
     queryCurrentWearState,
+    clearPendingLegacyWearMeasurement,
+    waitForLegacyWearMeasurementIdle,
+    vitalMeasurementLock,
+    isVitalMeasurementLocked,
+    vitalMeasurementLockKind,
+    acquireVitalMeasurementLock,
+    releaseVitalMeasurementLock,
+    completeVitalMeasurement,
+    getLegacyWearMeasurementBusyRemainingMs,
+    syncVitalMeasurementLockWithLegacyBusy,
     readBattery,
     getBattery: readBattery,
     getBatteryInfo: readBattery,

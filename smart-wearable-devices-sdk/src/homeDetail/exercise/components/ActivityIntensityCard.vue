@@ -23,6 +23,22 @@ watch(
 const actIntensityRef = ref<any>(null);
 const activePieRef = ref<any>(null);
 
+const activityIntensityColors = {
+  resting: '#A7B0C0',
+  low: '#63B995',
+  moderate: '#F2B84B',
+  high: '#E85D4A'
+} as const;
+
+const resolveActivityIntensityColor = (name?: string) => {
+  const normalizedName = String(name || '').trim();
+  if (['静息', '不活跃', '休息'].includes(normalizedName)) return activityIntensityColors.resting;
+  if (normalizedName === '低强度') return activityIntensityColors.low;
+  if (['中强度', '中等强度'].includes(normalizedName)) return activityIntensityColors.moderate;
+  if (normalizedName === '高强度') return activityIntensityColors.high;
+  return activityIntensityColors.resting;
+};
+
 // 分钟数转换为小时分钟格式的函数
 const formatMinutesToTime = (minutes: number): string => {
   if (isNaN(minutes) || minutes < 0) {
@@ -78,8 +94,11 @@ const getSecoundOption = () => {
       // 创建时间映射对象，直接从props获取时间值
       const timeMap: Record<string, string> = {
         不活跃: formatMinutesToTime(inactiveDuration),
+        静息: formatMinutesToTime(inactiveDuration),
+        休息: formatMinutesToTime(inactiveDuration),
         低强度: formatMinutesToTime(lowIntensity),
         中强度: formatMinutesToTime(mediumIntensity),
+        中等强度: formatMinutesToTime(mediumIntensity),
         高强度: formatMinutesToTime(highIntensity)
       };
       // 创建比例映射对象，从图表数据dataArray获取value值并添加百分号
@@ -133,20 +152,12 @@ const getSecoundOption = () => {
 
     // motionRatioChart有数据时，显示多颜色饼图
     if (motionRatioChart && motionRatioChart.length > 0) {
-      // 颜色映射
-      const colorMap = {
-        不活跃: '#ffdbc3',
-        低强度: '#ffbc90',
-        中强度: '#ffa468',
-        高强度: '#ff893b'
-      };
-
       // 生成饼图数据
       const pieData = motionRatioChart.map((item) => ({
         name: item.time || '',
         value: item.value || 0,
         itemStyle: {
-          color: colorMap[item.time as keyof typeof colorMap] || '#e6e5fc',
+          color: resolveActivityIntensityColor(item.time),
           borderWidth: 1,
           borderColor: '#ffffff'
         }

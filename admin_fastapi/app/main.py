@@ -19,6 +19,7 @@ from app.api.v1 import router as v1_router
 from app.api.h5_xiaoqing import auth_router as h5_auth_router
 from app.api.h5_xiaoqing import router as h5_xiaoqing_router
 from app.api.h5_xiaoqing_actions import router as h5_xiaoqing_actions_router
+from app.api.h5_ringfm_proxy import router as h5_ringfm_proxy_router
 from app.core.config import settings
 from app.core.responses import error
 from app.core.security import LOGIN_USER_CLAIM, decode_java_token, strip_token
@@ -135,9 +136,11 @@ def create_app() -> FastAPI:
     # fallback so the H5 can reliably reach the API through the existing proxy.
     app.include_router(h5_xiaoqing_router, prefix="/app")
     app.include_router(h5_xiaoqing_actions_router, prefix="/app")
+    app.include_router(h5_ringfm_proxy_router, prefix="/app")
     app.include_router(app_router)
     app.include_router(h5_xiaoqing_router)
     app.include_router(h5_xiaoqing_actions_router)
+    app.include_router(h5_ringfm_proxy_router)
     app.include_router(v1_router)
     app.include_router(sleepfm_router)
 

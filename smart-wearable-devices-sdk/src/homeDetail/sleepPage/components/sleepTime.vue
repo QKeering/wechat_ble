@@ -729,9 +729,9 @@ const handleChartTouchMove = (e: any) => {
         <view v-for="item in sleepTimeStats" :key="item.name" class="sleep-time-summary-item">
           <view class="sleep-time-summary-value">
             <text class="sleep-time-summary-hour">{{ item.hours }}</text>
-            <text class="sleep-time-summary-unit">h</text>
+            <text class="sleep-time-summary-unit">小时</text>
             <text class="sleep-time-summary-minute">{{ item.minutes }}</text>
-            <text class="sleep-time-summary-unit">分钟</text>
+            <text class="sleep-time-summary-unit">分</text>
           </view>
           <view class="sleep-time-summary-label">
             <view class="sleep-time-summary-dot" :style="{ backgroundColor: item.color }"></view>
@@ -888,7 +888,7 @@ const handleChartTouchMove = (e: any) => {
 }
 
 .sleep-time-summary-minute {
-  margin-left: 14rpx;
+  margin-left: 8rpx;
 }
 
 .sleep-time-summary-unit {

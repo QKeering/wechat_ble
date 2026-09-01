@@ -165,7 +165,6 @@ const initChart = async () => {
             <text class="t-979797 fs-24">毫秒</text>
           </view>
         </view>
-        <view class="t-979797 fs-24 mt-30">通常来说，较高 HRV（心率变异性）代表较好的状态</view>
       </view>
     </view>
   </view>

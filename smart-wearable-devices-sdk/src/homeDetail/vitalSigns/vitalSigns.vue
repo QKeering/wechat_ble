@@ -34,6 +34,7 @@ const calendar = ref<any>(null);
 const today = ref(new Date());
 const yesterday = ref(getYesterday(today.value));
 const beforeYesterday = ref(getBeforeYesterday(today.value));
+const calendarEndDate = formatLocalDate(today.value);
 
 // 计算日期信息（星期+日）
 const yesterdayInfo = ref(getDateInfo(yesterday.value));
@@ -562,6 +563,7 @@ watch(
 );
 // 点击日期处理函数
 const handleDateClick = async (index: number) => {
+  hasSelectedDate.value = false;
   selectedDayIndex.value = index;
   updateSelectedHistoryDateFromIndex(index);
   const currentDate = dateList.value[index]?.date || today.value;
@@ -831,6 +833,7 @@ onShow(async () => {
 // 下拉刷新事件处理器
 onPullDownRefresh(async () => {
   try {
+    hasSelectedDate.value = false;
     selectedDayIndex.value = 2;
     updateSelectedHistoryDateFromIndex(2);
     if (!isCurrentRwRing()) {
@@ -907,7 +910,13 @@ const openTimePicker = () => {
         </view>
       </view>
     </view>
-    <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
+    <uni-calendar
+      ref="calendar"
+      :insert="false"
+      :end-date="calendarEndDate"
+      :adjacent-month-selectable="true"
+      @confirm="confirm"
+    />
     <view v-for="cardId in visibleListData" :key="cardId">
       <HeartRate v-if="cardId === 'heartRate'" :heartRateData="heartRateDisplayObj" >
         <DetailInfo id="heart_rate" v-model:isPopupActive="isPopupActive" style="margin-left: 14rpx;"></DetailInfo>

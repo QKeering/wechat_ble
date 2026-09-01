@@ -26,7 +26,7 @@ type DetailConfig = {
   title: string;
   subtitle: string;
   fetcher: () => Promise<Record<string, any>>;
-  summary: (data: Record<string, any>) => Array<{ label: string; value: unknown }>;
+  summary: (data: Record<string, any>) => Array<{ label: string; value: unknown; trend?: string }>;
   chartKey?: string;
   chartValueKey?: string;
 };
@@ -57,8 +57,16 @@ const detailConfigs: Record<IndicatorType, DetailConfig> = {
     chartKey: 'trendChart',
     chartValueKey: 'value',
     summary: (data) => [
-      { label: '心率变化', value: formatChange(data.heartRateChange) },
-      { label: 'HRV变化', value: formatChange(data.hrvChange) }
+      {
+        label: '心率',
+        value: formatCurrentAndAverage(data.heartRateChange, '次/分钟'),
+        trend: formatCurrentAverageTrend(data.heartRateChange, '次/分钟')
+      },
+      {
+        label: 'HRV',
+        value: formatCurrentAndAverage(data.hrvChange, '毫秒'),
+        trend: formatCurrentAverageTrend(data.hrvChange, '毫秒')
+      }
     ]
   },
   sleepRhythm: {
@@ -91,7 +99,7 @@ const detailConfigs: Record<IndicatorType, DetailConfig> = {
   },
   sedentaryRisk: {
     title: '久坐风险',
-    subtitle: '结合步数、活动时长和站立时长评估久坐风险',
+    subtitle: '结合步数和活动时长评估久坐风险',
     fetcher: () => getSittingRiskDetail(),
     chartKey: 'stepChart',
     chartValueKey: 'steps',
@@ -99,8 +107,7 @@ const detailConfigs: Record<IndicatorType, DetailConfig> = {
       { label: '平均步数', value: data.avgSteps },
       { label: '步数等级', value: data.stepsLevel },
       { label: '活动水平', value: data.activityLevel },
-      { label: '活动时长', value: formatMinute(data.activeMinutes) },
-      { label: '站立时长', value: formatHour(data.standingHours) }
+      { label: '活动时长', value: formatMinute(data.activeMinutes) }
     ]
   },
   activityIntensity: {
@@ -121,7 +128,11 @@ const detailConfigs: Record<IndicatorType, DetailConfig> = {
     chartKey: 'balanceChart',
     chartValueKey: 'index',
     summary: (data) => [
-      { label: '负荷平均指数', value: data.balanceIndex },
+      {
+        label: '负荷平衡指数',
+        value: formatBalanceIndex(data.balanceIndex),
+        trend: formatBalanceIndexExplanation(data.balanceIndex)
+      },
       { label: '负荷等级', value: data.balanceLevel },
       { label: '中高强度活动天数', value: formatDay(data.midHighDays) }
     ]
@@ -134,14 +145,37 @@ const summaryItems = computed(() => currentConfig.value.summary(detailData.value
 const chartItems = computed(() => {
   const key = currentConfig.value.chartKey;
   if (!key || !Array.isArray(detailData.value?.[key])) return [];
-  return detailData.value[key].map((item: Record<string, any>) => ({
-    label: item.weekLabel || item.label || item.date || '--',
-    value: item[currentConfig.value.chartValueKey || 'score'] ?? item.score ?? item.value ?? item.level ?? '--',
-    level: normalizeHealthText(item.level, '')
-  }));
+  return detailData.value[key].map((item: Record<string, any>) => {
+    const rawValue = item[currentConfig.value.chartValueKey || 'score'] ?? item.score ?? item.value ?? item.level ?? '--';
+    return {
+      label: item.weekLabel || item.label || item.date || '--',
+      value:
+        detailType.value === 'activityIntensity'
+          ? formatActivityTrendMinutes(rawValue)
+          : detailType.value === 'exerciseRegularity'
+            ? formatBalanceIndex(rawValue)
+            : rawValue,
+      level: normalizeHealthText(item.level, '')
+    };
+  });
 });
 
 const displayTitle = computed(() => pageTitle.value || currentConfig.value.title);
+const overviewTrendLabel = computed(() => (detailType.value === 'activityIntensity' ? '活动评分较上期' : '趋势'));
+const overviewTrendValue = computed(() => {
+  if (detailType.value !== 'activityIntensity') return formatValue(overview.value.trend);
+  return formatActivityScoreChange(overview.value.trendValue, true);
+});
+const overviewChangeLabel = computed(() => (detailType.value === 'activityIntensity' ? '评分变化' : '变化值'));
+const overviewChangeValue = computed(() => {
+  if (detailType.value !== 'activityIntensity') return formatValue(overview.value.trendValue);
+  return formatActivityScoreChange(overview.value.trendValue, false);
+});
+const chartSectionTitle = computed(() => {
+  if (detailType.value === 'activityIntensity') return '近5周中高强度活动时长';
+  if (detailType.value === 'exerciseRegularity') return '近5周负荷平衡指数';
+  return '近期趋势';
+});
 
 const hasValue = (value: unknown) => value !== undefined && value !== null && value !== '';
 const formatValue = (value: unknown) => normalizeHealthText(value, '--');
@@ -159,23 +193,57 @@ const formatPercent = (value: unknown) => {
 const formatMinute = (value: unknown) => {
   return formatValueWithUnit(value, '分钟', /分钟/);
 };
-const formatHour = (value: unknown) => {
-  return formatValueWithUnit(value, '小时', /小时/);
-};
 const formatDay = (value: unknown) => {
   return formatValueWithUnit(value, '天', /天/);
 };
-const formatDirection = (value: unknown) => {
-  if (!hasValue(value)) return '';
-  const text = String(value).trim();
-  if (/^[+\-↑↓]/.test(text)) return text;
-  return normalizeHealthText(text, '');
+const toFiniteNumber = (value: unknown) => {
+  const numberValue = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+  return Number.isFinite(numberValue) ? numberValue : null;
 };
-const formatChange = (value: any) => {
+const formatMetricNumber = (value: number) => {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)));
+};
+const formatActivityScoreChange = (value: unknown, signed: boolean) => {
+  const score = toFiniteNumber(value);
+  if (score === null) return '--';
+  const displayScore = signed ? score : Math.abs(score);
+  const prefix = signed && displayScore > 0 ? '+' : '';
+  return `${prefix}${formatMetricNumber(displayScore)}分`;
+};
+const formatActivityTrendMinutes = (value: unknown) => {
+  const minutes = toFiniteNumber(value);
+  if (minutes === null || minutes <= 0) return '--';
+  return `${formatMetricNumber(minutes)}分钟`;
+};
+const formatBalanceIndex = (value: unknown) => {
+  const index = toFiniteNumber(value);
+  if (index === null || index <= 0) return '--';
+  return formatMetricNumber(index);
+};
+const formatBalanceIndexExplanation = (value: unknown) => {
+  const index = toFiniteNumber(value);
+  if (index === null || index <= 0) return '';
+  const percent = Math.round(index * 100);
+  return `${formatMetricNumber(index)} 代表本周单个活跃日的中高强度活动量约为建议基准的 ${percent}%`;
+};
+const formatCurrentAndAverage = (value: any, unit: string) => {
   if (!value || typeof value !== 'object') return '--';
-  const current = hasValue(value.currentValue) ? `${formatDirection(value.currentDirection)}${value.currentValue}` : '';
-  const avg = hasValue(value.avgValue) ? `近均${formatDirection(value.avgDirection)}${value.avgValue}` : '';
-  return [current, avg].filter(Boolean).join(' / ') || '--';
+  const current = toFiniteNumber(value.currentValue);
+  const average = toFiniteNumber(value.avgValue);
+  if (current === null && average === null) return '--';
+  const currentText = current === null ? '本周 --' : `本周 ${formatMetricNumber(current)} ${unit}`;
+  const averageText = average === null ? '近期均值 --' : `近期均值 ${formatMetricNumber(average)} ${unit}`;
+  return `${currentText}｜${averageText}`;
+};
+const formatCurrentAverageTrend = (value: any, unit: string) => {
+  if (!value || typeof value !== 'object') return '';
+  const current = toFiniteNumber(value.currentValue);
+  const average = toFiniteNumber(value.avgValue);
+  if (current === null || average === null) return '';
+  const difference = Number((current - average).toFixed(2));
+  if (difference === 0) return '较近期均值保持稳定';
+  const direction = difference > 0 ? '上升' : '下降';
+  return `较近期均值${direction} ${formatMetricNumber(Math.abs(difference))} ${unit}`;
 };
 
 const loadDetail = async () => {
@@ -228,12 +296,12 @@ onPullDownRefresh(() => {
           <text class="value">{{ formatValue(overview.dateRange) }}</text>
         </view>
         <view class="overview-item">
-          <text class="label">趋势</text>
-          <text class="value">{{ formatValue(overview.trend) }}</text>
+          <text class="label">{{ overviewTrendLabel }}</text>
+          <text class="value">{{ overviewTrendValue }}</text>
         </view>
         <view class="overview-item">
-          <text class="label">变化值</text>
-          <text class="value">{{ formatValue(overview.trendValue) }}</text>
+          <text class="label">{{ overviewChangeLabel }}</text>
+          <text class="value">{{ overviewChangeValue }}</text>
         </view>
       </view>
 
@@ -242,13 +310,16 @@ onPullDownRefresh(() => {
         <view class="metric-list">
           <view class="metric-row" v-for="item in summaryItems" :key="item.label">
             <text class="metric-label">{{ item.label }}</text>
-            <text class="metric-value">{{ formatValue(item.value) }}</text>
+            <view class="metric-content">
+              <text class="metric-value">{{ formatValue(item.value) }}</text>
+              <text v-if="item.trend" class="metric-trend">{{ item.trend }}</text>
+            </view>
           </view>
         </view>
       </view>
 
       <view class="section" v-if="chartItems.length > 0">
-        <view class="section-title">近期趋势</view>
+        <view class="section-title">{{ chartSectionTitle }}</view>
         <view class="trend-list">
           <view class="trend-row" v-for="item in chartItems" :key="item.label">
             <text class="trend-label">{{ item.label }}</text>
@@ -352,6 +423,26 @@ onPullDownRefresh(() => {
   color: #1d2939;
   font-size: 28rpx;
   font-weight: 700;
+  text-align: right;
+}
+
+.metric-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-end;
+  padding: 16rpx 0;
+}
+
+.metric-value {
+  line-height: 1.45;
+}
+
+.metric-trend {
+  margin-top: 6rpx;
+  color: #667085;
+  font-size: 24rpx;
+  line-height: 1.4;
   text-align: right;
 }
 

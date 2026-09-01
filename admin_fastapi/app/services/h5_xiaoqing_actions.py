@@ -81,6 +81,12 @@ def initialize_schema(db: Session) -> None:
           target_id varchar(128) null, result varchar(64) null, payload_json {json_type} not null,
           idempotency_key varchar(128) null, create_time datetime not null
         )""",
+        f"""create table if not exists h5_daily_fortune (
+          id {pk}, user_id bigint not null, fortune_date date not null,
+          payload_json {json_type} not null, provider varchar(32) null, model varchar(128) null,
+          create_time datetime not null, update_time datetime not null,
+          unique(user_id, fortune_date)
+        )""",
     ]
     for ddl in tables:
         db.execute(text(ddl))
@@ -126,6 +132,43 @@ def serialize_cycle(row: dict[str, Any]) -> dict[str, Any]:
 def list_cycle_records(db: Session, user_id: int, limit: int = 100) -> list[dict[str, Any]]:
     rows = db.execute(text(f"select * from h5_cycle_record where user_id=:uid order by record_date desc,id desc limit {max(1,min(limit,500))}"), {"uid": user_id}).mappings().all()
     return [serialize_cycle(dict(row)) for row in rows]
+
+
+def get_daily_fortune(db: Session, user_id: int, fortune_date: date) -> dict[str, Any] | None:
+    row = db.execute(text("""select payload_json,provider,model from h5_daily_fortune
+      where user_id=:uid and fortune_date=:day limit 1"""), {"uid": user_id, "day": fortune_date}).mappings().first()
+    if not row:
+        return None
+    payload = _load(row.get("payload_json")) or {}
+    payload["provider"] = row.get("provider") or payload.get("provider")
+    payload["model"] = row.get("model") or payload.get("model")
+    payload["cached"] = True
+    return payload
+
+
+def save_daily_fortune(
+    db: Session, user_id: int, fortune_date: date, payload: dict[str, Any],
+    provider: str | None, model: str | None,
+) -> dict[str, Any]:
+    now = datetime.now()
+    params = {"uid": user_id, "day": fortune_date, "payload": _json(payload), "provider": provider, "model": model, "now": now}
+    dialect = db.get_bind().dialect.name
+    if dialect == "mysql":
+        db.execute(text("""insert into h5_daily_fortune
+          (user_id,fortune_date,payload_json,provider,model,create_time,update_time)
+          values(:uid,:day,:payload,:provider,:model,:now,:now)
+          on duplicate key update payload_json=values(payload_json),provider=values(provider),model=values(model),update_time=values(update_time)"""), params)
+    else:
+        exists = db.execute(text("select id from h5_daily_fortune where user_id=:uid and fortune_date=:day"), params).scalar()
+        if exists:
+            db.execute(text("""update h5_daily_fortune set payload_json=:payload,provider=:provider,
+              model=:model,update_time=:now where id=:id"""), {**params, "id": exists})
+        else:
+            db.execute(text("""insert into h5_daily_fortune
+              (user_id,fortune_date,payload_json,provider,model,create_time,update_time)
+              values(:uid,:day,:payload,:provider,:model,:now,:now)"""), params)
+    db.commit()
+    return {**payload, "provider": provider, "model": model, "cached": False}
 
 
 def content_list(db: Session, user_id: int, category: str | None = None) -> list[dict[str, Any]]:

@@ -71,6 +71,7 @@ const oxyGenObj = ref<heartRateDetail>();
 const temperatureObj = ref<heartRateDetail>();
 const sleepNapList = ref<sleepNapType[]>([]);
 const sleepSummaryObj = ref<sleepSummaryData>();
+const isSleepCoreLoading = ref(true);
 const MAX_MAIN_SLEEP_MINUTES = 16 * 60;
 const MAIN_SLEEP_OVERVIEW_TOLERANCE_MINUTES = 120;
 
@@ -748,6 +749,7 @@ const getSelectedSleepPageDate = () => {
 };
 const selectedSleepPageDate = computed(() => getSelectedSleepPageDate());
 const getCurrentHistoryDate = (currentDate = new Date()) => formatLocalDate(currentDate);
+const calendarEndDate = formatLocalDate(new Date());
 const querySleepPage = <T>(endpoint: string, currentDate: Date, query: () => Promise<T>) =>
   ringBleBridge.queryHistoryPage({
     page: 'sleepPage',
@@ -759,6 +761,18 @@ const querySleepPage = <T>(endpoint: string, currentDate: Date, query: () => Pro
 let sleepPageLoadId = 0;
 let sleepPageDeferredLoadTimer: any = null;
 const isCurrentSleepPageLoad = (loadId?: number) => loadId == null || loadId === sleepPageLoadId;
+
+const resetSleepPageDateData = () => {
+  sleepOverviewObj.value = undefined;
+  sleepDetailObj.value = undefined;
+  sleepSegmentObj.value = undefined;
+  heartRateObj.value = undefined;
+  hrvObj.value = undefined;
+  oxyGenObj.value = undefined;
+  temperatureObj.value = undefined;
+  sleepNapList.value = [];
+  sleepSummaryObj.value = undefined;
+};
 
 const runSleepLoadTask = async (endpoint: string, currentDate: Date, task: () => Promise<unknown>) => {
   const startedAt = Date.now();
@@ -826,6 +840,11 @@ const loadSleepPageData = async (currentDate = new Date(), options: { waitSecond
   const loadId = ++sleepPageLoadId;
   const startedAt = Date.now();
   const date = formatLocalDate(currentDate);
+  // 日期标签会先于接口返回更新。切换日期时必须清空上一天快照，并在
+  // 总览、阶段和详情三份核心数据全部完成前保持加载态，避免同一日期
+  // 先显示 segment 的半成品，再被 detail 改写成另一组时长/效率。
+  isSleepCoreLoading.value = true;
+  resetSleepPageDateData();
   appendSleepPageDiagnosticLog('sleep-page-load-start', {
     date,
     trigger: options.trigger || 'unknown',
@@ -834,10 +853,10 @@ const loadSleepPageData = async (currentDate = new Date(), options: { waitSecond
 
   const criticalTasks = [
     { endpoint: 'sleep-segment', run: () => getSleepSegmentInfo(currentDate, loadId) },
-    { endpoint: 'sleep-overview', run: () => getSleepOverviewData(currentDate, loadId) }
+    { endpoint: 'sleep-overview', run: () => getSleepOverviewData(currentDate, loadId) },
+    { endpoint: 'sleep-detail', run: () => getSleepDetailInfo(currentDate, loadId) }
   ];
   const secondaryTasks = [
-    { endpoint: 'sleep-detail', run: () => getSleepDetailInfo(currentDate, loadId) },
     { endpoint: 'sleep-heart-rate', run: () => getRatDetail(currentDate, loadId) },
     { endpoint: 'sleep-hrv', run: () => getHrvDetailData(currentDate, loadId) },
     { endpoint: 'sleep-blood-oxygen', run: () => getOxyGenDetail(currentDate, loadId) },
@@ -855,6 +874,8 @@ const loadSleepPageData = async (currentDate = new Date(), options: { waitSecond
   }
 
   await settleSleepTasks(criticalTasks, currentDate, 'critical');
+  if (!isCurrentSleepPageLoad(loadId)) return;
+  isSleepCoreLoading.value = false;
 
   const secondaryRun = settleSleepTasks(secondaryTasks, currentDate, 'secondary').finally(() => {
     appendSleepPageDiagnosticLog('sleep-page-load-done', {
@@ -902,6 +923,9 @@ const scheduleSleepPageDataLoad = (currentDate: Date, trigger: string) => {
 
 // 点击日期处理函数
 const handleDateClick = async (index: number) => {
+  // 从日历自定义日期回到“前天/昨天/今天”时，左侧入口必须恢复为
+  // “选择日期”，不能继续展示上一次自定义日期造成两个选中状态并存。
+  hasSelectedDate.value = false;
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
   try {
@@ -1106,6 +1130,12 @@ const confirm = async (date: any) => {
   // 处理选择的日期，date可能是数组或单个日期对象
   let selectedDate;
   selectedDate = new Date(date.fulldate);
+  const todayEnd = new Date();
+  todayEnd.setHours(23, 59, 59, 999);
+  if (Number.isNaN(selectedDate.getTime()) || selectedDate.getTime() > todayEnd.getTime()) {
+    uni.showToast({ title: '不能选择未来日期', icon: 'none' });
+    return;
+  }
   // 更新选择的日期信息，使用月-日格式
   const month = (selectedDate.getMonth() + 1).toString().padStart(2, '0');
   const day = selectedDate.getDate().toString().padStart(2, '0');
@@ -1143,6 +1173,7 @@ onLoad((options) => {
   selectedDayIndex.value = dateList.value[dayIndex] ? dayIndex : 2;
 
   if (selectedDayIndex.value !== 3) {
+    hasSelectedDate.value = false;
     scheduleSleepPageDataLoad(dateList.value[selectedDayIndex.value].date, 'page-load');
   } else {
     // 核心修改：仅当 selectedDate 存在时才调用 confirm
@@ -1161,6 +1192,7 @@ onLoad((options) => {
         return;
       }
     }
+    hasSelectedDate.value = false;
     selectedDayIndex.value = 2;
     scheduleSleepPageDataLoad(dateList.value[2].date, 'page-load-fallback');
   }
@@ -1243,40 +1275,84 @@ defineExpose({
         </view>
       </view>
     </view>
-    <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
-    <view v-for="cardId in visibleListData" :key="cardId">
-      <sleepTime v-if="cardId === 'subjectiveSleepScore'" :sleepDetailObj="displaySleepDetailObj" :sleepSegmentObj="displaySleepTimelineSegmentObj">
-        <DetailInfo id="sleep_duration" v-model:isPopupActive="isPopupActive" size="small" style="margin-left: 6rpx"></DetailInfo>
-      </sleepTime>
-      <sleepRage v-else-if="cardId === 'sleepInterval'" :sleepSegmentObj="displaySleepSegmentObj">
-        <DetailInfo id="sleep_stages" v-model:isPopupActive="isPopupActive" style="margin-left: 2rpx"></DetailInfo>
-      </sleepRage>
-      <sleepScore v-else-if="cardId === 'sleepScore'" :sleepOverviewObj="sleepOverviewObj" :sleepSegmentObj="displaySleepSegmentObj">
-        <DetailInfo id="sleep_score" v-model:isPopupActive="isPopupActive" style="margin-left: 2rpx"></DetailInfo>
-      </sleepScore>
-      <HeartRate v-else-if="cardId === 'heartRate'" :heartRateData="displayHeartRateObj" :isHeartTate="false" :sleepSegmentObj="displaySleepSegmentObj">
-        <DetailInfo id="heart_rate" v-model:isPopupActive="isPopupActive" style="margin-left: 6rpx"></DetailInfo>
-      </HeartRate>
-      <oxyGen v-else-if="cardId === 'bloodOxygenSaturation'" :oxyGenData="displayOxyGenObj" :isHeartTate="false" :sleepSegmentObj="displaySleepSegmentObj">
-        <DetailInfo id="blood_oxygen_saturation" v-model:isPopupActive="isPopupActive" style="margin-left: 6rpx"></DetailInfo>
-      </oxyGen>
-      <heartRateVariability v-else-if="cardId === 'heartRateVariability'" :hrvData="displayHrvObj" :isHeartTate="false" :sleepSegmentObj="displaySleepSegmentObj">
-        <DetailInfo id="heart_rate_variability" v-model:isPopupActive="isPopupActive" style="margin-left: 6rpx"></DetailInfo>
-      </heartRateVariability>
-      <temperature v-else-if="cardId === 'skinTemperature'" :temperatureData="displayTemperatureObj" :isHeartTate="false" />
-      <sleepNap v-else-if="cardId === 'napRecord'" @refresh="getSleepNapList" :sleepNapList="sleepNapList" :currentDate="selectedSleepPageDate" />
-      <eventSummary v-else-if="cardId === 'activitySummary'" :sleepSummaryObj="sleepSummaryObj" />
+    <uni-calendar
+      ref="calendar"
+      :insert="false"
+      :end-date="calendarEndDate"
+      :adjacent-month-selectable="true"
+      @confirm="confirm"
+    />
+    <view v-if="isSleepCoreLoading" class="sleep-page-loading">
+      <view class="sleep-page-loading__spinner"></view>
+      <text class="sleep-page-loading__text">正在加载睡眠数据</text>
     </view>
-    <view @tap="jumpEdit" class="bg-white r-50 flex ai-center jc-center p-30">
-      <view class="flex ai-center jc-center">
-        <uv-image src="/static/images/homeDetail/editCardIcon.png" width="40rpx" height="40rpx"></uv-image>
-        <text class="ml-10 fs-36">编辑卡片</text>
+
+    <view v-else>
+      <view v-for="cardId in visibleListData" :key="cardId">
+        <sleepTime v-if="cardId === 'subjectiveSleepScore'" :sleepDetailObj="displaySleepDetailObj" :sleepSegmentObj="displaySleepTimelineSegmentObj">
+          <DetailInfo id="sleep_duration" v-model:isPopupActive="isPopupActive" size="small" style="margin-left: 6rpx"></DetailInfo>
+        </sleepTime>
+        <sleepRage v-else-if="cardId === 'sleepInterval'" :sleepSegmentObj="displaySleepSegmentObj">
+          <DetailInfo id="sleep_stages" v-model:isPopupActive="isPopupActive" style="margin-left: 2rpx"></DetailInfo>
+        </sleepRage>
+        <sleepScore v-else-if="cardId === 'sleepScore'" :sleepOverviewObj="sleepOverviewObj" :sleepSegmentObj="displaySleepSegmentObj">
+          <DetailInfo id="sleep_score" v-model:isPopupActive="isPopupActive" style="margin-left: 2rpx"></DetailInfo>
+        </sleepScore>
+        <HeartRate v-else-if="cardId === 'heartRate'" :heartRateData="displayHeartRateObj" :isHeartTate="false" :sleepSegmentObj="displaySleepSegmentObj">
+          <DetailInfo id="heart_rate" v-model:isPopupActive="isPopupActive" style="margin-left: 6rpx"></DetailInfo>
+        </HeartRate>
+        <oxyGen v-else-if="cardId === 'bloodOxygenSaturation'" :oxyGenData="displayOxyGenObj" :isHeartTate="false" :sleepSegmentObj="displaySleepSegmentObj">
+          <DetailInfo id="blood_oxygen_saturation" v-model:isPopupActive="isPopupActive" style="margin-left: 6rpx"></DetailInfo>
+        </oxyGen>
+        <heartRateVariability v-else-if="cardId === 'heartRateVariability'" :hrvData="displayHrvObj" :isHeartTate="false" :sleepSegmentObj="displaySleepSegmentObj">
+          <DetailInfo id="heart_rate_variability" v-model:isPopupActive="isPopupActive" style="margin-left: 6rpx"></DetailInfo>
+        </heartRateVariability>
+        <temperature v-else-if="cardId === 'skinTemperature'" :temperatureData="displayTemperatureObj" :isHeartTate="false" />
+        <sleepNap v-else-if="cardId === 'napRecord'" @refresh="getSleepNapList" :sleepNapList="sleepNapList" :currentDate="selectedSleepPageDate" />
+        <eventSummary v-else-if="cardId === 'activitySummary'" :sleepSummaryObj="sleepSummaryObj" />
+      </view>
+      <view @tap="jumpEdit" class="bg-white r-50 flex ai-center jc-center p-30">
+        <view class="flex ai-center jc-center">
+          <uv-image src="/static/images/homeDetail/editCardIcon.png" width="40rpx" height="40rpx"></uv-image>
+          <text class="ml-10 fs-36">编辑卡片</text>
+        </view>
       </view>
     </view>
     <uv-safe-bottom></uv-safe-bottom>
   </view>
 </template>
 <style lang="scss" scoped>
+.sleep-page-loading {
+  min-height: 360rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 40rpx;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.sleep-page-loading__spinner {
+  width: 48rpx;
+  height: 48rpx;
+  border: 5rpx solid #dbe7ff;
+  border-top-color: #2e70fc;
+  border-radius: 50%;
+  animation: sleep-page-spin 0.8s linear infinite;
+}
+
+.sleep-page-loading__text {
+  margin-top: 22rpx;
+  color: #667085;
+  font-size: 28rpx;
+}
+
+@keyframes sleep-page-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .bgcWrapper {
   position: absolute;
   top: 0;

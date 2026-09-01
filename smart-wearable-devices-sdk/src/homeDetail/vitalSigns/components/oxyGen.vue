@@ -36,7 +36,18 @@ import {
 import { showRingConnectionTroubleshootingPrompt } from '@/utils/ringConnectionTroubleshooting';
 const userStore = useUserStore();
 const ringStore = useRingStore();
-const { sendOxyGenCommand, refreshHealthData, waitForParsedData, queryCurrentWearState } = useRingBLE();
+const {
+  sendOxyGenCommand,
+  refreshHealthData,
+  waitForParsedData,
+  queryCurrentWearState,
+  isVitalMeasurementLocked,
+  vitalMeasurementLockKind,
+  acquireVitalMeasurementLock,
+  releaseVitalMeasurementLock,
+  completeVitalMeasurement,
+  syncVitalMeasurementLockWithLegacyBusy
+} = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
 const echarts = require('../../../static/echarts.min.js');
 const props = defineProps({
@@ -60,6 +71,7 @@ const oxyGen = ref(0);
 const agreementChecked = ref(false);
 // 测量状态：'idle' | 'measuring' | 'completed'
 const measureStatus = ref('idle');
+let vitalMeasurementLockToken = '';
 // 是否为iOS的计算属性
 const isIOS = computed(() => {
   const systemInfo = uni.getSystemInfoSync();
@@ -227,10 +239,28 @@ let measureTimeout: any = null;
 let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
 let measureStartedAt = 0;
+let completedMeasurementReading: any = null;
 let wearGatePending = false;
 let measurementRunToken = 0;
 let wearConfirmedForRun = false;
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
+const showVitalMeasurementBusy = () => {
+  uni.showToast({ title: '设备正在测量，请稍候', icon: 'none' });
+};
+const settleOwnVitalMeasurementLock = (reason: string) => {
+  if (!vitalMeasurementLockToken) return;
+  if (!isRwDevice() && syncVitalMeasurementLockWithLegacyBusy(vitalMeasurementLockToken) > 0) return;
+  releaseVitalMeasurementLock(vitalMeasurementLockToken, reason);
+  vitalMeasurementLockToken = '';
+};
+const completeOwnVitalMeasurement = () => {
+  if (!vitalMeasurementLockToken) return;
+  completeVitalMeasurement(vitalMeasurementLockToken);
+  vitalMeasurementLockToken = '';
+};
+// 血氧命令包含完整采集窗口；第一帧只记录候选值，戒指熄灯并结束采集前
+// 不关闭弹层、不跳转结果页，也不释放 BLE 独占锁。
+const getMeasurementMinimumDurationMs = () => MIN_VITAL_MEASUREMENT_DURATION_MS;
 const getLatestSpo2ReadingFromStores = () =>
   getLatestSpo2Reading(userStore, measureStartedAt) || getLatestSpo2Reading(ringStore, measureStartedAt);
 const getCurrentBloodOxygenWearState = () => {
@@ -263,6 +293,7 @@ const stopMeasureForWearGate = async (wearState: Exclude<RingWearState, 'unknown
   if (isRwDevice()) {
     await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
   }
+  settleOwnVitalMeasurementLock('wear-gate-blocked');
   showRingWearGuidance(wearState);
   wearGatePending = false;
 };
@@ -305,6 +336,7 @@ const startDirectBloodOxygenWearGate = (runToken: number) => {
       measureStatus.value = 'idle';
       measureStartedAt = 0;
       void stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
+      settleOwnVitalMeasurementLock('wear-gate-no-data');
       showRingWearGuidance('no_data');
     })
     .catch(() => undefined);
@@ -333,8 +365,14 @@ const completeMeasureWithLatestReading = async () => {
     }
     return;
   }
-  if (!getLatestSpo2ReadingFromStores()) return;
-  const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt);
+  const latestReading = getLatestSpo2ReadingFromStores();
+  if (!latestReading) {
+    if (Date.now() - measureStartedAt >= MAX_VITAL_MEASUREMENT_DURATION_MS - 250) {
+      await stopMeasureForWearGate('no_data');
+    }
+    return;
+  }
+  const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt, getMeasurementMinimumDurationMs());
   if (remainingMs > 0) {
     isMeasureCompletePending = true;
     clearMeasureCompleteTimer();
@@ -350,10 +388,12 @@ const completeMeasureWithLatestReading = async () => {
     measureTimeout = null;
   }
   clearMeasureCompleteTimer();
+  completedMeasurementReading = { ...latestReading };
   popup.value?.close();
   if (isRwDevice()) {
     await stopActiveRwMeasurement('RW VITAL');
   }
+  completeOwnVitalMeasurement();
   measureStatus.value = 'completed';
 };
 const completeMeasureWhenLatestReadingReady = async () => {
@@ -362,6 +402,14 @@ const completeMeasureWhenLatestReadingReady = async () => {
 };
 // 开始测量
 const handleMeasure = () => {
+  if (isVitalMeasurementLocked.value) {
+    if (measureStatus.value === 'measuring' && vitalMeasurementLockKind.value === 'blood_oxygen') {
+      void showMeasureWaitingPopup();
+    } else {
+      showVitalMeasurementBusy();
+    }
+    return;
+  }
   // 如果勾选了不再提示，直接开始测量
   if (agreementChecked.value) {
     startMeasure();
@@ -380,8 +428,18 @@ const startMeasure = async () => {
     await showRingConnectionTroubleshootingPrompt();
     return;
   }
+  const acquiredLockToken = acquireVitalMeasurementLock('blood_oxygen');
+  if (!acquiredLockToken) {
+    showVitalMeasurementBusy();
+    return;
+  }
+  vitalMeasurementLockToken = acquiredLockToken;
 
-  if (!(await ensureRingWornBeforeMeasurement(() => queryCurrentWearState('blood_oxygen')))) return;
+  if (!(await ensureRingWornBeforeMeasurement(() => queryCurrentWearState('blood_oxygen')))) {
+    settleOwnVitalMeasurementLock('wear-preflight-blocked');
+    return;
+  }
+  if (!isRwDevice()) syncVitalMeasurementLockWithLegacyBusy(vitalMeasurementLockToken);
   wearConfirmedForRun = true;
 
   // 清除可能残留的旧定时器
@@ -396,6 +454,7 @@ const startMeasure = async () => {
   measurementRunToken += 1;
   const runToken = measurementRunToken;
   measureStartedAt = Date.now();
+  completedMeasurementReading = null;
 
   await showMeasureWaitingPopup();
   startMeasureFallbackTimer();
@@ -431,6 +490,7 @@ const startMeasure = async () => {
     if (isRwDevice()) {
       await stopActiveRwMeasurement('RW VITAL');
     }
+    settleOwnVitalMeasurementLock('command-failed');
     measureStatus.value = 'idle';
     measurementRunToken += 1;
     measureStartedAt = 0;
@@ -476,7 +536,7 @@ watch(
   () => measureStatus.value,
   async (newStatus, oldStatus) => {
     if (newStatus === 'completed' && oldStatus !== 'completed') {
-      const latest: any = getLatestSpo2ReadingFromStores();
+      const latest: any = completedMeasurementReading;
       // 无效数据（包括 0）跳过，由 latest?.bloodOxygen > 0 判断
       if (!(latest?.bloodOxygen > 0)) {
         measureStatus.value = 'idle';
@@ -516,6 +576,8 @@ const measureText = computed(() => {
   if (!getSubmitDeviceMac(userStore, isIOS.value)) {
     return '未连接';
   }
+  // legacy 数值返回后的共享锁仅用于保护固件命令通道，不能显示为仍在测量。
+  if (measureStatus.value === 'measuring') return '测量中';
   // if (measureStatus.value === 'completed') {
   //   const latest: any = userStore.receivedData.filter((d) => d.type === 'active_measure').sort((a, b) => b.timestamp - a.timestamp)[0];
   //   // if (latest?.bloodOxygen) {
@@ -549,13 +611,14 @@ onUnload(() => {
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
   void stopActiveRwMeasurement('RW VITAL');
+  if (isRwDevice()) settleOwnVitalMeasurementLock('page-unload');
 });
 </script>
 <template>
   <view class="score-card mb-30">
     <view class="metric-header">
       <view class="metric-title">血氧饱和度<slot></slot></view>
-      <view class="textBox" @tap="handleMeasure" v-if="isHeartTate">
+      <view class="textBox" :class="{ 'is-measure-locked': isVitalMeasurementLocked }" @tap="handleMeasure" v-if="isHeartTate">
         <uv-image src="/static/images/homeDetail/oxygen.png" width="40rpx" height="40rpx" mode="aspectFit"></uv-image>
         <text>{{ measureText }}</text>
       </view>
@@ -619,6 +682,9 @@ onUnload(() => {
 <style lang="scss" scoped>
 .heartbeat-animation {
   animation: heartbeat 1.5s ease-in-out infinite;
+}
+.is-measure-locked {
+  opacity: 0.55;
 }
 
 @keyframes heartbeat {

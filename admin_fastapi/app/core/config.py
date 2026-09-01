@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     sleepfm_service_token: str = ""
     sleepfm_hash_secret: str = ""
     sleepfm_consented_user_ids: str = ""
+    ringfm_base_url: str = "https://www.qkeering.com"
+    ringfm_bridge_secret: str = ""
+    ringfm_timeout_seconds: int = 12
+    ringfm_bridge_debug: bool = False
 
     token_header: str = "Authorization"
     token_prefix: str = "Bearer "

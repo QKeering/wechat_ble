@@ -31,6 +31,7 @@ const hasSelectedDate = ref(false);
 const today = ref(new Date());
 const yesterday = ref(getYesterday(today.value));
 const beforeYesterday = ref(getBeforeYesterday(today.value));
+const calendarEndDate = formatLocalDate(today.value);
 const yesterdayInfo = ref(getDateInfo(yesterday.value));
 const beforeYesterdayInfo = ref(getDateInfo(beforeYesterday.value));
 
@@ -100,6 +101,7 @@ const getStressSummaryDetail = async (currentDate = new Date()) => {
 };
 
 const handleDateClick = async (index: number) => {
+  hasSelectedDate.value = false;
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
   await Promise.all([
@@ -164,6 +166,7 @@ onLoad((options) => {
 
 onPullDownRefresh(async () => {
   try {
+    hasSelectedDate.value = false;
     selectedDayIndex.value = 2;
     await getStressDetail();
     await getStressProportionDetail();
@@ -237,7 +240,13 @@ defineExpose({
         </view>
       </view>
     </view>
-    <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
+    <uni-calendar
+      ref="calendar"
+      :insert="false"
+      :end-date="calendarEndDate"
+      :adjacent-month-selectable="true"
+      @confirm="confirm"
+    />
     <view v-for="cardId in listData" :key="cardId">
       <relaxValue v-if="cardId === 'valueFirst'" :stressDetail="stressDetailObj" :stressSummaryObj="stressSummaryObj" >
         <DetailInfo id="stress" size="small" v-model:isPopupActive="isPopupActive" style="margin-left: 14rpx;"></DetailInfo>

@@ -1739,6 +1739,7 @@ watch(homeDataSyncing, (syncing) => {
 const today = ref(new Date());
 const yesterday = ref(getYesterday(today.value));
 const beforeYesterday = ref(getBeforeYesterday(today.value));
+const calendarEndDate = computed(() => formatLocalDate(today.value));
 
 
 const yesterdayInfo = ref(getDateInfo(yesterday.value));
@@ -4741,6 +4742,61 @@ watch(
   },
   { immediate: true }
 );
+const AWARENESS_SYNC_COMPLETE_DWELL_MS = 800;
+const awarenessSyncProgress = ref(0);
+const awarenessSyncCompletionVisible = ref(false);
+let awarenessSyncProgressActive = false;
+let awarenessSyncCompletionTimer: ReturnType<typeof setTimeout> | null = null;
+watch(
+  () => [
+    homeDataSyncing.value,
+    legacyHomeHistoryReadInFlight.value,
+    homeDataRefreshingAfterSync.value,
+    homeFreshBatteryReadingAfterSync.value,
+    userStore.uploadingStatus
+  ] as const,
+  ([homeSyncing, historyReading, refreshing, batteryRefreshing, uploadingStatus]) => {
+    const active = Boolean(homeSyncing || historyReading || refreshing);
+    if (active) {
+      if (awarenessSyncCompletionTimer) {
+        clearTimeout(awarenessSyncCompletionTimer);
+        awarenessSyncCompletionTimer = null;
+      }
+      awarenessSyncCompletionVisible.value = false;
+      if (!awarenessSyncProgressActive) {
+        awarenessSyncProgressActive = true;
+        awarenessSyncProgress.value = 10;
+      }
+
+      let nextProgress = 18;
+      if (historyReading) {
+        nextProgress = 38;
+      } else if (refreshing) {
+        nextProgress = batteryRefreshing ? 96 : 90;
+      } else if (
+        uploadingStatus === 'uploading' ||
+        uploadingStatus === 'success' ||
+        awarenessSyncProgress.value >= 38
+      ) {
+        nextProgress = 72;
+      }
+      awarenessSyncProgress.value = Math.max(awarenessSyncProgress.value, nextProgress);
+      return;
+    }
+
+    if (!awarenessSyncProgressActive) return;
+    awarenessSyncProgressActive = false;
+    awarenessSyncProgress.value = 100;
+    awarenessSyncCompletionVisible.value = true;
+    if (awarenessSyncCompletionTimer) clearTimeout(awarenessSyncCompletionTimer);
+    awarenessSyncCompletionTimer = setTimeout(() => {
+      awarenessSyncCompletionTimer = null;
+      awarenessSyncCompletionVisible.value = false;
+      awarenessSyncProgress.value = 0;
+    }, AWARENESS_SYNC_COMPLETE_DWELL_MS);
+  },
+  { immediate: true }
+);
 const bluetoothStatus = computed(() => {
   const runtimeReady = hasAwarenessRuntimeCommunicationReady();
   const hasStoredReadyClaim =
@@ -4775,7 +4831,8 @@ const bluetoothStatus = computed(() => {
       homeDataSyncing.value ||
         legacyHomeHistoryReadInFlight.value ||
         legacyHomeHistoryReadPromise ||
-        homeDataRefreshingAfterSync.value
+        homeDataRefreshingAfterSync.value ||
+        awarenessSyncCompletionVisible.value
     );
 
   return {
@@ -4786,7 +4843,12 @@ const bluetoothStatus = computed(() => {
 
 
     statusText: isConnecting ? '\u8fde\u63a5\u4e2d' : '',
-    syncingText: isSyncing ? '\u540c\u6b65\u4e2d' : '',
+    syncProgress: isSyncing ? awarenessSyncProgress.value : 0,
+    syncingText: isSyncing
+      ? awarenessSyncCompletionVisible.value
+        ? `\u540c\u6b65\u5b8c\u6210 ${awarenessSyncProgress.value}%`
+        : `\u540c\u6b65\u4e2d ${awarenessSyncProgress.value}%`
+      : '',
     // Runtime ready is already a real connection.  Until the deferred device
     // info task returns the battery, keep an explicit connected state instead
     // of rendering an empty label between refresh and battery.
@@ -8450,6 +8512,7 @@ function getHealthAvgScore() {
 };
 
 const handleDateClick = async (index: number, options: AwarenessBusinessRefreshOptions = {}) => {
+  hasSelectedDate.value = false;
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
   selectData.value = currentDate;
@@ -8470,6 +8533,26 @@ const confirm = async (date: any, options: AwarenessBusinessRefreshOptions = {})
   let selectedDate;
   selectedDate = new Date(date.fulldate);
 
+  const selectedDateKey = formatLocalDate(selectedDate);
+  if (selectedDateKey > calendarEndDate.value) {
+    uni.showToast({
+      title: '未来日期暂无数据',
+      icon: 'none'
+    });
+    return;
+  }
+  const recentDateIndex = dateList.value.findIndex(
+    (dateItem) => formatLocalDate(dateItem.date) === selectedDateKey
+  );
+  if (recentDateIndex >= 0) {
+    hasSelectedDate.value = false;
+    await handleDateClick(recentDateIndex, {
+      trigger: options.trigger || 'date-confirm-recent',
+      allowDuringSync: options.allowDuringSync
+    });
+    return;
+  }
+
 
   const month = (selectedDate.getMonth() + 1).toString().padStart(2, '0');
   const day = selectedDate.getDate().toString().padStart(2, '0');
@@ -8483,8 +8566,7 @@ const confirm = async (date: any, options: AwarenessBusinessRefreshOptions = {})
   hasSelectedDate.value = true;
   selectedDayIndex.value = 3;
   selectData.value = selectedDate;
-  const currentDate = formatLocalDate(selectedDate);
-  await refreshAwarenessBusinessOverview(currentDate, {
+  await refreshAwarenessBusinessOverview(selectedDateKey, {
     trigger: options.trigger || 'date-confirm',
     allowDuringSync: options.allowDuringSync
   });
@@ -11668,6 +11750,13 @@ onUnload(() => {
     clearTimeout(awarenessConnectedStatusTimer);
     awarenessConnectedStatusTimer = null;
   }
+  if (awarenessSyncCompletionTimer) {
+    clearTimeout(awarenessSyncCompletionTimer);
+    awarenessSyncCompletionTimer = null;
+  }
+  awarenessSyncProgressActive = false;
+  awarenessSyncCompletionVisible.value = false;
+  awarenessSyncProgress.value = 0;
   if (homeFreshBatteryBarrierTimer) {
     clearTimeout(homeFreshBatteryBarrierTimer);
     homeFreshBatteryBarrierTimer = null;
@@ -11698,6 +11787,7 @@ onPullDownRefresh(async () => {
   try {
     pullDownRefresh.value = true;
     pullDownProgress.value = 0;
+    hasSelectedDate.value = false;
     selectedDayIndex.value = 2;
     pullDownProgress.value = 30;
     if (activeAwarenessHomeSyncClaim || isAwarenessDataSyncInProgress()) {
@@ -11856,7 +11946,15 @@ onPullDownRefresh(async () => {
               <view class="bluetooth-icon-wrap" :class="{ 'bluetooth-icon-wrap--syncing': bluetoothStatus.isSyncing }">
                 <uv-image :src="bluetoothStatus.iconPath" width="48rpx" height="48rpx"></uv-image>
               </view>
-              <view v-if="bluetoothStatus.isSyncing" class="fs-20 bluetooth-sync-text">{{ bluetoothStatus.syncingText }}</view>
+              <template v-if="bluetoothStatus.isSyncing">
+                <view class="fs-20 bluetooth-sync-text">{{ bluetoothStatus.syncingText }}</view>
+                <view class="bluetooth-sync-progress" aria-label="同步进度">
+                  <view
+                    class="bluetooth-sync-progress__bar"
+                    :style="{ width: `${bluetoothStatus.syncProgress}%` }"
+                  ></view>
+                </view>
+              </template>
               <view v-else class="fs-20">{{ bluetoothStatus.batteryText }}</view>
             </view>
 
@@ -11869,7 +11967,13 @@ onPullDownRefresh(async () => {
       </view>
       <!-- <uv-calendar ref="calendar" :minDate="minDate" :maxDate="maxDate" @confirm="confirm"></uv-calendar> -->
       <!-- <uv-calendar ref="calendar" mode="single" @confirm="confirm"></uv-calendar> -->
-      <uni-calendar ref="calendar" :insert="false" @confirm="handleCalendarConfirm" />
+      <uni-calendar
+        ref="calendar"
+        :insert="false"
+        :end-date="calendarEndDate"
+        :adjacent-month-selectable="true"
+        @confirm="handleCalendarConfirm"
+      />
 
       <!-- 身心平衡卡片（已隐藏）
       <view class="module-card p-10 bg-white mt-30 r-50">
@@ -12287,6 +12391,22 @@ onPullDownRefresh(async () => {
   margin-top: 6rpx;
   color: #4c76f1;
   white-space: nowrap;
+}
+
+.bluetooth-sync-progress {
+  width: 112rpx;
+  height: 6rpx;
+  margin-top: 5rpx;
+  overflow: hidden;
+  border-radius: 999rpx;
+  background: rgba(76, 118, 241, 0.16);
+}
+
+.bluetooth-sync-progress__bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4c76f1 0%, #6a8cff 100%);
+  transition: width 240ms ease;
 }
 
 @keyframes bluetoothSpin {

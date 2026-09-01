@@ -86,7 +86,9 @@ export const resolveRingWearState = (records: unknown[]): RingWearState => {
       if (!isSyntheticRwAlias) {
         if (legacyStatus === 0x00) return 'not_worn';
         if (legacyStatus === 0x02 && !rwNack) return 'charging';
-        if (legacyStatus === 0x01) return 'worn';
+        // L19/B7/6E 在正确佩戴并开始采集后返回 0x03，且可能一直不再回到
+        // 0x01。0x03 是本次硬件测量已启动的明确佩戴证据，不应继续判为 unknown。
+        if (legacyStatus === 0x01 || legacyStatus === 0x03) return 'worn';
       }
     }
 

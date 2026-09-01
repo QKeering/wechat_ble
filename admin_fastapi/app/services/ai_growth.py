@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import time
@@ -140,6 +141,185 @@ def chat(question: str, context: dict[str, Any]) -> dict[str, Any]:
         )
 
     return _mock_chat(question, context)
+
+
+def daily_fortune(context: dict[str, Any], day: str, user_seed: str) -> dict[str, Any]:
+    provider = (settings.growth_ai_provider or "qwen").lower()
+    if provider == "doubao" and settings.volcengine_ark_api_key and settings.doubao_chat_model:
+        return _daily_fortune_openai_compatible(
+            base_url=settings.volcengine_ark_base_url, api_key=settings.volcengine_ark_api_key,
+            model=settings.doubao_chat_model, provider="doubao", context=context, day=day,
+        )
+    if settings.dashscope_api_key:
+        return _daily_fortune_openai_compatible(
+            base_url=settings.dashscope_compatible_url, api_key=settings.dashscope_api_key,
+            model=settings.dashscope_chat_model, provider="qwen", context=context, day=day,
+        )
+    return {**fallback_daily_fortune(day, user_seed), "provider": "fallback", "model": "local-rule", "status": "pending_key"}
+
+
+def fallback_daily_fortune(day: str, user_seed: str) -> dict[str, Any]:
+    choices = [
+        ("小吉", "把步子放慢一点，好消息正在靠近。", "适合整理手头的小事，给自己留一段不被打扰的时间。", "雾霾蓝", 7, "松弛", "你的细腻是天赋，不必急着回应所有声音。"),
+        ("中吉", "今天适合相信自己的第一感受。", "先完成一件最重要的小事，余下的交给时间慢慢展开。", "薄荷绿", 3, "笃定", "照顾好自己的节奏，也是一种向前。"),
+        ("小吉", "轻轻开始，今天会比想象中顺利。", "适合沟通、记录和短暂散步，不必一次把事情做满。", "暖杏色", 6, "轻盈", "你已经做得很好，今天也可以对自己温柔一点。"),
+    ]
+    index = int(hashlib.sha256(f"{user_seed}:{day}".encode("utf-8")).hexdigest()[:8], 16) % len(choices)
+    grade, message, detail, color, number, keyword, whisper = choices[index]
+    return {"date": day, "grade": grade, "message": message, "detail": detail, "luckyColor": color, "luckyNumber": number, "keyword": keyword, "whisper": whisper}
+
+
+def lifestyle_summary(report_data: list[dict[str, Any]], days: int = 7) -> dict[str, Any]:
+    if not report_data:
+        return {"text": "近期数据还不够，继续佩戴并同步后，小轻再帮你整理睡眠、情绪和运动报告。", "provider": "fallback", "model": "local-rule", "status": "insufficient_data"}
+    provider = (settings.growth_ai_provider or "qwen").lower()
+    if provider == "doubao" and settings.volcengine_ark_api_key and settings.doubao_chat_model:
+        return _lifestyle_summary_openai_compatible(
+            base_url=settings.volcengine_ark_base_url, api_key=settings.volcengine_ark_api_key,
+            model=settings.doubao_chat_model, provider="doubao", report_data=report_data, days=days,
+        )
+    if settings.dashscope_api_key:
+        return _lifestyle_summary_openai_compatible(
+            base_url=settings.dashscope_compatible_url, api_key=settings.dashscope_api_key,
+            model=settings.dashscope_chat_model, provider="qwen", report_data=report_data, days=days,
+        )
+    return {"text": fallback_lifestyle_summary(report_data), "provider": "fallback", "model": "local-rule", "status": "pending_key"}
+
+
+def fallback_lifestyle_summary(report_data: list[dict[str, Any]]) -> str:
+    def average(key: str) -> int | None:
+        values = []
+        for item in report_data:
+            try:
+                if item.get(key) is not None:
+                    values.append(float(item[key]))
+            except (TypeError, ValueError):
+                continue
+        return round(sum(values) / len(values)) if values else None
+
+    sleep_score, stress_score, motion_score = average("sleepScore"), average("stressScore"), average("motionScore")
+    sleep_text = f"睡眠平均{sleep_score}分" if sleep_score is not None else "睡眠数据不足"
+    emotion_text = f"情绪与压力状态平均{stress_score}分" if stress_score is not None else "情绪数据不足"
+    motion_text = f"运动状态平均{motion_score}分" if motion_score is not None else "运动数据不足"
+    return f"近7天{sleep_text}，{emotion_text}，{motion_text}。建议优先保持规律作息，再安排轻量活动。"
+
+
+def _lifestyle_summary_openai_compatible(
+    *, base_url: str, api_key: str, model: str, provider: str,
+    report_data: list[dict[str, Any]], days: int,
+) -> dict[str, Any]:
+    system_prompt = (
+        "你是小轻AI陪伴助手。根据用户授权的近期真实汇总，从睡眠、情绪、运动三个方面生成生活化周期报告。"
+        "每个方面都要提到，先总结趋势，再给一个总的低风险行动建议。控制在160个中文字符以内。"
+        "不得诊断疾病、夸大结论或使用数据中不存在的事实；数据不足时明确说明。"
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"观察窗口：最近{days}天\n生活汇总：{json.dumps(report_data, ensure_ascii=False, default=str)}"},
+        ],
+        "temperature": 0.45,
+    }
+    data = _post_json(f"{base_url.rstrip('/')}/chat/completions", {"Authorization": f"Bearer {api_key}"}, payload)
+    answer = str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    if not answer:
+        raise GrowthAIError("综合报告模型未返回内容")
+    return {"text": answer[:300], "provider": provider, "model": model, "status": "ok"}
+
+
+def sleep_summary(sleep_data: list[dict[str, Any]], days: int = 7) -> dict[str, Any]:
+    if not sleep_data:
+        return {"text": "近期睡眠数据还不够，继续佩戴并同步后，小轻再帮你总结睡眠节奏。", "provider": "fallback", "model": "local-rule", "status": "insufficient_data"}
+    provider = (settings.growth_ai_provider or "qwen").lower()
+    if provider == "doubao" and settings.volcengine_ark_api_key and settings.doubao_chat_model:
+        return _sleep_summary_openai_compatible(
+            base_url=settings.volcengine_ark_base_url, api_key=settings.volcengine_ark_api_key,
+            model=settings.doubao_chat_model, provider="doubao", sleep_data=sleep_data, days=days,
+        )
+    if settings.dashscope_api_key:
+        return _sleep_summary_openai_compatible(
+            base_url=settings.dashscope_compatible_url, api_key=settings.dashscope_api_key,
+            model=settings.dashscope_chat_model, provider="qwen", sleep_data=sleep_data, days=days,
+        )
+    return {"text": fallback_sleep_summary(sleep_data), "provider": "fallback", "model": "local-rule", "status": "pending_key"}
+
+
+def fallback_sleep_summary(sleep_data: list[dict[str, Any]]) -> str:
+    scores = [float(item["score"]) for item in sleep_data if item.get("score") is not None]
+    minutes = [float(item["minutes"]) for item in sleep_data if item.get("minutes") is not None]
+    if not scores and not minutes:
+        return "近期睡眠数据还不完整，建议继续保持佩戴和同步，暂不做趋势判断。"
+    parts = []
+    if minutes:
+        avg_minutes = round(sum(minutes) / len(minutes))
+        parts.append(f"近期开启睡眠记录的夜晚，平均睡眠约{avg_minutes // 60}小时{avg_minutes % 60}分")
+    if scores:
+        avg_score = round(sum(scores) / len(scores))
+        parts.append(f"平均睡眠评分约{avg_score}分")
+    return "，".join(parts) + "。保持规律作息，继续观察自己的恢复感受。"
+
+
+def _sleep_summary_openai_compatible(
+    *, base_url: str, api_key: str, model: str, provider: str,
+    sleep_data: list[dict[str, Any]], days: int,
+) -> dict[str, Any]:
+    system_prompt = (
+        "你是小轻AI陪伴助手。请根据用户授权的近期真实睡眠汇总，生成一段生活化睡眠总结。"
+        "先概括睡眠时长、评分和趋势，再给一个低风险、可执行的作息建议。"
+        "控制在100个中文字符以内，不诊断失眠或疾病，不承诺改善；数据不足时明确说明。"
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"观察窗口：最近{days}天\n睡眠数据：{json.dumps(sleep_data, ensure_ascii=False, default=str)}"},
+        ],
+        "temperature": 0.45,
+    }
+    data = _post_json(f"{base_url.rstrip('/')}/chat/completions", {"Authorization": f"Bearer {api_key}"}, payload)
+    answer = str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    if not answer:
+        raise GrowthAIError("睡眠总结模型未返回内容")
+    return {"text": answer[:180], "provider": provider, "model": model, "status": "ok"}
+
+
+def _daily_fortune_openai_compatible(
+    *, base_url: str, api_key: str, model: str, provider: str,
+    context: dict[str, Any], day: str,
+) -> dict[str, Any]:
+    system_prompt = (
+        "你是小轻AI陪伴助手。请生成轻松、积极、可执行的今日签，它属于生活方式娱乐内容，不是事实预测。"
+        "不得预测疾病、怀孕、寿命、灾祸、投资收益、考试录取或重大人生结果，不制造焦虑。"
+        "只返回一个JSON对象，不要Markdown。字段必须为date、grade、message、detail、luckyColor、"
+        "luckyNumber、keyword、whisper。grade只能是小吉、中吉、大吉、平；luckyNumber为1到9整数；"
+        "其余内容使用简洁自然的中文。"
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"日期：{day}\n用户授权状态摘要：{json.dumps(context, ensure_ascii=False, default=str)}"},
+        ],
+        "temperature": 0.75,
+    }
+    data = _post_json(f"{base_url.rstrip('/')}/chat/completions", {"Authorization": f"Bearer {api_key}"}, payload)
+    content = str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    if content.startswith("```"):
+        content = content.strip("`").removeprefix("json").strip()
+    try:
+        fortune = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise GrowthAIError("今日签模型返回格式无效") from exc
+    required = ("grade", "message", "detail", "luckyColor", "luckyNumber", "keyword", "whisper")
+    if not isinstance(fortune, dict) or any(not fortune.get(key) for key in required):
+        raise GrowthAIError("今日签模型返回字段不完整")
+    fortune["date"] = day
+    fortune["grade"] = str(fortune["grade"]) if str(fortune["grade"]) in {"小吉", "中吉", "大吉", "平"} else "平"
+    fortune["luckyNumber"] = max(1, min(9, int(fortune["luckyNumber"])))
+    for key, limit in {"message": 48, "detail": 90, "luckyColor": 12, "keyword": 12, "whisper": 70}.items():
+        fortune[key] = str(fortune[key]).strip()[:limit]
+    return {**fortune, "provider": provider, "model": model, "status": "ok"}
 
 
 def _chat_openai_compatible(

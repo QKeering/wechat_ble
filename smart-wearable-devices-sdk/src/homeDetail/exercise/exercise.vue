@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // @ts-nocheck
-import { ref } from 'vue';
+import { onUnmounted, ref } from 'vue';
 import { onLoad, onPageScroll, onShow, onPullDownRefresh } from '@dcloudio/uni-app';
 import { pressureOption, calorieOption, categoryOption, actIntensityOption, activePieOption, todayOption, lastDayOption } from '@/homeDetail/exercise/echartOptions';
 import ActivityScoreCard from '@/homeDetail/exercise/components/ActivityScoreCard.vue';
@@ -10,10 +10,12 @@ import ActivityIntensityCard from '@/homeDetail/exercise/components/ActivityInte
 import ActivitySummaryCard from '@/homeDetail/exercise/components/ActivitySummaryCard.vue';
 import { getDateInfo, getYesterday, getBeforeYesterday, formatLocalDate } from '@/utils/utils.js';
 import { getMotionOverview, getMotionCalorie, getMotionIntensity, getMotionSummary, getSleepDetail } from '@/common/api/homeDetail';
+import { getGoalInfo } from '@/common/api/user';
 import type { motionOverview, motionCalorie, motionIntensity, motionSummary } from '@/types/api/homeDetail';
 import DetailInfo from '@/components/DetailInfo.vue';
 import {usePopupFixer} from '@/hooks/usePopupFixer'
 import { useRingBusinessHistoryPageSync } from '@/composables/useRingBusinessHistoryPageSync';
+import { USER_GOAL_UPDATED_EVENT, type UserGoalUpdatedPayload } from '@/utils/goalSettings';
 
 const scrollTop = ref<number>(0);
 
@@ -29,6 +31,7 @@ const calendar = ref<any>(null);
 const today = ref(new Date());
 const yesterday = ref(getYesterday(today.value));
 const beforeYesterday = ref(getBeforeYesterday(today.value));
+const calendarEndDate = formatLocalDate(today.value);
 
 // 修改选择的日期信息结构，添加monthDay字段
 const selectedDateInfo = ref({
@@ -65,9 +68,34 @@ const motionCalorieObj = ref<motionCalorie>();
 const motionIntensityObj = ref<motionIntensity>();
 const motionSummaryObj = ref<motionSummary>();
 const sleepDurationMinutes = ref(0);
+const goalInfo = ref<Record<string, any>>({});
+let useSavedGoalSnapshotOnNextShow = false;
+
+const unwrapGoalInfo = (source: any) => {
+  const first = source?.data ?? source?.result ?? source;
+  return first?.goalInfo ?? first?.userGoal ?? first?.data ?? first?.result ?? first ?? {};
+};
+
+const handleGoalUpdated = (payload: UserGoalUpdatedPayload) => {
+  goalInfo.value = { ...goalInfo.value, ...payload };
+  useSavedGoalSnapshotOnNextShow = true;
+};
+
+const loadGoalTargets = async () => {
+  try {
+    const result = await getGoalInfo({}, { custom: { toast: false, catch: true } });
+    goalInfo.value = { ...goalInfo.value, ...unwrapGoalInfo(result) };
+  } catch {
+    // 目标读取失败时保留接口概览值或刚保存的本地快照，不影响活动数据展示。
+  }
+};
+
+uni.$off(USER_GOAL_UPDATED_EVENT, handleGoalUpdated);
+uni.$on(USER_GOAL_UPDATED_EVENT, handleGoalUpdated);
 
 // 点击日期处理函数
 const handleDateClick = async (index: number) => {
+  hasSelectedDate.value = false;
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
   await Promise.all([
@@ -187,15 +215,22 @@ onLoad((options) => {
   selectedDayIndex.value = dayIndex;
   loadInitialExerciseData(dayIndex, options?.selectedDate);
 });
-// onShow(async () => {
-//   await getMotionOverviewData();
-//   await getMotionCalorieData();
-//   await getMotionIntensityData();
-//   await getMotionSummaryData();
-// });
+onShow(() => {
+  if (useSavedGoalSnapshotOnNextShow) {
+    // 刚保存的快照就是本次用户确认值，避免立即读取到尚未失效的接口缓存。
+    useSavedGoalSnapshotOnNextShow = false;
+    return;
+  }
+  void loadGoalTargets();
+});
+
+onUnmounted(() => {
+  uni.$off(USER_GOAL_UPDATED_EVENT, handleGoalUpdated);
+});
 
 onPullDownRefresh(async () => {
   try {
+    hasSelectedDate.value = false;
     selectedDayIndex.value = 2;
     await Promise.all([
       getMotionOverviewData(),
@@ -271,10 +306,16 @@ defineExpose({
         </view>
       </view>
     </view>
-    <uni-calendar ref="calendar" :insert="false" @confirm="confirm" />
+    <uni-calendar
+      ref="calendar"
+      :insert="false"
+      :end-date="calendarEndDate"
+      :adjacent-month-selectable="true"
+      @confirm="confirm"
+    />
     <view v-for="cardId in listData" :key="cardId">
-      <ActivityScoreCard v-if="cardId === 'valueFirst'" :motionOverviewObj="motionOverviewObj" :motionSummaryObj="motionSummaryObj" />
-      <CalorieCard v-else-if="cardId === 'valueSecound'" :motionCalorieObj="motionCalorieObj" :sleepDurationMinutes="sleepDurationMinutes" >
+      <ActivityScoreCard v-if="cardId === 'valueFirst'" :motionOverviewObj="motionOverviewObj" :motionSummaryObj="motionSummaryObj" :goalInfo="goalInfo" />
+      <CalorieCard v-else-if="cardId === 'valueSecound'" :motionCalorieObj="motionCalorieObj" :sleepDurationMinutes="sleepDurationMinutes" :goalInfo="goalInfo" >
         <DetailInfo id="daily_calories" v-model:isPopupActive="isPopupActive" style="margin-left: 4rpx;"></DetailInfo>
       </CalorieCard>
       <!-- <StandTimeCard v-else-if="cardId === 'valueThird'" /> -->

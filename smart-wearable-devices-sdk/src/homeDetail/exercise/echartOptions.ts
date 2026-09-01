@@ -458,10 +458,10 @@ export const activePieOption: AnyEchartOption = {
       radius: ['40%', '55%'],
       center: ['15%', '53%'],
       data: [
-        { value: 60, name: '不活跃', itemStyle: { color: '#FFDBC3', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 12, name: '低强度', itemStyle: { color: '#FFBC90', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 18, name: '中强度', itemStyle: { color: '#FFA468', borderWidth: 1, borderColor: '#ffffff' } },
-        { value: 10, name: '高强度', itemStyle: { color: '#FF893B', borderWidth: 1, borderColor: '#ffffff' } }
+        { value: 60, name: '不活跃', itemStyle: { color: '#A7B0C0', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 12, name: '低强度', itemStyle: { color: '#63B995', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 18, name: '中强度', itemStyle: { color: '#F2B84B', borderWidth: 1, borderColor: '#ffffff' } },
+        { value: 10, name: '高强度', itemStyle: { color: '#E85D4A', borderWidth: 1, borderColor: '#ffffff' } }
       ],
       label: { show: false },
       labelLine: { show: false },

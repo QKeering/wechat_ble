@@ -1,6 +1,6 @@
 <!-- 功能设置 -->
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, ref } from 'vue';
+import { computed, onUnmounted, ref } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
 import { getBindInfo } from '@/common/api/device';
 import { getGoalInfo, updateGoalInfo } from '@/common/api/user';
@@ -15,6 +15,7 @@ import {
   getCalorieGoalRange,
   normalizeCalorieGoalKcal
 } from '@/utils/calorieGoal';
+import { USER_GOAL_UPDATED_EVENT, type UserGoalUpdatedPayload } from '@/utils/goalSettings';
 
 type PickerType = 'sleep' | 'step' | 'calorie' | 'activity' | 'collect';
 
@@ -43,12 +44,6 @@ const calorieTarget = ref(DEFAULT_GOAL_VALUES.calorie);
 const activityDurationTarget = ref(DEFAULT_GOAL_VALUES.activity);
 const collectPeriodTarget = ref(DEFAULT_GOAL_VALUES.collect);
 
-const pickerRef = ref<any>(null);
-const pickerMounted = ref(true);
-const pickerValue = ref([0]);
-const pickerTitle = ref('');
-const pickerColumns = ref<string[][]>([[]]);
-const activePickerType = ref<PickerType>('sleep');
 const collectPeriodOptions = ['20', '30'];
 
 const calorieGoalRange = computed(() => getCalorieGoalRange(userStore.userInfo?.sex));
@@ -62,14 +57,6 @@ const pickerOptions = computed<Record<PickerType, string[]>>(() => ({
   activity: ['15', '30', '45', '60', '90', '120'],
   collect: collectPeriodOptions
 }));
-
-const pickerTitleMap: Record<PickerType, string> = {
-  sleep: '睡眠时长',
-  step: '步数目标',
-  calorie: '热量目标',
-  activity: '活动时长目标',
-  collect: '设备采集周期'
-};
 
 const isBusy = computed(() => Boolean(busyText.value) || controller.isRestoringDevice.value || controller.isRefreshingBusinessData.value);
 const statusText = computed(() => busyText.value || lastActionText.value);
@@ -190,49 +177,25 @@ const setCurrentPickerValue = (type: PickerType, value: string) => {
   else collectPeriodTarget.value = value;
 };
 
-const openPicker = async (type: PickerType) => {
-  activePickerType.value = type;
-  pickerTitle.value = pickerTitleMap[type];
+const getPickerOptionList = (type: PickerType) => {
   const currentValue = getCurrentPickerValue(type) || DEFAULT_GOAL_VALUES[type];
   const columns = [...pickerOptions.value[type]];
   if (!columns.includes(currentValue)) {
     columns.push(currentValue);
     columns.sort((left, right) => Number(left) - Number(right));
   }
-  const currentIndex = columns.indexOf(currentValue);
-  pickerColumns.value = [columns];
-  pickerValue.value = [Math.max(0, currentIndex)];
-
-  // 微信小程序的原生 picker-view 会保留上一次打开时的内部索引。
-  // 每次打开前重新挂载选择器，确保弹层初始值始终来自外层当前值。
-  pickerMounted.value = false;
-  await nextTick();
-  pickerMounted.value = true;
-  await nextTick();
-  pickerRef.value?.open?.();
+  return columns;
 };
 
-const onPickerChange = (event: any) => {
-  const indexs = Array.isArray(event?.indexs) ? event.indexs : null;
-  if (indexs?.length) pickerValue.value = [Number(indexs[0]) || 0];
+const getPickerIndex = (type: PickerType) => {
+  const currentValue = getCurrentPickerValue(type) || DEFAULT_GOAL_VALUES[type];
+  return Math.max(0, getPickerOptionList(type).indexOf(currentValue));
 };
 
-const getPickerConfirmValue = (event: any) => {
-  const directValue = Array.isArray(event?.value) ? event.value[0] : event?.value;
-  if (directValue !== undefined && directValue !== null && typeof directValue !== 'object') {
-    return String(directValue);
-  }
-  const eventIndex = Array.isArray(event?.indexs)
-    ? event.indexs[0]
-    : Array.isArray(event?.index)
-      ? event.index[0]
-      : event?.index;
-  const index = Number.isFinite(Number(eventIndex)) ? Number(eventIndex) : pickerValue.value[0];
-  return pickerColumns.value[0]?.[index] || '';
-};
-
-const onPickerConfirm = (event: any) => {
-  setCurrentPickerValue(activePickerType.value, getPickerConfirmValue(event));
+const onPickerChange = (type: PickerType, event: any) => {
+  const index = Number(event?.detail?.value);
+  if (!Number.isInteger(index) || index < 0) return;
+  setCurrentPickerValue(type, getPickerOptionList(type)[index] || '');
 };
 
 const getGoalNumber = (value: string, fallback: string) => {
@@ -278,13 +241,16 @@ const handleOk = async () => {
   lastActionText.value = '';
   let collectWarning = '';
   try {
-    await updateGoalInfo(buildGoalPayload(), { custom: { toast: false, catch: true } });
+    const savedGoals = buildGoalPayload() as UserGoalUpdatedPayload;
+    await updateGoalInfo(savedGoals, { custom: { toast: false, catch: true } });
+    // 保存接口成功后立即把本次确定值同步给仍在页面栈中的首页、活动页。
+    // 不等待各业务接口缓存刷新，避免返回后仍短暂显示旧目标。
+    uni.$emit(USER_GOAL_UPDATED_EVENT, savedGoals);
     try {
       await applyCollectPeriodToDevice();
     } catch (error) {
       collectWarning = formatBleErrorMessage(error, '设备采集周期下发失败');
     }
-    await loadGoalInfo();
     lastActionText.value = collectWarning ? `目标已保存，${collectWarning}` : '目标已保存';
     clearStatusLater(collectWarning ? 4200 : 2600);
     uni.showToast({
@@ -337,73 +303,72 @@ onUnmounted(() => {
     <view>
       <view class="mb-50 fs-36 pl-40 pr-40 mb-50">设置目标</view>
       <view>
-        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('sleep')">
-          <view style="width: 50%">
-            <text>睡眠时长</text>
-            <text class="t-979797 fs-24">（小时）</text>
+        <picker mode="selector" header-text="睡眠时长" :range="getPickerOptionList('sleep')" :value="getPickerIndex('sleep')" @change="onPickerChange('sleep', $event)">
+          <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
+            <view style="width: 50%">
+              <text>睡眠时长</text>
+              <text class="t-979797 fs-24">（小时）</text>
+            </view>
+            <view class="flex ai-center">
+              <text class="mr-20">{{ sleepTarget || '请选择' }}</text>
+              <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+            </view>
           </view>
-          <view class="flex ai-center">
-            <text class="mr-20">{{ sleepTarget || '请选择' }}</text>
-            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
-          </view>
-        </view>
+        </picker>
 
-        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('step')">
-          <view style="width: 50%">
-            <text>步数目标</text>
-            <text class="t-979797 fs-24">（步数）</text>
+        <picker mode="selector" header-text="步数目标" :range="getPickerOptionList('step')" :value="getPickerIndex('step')" @change="onPickerChange('step', $event)">
+          <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
+            <view style="width: 50%">
+              <text>步数目标</text>
+              <text class="t-979797 fs-24">（步数）</text>
+            </view>
+            <view class="flex ai-center">
+              <text class="mr-20">{{ stepTarget || '请选择' }}</text>
+              <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+            </view>
           </view>
-          <view class="flex ai-center">
-            <text class="mr-20">{{ stepTarget || '请选择' }}</text>
-            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
-          </view>
-        </view>
+        </picker>
 
-        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('calorie')">
-          <view style="width: 60%">
-            <view><text>热量目标</text></view>
-            <text class="t-979797 fs-24">（千卡，{{ calorieGoalRangeText }}）</text>
+        <picker mode="selector" header-text="热量目标" :range="getPickerOptionList('calorie')" :value="getPickerIndex('calorie')" @change="onPickerChange('calorie', $event)">
+          <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
+            <view style="width: 60%">
+              <view><text>热量目标</text></view>
+              <text class="t-979797 fs-24">（千卡，{{ calorieGoalRangeText }}）</text>
+            </view>
+            <view class="flex ai-center">
+              <text class="mr-20">{{ calorieTarget || '请选择' }}</text>
+              <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+            </view>
           </view>
-          <view class="flex ai-center">
-            <text class="mr-20">{{ calorieTarget || '请选择' }}</text>
-            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
-          </view>
-        </view>
+        </picker>
 
-        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('activity')">
-          <view style="width: 80%">
-            <text>活动时长目标</text>
-            <text class="t-979797 fs-24">（分钟）</text>
+        <picker mode="selector" header-text="活动时长目标" :range="getPickerOptionList('activity')" :value="getPickerIndex('activity')" @change="onPickerChange('activity', $event)">
+          <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
+            <view style="width: 80%">
+              <text>活动时长目标</text>
+              <text class="t-979797 fs-24">（分钟）</text>
+            </view>
+            <view class="flex ai-center">
+              <text class="mr-20">{{ activityDurationTarget || '请选择' }}</text>
+              <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+            </view>
           </view>
-          <view class="flex ai-center">
-            <text class="mr-20">{{ activityDurationTarget || '请选择' }}</text>
-            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
-          </view>
-        </view>
+        </picker>
 
-        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36" @click="openPicker('collect')">
-          <view style="width: 80%">
-            <text>设备采集周期</text>
-            <text class="t-979797 fs-24">（分钟）</text>
+        <picker mode="selector" header-text="设备采集周期" :range="getPickerOptionList('collect')" :value="getPickerIndex('collect')" @change="onPickerChange('collect', $event)">
+          <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
+            <view style="width: 80%">
+              <text>设备采集周期</text>
+              <text class="t-979797 fs-24">（分钟）</text>
+            </view>
+            <view class="flex ai-center">
+              <text class="mr-20">{{ collectPeriodTarget || '请选择' }}</text>
+              <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+            </view>
           </view>
-          <view class="flex ai-center">
-            <text class="mr-20">{{ collectPeriodTarget || '请选择' }}</text>
-            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
-          </view>
-        </view>
+        </picker>
       </view>
     </view>
-
-    <uv-picker
-      v-if="pickerMounted"
-      ref="pickerRef"
-      :defaultIndex="pickerValue"
-      :title="pickerTitle"
-      :columns="pickerColumns"
-      @change="onPickerChange"
-      @confirm="onPickerConfirm"
-      confirmColor="#2e70fc"
-    ></uv-picker>
 
     <view class="purchase-section p-30 demo">
       <view v-if="statusText" class="save-status fs-28 t-979797">{{ statusText }}</view>

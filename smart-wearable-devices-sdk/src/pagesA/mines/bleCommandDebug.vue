@@ -17,6 +17,7 @@ type CommandKey =
   | 'software'
   | 'historyAll'
   | 'wearMeasure'
+  | 'wearNotWorn'
   | 'collectPeriod'
   | 'batteryMonitor'
   | 'factoryReset';
@@ -53,6 +54,7 @@ const testingCollectPeriodMinutes = ref(0);
 const batteryTestMode = ref<'passive' | 'polling' | ''>('');
 const batteryTestStopRequested = ref(false);
 let stopBatteryTestWait: (() => void) | null = null;
+let stopWearObservationWait: (() => void) | null = null;
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
 const lastWearMeasureReport = ref<AnyRecord | null>(null);
 
@@ -921,6 +923,171 @@ const copyWearMeasureReport = () => {
   });
 };
 
+const waitWearObservation = (timeoutMs: number) =>
+  new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      pendingTimers.delete(timer);
+      if (stopWearObservationWait === finish) stopWearObservationWait = null;
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    pendingTimers.add(timer);
+    stopWearObservationWait = finish;
+  });
+
+/**
+ * 仅在 BLE 测试页验证“未佩戴”门禁，不调用 refreshHealthData，也不修改业务状态。
+ * 旧协议的佩戴探测本身会发送正式测量命令，因此门禁返回后继续监听一段时间，
+ * 用于区分“状态误判为 worn”和“状态已拦截但探测命令仍产生数据帧”。
+ */
+const runNotWornGateValidation = async () => {
+  if (runningKey.value) return;
+
+  const commandTarget: AnyRecord = {
+    ...currentDevice.value,
+    advertis: currentDevice.value.advertis ? { ...currentDevice.value.advertis } : undefined
+  };
+  const releaseCommandSession = tryClaimLegacyBleCommandSession(45_000, {
+    reason: 'ble-command-debug:wear-not-worn-validation',
+    caller: 'bleCommandDebug.runNotWornGateValidation',
+    deviceId: commandTarget.deviceId || commandTarget.mac || commandTarget.uniMacId || ''
+  });
+  if (!releaseCommandSession) {
+    uni.showToast({ title: '设备正在同步，请稍后重试', icon: 'none' });
+    return;
+  }
+
+  runningKey.value = 'wearNotWorn';
+  const startedAt = Date.now();
+  const frames: AnyRecord[] = [];
+  const initialSignatures = new Set(
+    mergedRecords.value.filter(isHeartRateMeasureRecord).map(getWearMeasureRecordSignature)
+  );
+  const capturedSignatures = new Set<string>();
+  let preflightResult: AnyRecord | null = null;
+
+  const captureRecords = (records: AnyRecord[]) => {
+    records.filter(isHeartRateMeasureRecord).forEach((record) => {
+      const signature = getWearMeasureRecordSignature(record);
+      if (initialSignatures.has(signature) || capturedSignatures.has(signature)) return;
+      capturedSignatures.add(signature);
+      const sample = summarizeWearMeasureRecord(record);
+      frames.push(sample);
+      pushLog('未佩戴校验 - 收到探测帧', 'info', sample);
+      appendRingDiagnosticLog('BLE COMMAND DEBUG', 'wear-not-worn-frame', {
+        elapsedMs: Date.now() - startedAt,
+        deviceId: commandTarget.deviceId || '',
+        deviceMac: commandTarget.mac || commandTarget.uniMacId || '',
+        ...sample
+      });
+    });
+  };
+  const stopCapture = watch(mergedRecords, captureRecords, { deep: true });
+
+  pushLog('未佩戴门禁校验 - 开始', 'info', {
+    expected: '请将戒指完全摘下并放在桌面，再执行本测试',
+    steps: '通信就绪 -> 只发佩戴探测 -> 不调用业务刷新 -> 监听探测回包',
+    deviceId: commandTarget.deviceId || '-',
+    mac: commandTarget.mac || commandTarget.uniMacId || '-',
+    protocol: commandTarget.protocol || '-'
+  });
+  appendRingDiagnosticLog('BLE COMMAND DEBUG', 'wear-not-worn-start', {
+    deviceId: commandTarget.deviceId || '',
+    deviceMac: commandTarget.mac || commandTarget.uniMacId || '',
+    protocol: commandTarget.protocol || ''
+  });
+
+  try {
+    const ready = await ble.ensureCommunicationReady?.();
+    if (!ready) throw new Error('设备通信未就绪');
+    if (typeof ble.queryCurrentWearState !== 'function') throw new Error('当前版本未提供佩戴门禁命令');
+
+    const preflightStartedAt = Date.now();
+    preflightResult = await ble.queryCurrentWearState('heart_rate', 8000);
+    const preflightState = String(preflightResult?.state || 'unknown');
+    const observationMs = preflightState === 'worn' ? 32_000 : 12_000;
+    pushLog('未佩戴门禁校验 - 门禁回包', preflightState === 'not_worn' ? 'success' : 'error', {
+      supported: preflightResult?.supported,
+      protocol: preflightResult?.protocol,
+      expectedState: 'not_worn',
+      actualState: preflightState,
+      elapsedMs: Date.now() - preflightStartedAt,
+      observationMs,
+      record: summarizeWearMeasureRecord(preflightResult?.record || {})
+    });
+
+    // 不调用 refreshHealthData。这里收到的数据只能来自佩戴探测命令自身或设备主动通知。
+    await waitWearObservation(observationMs);
+    captureRecords(mergedRecords.value);
+
+    const valueFrames = frames.filter((record) => Number(record.heartRate) > 0);
+    const gateBlocked = preflightState !== 'worn';
+    const stateConfirmed = preflightState === 'not_worn';
+    const valueReturnedAfterProbe = valueFrames.length > 0;
+    const passed = stateConfirmed;
+    const conclusion = !gateBlocked
+      ? '失败：戒指已摘下，但门禁仍判定为已佩戴，业务会被错误放行'
+      : !stateConfirmed
+        ? `门禁已阻断，但返回状态为 ${preflightState}，尚未明确确认未佩戴`
+        : valueReturnedAfterProbe
+          ? '门禁状态判定正确，但探测命令仍返回心率数据；业务页必须忽略门禁失败后的这些帧'
+          : '通过：未佩戴状态识别正确，且观察期内没有返回心率数值';
+    const report = {
+      testMode: 'not-worn-gate-only',
+      passed,
+      conclusion,
+      expectedState: 'not_worn',
+      actualState: preflightState,
+      gateBlocked,
+      businessRefreshDispatched: false,
+      valueReturnedAfterProbe,
+      finalHeartRate: valueFrames[valueFrames.length - 1]?.heartRate ?? null,
+      elapsedMs: Date.now() - startedAt,
+      frameCount: frames.length,
+      frames,
+      preflightRecord: preflightResult?.record || null
+    };
+    lastWearMeasureReport.value = report;
+    pushLog('未佩戴门禁校验 - 结论', passed ? 'success' : 'error', report);
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'wear-not-worn-result', {
+      deviceId: commandTarget.deviceId || '',
+      deviceMac: commandTarget.mac || commandTarget.uniMacId || '',
+      ...report
+    });
+    uni.showToast({ title: conclusion, icon: 'none', duration: 4000 });
+  } catch (error) {
+    captureRecords(mergedRecords.value);
+    const report = {
+      testMode: 'not-worn-gate-only',
+      passed: false,
+      expectedState: 'not_worn',
+      actualState: preflightResult?.state || 'unknown',
+      businessRefreshDispatched: false,
+      elapsedMs: Date.now() - startedAt,
+      frameCount: frames.length,
+      frames,
+      error: stringify(error)
+    };
+    lastWearMeasureReport.value = report;
+    pushLog('未佩戴门禁校验 - 失败', 'error', report);
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'wear-not-worn-failed', {
+      deviceId: commandTarget.deviceId || '',
+      deviceMac: commandTarget.mac || commandTarget.uniMacId || '',
+      ...report
+    });
+    uni.showToast({ title: '未佩戴门禁校验失败', icon: 'none' });
+  } finally {
+    stopWearObservationWait?.();
+    stopCapture();
+    releaseCommandSession();
+    runningKey.value = '';
+  }
+};
+
 const runCommand = async (config: CommandConfig) => {
   if (runningKey.value) return;
   // Keep an immutable identity for the whole command. A physical disconnect
@@ -1067,6 +1234,7 @@ const handleFactoryReset = () => {
 
 onBeforeUnmount(() => {
   stopBatteryTest();
+  stopWearObservationWait?.();
   pendingTimers.forEach((timer) => clearTimeout(timer));
   pendingTimers.clear();
 });
@@ -1108,11 +1276,11 @@ onBeforeUnmount(() => {
         <view class="period-test-head">
           <view>
             <view class="period-test-title">佩戴门禁与心率测量链路</view>
-            <view class="period-test-desc">按业务页顺序测试通信、佩戴状态、命令复用和最终心率回包</view>
+            <view class="period-test-desc">分开校验正确佩戴链路，以及摘下戒指后的门禁与探测回包</view>
           </view>
         </view>
         <view class="battery-test-guide">
-          <text>请正确佩戴并保持手部静止约 30 秒。原始解析帧和阶段耗时会自动回传后台，不读取历史、不上传健康数据。</text>
+          <text>“正确佩戴测试”需佩戴并保持静止；“摘下戒指校验”需将戒指放在桌面。两项均不读取历史、不上传健康数据。</text>
         </view>
         <view class="battery-test-grid">
           <button
@@ -1121,7 +1289,15 @@ onBeforeUnmount(() => {
             :disabled="Boolean(runningKey)"
             @click="runWearMeasureChainTest"
           >
-            {{ runningKey === 'wearMeasure' ? '测试中...' : '测试佩戴 + 心率' }}
+            {{ runningKey === 'wearMeasure' ? '测试中...' : '正确佩戴测试' }}
+          </button>
+          <button
+            class="period-test-btn"
+            :class="{ running: runningKey === 'wearNotWorn' }"
+            :disabled="Boolean(runningKey)"
+            @click="runNotWornGateValidation"
+          >
+            {{ runningKey === 'wearNotWorn' ? '校验中...' : '摘下戒指校验' }}
           </button>
           <button class="period-test-btn secondary" :disabled="!lastWearMeasureReport || Boolean(runningKey)" @click="copyWearMeasureReport">
             复制测试日志

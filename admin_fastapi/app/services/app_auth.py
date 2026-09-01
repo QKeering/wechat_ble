@@ -140,15 +140,34 @@ def create_token(redis: Redis | None, user: dict[str, Any]) -> str:
     return token
 
 
-def create_h5_ticket(redis: Redis | None, user: dict[str, Any], scene_id: str | None = None) -> dict[str, Any]:
+def create_h5_ticket(
+    redis: Redis | None,
+    user: dict[str, Any],
+    scene_id: str | None = None,
+    ringfm_access_token: str | None = None,
+) -> dict[str, Any]:
     if redis is None:
         raise AppAuthError("H5 会话服务不可用")
+    # Most mini-program builds forward the current app token in Authorization,
+    # but older/proxied clients may authenticate the dependency successfully
+    # without leaving that header available here. In that case mint a fresh app
+    # token for the already authenticated user so RingFM still receives the same
+    # user identity. Never fall back to a fixed user id.
+    bound_ringfm_token = str(ringfm_access_token or "").strip() or create_token(redis, user)
     ticket = uuid4().hex
     expires_in = 5 * 60
     redis.setex(
         f"{H5_TICKET_KEY}{ticket}",
         expires_in,
-        json.dumps({"userId": int(user["id"]), "sceneId": scene_id or "", "createdAt": int(time.time())}),
+        json.dumps({
+            "userId": int(user["id"]),
+            "sceneId": scene_id or "",
+            "createdAt": int(time.time()),
+            # RingFM currently validates the original QKeer app access token,
+            # while the rest of the H5 uses a dedicated short-lived session.
+            # Bind it to the single-use ticket and never log it.
+            "ringfmAccessToken": bound_ringfm_token,
+        }),
     )
     return {"ticket": ticket, "expiresIn": expires_in}
 
@@ -188,9 +207,42 @@ def exchange_h5_ticket(db: Session, redis: Redis | None, ticket: str) -> dict[st
             "expireTime": expire_ms,
             "audience": "qkeer-h5",
             "sceneId": payload.get("sceneId") or "",
+            "ringfmAccessToken": payload.get("ringfmAccessToken") or "",
         }, ensure_ascii=False),
     )
-    return {"sessionToken": token, "expiresIn": H5_SESSION_TTL_SECONDS, "sceneId": payload.get("sceneId") or ""}
+    return {
+        "sessionToken": token,
+        "ringfmAccessToken": payload.get("ringfmAccessToken") or "",
+        "expiresIn": H5_SESSION_TTL_SECONDS,
+        "sceneId": payload.get("sceneId") or "",
+    }
+
+
+def ringfm_token_from_h5_session(redis: Redis | None, token: str | None, user_id: int) -> str:
+    """Resolve the upstream app token from an authenticated H5 session."""
+    normalized = strip_token(token)
+    if not normalized or redis is None:
+        raise AppAuthError("H5 登录状态无效")
+    try:
+        claims = jwt.decode(normalized, settings.token_secret, algorithms=["HS512"])
+    except jwt.InvalidTokenError as exc:
+        raise AppAuthError("H5 登录状态无效") from exc
+    if claims.get("tokenType") != "qkeer-h5":
+        raise AppAuthError("仅支持 H5 会话访问")
+    user_key = claims.get("app_login_user_key")
+    raw = redis.get(f"{LOGIN_TOKEN_KEY}{user_key}") if user_key else None
+    if raw is None:
+        raise AppAuthError("H5 登录状态已过期")
+    try:
+        session = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise AppAuthError("H5 登录状态无效") from exc
+    if int(session.get("userId") or 0) != int(user_id):
+        raise AppAuthError("H5 用户身份不匹配")
+    upstream_token = str(session.get("ringfmAccessToken") or "").strip()
+    if not upstream_token:
+        raise AppAuthError("RingFM 登录凭证缺失，请从小程序重新进入")
+    return upstream_token
 
 
 def record_login(db: Session, user_id: int, ip: str | None = None) -> None:
