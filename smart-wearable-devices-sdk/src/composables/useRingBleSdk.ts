@@ -8,6 +8,7 @@ import {
   disconnectLegacyRing,
   ensureLegacyBluetoothReady,
   handleRingParsedData,
+  parseRwAdvertisInfo,
   resolveRingProtocol,
   resetRingRuntimeState,
   refreshLegacyBusinessMetrics,
@@ -247,6 +248,22 @@ const getRawScannedAdvertisedMac = (device?: RingDeviceInfo | null) => {
     (device as Record<string, unknown> | undefined)?.manufacturerData,
     device?.serviceData
   ];
+
+  if (resolveRingProtocol(device || undefined) === 'rw') {
+    for (const candidate of rawCandidates) {
+      if (!candidate) continue;
+      const parsed = parseRwAdvertisInfo({
+        ...(device || {}),
+        advertisData: candidate
+      } as RingDeviceInfo);
+      const mac = normalizeFullBleMacText(parsed?.macInfo);
+      if (mac) return mac;
+    }
+
+    // RW 广播尾部包含序列号文本，不能套用旧协议的“末 6 字节倒序”规则，
+    // 否则会把 CD30460002 之类的 ASCII 内容误判成设备 MAC。
+    return '';
+  }
 
   for (const candidate of rawCandidates) {
     const mac = normalizeFullBleMacText(parseLegacyMacFromAdvertisHex(candidate));
