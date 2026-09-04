@@ -31,6 +31,7 @@ const chartRefT = ref<any>(null);
 const scrollTop = ref<number>(0);
 const activeEchartOption = ref(defaultEchartOption);
 const chartInstance = ref<any>(null);
+let detailRequestSerial = 0;
 
 const heartRate = ref(0);
 const normalizeIntegerDisplayMetric = (value: unknown, min = 0, max = Number.POSITIVE_INFINITY) => {
@@ -63,11 +64,8 @@ const chartData = ref<Point[]>([]);
 const chartTimeTicks = computed(() => (currentName.value === 'day' ? buildDailyDetailTimeTicks() : buildDetailTimeTicks(chartData.value)));
 watch(
   chartData,
-  (newData, oldData) => {
-    if (newData) {
-      // 有数据且图表已初始化，重新设置图表选项
-      initChart(chartRefT.value.chartRef);
-    }
+  () => {
+    if (chartRefT.value?.chartRef) void initChart(chartRefT.value.chartRef);
   },
   { deep: true, immediate: true }
 );
@@ -263,7 +261,7 @@ const getProcessedOption = () => {
   //   newOption.yAxis.interval = Math.ceil(maxValue / 50) * 10;
   // }
 
-  applyVitalSignsLineStyle(newOption);
+  applyVitalSignsLineStyle(newOption, '#ff5a5f', 'heartRate');
   // 详情卡片使用独立的时间刻度层，避免 ECharts 标签和页面刻度重复。
   newOption.xAxis.axisLabel = { ...(newOption.xAxis.axisLabel || {}), show: false };
   return newOption;
@@ -272,6 +270,10 @@ const initChart = async (chartRef: any) => {
   if (!chartRef) return;
 
   try {
+    if (chartInstance.value && !chartInstance.value.isDisposed?.()) {
+      chartInstance.value.setOption(getProcessedOption(), true);
+      return;
+    }
     const chart = await chartRef.init(echarts);
     chartInstance.value = chart;
     // 应用处理后的option
@@ -281,27 +283,35 @@ const initChart = async (chartRef: any) => {
   }
 };
 const getRatDetail = async () => {
+  const requestSerial = ++detailRequestSerial;
   const isoDate = formatLocalDate(currentDate.value);
+  const requestedType = currentName.value;
   const res = await getHeartRateDetail({
     date: isoDate,
-    type: currentName.value,
+    type: requestedType,
     offset: offset.value
   }, getVitalDetailSilentRequestConfig());
+  if (requestSerial !== detailRequestSerial || requestedType !== currentName.value || isoDate !== formatLocalDate(currentDate.value)) return;
   if (res) {
     const detail = withMetricDetailFallback(
       res,
-      userStore.healthData?.heartRate ?? userStore.latestMetrics?.heartRate ?? heartRate.value,
+      requestedType === 'day' ? (userStore.healthData?.heartRate ?? userStore.latestMetrics?.heartRate ?? heartRate.value) : undefined,
       { min: 25, max: 240 }
     );
     heartRateObj.value = detail;
     heartRateList.value = [
-      { label: '平均心率', value: formatIntegerDisplayMetric(heartRateObj.value.avgValue, '0', 25, 240) },
-      { label: '平均范围', value: formatIntegerRangeDisplayMetric(heartRateObj.value.avgValueRange) }
+      { label: '平均心率', value: formatIntegerDisplayMetric(heartRateObj.value.avgValue, '--', 25, 240) },
+      { label: '平均范围', value: formatIntegerRangeDisplayMetric(heartRateObj.value.avgValueRange, '--') }
     ];
     chartData.value = heartRateObj.value.chartData || [];
     const latestPoint = [...chartData.value].reverse().find((item) => pickMetricNumber([item.value], 25, 240) !== undefined);
     heartRate.value = normalizeIntegerDisplayMetric(
-      pickMetricNumber([heartRateObj.value.newValue, latestPoint?.value, heartRateObj.value.avgValue, heartRate.value], 25, 240),
+      pickMetricNumber([
+        heartRateObj.value.newValue,
+        latestPoint?.value,
+        heartRateObj.value.avgValue,
+        requestedType === 'day' ? heartRate.value : undefined
+      ], 25, 240),
       25,
       240
     );

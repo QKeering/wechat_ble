@@ -77,6 +77,56 @@
 			const callbackQueue = [] as EChartsResolveCallback[]
 			
 			let chartInstance: null | EChartsInstance = null
+			let keepTapTooltipVisible = false
+
+			/**
+			 * Give every cartesian chart the same touch interaction. Most pages call
+			 * the ECharts instance returned by init() directly, so this has to wrap
+			 * the instance instead of only enhancing the component setOption method.
+			 */
+			const installCartesianTooltipEnhancer = (chart: any) => {
+				if (!chart || typeof chart.setOption !== 'function' || chart.__qkeerCartesianTooltipEnhanced) return
+				const rawSetOption = chart.setOption.bind(chart)
+				chart.setOption = (options: ChartOptions, ...args: any[]) => {
+					const series = Array.isArray(options?.series) ? options.series : options?.series ? [options.series] : []
+					const hasCartesianSeries = series.some((item: any) =>
+						['line', 'bar', 'scatter', 'effectScatter'].includes(item?.type)
+					)
+					const hasCartesianAxes = Boolean(options?.xAxis && options?.yAxis)
+
+					if (!hasCartesianSeries || !hasCartesianAxes) {
+						return rawSetOption(options, ...args)
+					}
+
+					keepTapTooltipVisible = true
+					const currentTooltip = options?.tooltip && !Array.isArray(options.tooltip) ? options.tooltip : {}
+					const currentAxisPointer = currentTooltip?.axisPointer || {}
+					const currentPointerLabel = currentAxisPointer?.label || {}
+					const enhancedOptions = {
+						...options,
+						tooltip: {
+							...currentTooltip,
+							show: true,
+							trigger: 'axis',
+							triggerOn: 'mousemove|click',
+							confine: true,
+							alwaysShowContent: true,
+							axisPointer: {
+								...currentAxisPointer,
+								type: 'cross',
+								snap: true,
+								label: {
+									...currentPointerLabel,
+									show: true,
+									backgroundColor: currentPointerLabel.backgroundColor || '#4b5563'
+								}
+							}
+						}
+					}
+					return rawSetOption(enhancedOptions, ...args)
+				}
+				chart.__qkeerCartesianTooltipEnhanced = true
+			}
 			
 			const styles = computed(()=> {
 				if(props.landscape) {
@@ -207,6 +257,7 @@
 				}
 				await getContext();
 				chartInstance = new Echarts(chartContainer.value)
+				installCartesianTooltipEnhancer(chartInstance)
 				chartContainer.value.evalJs(`init(null, null, ${JSON.stringify(config)}, ${theme})`)
 				if (callback && typeof callback === 'function') {
 					callbackQueue.push(callback)
@@ -286,7 +337,7 @@
 				dispatch.call(handler, 'mousemove', touch)
 			}
 			const handleTouchEnd = (e) => {
-				if (chartInstance == null || !props.autoHideTooltip) return
+				if (chartInstance == null || !props.autoHideTooltip || keepTapTooltipVisible) return
 				const handler = chartInstance.getZr().handler;
 			
 				const touch = {
@@ -323,6 +374,7 @@
 				let options = await getContext();
 				setCanvasCreator(library, options)
 				chartInstance = library.init(options.canvas, theme, Object.assign({}, options, config))
+				installCartesianTooltipEnhancer(chartInstance)
 				if (callback && typeof callback === 'function') {
 					callbackQueue.push(callback)
 				}
@@ -377,6 +429,7 @@
 				library.env.wxa = false
 				
 				chartInstance = library.init(chartContainer.value, theme, config)
+				installCartesianTooltipEnhancer(chartInstance)
 				
 				if (callback != null && typeof callback === 'function') {
 					callbackQueue.push(callback)

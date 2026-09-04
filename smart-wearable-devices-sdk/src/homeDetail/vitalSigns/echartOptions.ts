@@ -91,6 +91,12 @@ const VITAL_METRIC_DISPLAY_RULES: Record<VitalMetricKind, { min: number; max: nu
   hrv: { min: 1, max: 300, spike: 120 }
 };
 
+const VITAL_METRIC_TOOLTIP_META: Record<VitalMetricKind, { label: string; unit: string }> = {
+  heartRate: { label: '心率', unit: ' 次/分钟' },
+  bloodOxygen: { label: '血氧饱和度', unit: '%' },
+  hrv: { label: 'HRV', unit: ' 毫秒' }
+};
+
 export const applyVitalSignsLineStyle = (
   option: any,
   color = '#ff5a5f',
@@ -148,6 +154,13 @@ export const applyVitalSignsLineStyle = (
     );
   });
   const validPointCount = normalizedSeriesData.length;
+  const tooltipMeta = VITAL_METRIC_TOOLTIP_META[metric];
+  const formatTimelineCoordinate = (value: unknown) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return String(value ?? '');
+    const sourceIndex = Math.max(0, Math.min(sourceAxisData.length - 1, Math.round(numeric)));
+    return String(sourceAxisData[sourceIndex] ?? value);
+  };
 
   option.animation = true;
   option.animationDuration = 320;
@@ -161,7 +174,16 @@ export const applyVitalSignsLineStyle = (
     boundaryGap: [0, 0],
     axisLine: { show: false },
     axisTick: { show: false },
-    axisLabel: { show: false },
+    axisLabel: {
+      show: false,
+      formatter: (value: unknown) => formatTimelineCoordinate(value)
+    },
+    axisPointer: {
+      label: {
+        show: true,
+        formatter: (params: any) => formatTimelineCoordinate(params?.value)
+      }
+    },
     splitLine: { show: false }
   };
   option.yAxis = {
@@ -222,6 +244,24 @@ export const applyVitalSignsLineStyle = (
     },
     emphasis: {
       disabled: true
+    }
+  };
+  option.tooltip = {
+    ...(option.tooltip || {}),
+    show: true,
+    trigger: 'axis',
+    triggerOn: 'mousemove|click',
+    confine: true,
+    alwaysShowContent: true,
+    formatter: (params: any) => {
+      const item = Array.isArray(params) ? params[0] : params;
+      if (!item) return '';
+      const point = normalizedSeriesData[Number(item.dataIndex)] || [];
+      const time = formatTimelineCoordinate(point[0] ?? item.axisValue ?? item.dataIndex);
+      const rawValue = Array.isArray(item.value) ? item.value[item.value.length - 1] : item.value;
+      const numeric = Number(rawValue);
+      const value = Number.isFinite(numeric) ? Math.round(numeric) : rawValue;
+      return `${time}<br/>${tooltipMeta.label}：${value}${tooltipMeta.unit}`;
     }
   };
   return option;

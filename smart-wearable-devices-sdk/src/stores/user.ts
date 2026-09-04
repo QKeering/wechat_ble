@@ -206,7 +206,11 @@ export const useUserStore = defineStore('user', () => {
     const loginUserInfo = pickFirstObject(payload, LOGIN_USER_INFO_KEYS);
     if (loginUserInfo) {
       setUserInfo(loginUserInfo);
-    } else if (!userInfo.value?.id) {
+    } else {
+      // A token belongs to exactly one account. Never keep the previous
+      // account profile while the new profile request is still in flight or
+      // fails, otherwise a successful account switch can still show the old
+      // phone number locally.
       setUserInfo(createLoginFallbackUserInfo(loginToken));
     }
 

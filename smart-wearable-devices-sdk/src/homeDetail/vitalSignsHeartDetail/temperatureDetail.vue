@@ -30,6 +30,7 @@ const offset = ref<number>(0);
 const scrollTop = ref<number>(0);
 const activeEchartOption = ref(temperatureOption);
 const chartInstance = ref<any>(null);
+let detailRequestSerial = 0;
 
 const temperature = ref(0);
 const currentDate = ref(new Date());
@@ -64,11 +65,8 @@ const formatTemperatureRangeDisplayMetric = (value: unknown, fallback = '0') => 
 const temperatureDisplay = computed(() => (temperature.value > 0 ? temperature.value.toFixed(1) : '--'));
 watch(
   chartData,
-  (newData, oldData) => {
-    if (newData.length > 0 && chartRefT.value && chartRefT.value.chartRef) {
-      // 有数据且图表已初始化，重新设置图表选项
-      initChart(chartRefT.value.chartRef);
-    }
+  () => {
+    if (chartRefT.value?.chartRef) void initChart(chartRefT.value.chartRef);
   },
   { deep: true, immediate: true }
 );
@@ -272,6 +270,10 @@ const getProcessedOption = () => {
 const initChart = async (chartRef: any) => {
   if (!chartRef) return;
   try {
+    if (chartInstance.value && !chartInstance.value.isDisposed?.()) {
+      chartInstance.value.setOption(getProcessedOption(), true);
+      return;
+    }
     const chart = await chartRef.init(echarts);
     chartInstance.value = chart;
     // 应用处理后的option
@@ -281,24 +283,29 @@ const initChart = async (chartRef: any) => {
   }
 };
 const getTemperatureDetail = async () => {
+  const requestSerial = ++detailRequestSerial;
   const isoDate = formatLocalDate(currentDate.value);
+  const requestedType = currentName.value;
   const res = await getBodyTemperatureDetail({
-    date: isoDate, //固定今天日期
-    type: currentName.value,
+    date: isoDate,
+    type: requestedType,
     offset: offset.value
   }, getVitalDetailSilentRequestConfig());
+  if (requestSerial !== detailRequestSerial || requestedType !== currentName.value || isoDate !== formatLocalDate(currentDate.value)) return;
   if (res) {
     heartRateObj.value = res;
     heartRateList.value = [
-      { label: '平均皮肤温度', value: formatTemperatureDisplayMetric(heartRateObj.value.avgValue) },
-      { label: '平均范围', value: formatTemperatureRangeDisplayMetric(heartRateObj.value.avgValueRange) }
+      { label: '平均皮肤温度', value: formatTemperatureDisplayMetric(heartRateObj.value.avgValue, '--') },
+      { label: '平均范围', value: formatTemperatureRangeDisplayMetric(heartRateObj.value.avgValueRange, '--') }
     ];
     chartData.value = heartRateObj.value.chartData || [];
     const latestPoint = [...chartData.value].reverse().find((item) => normalizeTemperatureDisplay(item.value) > 0);
-    temperature.value = normalizeTemperatureDisplay(heartRateObj.value.newValue ?? latestPoint?.value ?? heartRateObj.value.avgValue ?? temperature.value);
+    temperature.value = normalizeTemperatureDisplay(
+      heartRateObj.value.newValue ?? latestPoint?.value ?? heartRateObj.value.avgValue ?? (requestedType === 'day' ? temperature.value : undefined)
+    );
     heartRateList.value = [
-      { label: '平均皮肤温度', value: formatTemperatureDisplayMetric(heartRateObj.value.avgValue) },
-      { label: '平均范围', value: formatTemperatureRangeDisplayMetric(heartRateObj.value.avgValueRange) }
+      { label: '平均皮肤温度', value: formatTemperatureDisplayMetric(heartRateObj.value.avgValue, '--') },
+      { label: '平均范围', value: formatTemperatureRangeDisplayMetric(heartRateObj.value.avgValueRange, '--') }
     ];
   }
 };
@@ -337,7 +344,9 @@ onUnload(() => {
         <view @tap="prevDay">
           <uv-icon name="arrow-left" size="22"></uv-icon>
         </view>
-        <text class="date-text fs-36 fw-400">{{ formatDate(currentDate) }}</text>
+        <text v-if="current === 0" class="date-text fs-36 fw-400">{{ formatDateLocal(currentDate, 'day') }}</text>
+        <text v-if="current === 1" class="date-text fs-36 fw-400">{{ formatDateLocal(currentDate, 'week') }}</text>
+        <text v-if="current === 2" class="date-text fs-36 fw-400">{{ formatDateLocal(currentDate, 'month') }}</text>
         <view @tap="nextDay">
           <uv-icon name="arrow-right" size="22"></uv-icon>
         </view>

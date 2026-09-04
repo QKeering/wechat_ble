@@ -1363,46 +1363,61 @@ export const getRingSubmitDeviceMac = (userStore: any, isIOS: boolean, ...device
 
   if (info.protocol === 'rw' || hasRwSource) {
     for (const source of allDeviceSources) {
-      const stableMac = getRwStableSubmitMac(source);
+      const stableMac = getRwStableSubmitMac(source, isIOS);
       if (stableMac) return stableMac;
     }
     return '';
   }
 
-  const stableMac = getLegacyStableSubmitMac(allDeviceSources, userStore);
+  const stableMac = getLegacyStableSubmitMac(allDeviceSources, userStore, isIOS);
   if (stableMac) return stableMac;
 
   return (
-    (isIOS ? info.uniMacId || info.deviceId : (isColonSeparatedBleMac(info.deviceId) ? info.deviceId : '') || info.deviceId) ||
-    (isColonSeparatedBleMac(userStore.iosMacId) ? userStore.iosMacId : '') ||
+    (!isIOS ? (isColonSeparatedBleMac(info.deviceId) ? info.deviceId : '') || info.deviceId : '') ||
     ''
   );
 };
 
-const getLegacyStableSubmitMac = (sources: Array<Record<string, any>>, userStore: any) => {
+const getLegacyStableSubmitMac = (sources: Array<Record<string, any>>, userStore: any, isIOS: boolean) => {
   const candidates: unknown[] = [];
+  if (isIOS) {
+    candidates.push(userStore?.normalMac);
+  }
   for (const source of sources) {
     const isRwSource = isRwSubmitDeviceSource(source);
+    const deviceId = String(source?.deviceId || source?.platformDeviceId || '').trim().toUpperCase();
+    const sourceMac = String(source?.mac || '').trim();
+    const sourceMacIsPlatformId = Boolean(isIOS && sourceMac && sourceMac.toUpperCase() === deviceId);
     candidates.push(
-      source?.mac,
       source?.deviceMac,
       source?.normalMac,
       source?.advertis?.macInfo,
-      isColonSeparatedBleMac(source?.uniMacId) ? source?.uniMacId : '',
-      !isRwSource && isColonSeparatedBleMac(source?.deviceId) ? source?.deviceId : ''
+      sourceMacIsPlatformId ? '' : sourceMac,
+      isColonSeparatedBleMac(source?.uniMacId) && (!isIOS || String(source.uniMacId).trim().toUpperCase() !== deviceId)
+        ? source?.uniMacId
+        : '',
+      !isIOS && !isRwSource && isColonSeparatedBleMac(source?.deviceId) ? source?.deviceId : ''
     );
   }
-  candidates.push(userStore?.normalMac, isColonSeparatedBleMac(userStore?.iosMacId) ? userStore?.iosMacId : '');
+  if (!isIOS) {
+    candidates.push(userStore?.normalMac, isColonSeparatedBleMac(userStore?.iosMacId) ? userStore?.iosMacId : '');
+  }
   return candidates.map((item) => String(item || '').trim()).find(Boolean) || '';
 };
 
-const getRwStableSubmitMac = (device?: Record<string, any> | null) => {
+const getRwStableSubmitMac = (device: Record<string, any> | null | undefined, isIOS: boolean) => {
   if (!device) return '';
-  return (
-    device.mac ||
-    device.advertis?.macInfo ||
-    (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '')
-  );
+  const deviceId = String(device.deviceId || device.platformDeviceId || '').trim().toUpperCase();
+  const sourceMac = String(device.mac || '').trim();
+  const uniMacId = String(device.uniMacId || '').trim();
+  const candidates = [
+    device.advertis?.macInfo,
+    device.deviceMac,
+    device.normalMac,
+    sourceMac && (!isIOS || sourceMac.toUpperCase() !== deviceId) ? sourceMac : '',
+    isColonSeparatedBleMac(uniMacId) && (!isIOS || uniMacId.toUpperCase() !== deviceId) ? uniMacId : ''
+  ];
+  return candidates.map((value) => String(value || '').trim()).find(Boolean) || '';
 };
 
 const isColonSeparatedBleMac = (value?: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){2,5}$/.test(String(value || '').trim());

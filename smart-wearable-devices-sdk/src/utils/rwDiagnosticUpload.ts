@@ -134,11 +134,21 @@ const pickDeviceId = (entry: RwDiagnosticUploadEntry) => {
   const details = parseDetails(entry.details);
   return (
     details?.deviceId ||
+    details?.deviceMac ||
+    details?.mac ||
     details?.snapshot?.deviceId ||
+    details?.snapshot?.deviceMac ||
     details?.snapshot?.currentDevice?.deviceId ||
     details?.snapshot?.storeDevice?.deviceId ||
     details?.snapshot?.userDevice?.deviceId
   );
+};
+
+const pickUserId = (entry: RwDiagnosticUploadEntry) => {
+  if (typeof entry.userId === 'number' && Number.isFinite(entry.userId)) return entry.userId;
+  const details = parseDetails(entry.details);
+  const value = Number(details?.userId ?? details?.snapshot?.userId ?? details?.snapshot?.userInfo?.id);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
 };
 
 const normalizeUploadEntry = (entry: RwDiagnosticUploadEntry): RwDiagnosticUploadEntry => {
@@ -155,7 +165,7 @@ const normalizeUploadEntry = (entry: RwDiagnosticUploadEntry): RwDiagnosticUploa
     details: entry.details ?? '',
     buildTag: pickBuildTag(entry),
     deviceId: pickDeviceId(entry),
-    userId: typeof entry.userId === 'number' ? entry.userId : undefined,
+    userId: pickUserId(entry),
     sessionId
   };
 };

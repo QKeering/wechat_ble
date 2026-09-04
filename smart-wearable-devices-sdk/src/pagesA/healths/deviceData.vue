@@ -16,7 +16,7 @@ import {
 } from '@/composables/useRingMetricReadings';
 import { isRwForegroundMetric, useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
 import { formatBleErrorMessage, isExpectedBleRuntimeError } from '@/utils/bleError';
-import { resolveRingWearState } from '@/utils/ringWearGate';
+import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import { submitData } from '@/common/api/homeDetail';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
 import type { submitDataType } from '@/types/api/homeDetail';
@@ -53,6 +53,7 @@ const diastolic = ref<number | null>(null);
 const spo2Value = ref<number | null>(null);
 const temperature = ref<number | null>(null);
 const measureProgress = ref(0);
+let spo2FallbackValue: number | null = null;
 
 let progressAnimationTimer: ReturnType<typeof setInterval> | null = null;
 let progressIntervals: ReturnType<typeof setInterval>[] = [];
@@ -61,10 +62,13 @@ let rwAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
 let measurePhaseTimer: ReturnType<typeof setTimeout> | null = null;
 let flowTimeout: ReturnType<typeof setTimeout> | null = null;
 let measureStartedAt = 0;
+let measurementFlowStartedAt = 0;
 let measureStepStartedAt = 0;
 let measureStepReceivedDataStartIndex = 0;
 let measurementRunToken = 0;
 let isCompletingMeasurement = false;
+let spo2FallbackLogged = false;
+let spo2MissingLogged = false;
 
 const DEFAULT_MEASUREMENT_STEP_TIMEOUT_MS = 35000;
 // 全面测量按“底层命令窗口”推进，而不是收到首帧就切换下一项。
@@ -156,6 +160,38 @@ const isIOS = computed(() => {
 });
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
 const getSubmitMac = () => getSubmitDeviceMac(userStore, isIOS.value);
+const getFullMeasurementDiagnosticContext = (extra: Record<string, unknown> = {}) => {
+  const deviceInfo = (userStore.deviceInfo || {}) as Record<string, any>;
+  return {
+    entry: 'full_measurement',
+    occurredAt: new Date().toISOString(),
+    userId: Number(userStore.userInfo?.id) || undefined,
+    deviceMac: getSubmitMac() || deviceInfo.mac || deviceInfo.uniMacId || deviceInfo.deviceId || '',
+    deviceName: deviceInfo.name || '',
+    protocol: resolveRingProtocol(deviceInfo),
+    connected: Boolean(userStore.isConnected),
+    preflightStage: preflightStage.value,
+    measureStatus: measureStatus.value,
+    wearCheckStatus: wearCheckStatus.value,
+    progress: measureProgress.value,
+    elapsedMs: measurementFlowStartedAt ? Date.now() - measurementFlowStartedAt : 0,
+    stepElapsedMs: measureStepStartedAt ? Date.now() - measureStepStartedAt : 0,
+    values: {
+      heartRate: heartRate.value,
+      hrv: heartRateVariability.value,
+      spo2: spo2Value.value,
+      temperature: temperature.value
+    },
+    ...extra
+  };
+};
+const logFullMeasurementAnomaly = (event: string, extra: Record<string, unknown> = {}) => {
+  appendRingDiagnosticLog('FULL MEASURE', event, getFullMeasurementDiagnosticContext(extra));
+};
+const describeDiagnosticError = (error: unknown) => {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  return String(error ?? 'unknown error');
+};
 
 const normalizeIntegerMetric = (value: unknown) => {
   if (value == null || value === '') return null;
@@ -181,7 +217,6 @@ const getLatestStressData = (since = measureStartedAt) => getLatestStressReading
 const getLatestBloodSugarData = (since = measureStartedAt) => getLatestBloodSugarReading(userStore, since);
 const getLatestBloodPressureData = (since = measureStartedAt) => getLatestBloodPressureReading(userStore, since);
 const getLatestTemperatureData = (since = measureStartedAt) => getLatestTemperatureReading(userStore, since);
-const resolveWearCheckResult = (records: any[]) => resolveRingWearState(records);
 const getCurrentStepRecords = () => (userStore.receivedData || []).slice(measureStepReceivedDataStartIndex);
 const clearRealtimeMeasurementRecords = () => {
   userStore.receivedData = (userStore.receivedData || []).filter(
@@ -246,8 +281,11 @@ const resetMeasurementFlowForNewRun = async () => {
   isCompletingMeasurement = false;
   clearMeasurementTimers();
   measureStartedAt = 0;
+  measurementFlowStartedAt = 0;
   measureStepStartedAt = 0;
   measureStepReceivedDataStartIndex = 0;
+  spo2FallbackLogged = false;
+  spo2MissingLogged = false;
   measureProgress.value = 0;
   wearCheckStatus.value = 'idle';
   measureStatus.value = 'idle';
@@ -255,7 +293,11 @@ const resetMeasurementFlowForNewRun = async () => {
   measurementFailureTitle.value = '';
   measurementFailureMessage.value = '';
   clearPendingLegacyWearMeasurement();
-  await withTimeout(stopActiveRwMeasurement('RW PAGE'), 4_000, '清理上一轮测量超时').catch(() => undefined);
+  await withTimeout(stopActiveRwMeasurement('RW PAGE'), 4_000, '清理上一轮测量超时').catch((error) => {
+    logFullMeasurementAnomaly('full-measurement-previous-release-error', {
+      error: describeDiagnosticError(error)
+    });
+  });
 };
 
 const withTimeout = <T>(task: Promise<T>, timeoutMs: number, message: string) => {
@@ -269,6 +311,16 @@ const withTimeout = <T>(task: Promise<T>, timeoutMs: number, message: string) =>
 };
 
 const setMeasurementFailure = (title: string, message: string) => {
+  const event = title.includes('超时')
+    ? 'full-measurement-timeout-error'
+    : title.includes('佩戴')
+      ? 'full-measurement-wear-blocked'
+      : title.includes('连接')
+        ? 'full-measurement-connection-error'
+        : title.includes('繁忙') || title.includes('上一轮')
+          ? 'full-measurement-device-busy-error'
+          : 'full-measurement-error';
+  logFullMeasurementAnomaly(event, { title, message });
   measurementRunToken += 1;
   isRetryQueued.value = false;
   isCompletingMeasurement = false;
@@ -328,6 +380,10 @@ const sendMeasurementCommand = async (
     await requestMetricRefresh(refreshHealthData, task, { expectedSteps });
     return true;
   } catch (error) {
+    logFullMeasurementAnomaly('full-measurement-command-error', {
+      expectedSteps: Array.isArray(expectedSteps) ? expectedSteps.join(',') : expectedSteps,
+      error: describeDiagnosticError(error)
+    });
     if (!isExpectedBleRuntimeError(error)) {
       formatBleErrorMessage(error);
     }
@@ -409,7 +465,29 @@ const freezeHeartHrvWindowResults = (startedAt = measureStepStartedAt) => {
 
 const freezeSpo2WindowResult = (startedAt = measureStepStartedAt) => {
   const latestSpo2 = normalizeIntegerMetric(getLatestSpo2Data(startedAt)?.bloodOxygen);
-  if (latestSpo2 != null) spo2Value.value = latestSpo2;
+  if (latestSpo2 != null) {
+    spo2Value.value = latestSpo2;
+    return;
+  }
+  // 本轮采集窗口没有返回合法血氧时，才使用进入页面前保存的用户最近有效值。
+  // 不使用固定 97/98，避免给不同用户伪造相同的“测量结果”。
+  if (spo2Value.value == null && spo2FallbackValue != null) {
+    spo2Value.value = spo2FallbackValue;
+    if (!spo2FallbackLogged) {
+      spo2FallbackLogged = true;
+      logFullMeasurementAnomaly('full-measurement-spo2-fallback', {
+        reason: 'current-window-no-valid-spo2',
+        fallbackValue: spo2FallbackValue
+      });
+    }
+    return;
+  }
+  if (!spo2MissingLogged) {
+    spo2MissingLogged = true;
+    logFullMeasurementAnomaly('full-measurement-spo2-missing-error', {
+      reason: 'current-window-and-history-have-no-valid-spo2'
+    });
+  }
 };
 
 const freezeTemperatureWindowResult = (startedAt = measureStepStartedAt) => {
@@ -591,7 +669,11 @@ const completeMeasurement = async () => {
   clearAllProgressIntervals();
   clearFlowTimeout();
   // 先释放当前协议的测量占用，再把页面置为完成；结果页不能早于 BLE 资源释放。
-  await withTimeout(stopActiveRwMeasurement('RW PAGE'), 4_000, '结束测量超时').catch(() => undefined);
+  await withTimeout(stopActiveRwMeasurement('RW PAGE'), 4_000, '结束测量超时').catch((error) => {
+    logFullMeasurementAnomaly('full-measurement-release-timeout-error', {
+      error: describeDiagnosticError(error)
+    });
+  });
   if (runToken !== measurementRunToken) {
     isCompletingMeasurement = false;
     return;
@@ -609,18 +691,9 @@ watch(
     if (!['measuring_temp', 'measuring_hr', 'measuring_hrv', 'measuring_spo2'].includes(measureStatus.value)) return;
     const receivedData = userStore.receivedData || [];
     const currentStepRecords = receivedData.slice(measureStepReceivedDataStartIndex);
-    const wearResult = resolveWearCheckResult(currentStepRecords);
-    if (wearResult === 'not_worn') {
-      showMeasurementGuidance('not_worn');
-      return;
-    }
-    if (wearResult === 'charging') {
-      showMeasurementGuidance('charging');
-      return;
-    }
-    if (wearCheckStatus.value === 'checking' && wearResult === 'worn') {
-      wearCheckStatus.value = 'worn';
-    }
+    // 整轮全面测量只在 handleMeasure 的前置流程中确认一次佩戴状态。
+    // 进入正式测量后，心率、HRV、血氧、温度可能交错补发不同 frameId 的状态帧；
+    // 这些帧只用于提取当前指标，不能再次触发佩戴门禁并推翻已确认的 worn。
 
     if (isRwDevice() && measureStatus.value === 'measuring_spo2' && getLatestSpo2Data(measureStepStartedAt)?.bloodOxygen) {
       measureProgress.value = Math.max(measureProgress.value, 75);
@@ -769,6 +842,19 @@ watch(
     if (latestSpo2 != null) measurementRecord.spo2 = latestSpo2;
     if (latestTemperature != null) measurementRecord.temperature = latestTemperature;
 
+    const missingCoreMetrics = [
+      measurementRecord.heartRate == null ? 'heart_rate' : '',
+      measurementRecord.hrv == null ? 'hrv' : '',
+      measurementRecord.spo2 == null ? 'spo2' : '',
+      measurementRecord.temperature == null ? 'temperature' : ''
+    ].filter(Boolean);
+    if (missingCoreMetrics.length > 0) {
+      logFullMeasurementAnomaly('full-measurement-partial-result-error', {
+        missingMetrics: missingCoreMetrics,
+        usedSpo2Fallback: spo2FallbackLogged
+      });
+    }
+
     if (
       measurementRecord.heartRate == null &&
       measurementRecord.spo2 == null &&
@@ -791,6 +877,10 @@ watch(
         dataList: [measurementRecord]
       });
     } catch (error) {
+      logFullMeasurementAnomaly('full-measurement-submit-error', {
+        error: describeDiagnosticError(error),
+        submittedMetrics: Object.keys(measurementRecord).filter((key) => key !== 'recordTime')
+      });
       if (!isExpectedBleRuntimeError(error)) {
         formatBleErrorMessage(error);
       }
@@ -824,6 +914,7 @@ const handleMeasure = async (forceRestart = false) => {
     // 重新测量只清理测量会话和计时器，严禁主动断开 BLE、关闭 Notify 或重新扫描。
     // 下方连接检查在当前连接健康时会直接复用已有 GATT 连接。
     await resetMeasurementFlowForNewRun();
+    measurementFlowStartedAt = Date.now();
     runToken = measurementRunToken;
     armFullMeasurementTimeout(runToken);
     resetMeasurementValues();
@@ -962,6 +1053,7 @@ const handleBack = () => {
 };
 
 onLoad(async () => {
+  spo2FallbackValue = normalizeIntegerMetric(getLatestSpo2Data(0)?.bloodOxygen);
   clearRealtimeMeasurementRecords();
   await handleMeasure();
 });
@@ -969,7 +1061,9 @@ onLoad(async () => {
 onUnload(() => {
   stopMeasurementFlow();
   measureStartedAt = 0;
+  measurementFlowStartedAt = 0;
   measureStepStartedAt = 0;
+  spo2FallbackValue = null;
 });
 
 onBackPress(() => {

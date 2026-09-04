@@ -18,7 +18,14 @@ import type { heartRateDetail, Point, sleepSegment } from '@/types/api/homeDetai
 import { cloneDeep } from 'lodash-es';
 import Action from '@/components/action.vue';
 import { formatBleErrorMessage } from '@/utils/bleError';
-import { formatMetricRecordTime, getLatestSpo2Reading, getSubmitDeviceMac, requestMetricRefresh } from '@/composables/useRingMetricReadings';
+import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
+import {
+  formatMetricRecordTime,
+  getLatestSpo2Reading,
+  getSubmitDeviceMac,
+  isValidBloodOxygenValue,
+  requestMetricRefresh
+} from '@/composables/useRingMetricReadings';
 import { useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
 import {
@@ -238,12 +245,55 @@ const initChart = async () => {
 let measureTimeout: any = null;
 let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
+let isMeasurementFinalizing = false;
 let measureStartedAt = 0;
+let measurementDeadlineAt = 0;
+let measurementFlowStartedAt = 0;
 let completedMeasurementReading: any = null;
+let spo2FallbackReading: any = null;
+let spo2FallbackLogged = false;
 let wearGatePending = false;
 let measurementRunToken = 0;
 let wearConfirmedForRun = false;
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
+const getBloodOxygenDiagnosticContext = (extra: Record<string, unknown> = {}) => {
+  const deviceInfo = (userStore.deviceInfo || {}) as Record<string, any>;
+  return {
+    entry: 'realtime_blood_oxygen',
+    occurredAt: new Date().toISOString(),
+    userId: Number(userStore.userInfo?.id) || undefined,
+    deviceMac:
+      getSubmitDeviceMac(userStore, isIOS.value) || deviceInfo.mac || deviceInfo.uniMacId || deviceInfo.deviceId || '',
+    deviceName: deviceInfo.name || '',
+    protocol: resolveRingProtocol(deviceInfo),
+    connected: Boolean(userStore.isConnected),
+    measureStatus: measureStatus.value,
+    wearConfirmedForRun,
+    lockKind: vitalMeasurementLockKind.value,
+    elapsedMs: measurementFlowStartedAt ? Date.now() - measurementFlowStartedAt : 0,
+    measureElapsedMs: measureStartedAt ? Date.now() - measureStartedAt : 0,
+    currentSpo2: getLatestSpo2ReadingFromStores()?.bloodOxygen ?? null,
+    fallbackSpo2: spo2FallbackReading?.bloodOxygen ?? null,
+    ...extra
+  };
+};
+const logBloodOxygenAnomaly = (event: string, extra: Record<string, unknown> = {}) => {
+  appendRingDiagnosticLog('VITAL OXYGEN', event, getBloodOxygenDiagnosticContext(extra));
+};
+const describeDiagnosticError = (error: unknown) => {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  return String(error ?? 'unknown error');
+};
+const stopRwBloodOxygenMeasurement = async (reason: string) => {
+  try {
+    await stopActiveRwMeasurement('RW VITAL');
+  } catch (error) {
+    logBloodOxygenAnomaly('blood-oxygen-release-error', {
+      reason,
+      error: describeDiagnosticError(error)
+    });
+  }
+};
 const showVitalMeasurementBusy = () => {
   uni.showToast({ title: '设备正在测量，请稍候', icon: 'none' });
 };
@@ -263,6 +313,18 @@ const completeOwnVitalMeasurement = () => {
 const getMeasurementMinimumDurationMs = () => MIN_VITAL_MEASUREMENT_DURATION_MS;
 const getLatestSpo2ReadingFromStores = () =>
   getLatestSpo2Reading(userStore, measureStartedAt) || getLatestSpo2Reading(ringStore, measureStartedAt);
+const captureSpo2FallbackReading = () => {
+  const latestStoredReading = getLatestSpo2Reading(userStore, 0) || getLatestSpo2Reading(ringStore, 0);
+  if (latestStoredReading) {
+    return { ...latestStoredReading };
+  }
+  const pageValue = Number(props.oxyGenData?.newValue);
+  if (!isValidBloodOxygenValue(Number.isFinite(pageValue) ? pageValue : null)) return null;
+  return {
+    bloodOxygen: pageValue,
+    timestamp: Date.now()
+  };
+};
 const getCurrentBloodOxygenWearState = () => {
   const userMeasurementRecords = getRingMeasurementRecords(userStore.receivedData || [], measureStartedAt);
   const ringMeasurementRecords = getRingMeasurementRecords(ringStore.receivedData || [], measureStartedAt);
@@ -278,6 +340,7 @@ const clearMeasureCompleteTimer = () => {
 };
 const stopMeasureForWearGate = async (wearState: Exclude<RingWearState, 'unknown' | 'worn'> | 'no_data') => {
   if (measureStatus.value !== 'measuring' || wearGatePending) return;
+  logBloodOxygenAnomaly('blood-oxygen-wear-gate-blocked', { wearState });
   measurementRunToken += 1;
   wearGatePending = true;
   if (measureTimeout) {
@@ -286,12 +349,14 @@ const stopMeasureForWearGate = async (wearState: Exclude<RingWearState, 'unknown
   }
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
   popup.value?.close?.();
   measureStatus.value = 'idle';
   measureStartedAt = 0;
+  measurementDeadlineAt = 0;
   wearConfirmedForRun = false;
   if (isRwDevice()) {
-    await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
+    await stopRwBloodOxygenMeasurement('wear-gate-blocked');
   }
   settleOwnVitalMeasurementLock('wear-gate-blocked');
   showRingWearGuidance(wearState);
@@ -326,6 +391,10 @@ const startDirectBloodOxygenWearGate = (runToken: number) => {
         return;
       }
       // RW NACK 当前固件没有更细的佩戴码，但可以确定本轮没有有效血氧。
+      logBloodOxygenAnomaly('blood-oxygen-rw-nack-error', {
+        parsedType: String(parsed?.sourceType || parsed?.type || ''),
+        statusCode: Number(parsed?.statusCode ?? parsed?.metrics?.statusCode ?? parsed?.raw?.statusCode)
+      });
       measurementRunToken += 1;
       if (measureTimeout) {
         clearTimeout(measureTimeout);
@@ -335,7 +404,9 @@ const startDirectBloodOxygenWearGate = (runToken: number) => {
       popup.value?.close?.();
       measureStatus.value = 'idle';
       measureStartedAt = 0;
-      void stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
+      measurementDeadlineAt = 0;
+      isMeasurementFinalizing = false;
+      void stopRwBloodOxygenMeasurement('rw-nack');
       settleOwnVitalMeasurementLock('wear-gate-no-data');
       showRingWearGuidance('no_data');
     })
@@ -345,34 +416,56 @@ const startMeasureFallbackTimer = () => {
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }
+  const remainingMs = Math.max(0, measurementDeadlineAt - Date.now());
+  if (remainingMs <= 0) {
+    void completeMeasureWithLatestReading(true);
+    return;
+  }
   measureTimeout = setTimeout(() => {
-    if (measureStatus.value === 'measuring') {
-      void completeMeasureWithLatestReading();
-    }
     measureTimeout = null;
-  }, MAX_VITAL_MEASUREMENT_DURATION_MS);
+    if (measureStatus.value === 'measuring') {
+      void completeMeasureWithLatestReading(true);
+    }
+  }, remainingMs);
 };
-const completeMeasureWithLatestReading = async () => {
-  if (measureStatus.value !== 'measuring' || isMeasureCompletePending) return;
+const completeMeasureWithLatestReading = async (forceDeadline = false) => {
+  if (measureStatus.value !== 'measuring' || isMeasurementFinalizing || (!forceDeadline && isMeasureCompletePending)) return;
   const wearState = getCurrentBloodOxygenWearState();
   if (wearState === 'not_worn' || wearState === 'charging') {
     await stopMeasureForWearGate(wearState);
     return;
   }
-  if (wearState !== 'worn') {
-    if (Date.now() - measureStartedAt >= MAX_VITAL_MEASUREMENT_DURATION_MS - 250) {
+  if (wearState !== 'worn' && !forceDeadline) {
+    if (Date.now() >= measurementDeadlineAt - 250) {
       await stopMeasureForWearGate('no_data');
     }
     return;
   }
-  const latestReading = getLatestSpo2ReadingFromStores();
+  let latestReading = getLatestSpo2ReadingFromStores();
   if (!latestReading) {
-    if (Date.now() - measureStartedAt >= MAX_VITAL_MEASUREMENT_DURATION_MS - 250) {
-      await stopMeasureForWearGate('no_data');
+    if (forceDeadline || Date.now() >= measurementDeadlineAt - 250) {
+      if (spo2FallbackReading) {
+        latestReading = {
+          ...spo2FallbackReading,
+          timestamp: Date.now(),
+          fallback: true
+        };
+        if (!spo2FallbackLogged) {
+          spo2FallbackLogged = true;
+          logBloodOxygenAnomaly('blood-oxygen-fallback', {
+            reason: 'current-window-no-valid-spo2',
+            fallbackValue: spo2FallbackReading.bloodOxygen
+          });
+        }
+      } else {
+        await stopMeasureForWearGate('no_data');
+        return;
+      }
+    } else {
+      return;
     }
-    return;
   }
-  const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt, getMeasurementMinimumDurationMs());
+  const remainingMs = forceDeadline ? 0 : getRemainingVitalMeasurementMs(measureStartedAt, getMeasurementMinimumDurationMs());
   if (remainingMs > 0) {
     isMeasureCompletePending = true;
     clearMeasureCompleteTimer();
@@ -383,15 +476,17 @@ const completeMeasureWithLatestReading = async () => {
     }, remainingMs);
     return;
   }
+  isMeasurementFinalizing = true;
   if (measureTimeout) {
     clearTimeout(measureTimeout);
     measureTimeout = null;
   }
   clearMeasureCompleteTimer();
+  measurementDeadlineAt = 0;
   completedMeasurementReading = { ...latestReading };
   popup.value?.close();
   if (isRwDevice()) {
-    await stopActiveRwMeasurement('RW VITAL');
+    await stopRwBloodOxygenMeasurement('measurement-completed');
   }
   completeOwnVitalMeasurement();
   measureStatus.value = 'completed';
@@ -399,6 +494,25 @@ const completeMeasureWithLatestReading = async () => {
 const completeMeasureWhenLatestReadingReady = async () => {
   if (!getLatestSpo2ReadingFromStores()) return;
   await completeMeasureWithLatestReading();
+};
+const cancelMeasurement = async () => {
+  measurementRunToken += 1;
+  if (measureTimeout) {
+    clearTimeout(measureTimeout);
+    measureTimeout = null;
+  }
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
+  popup.value?.close?.();
+  if (measureStatus.value !== 'measuring') return;
+  measureStatus.value = 'idle';
+  measureStartedAt = 0;
+  measurementDeadlineAt = 0;
+  wearConfirmedForRun = false;
+  if (isRwDevice()) await stopRwBloodOxygenMeasurement('user-cancelled');
+  settleOwnVitalMeasurementLock('user-cancelled');
+  uni.showToast({ title: '已结束测量', icon: 'none' });
 };
 // 开始测量
 const handleMeasure = () => {
@@ -424,18 +538,41 @@ const startMeasure = async () => {
     return;
   }
   measurePopup.value?.close?.();
+  measurementFlowStartedAt = Date.now();
+  spo2FallbackLogged = false;
   if (!getSubmitDeviceMac(userStore, isIOS.value)) {
+    logBloodOxygenAnomaly('blood-oxygen-connection-error', { reason: 'missing-device-mac' });
     await showRingConnectionTroubleshootingPrompt();
     return;
   }
   const acquiredLockToken = acquireVitalMeasurementLock('blood_oxygen');
   if (!acquiredLockToken) {
+    logBloodOxygenAnomaly('blood-oxygen-lock-blocked', {
+      reason: 'measurement-lock-unavailable',
+      activeLockKind: vitalMeasurementLockKind.value
+    });
     showVitalMeasurementBusy();
     return;
   }
   vitalMeasurementLockToken = acquiredLockToken;
+  // 保存测量开始前该用户最近一次有效血氧；仅在完整采集窗口结束仍无合法值时使用。
+  spo2FallbackReading = captureSpo2FallbackReading();
 
-  if (!(await ensureRingWornBeforeMeasurement(() => queryCurrentWearState('blood_oxygen')))) {
+  let passedWearPreflight = false;
+  try {
+    passedWearPreflight = await ensureRingWornBeforeMeasurement(() => queryCurrentWearState('blood_oxygen'));
+  } catch (error) {
+    logBloodOxygenAnomaly('blood-oxygen-preflight-error', {
+      error: describeDiagnosticError(error)
+    });
+    settleOwnVitalMeasurementLock('wear-preflight-error');
+    showRingWearGuidance('no_data');
+    return;
+  }
+  if (!passedWearPreflight) {
+    logBloodOxygenAnomaly('blood-oxygen-preflight-wear-blocked', {
+      reason: 'wear-preflight-rejected'
+    });
     settleOwnVitalMeasurementLock('wear-preflight-blocked');
     return;
   }
@@ -448,12 +585,14 @@ const startMeasure = async () => {
   }
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
   wearGatePending = false;
 
   measureStatus.value = 'measuring';
   measurementRunToken += 1;
   const runToken = measurementRunToken;
   measureStartedAt = Date.now();
+  measurementDeadlineAt = measureStartedAt + MAX_VITAL_MEASUREMENT_DURATION_MS;
   completedMeasurementReading = null;
 
   await showMeasureWaitingPopup();
@@ -478,22 +617,27 @@ const startMeasure = async () => {
     });
     await completeMeasureWhenLatestReadingReady();
   } catch (error) {
-    if (measureStatus.value !== 'measuring') return;
+    if (measureStatus.value !== 'measuring' || isMeasurementFinalizing) return;
     // 命令 Promise 可能在 watcher 执行前因 NACK/超时拒绝。
     // 先用本轮回包判断佩戴状态，不要先清空 measureStartedAt。
     const wearState = getCurrentBloodOxygenWearState();
+    logBloodOxygenAnomaly('blood-oxygen-command-error', {
+      error: describeDiagnosticError(error),
+      wearState
+    });
     if (wearState === 'not_worn' || wearState === 'charging') {
       await stopMeasureForWearGate(wearState);
       return;
     }
     popup.value?.close();
     if (isRwDevice()) {
-      await stopActiveRwMeasurement('RW VITAL');
+      await stopRwBloodOxygenMeasurement('command-failed');
     }
     settleOwnVitalMeasurementLock('command-failed');
     measureStatus.value = 'idle';
     measurementRunToken += 1;
     measureStartedAt = 0;
+    measurementDeadlineAt = 0;
     wearConfirmedForRun = false;
     const errorText = formatBleErrorMessage(error, '测量指令发送失败');
     const isConnectionFailure =
@@ -539,6 +683,10 @@ watch(
       const latest: any = completedMeasurementReading;
       // 无效数据（包括 0）跳过，由 latest?.bloodOxygen > 0 判断
       if (!(latest?.bloodOxygen > 0)) {
+        logBloodOxygenAnomaly('blood-oxygen-invalid-result-error', {
+          result: latest?.bloodOxygen ?? null,
+          fallback: Boolean(latest?.fallback)
+        });
         measureStatus.value = 'idle';
         showRingWearGuidance('no_data');
         return;
@@ -561,6 +709,11 @@ watch(
             ]
           });
         } catch (error) {
+          logBloodOxygenAnomaly('blood-oxygen-submit-error', {
+            error: describeDiagnosticError(error),
+            result: latest.bloodOxygen,
+            fallback: Boolean(latest?.fallback)
+          });
           uni.showToast({ title: '测量已完成，数据稍后同步', icon: 'none' });
         } finally {
           uni.hideLoading();
@@ -577,7 +730,7 @@ const measureText = computed(() => {
     return '未连接';
   }
   // legacy 数值返回后的共享锁仅用于保护固件命令通道，不能显示为仍在测量。
-  if (measureStatus.value === 'measuring') return '测量中';
+  if (measureStatus.value === 'measuring') return '血氧测量中';
   // if (measureStatus.value === 'completed') {
   //   const latest: any = userStore.receivedData.filter((d) => d.type === 'active_measure').sort((a, b) => b.timestamp - a.timestamp)[0];
   //   // if (latest?.bloodOxygen) {
@@ -599,9 +752,16 @@ onShow(async () => {
   measurementRunToken += 1;
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
   wearGatePending = false;
   wearConfirmedForRun = false;
+  spo2FallbackReading = null;
+  spo2FallbackLogged = false;
+  measurementFlowStartedAt = 0;
   measureStatus.value = 'idle';
+  measureStartedAt = 0;
+  measurementDeadlineAt = 0;
+  popup.value?.close?.();
 });
 onUnload(() => {
   measurementRunToken += 1;
@@ -610,7 +770,10 @@ onUnload(() => {
   }
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
-  void stopActiveRwMeasurement('RW VITAL');
+  spo2FallbackReading = null;
+  spo2FallbackLogged = false;
+  measurementFlowStartedAt = 0;
+  void stopRwBloodOxygenMeasurement('page-unload');
   if (isRwDevice()) settleOwnVitalMeasurementLock('page-unload');
 });
 </script>
@@ -664,7 +827,8 @@ onUnload(() => {
         <view class="heartbeat-animation">
 <uv-image src="/static/images/homeDetail/oxygen.png" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
         </view>
-        <view class="ml-20 t-white">测量中...</view>
+        <view class="ml-20 t-white">血氧测量中...</view>
+        <view class="measurement-exit" @tap.stop="cancelMeasurement">结束测量</view>
       </view>
     </uv-popup>
     <uv-popup round="20" ref="measurePopup" mode="center">
@@ -685,6 +849,14 @@ onUnload(() => {
 }
 .is-measure-locked {
   opacity: 0.55;
+}
+.measurement-exit {
+  margin-top: 24rpx;
+  padding: 10rpx 28rpx;
+  border: 1rpx solid rgba(255, 255, 255, 0.65);
+  border-radius: 28rpx;
+  color: #fff;
+  font-size: 24rpx;
 }
 
 @keyframes heartbeat {

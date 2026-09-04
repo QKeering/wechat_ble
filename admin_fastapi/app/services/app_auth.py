@@ -67,7 +67,13 @@ def is_shadow_phone(value: Any) -> bool:
     return len(normalized) == 11 and normalized.isdigit() and normalized.startswith("9")
 
 
-def create_user(db: Session, open_id: str | None = None, phone: str | None = None) -> dict[str, Any]:
+def create_user(
+    db: Session,
+    open_id: str | None = None,
+    phone: str | None = None,
+    *,
+    commit: bool = True,
+) -> dict[str, Any]:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     stored_phone = str(phone or "").strip() or shadow_phone_for_open_id(open_id)
     tail = (phone or open_id or "0000")[-4:]
@@ -90,11 +96,39 @@ def create_user(db: Session, open_id: str | None = None, phone: str | None = Non
     result = db.execute(table.insert().values(**values))
     user_id = int(result.inserted_primary_key[0])
     init_user_defaults(db, user_id)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     user = user_by_id(db, user_id)
     if not user:
         raise AppAuthError("用户创建失败")
     return user
+
+
+def bind_open_id(db: Session, user_id: int, open_id: str) -> None:
+    """Bind one WeChat identity to exactly one active app account.
+
+    The cleanup and target update intentionally share the caller's transaction,
+    so an existing account cannot keep the same OpenID after a phone rebind.
+    """
+    normalized_open_id = str(open_id or "").strip()
+    if not normalized_open_id:
+        return
+    db.execute(
+        text(
+            """
+            update app_user
+            set open_id=null, update_time=now()
+            where open_id=:open_id and id<>:user_id
+            """
+        ),
+        {"open_id": normalized_open_id, "user_id": int(user_id)},
+    )
+    db.execute(
+        text("update app_user set open_id=:open_id, update_time=now() where id=:user_id"),
+        {"open_id": normalized_open_id, "user_id": int(user_id)},
+    )
 
 
 def init_user_defaults(db: Session, user_id: int) -> None:
@@ -253,7 +287,7 @@ def record_login(db: Session, user_id: int, ip: str | None = None) -> None:
     db.commit()
 
 
-def login_by_phone(db: Session, redis: Redis | None, phone: str, code: str | None, open_id_code: str | None, ip: str | None = None) -> str:
+def login_by_phone(db: Session, redis: Redis | None, phone: str, code: str | None, open_id: str | None, ip: str | None = None) -> str:
     if redis is None:
         raise AppAuthError("验证码服务不可用")
     if redis.get(f"{PHONE_CODE_KEY}{phone}") is None:
@@ -266,11 +300,28 @@ def login_by_phone(db: Session, redis: Redis | None, phone: str, code: str | Non
                 raise AppAuthError("验证码错误")
             redis.delete(f"{PHONE_CODE_KEY}{phone}")
     user = user_by_phone(db, phone)
-    open_id = open_id_code or phone
+    open_id = str(open_id or "").strip()
     if not user:
-        user = create_user(db, open_id=open_id, phone=phone)
-    elif open_id and user.get("openId") != open_id:
-        db.execute(text("update app_user set open_id=:open_id where id=:id"), {"open_id": open_id, "id": user["id"]})
+        open_id_user = user_by_open_id(db, open_id) if open_id else None
+        if open_id_user and is_shadow_phone(open_id_user.get("phone")):
+            user = open_id_user
+            bind_open_id(db, int(user["id"]), open_id)
+            db.execute(
+                text("update app_user set phone=:phone, update_time=now() where id=:id"),
+                {"phone": phone, "id": int(user["id"])},
+            )
+            db.commit()
+            user = user_by_id(db, int(user["id"])) or user
+        else:
+            if open_id:
+                db.execute(
+                    text("update app_user set open_id=null, update_time=now() where open_id=:open_id"),
+                    {"open_id": open_id},
+                )
+            user = create_user(db, open_id=open_id or None, phone=phone, commit=False)
+            db.commit()
+    elif open_id:
+        bind_open_id(db, int(user["id"]), open_id)
         db.commit()
         user = user_by_id(db, int(user["id"])) or user
     record_login(db, int(user["id"]), ip)
@@ -295,9 +346,25 @@ def login_by_wechat_identity(db: Session, redis: Redis | None, open_id: str, pho
         raise AppAuthError("手机号不能为空")
     user = user_by_phone(db, phone)
     if not user:
-        user = create_user(db, open_id=open_id, phone=phone)
-    elif open_id and user.get("openId") != open_id:
-        db.execute(text("update app_user set open_id=:open_id where id=:id"), {"open_id": open_id, "id": user["id"]})
+        open_id_user = user_by_open_id(db, open_id)
+        if open_id_user and is_shadow_phone(open_id_user.get("phone")):
+            user = open_id_user
+            bind_open_id(db, int(user["id"]), open_id)
+            db.execute(
+                text("update app_user set phone=:phone, update_time=now() where id=:id"),
+                {"phone": phone, "id": int(user["id"])},
+            )
+            db.commit()
+            user = user_by_id(db, int(user["id"])) or user
+        else:
+            db.execute(
+                text("update app_user set open_id=null, update_time=now() where open_id=:open_id"),
+                {"open_id": open_id},
+            )
+            user = create_user(db, open_id=open_id, phone=phone, commit=False)
+            db.commit()
+    else:
+        bind_open_id(db, int(user["id"]), open_id)
         db.commit()
         user = user_by_id(db, int(user["id"])) or user
     record_login(db, int(user["id"]), ip)

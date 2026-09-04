@@ -20,6 +20,7 @@ from app.core.responses import error, not_migrated, success, table
 from app.core.security import read_request_token
 from app.db.redis import get_redis
 from app.db.session import get_db
+from app.api.rw_debug import RW_DEBUG_TABLE, initialize_rw_debug_schema
 from app.services import admin_backup, ai_lab, auth, code_generator, feedback, health, server_monitor, system
 from app.services.crud import camelize_dict, create_row, delete_rows, get_row, list_rows, update_row
 from app.services.device_import import device_template_xlsx, import_device_xlsx
@@ -1119,6 +1120,143 @@ def app_user_battery_log_query(db: Session, query: dict[str, Any], paginate: boo
 @router.get("/user/batteryLog/list")
 def app_user_battery_log_list(request: Request, db: Session = Depends(get_db)):
     rows, total = app_user_battery_log_query(db, dict(request.query_params))
+    return table(rows, total)
+
+
+MEASUREMENT_ANOMALY_SOURCES = ("FULL MEASURE", "VITAL OXYGEN")
+MEASUREMENT_ANOMALY_LABELS = {
+    "full-measurement-timeout-error": "全面测量超时",
+    "full-measurement-wear-blocked": "全面测量佩戴门禁拦截",
+    "full-measurement-connection-error": "全面测量连接失败",
+    "full-measurement-device-busy-error": "全面测量设备繁忙",
+    "full-measurement-command-error": "全面测量命令失败",
+    "full-measurement-spo2-fallback": "全面测量血氧使用历史值兜底",
+    "full-measurement-spo2-missing-error": "全面测量未返回血氧",
+    "full-measurement-partial-result-error": "全面测量结果不完整",
+    "full-measurement-release-timeout-error": "全面测量释放BLE超时",
+    "full-measurement-previous-release-error": "全面测量上一轮释放失败",
+    "full-measurement-submit-error": "全面测量结果提交失败",
+    "full-measurement-error": "全面测量异常",
+    "blood-oxygen-wear-gate-blocked": "血氧测量佩戴门禁拦截",
+    "blood-oxygen-rw-nack-error": "血氧测量设备拒绝命令",
+    "blood-oxygen-fallback": "血氧测量使用历史值兜底",
+    "blood-oxygen-release-error": "血氧测量释放BLE失败",
+    "blood-oxygen-connection-error": "血氧测量设备未连接",
+    "blood-oxygen-lock-blocked": "血氧测量通道被占用",
+    "blood-oxygen-preflight-error": "血氧佩戴检查失败",
+    "blood-oxygen-preflight-wear-blocked": "血氧佩戴门禁拦截",
+    "blood-oxygen-command-error": "血氧测量命令失败",
+    "blood-oxygen-invalid-result-error": "血氧测量结果无效",
+    "blood-oxygen-submit-error": "血氧测量结果提交失败",
+}
+
+
+def parse_measurement_anomaly_details(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def app_user_measurement_anomaly_query(
+    db: Session, query: dict[str, Any], paginate: bool = True
+) -> tuple[list[dict[str, Any]], int]:
+    initialize_rw_debug_schema(db)
+    clauses = ["l.source in (:full_source, :oxygen_source)"]
+    params: dict[str, Any] = {
+        "full_source": MEASUREMENT_ANOMALY_SOURCES[0],
+        "oxygen_source": MEASUREMENT_ANOMALY_SOURCES[1],
+    }
+
+    user_id = query.get("userId") or query.get("user_id")
+    if user_id not in (None, ""):
+        clauses.append("l.user_id=:user_id")
+        params["user_id"] = user_id
+
+    device_mac = query.get("deviceMac") or query.get("device_mac") or query.get("mac")
+    if device_mac not in (None, ""):
+        clauses.append("(l.device_id like :device_mac or l.details_json like :device_mac)")
+        params["device_mac"] = f"%{str(device_mac).strip()}%"
+
+    begin_time = query.get("beginTime") or query.get("startDate") or query.get("params[beginTime]")
+    end_time = query.get("endTime") or query.get("endDate") or query.get("params[endTime]")
+    if begin_time:
+        clauses.append("l.created_at >= :begin_time")
+        params["begin_time"] = begin_time
+    if end_time:
+        clauses.append("l.created_at <= :end_time")
+        params["end_time"] = end_time
+
+    where = f" where {' and '.join(clauses)}"
+    total = int(db.execute(text(f"select count(*) from {RW_DEBUG_TABLE} l{where}"), params).scalar() or 0)
+    sql = f"""
+        select
+          l.id,
+          l.created_at,
+          l.client_time,
+          l.source,
+          l.event,
+          l.build_tag,
+          l.device_id,
+          l.user_id,
+          l.session_id,
+          l.details_json,
+          u.code as user_code,
+          u.nick_name,
+          u.phone
+        from {RW_DEBUG_TABLE} l
+        left join app_user u on u.id=l.user_id
+        {where}
+        order by l.created_at desc, l.id desc
+    """
+    if paginate:
+        page_num = int(query.get("pageNum", 1) or 1)
+        page_size = int(query.get("pageSize", 10) or 10)
+        sql += " limit :limit offset :offset"
+        params.update({"limit": page_size, "offset": max(page_num - 1, 0) * page_size})
+
+    rows = db.execute(text(sql), params).mappings().all()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        data = dict(row)
+        details = parse_measurement_anomaly_details(data.pop("details_json", None))
+        device_mac_value = details.get("deviceMac") or data.get("device_id") or ""
+        values = details.get("values") if isinstance(details.get("values"), dict) else {}
+        if not values and details.get("currentSpo2") is not None:
+            values = {"spo2": details.get("currentSpo2")}
+        result.append(
+            {
+                "id": data.get("id"),
+                "userId": data.get("user_id"),
+                "userCode": data.get("user_code"),
+                "nickName": data.get("nick_name"),
+                "phone": data.get("phone"),
+                "deviceMac": device_mac_value,
+                "measurementType": "全面测量" if data.get("source") == "FULL MEASURE" else "血氧实时测量",
+                "anomaly": MEASUREMENT_ANOMALY_LABELS.get(data.get("event"), data.get("event")),
+                "event": data.get("event"),
+                "stage": details.get("preflightStage") or details.get("measureStatus") or "",
+                "wearStatus": details.get("wearState") or details.get("wearCheckStatus") or "",
+                "elapsedMs": details.get("elapsedMs") or details.get("measureElapsedMs") or 0,
+                "values": values,
+                "recordTime": details.get("occurredAt") or data.get("created_at"),
+                "createTime": data.get("created_at"),
+                "buildTag": data.get("build_tag"),
+                "sessionId": data.get("session_id"),
+                "details": details,
+            }
+        )
+    return result, total
+
+
+@router.get("/user/measurementAnomaly/list")
+def app_user_measurement_anomaly_list(request: Request, db: Session = Depends(get_db)):
+    rows, total = app_user_measurement_anomaly_query(db, dict(request.query_params))
     return table(rows, total)
 
 

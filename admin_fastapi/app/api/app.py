@@ -1686,7 +1686,122 @@ def data_detail_response(
     score_field: str | None = None,
     summary_avg_field: str | None = None,
     latest_desc: str | None = None,
+    period_type: str = "day",
 ) -> dict:
+    normalized_period = str(period_type or "day").strip().lower()
+    if normalized_period not in {"week", "month"}:
+        normalized_period = "day"
+
+    if normalized_period != "day":
+        try:
+            anchor_date = datetime.strptime(str(date_value or "")[:10], "%Y-%m-%d").date()
+        except ValueError:
+            anchor_date = date.today()
+
+        if normalized_period == "week":
+            start_date = anchor_date - timedelta(days=anchor_date.weekday())
+            end_date = start_date + timedelta(days=6)
+        else:
+            start_date = anchor_date.replace(day=1)
+            if start_date.month == 12:
+                next_month = date(start_date.year + 1, 1, 1)
+            else:
+                next_month = date(start_date.year, start_date.month + 1, 1)
+            end_date = next_month - timedelta(days=1)
+
+        start_time = datetime.combine(start_date, time.min)
+        end_time = datetime.combine(end_date, time.max)
+        series = raw_series_between(db, user_id, start_time, end_time, field)
+        grouped_values: dict[date, list[float]] = {}
+        raw_period_values: list[float] = []
+        latest_value = None
+        for item in series:
+            record_time = coerce_datetime(item.get("recordTime") or item.get("record_time"))
+            try:
+                value = float(item.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if record_time is None:
+                continue
+            grouped_values.setdefault(record_time.date(), []).append(value)
+            raw_period_values.append(value)
+            latest_value = value
+
+        summaries = summaries_between(db, user_id, start_date, end_date)
+        summary_by_date: dict[date, dict] = {}
+        for item in summaries:
+            try:
+                item_date = datetime.strptime(str(item.get("recordDate") or "")[:10], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            summary_by_date[item_date] = item
+
+        chart_values: list[tuple[date, float]] = []
+        cursor = start_date
+        while cursor <= end_date:
+            values_for_day = grouped_values.get(cursor, [])
+            daily_value = (sum(values_for_day) / len(values_for_day)) if values_for_day else None
+            if daily_value is None and summary_avg_field:
+                summary_value = (summary_by_date.get(cursor) or {}).get(summary_avg_field)
+                try:
+                    daily_value = float(summary_value) if summary_value not in (None, "", 0, "0") else None
+                except (TypeError, ValueError):
+                    daily_value = None
+            if daily_value is not None:
+                chart_values.append((cursor, daily_value))
+            cursor += timedelta(days=1)
+
+        average_values = [value for _, value in chart_values]
+        avg_value = sum(average_values) / len(average_values) if average_values else None
+        range_values = raw_period_values or average_values
+        min_value = min(range_values) if range_values else None
+        max_value = max(range_values) if range_values else None
+        if latest_value is None and chart_values:
+            latest_value = chart_values[-1][1]
+        digits = 1 if field == "temperature" else 0
+
+        def format_period_metric(value, fallback: str = "0") -> str:
+            if value in (None, ""):
+                return fallback
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return str(value)
+            if digits <= 0:
+                return str(int(round(number)))
+            return f"{number:.1f}"
+
+        score_values = [
+            float(item.get(score_field))
+            for item in summaries
+            if score_field and item.get(score_field) not in (None, "")
+        ]
+        latest_summary = summaries[-1] if summaries else {}
+        payload = {
+            "healthScore": round(sum(score_values) / len(score_values)) if score_values else None,
+            "latestDesc": latest_desc or latest_summary.get("healthLevel"),
+            "minValue": format_period_metric(min_value),
+            "maxValue": format_period_metric(max_value),
+            "newValue": format_period_metric(latest_value),
+            "avgValue": format_period_metric(avg_value),
+            "avgValueRange": f"{format_period_metric(min_value)}-{format_period_metric(max_value)}" if range_values else "--",
+            "baseValue": format_period_metric(avg_value),
+            "baseValueMax": format_period_metric(max_value),
+            "baseValueMin": format_period_metric(min_value),
+            "diffValue": "0",
+            "type": normalized_period,
+            "granularity": "day",
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+            "chartData": [
+                {"time": item_date.strftime("%m-%d"), "value": format_period_metric(value)}
+                for item_date, value in chart_values
+            ],
+        }
+        if field == "hrv":
+            payload.update(hrv_real_display_meta() if average_values else hrv_proxy_empty_meta("no_bpm_data"))
+        return localize_payload_levels(payload)
+
     summary = daily_summary(db, user_id, date_value) or {}
     values = raw_values(db, user_id, date_value, field)
     avg_value = sum(values) / len(values) if values else summary.get(summary_avg_field or "")
@@ -3440,12 +3555,14 @@ async def get_phone_code(request: Request, redis: Redis | None = Depends(get_red
 async def phone_login(request: Request, db: Session = Depends(get_db), redis: Redis | None = Depends(get_redis)):
     payload = await request.json()
     try:
+        open_id_code = str(payload.get("openIdCode") or payload.get("openidCode") or "").strip()
+        open_id = wechat_open_id(open_id_code) if open_id_code else ""
         token = app_auth.login_by_phone(
             db,
             redis,
             str(payload.get("phone") or ""),
             str(payload.get("code") or ""),
-            str(payload.get("openIdCode") or ""),
+            open_id,
             request_ip(request),
         )
         return success({"token": token}, "鐧诲綍鎴愬姛")
@@ -8151,7 +8268,7 @@ def health_activity_regularity(user: dict = Depends(app_user), db: Session = Dep
 def heart_rate_detail(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
     if "/data/sleep/" in str(request.url.path):
         return localized_success(sleep_metric_detail_response(db, int(user["id"]), date_from_request(request), "heart_rate", "heartRateScore", "heartRateAvg"))
-    return localized_success(data_detail_response(db, int(user["id"]), date_from_request(request), "heart_rate", "heartRateScore", "heartRateAvg"))
+    return localized_success(data_detail_response(db, int(user["id"]), date_from_request(request), "heart_rate", "heartRateScore", "heartRateAvg", period_type=request.query_params.get("type") or "day"))
 
 
 @router.get("/data/hrv/hrvDetail")
@@ -8159,7 +8276,7 @@ def heart_rate_detail(request: Request, user: dict = Depends(app_user), db: Sess
 def hrv_detail(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
     if "/data/sleep/" in str(request.url.path):
         return localized_success(sleep_metric_detail_response(db, int(user["id"]), date_from_request(request), "hrv", "hrvScore", "hrvAvg"))
-    return localized_success(data_detail_response(db, int(user["id"]), date_from_request(request), "hrv", "hrvScore", "hrvAvg"))
+    return localized_success(data_detail_response(db, int(user["id"]), date_from_request(request), "hrv", "hrvScore", "hrvAvg", period_type=request.query_params.get("type") or "day"))
 
 
 @router.get("/data/bloodOxygen/bloodOxygenDetail")
@@ -8167,12 +8284,12 @@ def hrv_detail(request: Request, user: dict = Depends(app_user), db: Session = D
 def blood_oxygen_detail(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
     if "/data/sleep/" in str(request.url.path):
         return localized_success(sleep_metric_detail_response(db, int(user["id"]), date_from_request(request), "spo2", "spo2Score", "spo2Avg"))
-    return localized_success(data_detail_response(db, int(user["id"]), date_from_request(request), "spo2", "spo2Score", "spo2Avg"))
+    return localized_success(data_detail_response(db, int(user["id"]), date_from_request(request), "spo2", "spo2Score", "spo2Avg", period_type=request.query_params.get("type") or "day"))
 
 
 @router.get("/data/bodyTemperature/bodyTemperatureDetail")
 def body_temperature_detail(request: Request, user: dict = Depends(app_user), db: Session = Depends(get_db)):
-    return localized_success(data_detail_response(db, int(user["id"]), date_from_request(request), "temperature", "temperatureScore", "temperatureAvg"))
+    return localized_success(data_detail_response(db, int(user["id"]), date_from_request(request), "temperature", "temperatureScore", "temperatureAvg", period_type=request.query_params.get("type") or "day"))
 
 
 @router.get("/data/stress/stressDetail")

@@ -221,6 +221,12 @@ const LEGACY_PRIMARY_SERVICE_UUID = 'BAE80001-4F05-4503-8E65-3AF1F7329D1F';
 const LEGACY_SERVICE_MARKERS = ['BAE8', '4F05-4503-8E65-3AF1F7329D1F'];
 const SERVICE_CACHE_KEY = 'deviceServiceCache';
 const LEGACY_GATT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const LEGACY_TARGET_MTU = 247;
+// The shortest L19 history Notify observed on the wire is 29 bytes. ATT keeps
+// three bytes for its own header, so MTU must be at least 32 for the existing
+// complete-frame parser to receive one history frame intact.
+const LEGACY_HISTORY_MINIMUM_MTU = 32;
+const LEGACY_MTU_MAX_ATTEMPTS = 2;
 type LegacyGattCacheEntry = {
   serviceId: string;
   cmdCharId?: string;
@@ -1205,17 +1211,124 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     });
   };
 
-  const setMTU = (deviceId: string, mtu = 247) => {
-    if (uni.getSystemInfoSync().platform !== 'android') return Promise.resolve(undefined);
-
-    return new Promise<unknown>((resolve) => {
-      uni.setBLEMTU({
+  const readBleMtu = (deviceId: string) =>
+    new Promise<{
+      supported: boolean;
+      ok: boolean;
+      mtu: number | null;
+      result?: unknown;
+      error?: unknown;
+    }>((resolve) => {
+      const getBLEMTU = (uni as any).getBLEMTU;
+      if (typeof getBLEMTU !== 'function') {
+        resolve({ supported: false, ok: false, mtu: null });
+        return;
+      }
+      getBLEMTU({
         deviceId,
-        mtu,
-        success: resolve,
-        fail: (error) => resolve({ ignoredMtuError: error })
+        writeType: 'writeNoResponse',
+        success: (result: Record<string, unknown>) => {
+          const actualMtu = Number(result?.mtu);
+          resolve({
+            supported: true,
+            ok: Number.isFinite(actualMtu) && actualMtu > 0,
+            mtu: Number.isFinite(actualMtu) && actualMtu > 0 ? actualMtu : null,
+            result
+          });
+        },
+        fail: (error: unknown) => resolve({ supported: true, ok: false, mtu: null, error })
       });
     });
+
+  const requestBleMtu = (deviceId: string, mtu: number) =>
+    new Promise<{ ok: boolean; result?: unknown; error?: unknown }>((resolve) => {
+      const setBLEMTU = (uni as any).setBLEMTU;
+      if (typeof setBLEMTU !== 'function') {
+        resolve({ ok: false, error: new Error('setBLEMTU API unavailable') });
+        return;
+      }
+      setBLEMTU({
+        deviceId,
+        mtu,
+        success: (result: unknown) => resolve({ ok: true, result }),
+        fail: (error: unknown) => resolve({ ok: false, error })
+      });
+    });
+
+  const setMTU = async (deviceId: string, mtu = LEGACY_TARGET_MTU) => {
+    const systemInfo = uni.getSystemInfoSync();
+    const platform = `${systemInfo.platform || ''}`.trim().toLowerCase();
+    const system = `${systemInfo.system || ''}`.trim().toLowerCase();
+    // HarmonyOS/OpenHarmony reports `ohos`, not `android`, even though its
+    // WeChat BLE bridge supports setBLEMTU. Restricting this to exactly
+    // `android` left Huawei phones at the default MTU 23.
+    const shouldNegotiate = platform === 'android'
+      || platform === 'ohos'
+      || system.includes('android')
+      || system.includes('harmony');
+    if (!shouldNegotiate) {
+      appendRingDiagnosticLog('L19 BLE', 'legacy-mtu-negotiation-skipped', {
+        deviceId,
+        platform,
+        system,
+        reason: 'platform-does-not-require-explicit-negotiation'
+      });
+      return { skipped: true, platform, system };
+    }
+
+    const startedAt = Date.now();
+    const before = await readBleMtu(deviceId);
+    const attempts: Array<{
+      attempt: number;
+      request: Awaited<ReturnType<typeof requestBleMtu>>;
+      actual: Awaited<ReturnType<typeof readBleMtu>>;
+    }> = [];
+
+    for (let attempt = 1; attempt <= LEGACY_MTU_MAX_ATTEMPTS; attempt += 1) {
+      const request = await requestBleMtu(deviceId, mtu);
+      await sleep(150);
+      const actual = await readBleMtu(deviceId);
+      attempts.push({ attempt, request, actual });
+
+      // A rejected platform call is not improved by immediately repeating the
+      // same request. Preserve the historical behaviour of continuing GATT
+      // setup after one failed MTU request. Retry only when the request was
+      // accepted but getBLEMTU proves the negotiated value is still too low.
+      if (!request.ok) break;
+
+      // Older WeChat bases may support setting MTU without exposing getBLEMTU.
+      // In that case a successful set request is the strongest available proof.
+      const verified = actual.supported
+        ? actual.ok && Number(actual.mtu) >= LEGACY_HISTORY_MINIMUM_MTU
+        : request.ok;
+      if (verified) break;
+      if (attempt < LEGACY_MTU_MAX_ATTEMPTS) await sleep(250);
+    }
+
+    const lastAttempt = attempts[attempts.length - 1];
+    const actualMtu = lastAttempt?.actual.mtu ?? before.mtu;
+    const verified = lastAttempt?.actual.supported
+      ? lastAttempt.actual.ok && Number(actualMtu) >= LEGACY_HISTORY_MINIMUM_MTU
+      : Boolean(lastAttempt?.request.ok);
+    const result = {
+      verified,
+      deviceId,
+      platform,
+      system,
+      requestedMtu: mtu,
+      minimumHistoryMtu: LEGACY_HISTORY_MINIMUM_MTU,
+      before,
+      actualMtu,
+      attempts,
+      elapsedMs: Date.now() - startedAt
+    };
+
+    appendRingDiagnosticLog(
+      'L19 BLE',
+      verified ? 'legacy-mtu-negotiation-verified' : 'legacy-mtu-negotiation-insufficient',
+      result
+    );
+    return result;
   };
 
   const getConnectedLegacyDeviceIds = () => {

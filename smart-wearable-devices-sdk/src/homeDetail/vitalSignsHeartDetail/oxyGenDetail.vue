@@ -31,6 +31,7 @@ const chartRefT = ref<any>(null);
 const scrollTop = ref<number>(0);
 const activeEchartOption = ref(defaultEchartOption);
 const chartInstance = ref<any>(null);
+let detailRequestSerial = 0;
 
 const oxyGen = ref(0);
 const normalizeIntegerDisplayMetric = (value: unknown, min = 0, max = Number.POSITIVE_INFINITY) => {
@@ -63,11 +64,8 @@ const chartData = ref<Point[]>([]);
 const chartTimeTicks = computed(() => (currentName.value === 'day' ? buildDailyDetailTimeTicks() : buildDetailTimeTicks(chartData.value)));
 watch(
   chartData,
-  (newData, oldData) => {
-    if (newData.length > 0 && chartRefT.value && chartRefT.value.chartRef) {
-      // 有数据且图表已初始化，重新设置图表选项
-      initChart(chartRefT.value.chartRef);
-    }
+  () => {
+    if (chartRefT.value?.chartRef) void initChart(chartRefT.value.chartRef);
   },
   { deep: true, immediate: true }
 );
@@ -255,7 +253,7 @@ const getProcessedOption = () => {
   //   newOption.yAxis.interval = Math.ceil(maxValue / 50) * 10;
   // }
 
-  applyVitalSignsLineStyle(newOption);
+  applyVitalSignsLineStyle(newOption, '#ff5a5f', 'bloodOxygen');
   // 详情卡片使用独立的时间刻度层，避免 ECharts 标签和页面刻度重复。
   newOption.xAxis.axisLabel = { ...(newOption.xAxis.axisLabel || {}), show: false };
   return newOption;
@@ -264,6 +262,10 @@ const initChart = async (chartRef: any) => {
   if (!chartRef) return;
 
   try {
+    if (chartInstance.value && !chartInstance.value.isDisposed?.()) {
+      chartInstance.value.setOption(getProcessedOption(), true);
+      return;
+    }
     const chart = await chartRef.init(echarts);
     chartInstance.value = chart;
     // 应用处理后的option
@@ -273,31 +275,41 @@ const initChart = async (chartRef: any) => {
   }
 };
 const getOxyGenDetail = async () => {
+  const requestSerial = ++detailRequestSerial;
   const isoDate = formatLocalDate(currentDate.value);
+  const requestedType = currentName.value;
   const res = await getBloodOxygenDetail({
     date: isoDate,
-    type: currentName.value,
+    type: requestedType,
     offset: offset.value
   }, getVitalDetailSilentRequestConfig());
+  if (requestSerial !== detailRequestSerial || requestedType !== currentName.value || isoDate !== formatLocalDate(currentDate.value)) return;
   if (res) {
     const detail = withMetricDetailFallback(
       res,
-      userStore.healthData?.bloodOxygen ?? userStore.healthData?.bloodOxygenSaturation ?? userStore.latestMetrics?.bloodOxygen ?? oxyGen.value,
+      requestedType === 'day'
+        ? (userStore.healthData?.bloodOxygen ?? userStore.healthData?.bloodOxygenSaturation ?? userStore.latestMetrics?.bloodOxygen ?? oxyGen.value)
+        : undefined,
       {
         min: 70,
         max: 100,
-        extra: { avgValueRange: (res as any)?.avgValueRange || '95-100' }
+        extra: { avgValueRange: (res as any)?.avgValueRange || (requestedType === 'day' ? '95-100' : '--') }
       }
     );
     heartRateObj.value = detail;
     heartRateList.value = [
-      { label: '平均血氧', value: formatIntegerDisplayMetric(heartRateObj.value.avgValue, '0', 70, 100) },
-      { label: '平均范围', value: formatIntegerRangeDisplayMetric(heartRateObj.value.avgValueRange) }
+      { label: '平均血氧', value: formatIntegerDisplayMetric(heartRateObj.value.avgValue, '--', 70, 100) },
+      { label: '平均范围', value: formatIntegerRangeDisplayMetric(heartRateObj.value.avgValueRange, '--') }
     ];
     chartData.value = heartRateObj.value.chartData || [];
     const latestPoint = [...chartData.value].reverse().find((item) => pickMetricNumber([item.value], 70, 100) !== undefined);
     oxyGen.value = normalizeIntegerDisplayMetric(
-      pickMetricNumber([heartRateObj.value.newValue, latestPoint?.value, heartRateObj.value.avgValue, oxyGen.value], 70, 100),
+      pickMetricNumber([
+        heartRateObj.value.newValue,
+        latestPoint?.value,
+        heartRateObj.value.avgValue,
+        requestedType === 'day' ? oxyGen.value : undefined
+      ], 70, 100),
       70,
       100
     );

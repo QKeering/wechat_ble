@@ -856,6 +856,45 @@ if (submitMac !== 'AA:BB:CC:DD:EE:FF') {
   throw new Error(`iOS submit MAC should prefer normalMac: ${submitMac}`);
 }
 
+const iosTemporaryDeviceIdSubmitMac = getRingSubmitDeviceMac(
+  {
+    normalMac: '',
+    iosMacId: '84:2E:A9:B5:99:8A',
+    deviceInfo: {
+      deviceId: '84:2E:A9:B5:99:8A',
+      mac: '84:2E:A9:B5:99:8A',
+      protocol: 'rw'
+    }
+  },
+  true,
+  {
+    deviceId: 'backend-device-9e',
+    mac: 'B0:05:F0:01:07:9E',
+    protocol: 'rw'
+  }
+);
+
+if (iosTemporaryDeviceIdSubmitMac !== 'B0:05:F0:01:07:9E') {
+  throw new Error(`iOS history submissions must use the backend-bound stable MAC instead of the temporary deviceId: ${iosTemporaryDeviceIdSubmitMac}`);
+}
+
+const iosTemporaryDeviceIdWithoutBinding = getRingSubmitDeviceMac(
+  {
+    normalMac: '',
+    iosMacId: '84:2E:A9:B5:99:8A',
+    deviceInfo: {
+      deviceId: '84:2E:A9:B5:99:8A',
+      mac: '84:2E:A9:B5:99:8A',
+      protocol: 'rw'
+    }
+  },
+  true
+);
+
+if (iosTemporaryDeviceIdWithoutBinding !== '') {
+  throw new Error(`iOS history submissions must stop when only a temporary platform deviceId is available: ${iosTemporaryDeviceIdWithoutBinding}`);
+}
+
 const rwAdvertisSubmitMac = getRingSubmitDeviceMac(
   {
     normalMac: '',

@@ -161,7 +161,7 @@ const AWARENESS_AUXILIARY_SYNC_IDLE_MAX_WAIT_MS = 400;
 const AWARENESS_FOREGROUND_SYNC_BUDGET_MS = 12000;
 // 0x36 终帧到达后给 Notify/Store 回调一个很短的落稳窗口，再只构建一次
 // 后台上传快照。该等待不占用前台“同步中”状态。
-const LEGACY_HOME_HISTORY_TERMINAL_UPLOAD_SETTLE_MS = 300;
+const LEGACY_HOME_HISTORY_TERMINAL_UPLOAD_SETTLE_MS = 0;
 const RW_HOME_HISTORY_DATA_TYPES: RwHistoryDataName[] = [
   'lastData',
   'sleepData',
@@ -242,6 +242,7 @@ let legacyLocalDataStableWaitStartedAt = 0;
 let legacyLocalDataUploadWatcherActive = false;
 let legacyLocalDataUploadWatcherActiveAt = 0;
 let legacyLocalDataUploadWatcherPending = false;
+let legacyLocalDataStoppedTerminalWatcherKey = '';
 let legacyLocalDataActiveHistoryDeferredLogAt = 0;
 let legacyLocalDataIncompleteFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let legacyLocalDataIncompleteFlushKey = '';
@@ -704,6 +705,29 @@ const isAwarenessL19HistoryDevice = () => {
   });
 };
 const isAwarenessColonSeparatedBleMac = (value?: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){2,5}$/.test(String(value || '').trim());
+const pickAwarenessBackendBoundMacCandidate = (source: Record<string, any> | null | undefined) => {
+  if (!source) return '';
+  const advertis = source.advertis || {};
+  const deviceIdKey = normalizeHistoryCheckpointDeviceMac(source.deviceId || source.platformDeviceId);
+  const sourceMacKey = normalizeHistoryCheckpointDeviceMac(source.mac);
+  const candidates = [
+    source.deviceMac,
+    source.device_mac,
+    source.bluetoothMac,
+    source.bleMac,
+    source.macAddr,
+    source.mac_addr,
+    source.normalMac,
+    advertis.macInfo,
+    advertis.mac,
+    advertis.macAddress,
+    advertis.deviceMac,
+    sourceMacKey && sourceMacKey !== deviceIdKey ? source.mac : '',
+    isAwarenessColonSeparatedBleMac(source.uniMacId) ? source.uniMacId : ''
+  ];
+  const stableMac = candidates.find((value) => normalizeHistoryCheckpointDeviceMac(value));
+  return stableMac ? String(stableMac).trim() : '';
+};
 const pickAwarenessStableMacCandidate = (source: Record<string, any> | null | undefined) => {
   if (!source) return '';
   const advertis = source.advertis || {};
@@ -727,15 +751,17 @@ const pickAwarenessStableMacCandidate = (source: Record<string, any> | null | un
 
   const macKey = normalizeHistoryCheckpointDeviceMac(source.mac);
   if (macKey && (!deviceIdKey || macKey !== deviceIdKey)) return String(source.mac || '').trim();
-  if (macKey) return String(source.mac || '').trim();
-  return isAwarenessColonSeparatedBleMac(source.deviceId) ? String(source.deviceId || '').trim() : '';
+  // iOS exposes a session-scoped BLE deviceId that can look exactly like a
+  // colon-separated MAC. It is valid for connectDevice but must never become
+  // the backend data identity. A real MAC has to come from binding/advertising.
+  return '';
 };
 const getAwarenessDeviceCanonicalMacFromSource = (device: Record<string, any> | null | undefined) => {
   if (!device) return '';
   return pickAwarenessStableMacCandidate(device);
 };
 const getAwarenessCanonicalDeviceMac = () =>
-  getAwarenessDeviceCanonicalMacFromSource(ringStore.boundDevice as Record<string, any>) ||
+  pickAwarenessBackendBoundMacCandidate(ringStore.boundDevice as Record<string, any>) ||
   getAwarenessDeviceCanonicalMacFromSource(ringBleDeviceInfo.value as Record<string, any>) ||
   getAwarenessDeviceCanonicalMacFromSource(ringStore.deviceInfo as Record<string, any>) ||
   getAwarenessDeviceCanonicalMacFromSource(userStore.deviceInfo as Record<string, any>);
@@ -802,16 +828,11 @@ const getAwarenessDeviceTimeSyncIdentity = () => {
   );
 };
 const getAwarenessHomeUploadDeviceKey = () => {
-  const canonicalMac = getAwarenessCanonicalDeviceMac();
-  if (canonicalMac) return canonicalMac;
+  const stableUploadMac = getAwarenessUploadDeviceMac();
+  if (stableUploadMac) return stableUploadMac;
   const device = (ringStore.boundDevice || ringStore.deviceInfo || userStore.deviceInfo || {}) as Record<string, any>;
   return String(
-    device.mac ||
-      device.advertis?.macInfo ||
-      device.deviceMac ||
-      device.device_mac ||
-      (isAwarenessColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '') ||
-      (isAwarenessColonSeparatedBleMac(device.deviceId) ? device.deviceId : '') ||
+    device.platformDeviceId ||
       device.deviceId ||
       device.deviceName ||
       device.name ||
@@ -1038,8 +1059,15 @@ const claimAwarenessHomeSyncSession = (trigger: string, options: { force?: boole
   });
   return true;
 };
-const getAwarenessActiveHomeSyncMac = () =>
-  normalizeDeviceSyncMac(activeAwarenessHomeSyncClaim?.mac || '');
+const getAwarenessActiveHomeSyncMac = () => {
+  const stableUploadMac = normalizeDeviceSyncMac(getAwarenessUploadDeviceMac());
+  if (!stableUploadMac) return '';
+  const claimedMac = normalizeDeviceSyncMac(activeAwarenessHomeSyncClaim?.mac || '');
+  // The global session may use a platform deviceId as a scheduling key before
+  // binding hydration finishes. Data/checkpoint identity must still remain the
+  // backend-bound stable MAC and must never inherit that temporary key.
+  return claimedMac === stableUploadMac ? claimedMac : stableUploadMac;
+};
 const getAwarenessLiveDeviceContextMac = () =>
   normalizeDeviceSyncMac(
     getAwarenessDeviceCanonicalMacFromSource(ringBleDeviceInfo.value as Record<string, any>) ||
@@ -1160,26 +1188,16 @@ const pickAwarenessDeviceMacCandidate = (source: Record<string, any> | null | un
 const getAwarenessCheckpointProtocol = () =>
   resolveRingProtocol((ringStore.boundDevice || ringStore.deviceInfo || userStore.deviceInfo || {}) as any);
 const getAwarenessUploadDeviceMac = () =>
-  pickAwarenessDeviceMacCandidate(ringStore.boundDevice as Record<string, any>) ||
+  pickAwarenessBackendBoundMacCandidate(ringStore.boundDevice as Record<string, any>) ||
+  pickAwarenessDeviceMacCandidate(ringBleDeviceInfo.value as Record<string, any>) ||
   pickAwarenessDeviceMacCandidate(ringStore.deviceInfo as Record<string, any>) ||
   pickAwarenessDeviceMacCandidate(userStore.deviceInfo as Record<string, any>) ||
   ringStore.normalMac ||
-  userStore.normalMac ||
-  (isAwarenessColonSeparatedBleMac(ringStore.iosMacId) ? ringStore.iosMacId : '') ||
-  (isAwarenessColonSeparatedBleMac(userStore.iosMacId) ? userStore.iosMacId : '');
+  userStore.normalMac;
 const getAwarenessCheckpointDeviceMac = () => {
   const submitMac = getAwarenessUploadDeviceMac();
   if (normalizeHistoryCheckpointDeviceMac(submitMac)) return submitMac;
-  const candidates = [
-    pickAwarenessDeviceMacCandidate(ringStore.boundDevice as Record<string, any>),
-    pickAwarenessDeviceMacCandidate(ringStore.deviceInfo as Record<string, any>),
-    pickAwarenessDeviceMacCandidate(userStore.deviceInfo as Record<string, any>),
-    userStore.normalMac,
-    ringStore.normalMac,
-    isAwarenessColonSeparatedBleMac(userStore.iosMacId) ? userStore.iosMacId : '',
-    isAwarenessColonSeparatedBleMac(ringStore.iosMacId) ? ringStore.iosMacId : ''
-  ];
-  return candidates.find((item) => normalizeHistoryCheckpointDeviceMac(item)) || '';
+  return '';
 };
 const getAwarenessPayloadDeviceIdentityValues = (source: Record<string, any> | null | undefined) => {
   if (!source) return [];
@@ -2146,6 +2164,30 @@ const createLegacyLocalDataUploadBatch = (deviceMac: string, uploadSinceTimestam
   };
 };
 
+type LegacyLocalDataUploadBatch = ReturnType<typeof createLegacyLocalDataUploadBatch>;
+const freezeLegacyLocalDataUploadBatch = (batch: LegacyLocalDataUploadBatch): LegacyLocalDataUploadBatch =>
+  Object.freeze({
+    ...batch,
+    payloadScope: Object.freeze({
+      ...batch.payloadScope,
+      allPayloads: Object.freeze([...batch.payloadScope.allPayloads]),
+      matchedPayloads: Object.freeze([...batch.payloadScope.matchedPayloads])
+    }) as unknown as LegacyLocalDataUploadBatch['payloadScope'],
+    records: Object.freeze([...batch.records]) as unknown as LegacyLocalDataUploadBatch['records'],
+    rawFrames: Object.freeze([...batch.rawFrames]) as unknown as LegacyLocalDataUploadBatch['rawFrames'],
+    rawMetricCounts: Object.freeze({ ...batch.rawMetricCounts }),
+    builtSubmitArray: Object.freeze([...batch.builtSubmitArray]) as unknown as LegacyLocalDataUploadBatch['builtSubmitArray'],
+    uploadedRecordFilter: Object.freeze({
+      ...batch.uploadedRecordFilter,
+      submitRecords: Object.freeze([...batch.uploadedRecordFilter.submitRecords]),
+      alreadyUploadedRecords: Object.freeze([...batch.uploadedRecordFilter.alreadyUploadedRecords])
+    }) as unknown as LegacyLocalDataUploadBatch['uploadedRecordFilter'],
+    submitArray: Object.freeze([...batch.submitArray]) as unknown as LegacyLocalDataUploadBatch['submitArray'],
+    submitMetricCounts: Object.freeze({ ...batch.submitMetricCounts }),
+    rawRecordSummary: Object.freeze({ ...batch.rawRecordSummary }),
+    submitRecordSummary: Object.freeze({ ...batch.submitRecordSummary })
+  });
+
 const buildLegacyLocalDataStableSnapshot = () => {
   const deviceMac = getAwarenessActiveHomeSyncMac() || getAwarenessUploadDeviceMac();
   const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
@@ -2189,7 +2231,7 @@ const buildLegacyLocalDataStableSnapshot = () => {
   const checkpointCovered =
     Boolean(deviceMacNorm) && checkpointTimestamp > 0 && latestKnownTimestamp > 0 && checkpointTimestamp >= latestKnownTimestamp;
 
-  return {
+  const snapshot = {
     signature: [
       deviceMacNorm || 'unknown-device',
       allPayloads.length,
@@ -2235,9 +2277,17 @@ const buildLegacyLocalDataStableSnapshot = () => {
     builtSubmitRange,
     submitRange
   };
+  // Keep the upload payload on the terminal snapshot without serializing the
+  // full record set into every diagnostic log. This is the single normalized,
+  // deduped batch handed directly from BLE terminal handling to HTTP upload.
+  return Object.defineProperty(snapshot, 'uploadBatch', {
+    value: deviceMac ? freezeLegacyLocalDataUploadBatch(uploadBatch as LegacyLocalDataUploadBatch) : null,
+    enumerable: false,
+    configurable: false,
+    writable: false
+  }) as typeof snapshot & { readonly uploadBatch: LegacyLocalDataUploadBatch | null };
 };
 
-type LegacyLocalDataUploadBatch = ReturnType<typeof createLegacyLocalDataUploadBatch>;
 type LegacyLocalDataUploadBatchCacheEntry = {
   expiresAt: number;
   value: LegacyLocalDataUploadBatch;
@@ -2504,6 +2554,9 @@ const getClosedLegacyLocalDataUploadSessionForCurrentForeground = () => {
 };
 const closeLegacyLocalDataTerminalSkip = (snapshot: ReturnType<typeof getLegacyLocalDataStableSnapshot>, reason = '') => {
   clearLegacyLocalDataTimeoutFlush();
+  if (snapshot.completed === true) {
+    stopLegacyLocalDataWatcherForTerminal(snapshot, `terminal-skip:${reason || 'unknown'}`, getAwarenessCheckpointProtocol());
+  }
   const terminalMaxTimestamp = getLegacyLocalDataSnapshotMaxTimestamp(snapshot);
   const terminalUploadedUntil = Math.max(Number(snapshot.checkpointTimestamp || 0), terminalMaxTimestamp);
   closeLegacyLocalDataUploadSession(
@@ -2566,7 +2619,7 @@ const resetLegacyLocalDataUploadWatcherState = (trigger: string, protocol = '', 
     protocol,
     trigger,
     ...details,
-    stableSnapshot: getLegacyLocalDataStableSnapshot(),
+    stableSnapshot: details.stableSnapshot || getLegacyLocalDataStableSnapshot(),
     snapshot: getAwarenessConnectionSnapshot()
   });
 };
@@ -2791,6 +2844,99 @@ const clearLegacyLocalDataTimeoutFlush = () => {
   legacyLocalDataCompletedFastPathKey = '';
   legacyLocalDataCompletedFastPathRequestedAt = 0;
 };
+const getLegacyLocalDataTerminalWatcherKey = (snapshot: LegacyLocalDataStableSnapshot | null | undefined) => {
+  if (!snapshot?.deviceMacNorm || snapshot.completed !== true) return '';
+  const terminal = snapshot.historyReadTerminal as Record<string, any> | null;
+  const terminalGeneration = Number(terminal?.generation || terminal?.updatedAt || terminal?.completedAt || 0);
+  return terminalGeneration > 0 ? `${snapshot.deviceMacNorm}|${terminalGeneration}` : '';
+};
+const getCurrentLegacyLocalDataTerminalWatcherKey = () => {
+  const deviceMac = getAwarenessActiveHomeSyncMac() || getAwarenessUploadDeviceMac();
+  const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  if (!deviceMacNorm || !deviceMac) return '';
+  const terminal = getLegacyHomeHistoryReadTerminalForDevice(deviceMac) as Record<string, any> | null;
+  if (!isLegacyHomeHistoryReadTerminalComplete(terminal)) return '';
+  const terminalGeneration = Number(terminal?.generation || terminal?.updatedAt || terminal?.completedAt || 0);
+  return terminalGeneration > 0 ? `${deviceMacNorm}|${terminalGeneration}` : '';
+};
+const isLegacyLocalDataWatcherStoppedForDevice = (deviceMac: string) => {
+  const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  if (!legacyLocalDataStoppedTerminalWatcherKey || !deviceMacNorm) return false;
+  const terminal = getLegacyHomeHistoryReadTerminalForDevice(deviceMac) as Record<string, any> | null;
+  if (!isLegacyHomeHistoryReadTerminalComplete(terminal)) return false;
+  const terminalGeneration = Number(terminal?.generation || terminal?.updatedAt || terminal?.completedAt || 0);
+  return legacyLocalDataStoppedTerminalWatcherKey === `${deviceMacNorm}|${terminalGeneration}`;
+};
+const isLegacyLocalDataWatcherStoppedForCurrentTerminal = () =>
+  Boolean(
+    legacyLocalDataStoppedTerminalWatcherKey &&
+      legacyLocalDataStoppedTerminalWatcherKey === getCurrentLegacyLocalDataTerminalWatcherKey()
+  );
+const applyLegacyLocalDataTerminalWatcherStop = (terminalWatcherKey: string) => {
+  if (!terminalWatcherKey) return false;
+  clearLegacyLocalDataIncompleteFlushTimer();
+  clearLegacyLocalDataTimeoutFlush();
+  legacyLocalDataStableWaitGeneration += 1;
+  legacyLocalDataStablePromise = null;
+  legacyLocalDataStableReadyAt = Date.now();
+  legacyLocalDataStableUploadScheduled = false;
+  legacyLocalDataStableWaitStartedAt = 0;
+  legacyLocalDataUploadWatcherActive = false;
+  legacyLocalDataUploadWatcherActiveAt = 0;
+  legacyLocalDataUploadWatcherPending = false;
+  const changed = legacyLocalDataStoppedTerminalWatcherKey !== terminalWatcherKey;
+  legacyLocalDataStoppedTerminalWatcherKey = terminalWatcherKey;
+  return changed;
+};
+const stopLegacyLocalDataWatcherForCompletedDeviceTerminal = (
+  deviceMac: string,
+  trigger: string,
+  protocol = ''
+) => {
+  const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  const terminal = getLegacyHomeHistoryReadTerminalForDevice(deviceMac) as Record<string, any> | null;
+  if (!deviceMacNorm || !isLegacyHomeHistoryReadTerminalComplete(terminal)) return;
+  const terminalGeneration = Number(terminal?.generation || terminal?.updatedAt || terminal?.completedAt || 0);
+  const terminalWatcherKey = terminalGeneration > 0 ? `${deviceMacNorm}|${terminalGeneration}` : '';
+  if (!applyLegacyLocalDataTerminalWatcherStop(terminalWatcherKey)) return;
+  appendAwarenessDiagnosticLog('legacy-local-data-terminal-watcher-stopped', {
+    protocol,
+    trigger,
+    terminalWatcherKey,
+    deviceMac,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+};
+const stopLegacyLocalDataWatcherForTerminal = (
+  snapshot: LegacyLocalDataStableSnapshot,
+  trigger: string,
+  protocol = ''
+) => {
+  const terminalWatcherKey = getLegacyLocalDataTerminalWatcherKey(snapshot);
+  if (!terminalWatcherKey) return;
+  if (!applyLegacyLocalDataTerminalWatcherStop(terminalWatcherKey)) return;
+  appendAwarenessDiagnosticLog('legacy-local-data-terminal-watcher-stopped', {
+    protocol,
+    trigger,
+    terminalWatcherKey,
+    stableSnapshot: snapshot,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+};
+const resumeLegacyLocalDataWatcherForHistoryRead = (deviceMac: string, trigger: string, protocol = '') => {
+  const deviceMacNorm = normalizeHistoryCheckpointDeviceMac(deviceMac);
+  if (!legacyLocalDataStoppedTerminalWatcherKey || !deviceMacNorm) return;
+  if (!legacyLocalDataStoppedTerminalWatcherKey.startsWith(`${deviceMacNorm}|`)) return;
+  const previousTerminalWatcherKey = legacyLocalDataStoppedTerminalWatcherKey;
+  legacyLocalDataStoppedTerminalWatcherKey = '';
+  appendAwarenessDiagnosticLog('legacy-local-data-terminal-watcher-resumed', {
+    protocol,
+    trigger,
+    deviceMac,
+    previousTerminalWatcherKey,
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+};
 
 const hasLegacyLocalDataUploadableSnapshot = (snapshot: ReturnType<typeof getLegacyLocalDataStableSnapshot>) =>
   Boolean(snapshot && (snapshot.recordCount > 0 || snapshot.builtSubmitCount > 0 || snapshot.rawFrameCount > 0));
@@ -3010,8 +3156,12 @@ const scheduleLegacyLocalDataIncompleteFlush = (trigger: string, protocol: strin
   }, LEGACY_HOME_HISTORY_UPLOAD_SOFT_WAIT_MS);
 };
 
-const requestOrScheduleLegacyLocalDataIncompleteFlush = (trigger: string, protocol: string) => {
-  const snapshot = getLegacyLocalDataStableSnapshot();
+const requestOrScheduleLegacyLocalDataIncompleteFlush = (
+  trigger: string,
+  protocol: string,
+  terminalSnapshot?: LegacyLocalDataStableSnapshot
+) => {
+  const snapshot = terminalSnapshot || getLegacyLocalDataStableSnapshot();
   if (!hasLegacyLocalDataUploadableSnapshot(snapshot)) return false;
   if (snapshot.completed === true) {
     const flushKey = getLegacyLocalDataIncompleteFlushKey(snapshot);
@@ -3032,6 +3182,7 @@ const requestOrScheduleLegacyLocalDataIncompleteFlush = (trigger: string, protoc
       });
       return true;
     }
+    stopLegacyLocalDataWatcherForTerminal(snapshot, trigger, protocol);
     legacyLocalDataCompletedFastPathKey = flushKey;
     legacyLocalDataCompletedFastPathRequestedAt = now;
     legacyLocalDataStableReadyAt = Date.now();
@@ -5174,11 +5325,17 @@ watch(
 
 async function runLegacyLocalDataUploadCycle(context: LegacyLocalDataUploadCycleContext = { trigger: 'reactive-watcher' }) {
     const immutableTerminalSnapshot = context.directTerminal === true ? context.stableSnapshot : undefined;
+    if (!immutableTerminalSnapshot && isLegacyLocalDataWatcherStoppedForCurrentTerminal()) {
+      legacyLocalDataUploadWatcherActive = false;
+      legacyLocalDataUploadWatcherActiveAt = 0;
+      legacyLocalDataUploadWatcherPending = false;
+      return;
+    }
     const getUploadCycleStableSnapshot = () => immutableTerminalSnapshot || getLegacyLocalDataStableSnapshot();
     const protocol = userStore.deviceInfo?.protocol || ringStore.deviceInfo?.protocol || 'unknown';
     const isRwRing = isAwarenessRwRing();
-    const activeUploadDeviceMac = getAwarenessActiveHomeSyncMac();
-    const uploadDeviceMacAtStart = activeUploadDeviceMac || getAwarenessUploadDeviceMac();
+    const activeUploadDeviceMac = immutableTerminalSnapshot?.deviceMac || getAwarenessActiveHomeSyncMac();
+    const uploadDeviceMacAtStart = immutableTerminalSnapshot?.deviceMac || activeUploadDeviceMac || getAwarenessUploadDeviceMac();
     if (immutableTerminalSnapshot) {
       appendAwarenessDiagnosticLog('legacy-local-data-terminal-direct-upload-start', {
         protocol,
@@ -5243,7 +5400,7 @@ async function runLegacyLocalDataUploadCycle(context: LegacyLocalDataUploadCycle
       });
       return;
     }
-    const payloadScopeAtStart = getAwarenessHistoryPayloadsForDevice(
+    const payloadScopeAtStart = immutableTerminalSnapshot?.uploadBatch?.payloadScope || getAwarenessHistoryPayloadsForDevice(
       Array.isArray(userStore.receivedData) ? userStore.receivedData : [],
       uploadDeviceMacAtStart
     );
@@ -5302,11 +5459,13 @@ async function runLegacyLocalDataUploadCycle(context: LegacyLocalDataUploadCycle
           legacyLocalDataUploadWatcherPending = false;
           return;
         }
-        appendAwarenessDiagnosticLog('legacy-local-data-upload-continue-during-home-sync-cooldown', {
-          protocol,
-          stableSnapshot: cooldownSnapshot,
-          snapshot: getAwarenessConnectionSnapshot()
-        });
+        if (!immutableTerminalSnapshot) {
+          appendAwarenessDiagnosticLog('legacy-local-data-upload-continue-during-home-sync-cooldown', {
+            protocol,
+            stableSnapshot: cooldownSnapshot,
+            snapshot: getAwarenessConnectionSnapshot()
+          });
+        }
       }
     }
 
@@ -5458,7 +5617,7 @@ async function runLegacyLocalDataUploadCycle(context: LegacyLocalDataUploadCycle
             return;
           }
           legacyLocalDataStableReadyAt = 0;
-          localData = getAwarenessHistoryPayloadsForDevice(
+          localData = immutableTerminalSnapshot?.uploadBatch?.payloadScope.matchedPayloads || getAwarenessHistoryPayloadsForDevice(
             Array.isArray(userStore.receivedData) ? userStore.receivedData : [],
             precheckDeviceMac
           ).matchedPayloads;
@@ -5483,8 +5642,8 @@ async function runLegacyLocalDataUploadCycle(context: LegacyLocalDataUploadCycle
           }
         }
 
-        const allFilteredRecords = local.value || [];
-        const deviceMac = activeUploadDeviceMac || getAwarenessUploadDeviceMac();
+        const allFilteredRecords = immutableTerminalSnapshot?.uploadBatch?.records || local.value || [];
+        const deviceMac = immutableTerminalSnapshot?.deviceMac || activeUploadDeviceMac || getAwarenessUploadDeviceMac();
         if (!deviceMac) {
           userStore.updateUploadingStatus('2');
           appendAwarenessDiagnosticLog('legacy-local-data-upload-skip', {
@@ -5517,10 +5676,12 @@ async function runLegacyLocalDataUploadCycle(context: LegacyLocalDataUploadCycle
           });
           return;
         }
-        const defaultUploadSinceTimestamp = getAwarenessHistoryUploadSinceTimestamp(isRwRing);
-        const uploadSinceTimestamp = isRwRing
-          ? defaultUploadSinceTimestamp
-          : getLegacyLocalDataHttpRetrySinceTimestamp(deviceMac, defaultUploadSinceTimestamp);
+        const defaultUploadSinceTimestamp = immutableTerminalSnapshot?.uploadSinceTimestamp || getAwarenessHistoryUploadSinceTimestamp(isRwRing);
+        const uploadSinceTimestamp = immutableTerminalSnapshot
+          ? immutableTerminalSnapshot.uploadSinceTimestamp
+          : isRwRing
+            ? defaultUploadSinceTimestamp
+            : getLegacyLocalDataHttpRetrySinceTimestamp(deviceMac, defaultUploadSinceTimestamp);
         if (!isRwRing && uploadSinceTimestamp !== defaultUploadSinceTimestamp) {
           appendAwarenessDiagnosticLog('legacy-local-data-http-retry-window-applied', {
             protocol,
@@ -5535,8 +5696,13 @@ async function runLegacyLocalDataUploadCycle(context: LegacyLocalDataUploadCycle
         // The last BLE notification and page navigation callbacks share the
         // mini-program JS thread. Yield once before the only full normalize /
         // dedupe pass so a completed history read cannot freeze page taps.
-        await waitForAwarenessMs(0);
-        const uploadBatch = buildLegacyLocalDataUploadBatch(deviceMac, uploadSinceTimestamp);
+        if (!immutableTerminalSnapshot) {
+          await waitForAwarenessMs(0);
+        }
+        const terminalUploadBatch = immutableTerminalSnapshot?.uploadBatch;
+        const uploadBatch = terminalUploadBatch && immutableTerminalSnapshot?.deviceMacNorm === normalizeHistoryCheckpointDeviceMac(deviceMac)
+          ? terminalUploadBatch
+          : buildLegacyLocalDataUploadBatch(deviceMac, uploadSinceTimestamp);
         // Keep the terminal snapshot alive for this upload cycle.  Stable-check,
         // watcher and HTTP dispatch can all enter this path before the cursor is
         // acknowledged; clearing here made the same 248 records normalize/sort
@@ -5548,7 +5714,9 @@ async function runLegacyLocalDataUploadCycle(context: LegacyLocalDataUploadCycle
         const rawMetricCounts = uploadBatch.rawMetricCounts;
         const builtSubmitArray = uploadBatch.builtSubmitArray;
         const uploadedRecordFilter = uploadBatch.uploadedRecordFilter;
-        const submitArray = uploadBatch.submitArray;
+        // The terminal snapshot is frozen. Sort a lightweight array shell for
+        // oldest-first submission without mutating or rebuilding that batch.
+        const submitArray = [...uploadBatch.submitArray];
         const submitMetricCounts = uploadBatch.submitMetricCounts;
         const rawRecordSummary = uploadBatch.rawRecordSummary;
         const submitRecordSummary = uploadBatch.submitRecordSummary;
@@ -6863,9 +7031,9 @@ async function runLegacyLocalDataUploadCycle(context: LegacyLocalDataUploadCycle
       // next history generation cannot reuse this cycle's records.
       const pendingTerminalUpload = legacyPendingTerminalUpload;
       legacyPendingTerminalUpload = null;
-      if (!pendingTerminalUpload) {
-        clearLegacyLocalDataUploadBatchCache();
-      }
+      // A pending terminal handoff owns its frozen batch, so the global merge
+      // cache can always be released here without forcing another full merge.
+      clearLegacyLocalDataUploadBatchCache();
       legacyLocalDataStableSnapshotCache = null;
       if (legacyHomeHistoryPartialContinuationPending) {
         legacyHomeHistoryPartialContinuationPending = false;
@@ -6895,6 +7063,10 @@ async function runLegacyLocalDataUploadCycle(context: LegacyLocalDataUploadCycle
           setTimeout(() => {
             void runLegacyLocalDataUploadCycle(pendingTerminalUpload);
           }, 0);
+        } else if (immutableTerminalSnapshot) {
+          // Terminal upload is the sole owner of this generation. Store writes,
+          // cooldown and page refreshes must not re-arm its reactive watcher.
+          legacyLocalDataUploadWatcherPending = false;
         } else if (legacyLocalDataUploadWatcherPending) {
           const pendingSnapshot = getLegacyLocalDataStableSnapshot();
           const pendingSkipReason = getLegacyLocalDataStableSkipReason(pendingSnapshot);
@@ -6927,6 +7099,7 @@ async function runLegacyLocalDataUploadCycle(context: LegacyLocalDataUploadCycle
 watch(
   () => [userStore.localData, legacyHomeHistoryReadCompletedTick.value],
   () => {
+    if (isLegacyLocalDataWatcherStoppedForCurrentTerminal()) return;
     void runLegacyLocalDataUploadCycle({ trigger: 'reactive-watcher' });
   },
   { deep: false, flush: 'post' }
@@ -9230,6 +9403,10 @@ const scheduleLegacyHomeHistoryLongRetry = (
   const retryKey = `${context.historyReadKey}:long-retry`;
   const ownerKey = `${context.historyScopeKey}:long-retry-owner`;
   const now = Date.now();
+  if (isLegacyLocalDataWatcherStoppedForDevice(context.deviceMac)) {
+    legacyHomeHistoryLongRetryOwners.delete(ownerKey);
+    return false;
+  }
   if (legacyHomeHistoryLongRetryOwners.has(ownerKey)) {
     appendAwarenessDiagnosticLog('legacy-home-history-long-retry-skip', {
       protocol,
@@ -9335,6 +9512,10 @@ const scheduleLegacyHomeHistoryLongRetry = (
     snapshot: getAwarenessConnectionSnapshot()
   });
   setTimeout(() => {
+    if (isLegacyLocalDataWatcherStoppedForDevice(context.deviceMac)) {
+      legacyHomeHistoryLongRetryOwners.delete(ownerKey);
+      return;
+    }
     const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(getAwarenessCanonicalDeviceMac());
     const hasRunningHistoryRead = Boolean(legacyHomeHistoryReadPromise || legacyHomeHistoryReadInFlight.value);
     if (hasRunningHistoryRead || historyExclusive.active) {
@@ -10182,6 +10363,10 @@ const startLegacyHomeHistoryReadInBackground = (
         throw new Error('Ring BLE command channel was lost before history read.');
         }
       }
+      // A real new BLE read creates a new terminal generation. Re-enable the
+      // watcher only at this explicit boundary; ordinary store updates after
+      // the previous terminal remain ignored.
+      resumeLegacyLocalDataWatcherForHistoryRead(historyDeviceMac, reason, protocol);
       legacyHomeHistoryReadInFlight.value = true;
       legacyHomeHistoryReadStartedAt = Date.now();
       appendAwarenessDiagnosticLog('legacy-home-history-read-start', {
@@ -10743,6 +10928,13 @@ const startLegacyHomeHistoryReadInBackground = (
           ? 'l19-short-result-incomplete'
           : 'legacy-home-history-read-background-finished'
       });
+      if (legacyHistoryReadCompleted && legacyHistoryParsedComplete) {
+        stopLegacyLocalDataWatcherForCompletedDeviceTerminal(
+          normalizedHistoryDeviceMac,
+          'legacy-home-history-read-terminal',
+          protocol
+        );
+      }
       appendAwarenessDiagnosticLog('legacy-home-history-read-background-finished', {
         protocol,
         reason,
@@ -10844,12 +11036,9 @@ const startLegacyHomeHistoryReadInBackground = (
           settleMs: LEGACY_HOME_HISTORY_TERMINAL_UPLOAD_SETTLE_MS,
           snapshot: getAwarenessConnectionSnapshot()
         });
-        if (!legacyHistoryIncrementalNoNewDataTerminal) {
-          await waitForAwarenessMs(LEGACY_HOME_HISTORY_TERMINAL_UPLOAD_SETTLE_MS);
-          // Keep the terminal snapshot built by getLegacyLocalDataStableSnapshot.
-          // The upload watcher consumes this exact immutable batch and clears it
-          // in its own finally block; rebuilding here was the 63 main-thread gap.
-        }
+        // The confirmed terminal callback already owns the final frame. Freeze
+        // and upload in this turn; an extra settle delay only postpones HTTP and
+        // allows unrelated store callbacks to compete for the same generation.
       }
       // An L19 terminal empty read has no new payload. Avoid rebuilding thousands of
       // cached records and do not wake the upload watcher for an empty overlap frame.
@@ -10951,7 +11140,11 @@ const startLegacyHomeHistoryReadInBackground = (
         const shouldUseCompletedUploadFastPath =
           legacyHistoryReadCompleted && legacyHistoryParsedComplete && finishedStableSnapshot?.completed === true;
         const historyUploadFlushQueued = shouldUseCompletedUploadFastPath
-          ? requestOrScheduleLegacyLocalDataIncompleteFlush('legacy-home-history-read-upload-dispatch', protocol)
+          ? requestOrScheduleLegacyLocalDataIncompleteFlush(
+              'legacy-home-history-read-upload-dispatch',
+              protocol,
+              finishedStableSnapshot || undefined
+            )
           : requestLegacyLocalDataTimeoutFlush(
               'legacy-home-history-read-upload-dispatch',
               protocol,

@@ -59,7 +59,9 @@ let vitalMeasurementLockToken = '';
 let measureTimeout: any = null;
 let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
+let isMeasurementFinalizing = false;
 let measureStartedAt = 0;
+let measurementDeadlineAt = 0;
 let completedMeasurementReading: any = null;
 let wearGatePending = false;
 let wearConfirmedForRun = false;
@@ -97,9 +99,11 @@ const stopMeasureForWearGate = async (wearState: Exclude<RingWearState, 'unknown
   }
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
   popup.value?.close?.();
   measureStatus.value = 'idle';
   measureStartedAt = 0;
+  measurementDeadlineAt = 0;
   wearConfirmedForRun = false;
   if (isRwDevice()) {
     await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
@@ -112,34 +116,39 @@ const startMeasureFallbackTimer = () => {
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }
+  const remainingMs = Math.max(0, measurementDeadlineAt - Date.now());
+  if (remainingMs <= 0) {
+    void completeMeasureWithLatestReading(true);
+    return;
+  }
   measureTimeout = setTimeout(() => {
-    if (measureStatus.value === 'measuring') {
-      void completeMeasureWithLatestReading();
-    }
     measureTimeout = null;
-  }, MAX_VITAL_MEASUREMENT_DURATION_MS);
+    if (measureStatus.value === 'measuring') {
+      void completeMeasureWithLatestReading(true);
+    }
+  }, remainingMs);
 };
-const completeMeasureWithLatestReading = async () => {
-  if (measureStatus.value !== 'measuring' || isMeasureCompletePending) return;
+const completeMeasureWithLatestReading = async (forceDeadline = false) => {
+  if (measureStatus.value !== 'measuring' || isMeasurementFinalizing || (!forceDeadline && isMeasureCompletePending)) return;
   const wearState = getCurrentTemperatureWearState();
   if (wearState === 'not_worn' || wearState === 'charging') {
     await stopMeasureForWearGate(wearState);
     return;
   }
-  if (wearState !== 'worn') {
-    if (Date.now() - measureStartedAt >= MAX_VITAL_MEASUREMENT_DURATION_MS - 250) {
+  if (wearState !== 'worn' && !forceDeadline) {
+    if (Date.now() >= measurementDeadlineAt - 250) {
       await stopMeasureForWearGate('no_data');
     }
     return;
   }
   const latestReading = getLatestTemperatureReading(userStore, measureStartedAt);
   if (!latestReading) {
-    if (Date.now() - measureStartedAt >= MAX_VITAL_MEASUREMENT_DURATION_MS - 250) {
+    if (forceDeadline || Date.now() >= measurementDeadlineAt - 250) {
       await stopMeasureForWearGate('no_data');
     }
     return;
   }
-  const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt, getMeasurementMinimumDurationMs());
+  const remainingMs = forceDeadline ? 0 : getRemainingVitalMeasurementMs(measureStartedAt, getMeasurementMinimumDurationMs());
   if (remainingMs > 0) {
     isMeasureCompletePending = true;
     clearMeasureCompleteTimer();
@@ -150,18 +159,38 @@ const completeMeasureWithLatestReading = async () => {
     }, remainingMs);
     return;
   }
+  isMeasurementFinalizing = true;
   if (measureTimeout) {
     clearTimeout(measureTimeout);
     measureTimeout = null;
   }
   clearMeasureCompleteTimer();
+  measurementDeadlineAt = 0;
   completedMeasurementReading = { ...latestReading };
   popup.value?.close();
   if (isRwDevice()) {
-    await stopActiveRwMeasurement('RW VITAL');
+    await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
   }
   completeOwnVitalMeasurement();
   measureStatus.value = 'completed';
+};
+const cancelMeasurement = async () => {
+  if (measureTimeout) {
+    clearTimeout(measureTimeout);
+    measureTimeout = null;
+  }
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
+  popup.value?.close?.();
+  if (measureStatus.value !== 'measuring') return;
+  measureStatus.value = 'idle';
+  measureStartedAt = 0;
+  measurementDeadlineAt = 0;
+  wearConfirmedForRun = false;
+  if (isRwDevice()) await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
+  settleOwnVitalMeasurementLock('user-cancelled');
+  uni.showToast({ title: '已结束测量', icon: 'none' });
 };
 // 是否为iOS的计算属性
 const isIOS = computed(() => {
@@ -218,10 +247,12 @@ const startMeasure = async () => {
   }
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
   wearGatePending = false;
 
   measureStatus.value = 'measuring';
   measureStartedAt = Date.now();
+  measurementDeadlineAt = measureStartedAt + MAX_VITAL_MEASUREMENT_DURATION_MS;
   completedMeasurementReading = null;
   // uni.showLoading({
   //   title: '测量中...',
@@ -247,7 +278,7 @@ const startMeasure = async () => {
       timeoutMs: MAX_VITAL_MEASUREMENT_DURATION_MS
     });
   } catch (error) {
-    if (measureStatus.value !== 'measuring') return;
+    if (measureStatus.value !== 'measuring' || isMeasurementFinalizing) return;
     popup.value?.close();
     if (isRwDevice()) {
       await stopActiveRwMeasurement('RW VITAL');
@@ -255,6 +286,7 @@ const startMeasure = async () => {
     settleOwnVitalMeasurementLock('command-failed');
     measureStatus.value = 'idle';
     measureStartedAt = 0;
+    measurementDeadlineAt = 0;
     wearConfirmedForRun = false;
     uni.showToast({ title: formatBleErrorMessage(error, '测量指令发送失败'), icon: 'none' });
     return;
@@ -345,7 +377,7 @@ const measureText = computed(() => {
     return '未连接';
   }
   // legacy 数值返回后的共享锁仅用于保护固件命令通道，不能显示为仍在测量。
-  if (measureStatus.value === 'measuring') return '测量中';
+  if (measureStatus.value === 'measuring') return '皮肤温度测量中';
   // if (measureStatus.value === 'completed') {
   //   const latest: any = userStore.receivedData.filter((d) => d.type === 'active_Temperature').sort((a, b) => b.timestamp - a.timestamp)[0];
   //   if (latest?.temperature !== null && latest?.temperature !== undefined) {
@@ -361,9 +393,13 @@ onShow(async () => {
   // 防止测量完成后返回到该页时，measureText重复跳转
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
   wearGatePending = false;
   wearConfirmedForRun = false;
   measureStatus.value = 'idle';
+  measureStartedAt = 0;
+  measurementDeadlineAt = 0;
+  popup.value?.close?.();
 });
 onUnload(() => {
   if (measureTimeout) {
@@ -411,7 +447,8 @@ onUnload(() => {
         <view class="heartbeat-animation">
           <uv-image src="/static/images/homeDetail/Temperature.png" width="45rpx" height="45rpx"></uv-image>
         </view>
-        <view class="ml-20 t-white">测量中...</view>
+        <view class="ml-20 t-white">皮肤温度测量中...</view>
+        <view class="measurement-exit" @tap.stop="cancelMeasurement">结束测量</view>
       </view>
     </uv-popup>
     <uv-popup round="20" ref="measurePopup" mode="center">
@@ -432,6 +469,14 @@ onUnload(() => {
 }
 .is-measure-locked {
   opacity: 0.55;
+}
+.measurement-exit {
+  margin-top: 24rpx;
+  padding: 10rpx 28rpx;
+  border: 1rpx solid rgba(255, 255, 255, 0.65);
+  border-radius: 28rpx;
+  color: #fff;
+  font-size: 24rpx;
 }
 
 @keyframes heartbeat {

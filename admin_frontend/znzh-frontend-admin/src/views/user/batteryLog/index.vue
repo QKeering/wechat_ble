@@ -40,7 +40,12 @@
       <right-toolbar :showSearch.sync="showSearch" @queryTable="getList"></right-toolbar>
     </el-row>
 
-    <el-table v-loading="loading" :data="batteryLogList">
+    <el-tabs v-model="activeTab" @tab-click="handleTabChange">
+      <el-tab-pane label="电量记录" name="battery" />
+      <el-tab-pane label="测量异常" name="measurement" />
+    </el-tabs>
+
+    <el-table v-if="activeTab === 'battery'" v-loading="loading" :data="batteryLogList">
       <el-table-column label="ID" align="center" prop="id" width="90" />
       <el-table-column label="用户ID" align="center" prop="userId" width="100" />
       <el-table-column label="用户编码" align="center" prop="userCode" min-width="140" show-overflow-tooltip />
@@ -70,6 +75,44 @@
       </el-table-column>
     </el-table>
 
+    <el-table v-else v-loading="loading" :data="measurementAnomalyList">
+      <el-table-column type="expand" width="45">
+        <template slot-scope="scope">
+          <div class="anomaly-detail-title">异常详情</div>
+          <pre class="anomaly-detail">{{ formatDetails(scope.row.details) }}</pre>
+        </template>
+      </el-table-column>
+      <el-table-column label="ID" align="center" prop="id" width="90" />
+      <el-table-column label="用户ID" align="center" prop="userId" width="100" />
+      <el-table-column label="用户编码" align="center" prop="userCode" min-width="130" show-overflow-tooltip />
+      <el-table-column label="昵称" align="center" prop="nickName" min-width="110" show-overflow-tooltip />
+      <el-table-column label="Mac地址" align="center" prop="deviceMac" min-width="170" show-overflow-tooltip />
+      <el-table-column label="测量类型" align="center" prop="measurementType" width="130" />
+      <el-table-column label="异常情况" align="left" prop="anomaly" min-width="210" show-overflow-tooltip />
+      <el-table-column label="阶段" align="center" prop="stage" min-width="120" show-overflow-tooltip />
+      <el-table-column label="佩戴状态" align="center" prop="wearStatus" width="110">
+        <template slot-scope="scope">
+          <span>{{ scope.row.wearStatus || '-' }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="已有数据" align="left" min-width="220" show-overflow-tooltip>
+        <template slot-scope="scope">
+          <span>{{ formatMeasurementValues(scope.row.values) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="耗时" align="center" prop="elapsedMs" width="100">
+        <template slot-scope="scope">
+          <span>{{ formatDuration(scope.row.elapsedMs) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="异常时间" align="center" prop="recordTime" width="180">
+        <template slot-scope="scope">
+          <span>{{ parseTime(scope.row.recordTime) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="版本" align="center" prop="buildTag" min-width="160" show-overflow-tooltip />
+    </el-table>
+
     <pagination
       v-show="total > 0"
       :total="total"
@@ -81,7 +124,7 @@
 </template>
 
 <script>
-import { getUserBatteryLogList } from '@/api/user/user'
+import { getUserBatteryLogList, getUserMeasurementAnomalyList } from '@/api/user/user'
 
 export default {
   name: 'UserBatteryLog',
@@ -89,8 +132,10 @@ export default {
     return {
       loading: false,
       showSearch: true,
+      activeTab: 'battery',
       total: 0,
       batteryLogList: [],
+      measurementAnomalyList: [],
       daterangeRecordTime: [],
       queryParams: {
         pageNum: 1,
@@ -116,18 +161,64 @@ export default {
         params.beginTime = undefined
         params.endTime = undefined
       }
-      getUserBatteryLogList(params)
+      const requestList = this.activeTab === 'measurement'
+        ? getUserMeasurementAnomalyList
+        : getUserBatteryLogList
+      const requestedTab = this.activeTab
+      requestList(params)
         .then(response => {
-          this.batteryLogList = response.rows || []
-          this.total = response.total || 0
+          if (requestedTab === 'measurement') {
+            this.measurementAnomalyList = response.rows || []
+          } else {
+            this.batteryLogList = response.rows || []
+          }
+          if (requestedTab === this.activeTab) this.total = response.total || 0
         })
         .finally(() => {
-          this.loading = false
+          if (requestedTab === this.activeTab) this.loading = false
         })
     },
     handleQuery() {
       this.queryParams.pageNum = 1
       this.getList()
+    },
+    handleTabChange() {
+      this.queryParams.pageNum = 1
+      this.total = 0
+      this.getList()
+    },
+    formatDuration(value) {
+      const milliseconds = Number(value)
+      if (!Number.isFinite(milliseconds) || milliseconds <= 0) return '-'
+      if (milliseconds < 1000) return `${milliseconds}ms`
+      return `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 1 : 0)}秒`
+    },
+    formatMeasurementValues(values) {
+      if (!values || typeof values !== 'object') return '-'
+      const labels = {
+        heartRate: '心率',
+        hrv: 'HRV',
+        spo2: '血氧',
+        temperature: '温度'
+      }
+      const units = {
+        heartRate: 'bpm',
+        hrv: 'ms',
+        spo2: '%',
+        temperature: '℃'
+      }
+      const result = Object.keys(labels)
+        .filter(key => values[key] !== null && values[key] !== undefined && values[key] !== '')
+        .map(key => `${labels[key]} ${values[key]}${units[key]}`)
+      return result.length ? result.join('，') : '-'
+    },
+    formatDetails(details) {
+      if (!details) return '-'
+      try {
+        return JSON.stringify(details, null, 2)
+      } catch (error) {
+        return String(details)
+      }
     },
     resetQuery() {
       this.daterangeRecordTime = []
@@ -137,3 +228,23 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+.anomaly-detail-title {
+  margin-bottom: 8px;
+  color: #303133;
+  font-weight: 600;
+}
+
+.anomaly-detail {
+  max-height: 360px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  color: #606266;
+  background: #f7f8fa;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+</style>

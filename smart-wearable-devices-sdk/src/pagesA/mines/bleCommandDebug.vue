@@ -18,6 +18,7 @@ type CommandKey =
   | 'historyAll'
   | 'wearMeasure'
   | 'wearNotWorn'
+  | 'mtuHistory'
   | 'collectPeriod'
   | 'batteryMonitor'
   | 'factoryReset';
@@ -55,8 +56,11 @@ const batteryTestMode = ref<'passive' | 'polling' | ''>('');
 const batteryTestStopRequested = ref(false);
 let stopBatteryTestWait: (() => void) | null = null;
 let stopWearObservationWait: (() => void) | null = null;
+let stopMtuHistoryObservationWait: (() => void) | null = null;
+let stopMtuHistoryCapture: (() => void) | null = null;
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
 const lastWearMeasureReport = ref<AnyRecord | null>(null);
+const lastMtuHistoryReport = ref<AnyRecord | null>(null);
 
 const unwrap = <T = unknown>(value: any): T => {
   if (value && typeof value === 'object' && 'value' in value) return value.value as T;
@@ -923,6 +927,59 @@ const copyWearMeasureReport = () => {
   });
 };
 
+const normalizeBleIdentity = (value: unknown) => String(value ?? '').replace(/[^0-9a-z]/gi, '').toLowerCase();
+
+const bytesToHex = (bytes: Uint8Array, maxLength = 24) =>
+  Array.from(bytes.slice(0, maxLength))
+    .map((value) => value.toString(16).padStart(2, '0').toUpperCase())
+    .join('');
+
+const waitForMtuHistoryObservation = (timeoutMs: number) =>
+  new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      pendingTimers.delete(timer);
+      if (stopMtuHistoryObservationWait === finish) stopMtuHistoryObservationWait = null;
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    pendingTimers.add(timer);
+    stopMtuHistoryObservationWait = finish;
+  });
+
+const requestBleMtu = (deviceId: string, mtu: number) =>
+  new Promise<AnyRecord>((resolve) => {
+    const api = uni as any;
+    if (typeof api.setBLEMTU !== 'function') {
+      resolve({ supported: false, ok: false, requestedMtu: mtu, error: 'setBLEMTU API unavailable' });
+      return;
+    }
+    api.setBLEMTU({
+      deviceId,
+      mtu,
+      success: (result: unknown) => resolve({ supported: true, ok: true, requestedMtu: mtu, result }),
+      fail: (error: unknown) => resolve({ supported: true, ok: false, requestedMtu: mtu, error })
+    });
+  });
+
+const readBleMtu = (deviceId: string, writeType: 'write' | 'writeNoResponse') =>
+  new Promise<AnyRecord>((resolve) => {
+    const api = uni as any;
+    if (typeof api.getBLEMTU !== 'function') {
+      resolve({ supported: false, ok: false, writeType, error: 'getBLEMTU API unavailable' });
+      return;
+    }
+    api.getBLEMTU({
+      deviceId,
+      writeType,
+      success: (result: AnyRecord) => resolve({ supported: true, ok: true, writeType, mtu: Number(result?.mtu) || null, result }),
+      fail: (error: unknown) => resolve({ supported: true, ok: false, writeType, error })
+    });
+  });
+
 const waitWearObservation = (timeoutMs: number) =>
   new Promise<void>((resolve) => {
     let settled = false;
@@ -1088,6 +1145,339 @@ const runNotWornGateValidation = async () => {
   }
 };
 
+/**
+ * Android/Huawei compatibility probe for the L19 history channel.
+ * It deliberately sends exactly one incremental history command and never
+ * disconnects, uploads, deletes, or mutates health data.
+ */
+const runMtuHistoryCompatibilityTest = async () => {
+  if (runningKey.value) return;
+
+  const initialTarget: AnyRecord = {
+    ...currentDevice.value,
+    advertis: currentDevice.value.advertis ? { ...currentDevice.value.advertis } : undefined
+  };
+  const releaseCommandSession = tryClaimLegacyBleCommandSession(30_000, {
+    reason: 'ble-command-debug:mtu-history',
+    caller: 'bleCommandDebug.runMtuHistoryCompatibilityTest',
+    deviceId: initialTarget.deviceId || initialTarget.mac || initialTarget.uniMacId || ''
+  });
+  if (!releaseCommandSession) {
+    uni.showToast({ title: '设备正在同步，请稍后重试', icon: 'none' });
+    return;
+  }
+
+  runningKey.value = 'mtuHistory';
+  lastMtuHistoryReport.value = null;
+  const startedAt = Date.now();
+  const rawPackets: AnyRecord[] = [];
+  const connectionEvents: AnyRecord[] = [];
+  const packetLengthCounts: Record<string, number> = {};
+  let totalNotifyCount = 0;
+  let historyNotifyCount = 0;
+  let shortPacketCount = 0;
+  let firstNotifyElapsedMs: number | null = null;
+  let lastNotifyElapsedMs: number | null = null;
+  let firstHistoryNotifyElapsedMs: number | null = null;
+  let target: AnyRecord = initialTarget;
+  let deviceId = String(initialTarget.deviceId || '');
+  let setMtuResult: AnyRecord | null = null;
+  let mtuBefore: AnyRecord | null = null;
+  let mtuAfter: AnyRecord | null = null;
+  let commandResult: unknown = null;
+  let commandWritten = false;
+
+  pushLog('MTU/历史链路 - 开始测试', 'info', {
+    purpose: '验证华为手机实际 MTU、历史 Notify 分片及物理断开',
+    mode: '单次增量历史命令，观察10秒；不主动断开、不上传、不删除数据',
+    deviceId: initialTarget.deviceId || '-',
+    mac: initialTarget.mac || initialTarget.uniMacId || '-'
+  });
+
+  try {
+    const readyStartedAt = Date.now();
+    const ready = await ble.ensureCommunicationReady?.();
+    if (!ready) throw new Error('设备通信未就绪');
+
+    target = {
+      ...currentDevice.value,
+      advertis: currentDevice.value.advertis ? { ...currentDevice.value.advertis } : undefined
+    };
+    deviceId = String(target.deviceId || initialTarget.deviceId || '');
+    const protocol = String(target.protocol || initialTarget.protocol || '');
+    if (!deviceId) throw new Error('缺少当前通信 deviceId');
+    if (protocol && protocol !== 'legacy') throw new Error(`当前测试仅适用于 L19/legacy，实际协议为 ${protocol}`);
+
+    const api = uni as any;
+    const adapter = ble.adapter as AnyRecord | undefined;
+    if (!adapter || typeof adapter.sendReadLocalDataCommand !== 'function') {
+      throw new Error('当前适配器不支持原始历史命令测试');
+    }
+
+    const systemInfo = (() => {
+      try {
+        const info = api.getSystemInfoSync?.() || {};
+        return {
+          brand: info.brand,
+          model: info.model,
+          platform: info.platform,
+          system: info.system,
+          version: info.version,
+          SDKVersion: info.SDKVersion
+        };
+      } catch (error) {
+        return { error: stringify(error) };
+      }
+    })();
+    const targetIdentity = normalizeBleIdentity(deviceId);
+    const notifyHandler = (result: AnyRecord) => {
+      if (targetIdentity && normalizeBleIdentity(result?.deviceId) !== targetIdentity) return;
+      const bytes = new Uint8Array(result?.value || new ArrayBuffer(0));
+      const packet = {
+        elapsedMs: Date.now() - startedAt,
+        deviceId: result?.deviceId || '',
+        serviceId: result?.serviceId || '',
+        characteristicId: result?.characteristicId || '',
+        byteLength: bytes.byteLength,
+        frameType: bytes.length > 0 ? `0x${bytes[0].toString(16).padStart(2, '0').toUpperCase()}` : '-',
+        frameId: bytes.length > 1 ? bytes[1] : null,
+        command: bytes.length > 2 ? `0x${bytes[2].toString(16).padStart(2, '0').toUpperCase()}` : '-',
+        subcommand: bytes.length > 3 ? `0x${bytes[3].toString(16).padStart(2, '0').toUpperCase()}` : '-',
+        headHex: bytesToHex(bytes)
+      };
+      totalNotifyCount += 1;
+      firstNotifyElapsedMs ??= packet.elapsedMs;
+      lastNotifyElapsedMs = packet.elapsedMs;
+      packetLengthCounts[String(packet.byteLength)] = (packetLengthCounts[String(packet.byteLength)] || 0) + 1;
+      if (packet.command === '0x36') {
+        historyNotifyCount += 1;
+        firstHistoryNotifyElapsedMs ??= packet.elapsedMs;
+      }
+      if (packet.byteLength > 0 && packet.byteLength < 29) shortPacketCount += 1;
+      // Keep a bounded in-memory sample for the copied report. Uploading every
+      // history frame produced hundreds of diagnostic rows and displaced the
+      // connection/MTU evidence that this test is intended to capture.
+      if (rawPackets.length < 24) rawPackets.push(packet);
+      if (totalNotifyCount === 1 || (packet.command === '0x36' && historyNotifyCount === 1)) {
+        appendRingDiagnosticLog('BLE COMMAND DEBUG', 'mtu-history-test-first-notify', {
+          ...packet,
+          deviceId,
+          deviceMac: target.mac || target.uniMacId || ''
+        });
+      }
+    };
+    const connectionHandler = (result: AnyRecord) => {
+      if (targetIdentity && normalizeBleIdentity(result?.deviceId) !== targetIdentity) return;
+      const event = {
+        elapsedMs: Date.now() - startedAt,
+        deviceId: result?.deviceId || '',
+        connected: Boolean(result?.connected)
+      };
+      connectionEvents.push(event);
+      pushLog(
+        'MTU/历史链路 - 连接状态变化',
+        event.connected ? 'success' : 'error',
+        event
+      );
+      appendRingDiagnosticLog('BLE COMMAND DEBUG', 'mtu-history-test-connection', {
+        deviceMac: target.mac || target.uniMacId || '',
+        ...event
+      });
+    };
+
+    api.onBLECharacteristicValueChange?.(notifyHandler);
+    api.onBLEConnectionStateChange?.(connectionHandler);
+    stopMtuHistoryCapture = () => {
+      api.offBLECharacteristicValueChange?.(notifyHandler);
+      api.offBLEConnectionStateChange?.(connectionHandler);
+      stopMtuHistoryCapture = null;
+    };
+
+    pushLog('MTU/历史链路 - 通信就绪', 'success', {
+      elapsedMs: Date.now() - readyStartedAt,
+      systemInfo,
+      deviceId,
+      mac: target.mac || target.uniMacId || '-',
+      serviceId: target.serviceId || '-',
+      dataCharId: target.dataCharId || '-'
+    });
+
+    mtuBefore = await readBleMtu(deviceId, 'writeNoResponse');
+    setMtuResult = await requestBleMtu(deviceId, 247);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    mtuAfter = await readBleMtu(deviceId, 'writeNoResponse');
+    pushLog('MTU/历史链路 - MTU协商结果', mtuAfter.ok ? 'success' : 'error', {
+      before: mtuBefore,
+      request: setMtuResult,
+      after: mtuAfter,
+      minimumRequiredMtu: 32,
+      recommendedMtu: 92,
+      note: '历史帧至少29字节，ATT有效载荷为 MTU-3；理论最长89字节时建议 MTU≥92'
+    });
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'mtu-history-test-mtu-result', {
+      deviceId,
+      deviceMac: target.mac || target.uniMacId || '',
+      systemInfo,
+      mtuBefore,
+      setMtuResult,
+      mtuAfter
+    });
+
+    const sinceTimestamp = Math.max(0, Math.floor(Date.now() / 1000) - 48 * 60 * 60);
+    const commandStartedAt = Date.now();
+    commandResult = await adapter.sendReadLocalDataCommand(sinceTimestamp, false);
+    commandWritten = true;
+    pushLog('MTU/历史链路 - 历史命令已写入', 'success', {
+      elapsedMs: Date.now() - commandStartedAt,
+      command: '0x36/0x00',
+      sinceTimestamp,
+      retryCount: 0,
+      result: commandResult
+    });
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'mtu-history-test-command-written', {
+      deviceId,
+      deviceMac: target.mac || target.uniMacId || '',
+      command: '0x36/0x00',
+      sinceTimestamp,
+      retryCount: 0,
+      result: commandResult
+    });
+
+    await waitForMtuHistoryObservation(10_000);
+    adapter.finishHistoryReadTrace?.('ble-debug-mtu-history-observation-finished', {
+      observationMs: 10_000,
+      packetCount: totalNotifyCount
+    });
+
+    const actualMtu = Number(mtuAfter?.mtu || mtuBefore?.mtu) || null;
+    const disconnected = connectionEvents.some((event) => event.connected === false);
+    let finalConnected: boolean | null = null;
+    try {
+      if (typeof ble.isDeviceConnected === 'function' && target.serviceId) {
+        finalConnected = Boolean(await ble.isDeviceConnected(deviceId, target.serviceId));
+      }
+    } catch {
+      finalConnected = false;
+    }
+
+    const conclusion = disconnected
+      ? '失败：历史读取过程中发生物理断开'
+      : historyNotifyCount === 0
+        ? '异常：命令写入成功，但10秒内未收到0x36历史Notify'
+        : shortPacketCount > 0
+          ? '异常：收到短分片，需验证历史帧重组'
+          : '通过：收到完整历史Notify，连接未断开';
+    const passed = !disconnected && historyNotifyCount > 0 && shortPacketCount === 0;
+    const report = {
+      passed,
+      conclusion,
+      elapsedMs: Date.now() - startedAt,
+      summary: {
+        actualMtu,
+        effectivePayload: actualMtu ? Math.max(0, actualMtu - 3) : null,
+        commandWritten,
+        totalNotifyCount,
+        historyNotifyCount,
+        shortPacketCount,
+        packetLengthCounts,
+        firstNotifyElapsedMs,
+        firstHistoryNotifyElapsedMs,
+        lastNotifyElapsedMs,
+        disconnected,
+        finalConnected
+      },
+      systemInfo,
+      device: {
+        deviceId,
+        mac: target.mac || target.uniMacId || '',
+        protocol: target.protocol || 'legacy',
+        serviceId: target.serviceId || '',
+        dataCharId: target.dataCharId || ''
+      },
+      mtu: {
+        requested: 247,
+        actual: actualMtu,
+        effectivePayload: actualMtu ? Math.max(0, actualMtu - 3) : null,
+        minimumRequiredMtu: 32,
+        recommendedMtu: 92,
+        before: mtuBefore,
+        request: setMtuResult,
+        after: mtuAfter
+      },
+      history: {
+        command: '0x36/0x00',
+        commandWritten,
+        retryCount: 0,
+        commandResult,
+        observationMs: 10_000,
+        packetCount: totalNotifyCount,
+        historyPacketCount: historyNotifyCount,
+        packetLengthCounts,
+        shortPacketCount,
+        firstNotifyElapsedMs,
+        firstHistoryNotifyElapsedMs,
+        lastNotifyElapsedMs,
+        packetSamples: rawPackets
+      },
+      connection: {
+        disconnected,
+        finalConnected,
+        events: connectionEvents
+      }
+    };
+    lastMtuHistoryReport.value = report;
+    pushLog('MTU/历史链路 - 测试结论', passed ? 'success' : 'error', report);
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'mtu-history-test-result', report);
+    uni.showToast({ title: passed ? '链路测试通过' : '已记录异常证据', icon: passed ? 'success' : 'none', duration: 3000 });
+  } catch (error) {
+    const report = {
+      passed: false,
+      conclusion: '测试执行失败',
+      elapsedMs: Date.now() - startedAt,
+      deviceId,
+      deviceMac: target.mac || target.uniMacId || '',
+      commandWritten,
+      mtuBefore,
+      setMtuResult,
+      mtuAfter,
+      packetCount: totalNotifyCount,
+      historyNotifyCount,
+      shortPacketCount,
+      packetLengthCounts,
+      packetSamples: rawPackets,
+      connectionEvents,
+      error: stringify(error)
+    };
+    lastMtuHistoryReport.value = report;
+    pushLog('MTU/历史链路 - 测试失败', 'error', report);
+    appendRingDiagnosticLog('BLE COMMAND DEBUG', 'mtu-history-test-failed', report);
+    uni.showToast({ title: 'MTU链路测试失败', icon: 'none' });
+  } finally {
+    stopMtuHistoryObservationWait?.();
+    stopMtuHistoryCapture?.();
+    try {
+      (ble.adapter as AnyRecord | undefined)?.finishHistoryReadTrace?.('ble-debug-mtu-history-test-finished', {
+        packetCount: totalNotifyCount
+      });
+    } catch {
+      // Test cleanup must never alter the connection state.
+    }
+    releaseCommandSession();
+    runningKey.value = '';
+  }
+};
+
+const copyMtuHistoryReport = () => {
+  if (!lastMtuHistoryReport.value) {
+    uni.showToast({ title: '请先执行测试', icon: 'none' });
+    return;
+  }
+  uni.setClipboardData({
+    data: stringify(lastMtuHistoryReport.value),
+    success: () => uni.showToast({ title: '测试报告已复制', icon: 'success' })
+  });
+};
+
 const runCommand = async (config: CommandConfig) => {
   if (runningKey.value) return;
   // Keep an immutable identity for the whole command. A physical disconnect
@@ -1235,6 +1625,8 @@ const handleFactoryReset = () => {
 onBeforeUnmount(() => {
   stopBatteryTest();
   stopWearObservationWait?.();
+  stopMtuHistoryObservationWait?.();
+  stopMtuHistoryCapture?.();
   pendingTimers.forEach((timer) => clearTimeout(timer));
   pendingTimers.clear();
 });
@@ -1271,6 +1663,35 @@ onBeforeUnmount(() => {
         </button>
       </view>
       <view class="hint">用于临时验证 D7 等设备命令回执。血氧会等待 30 秒，超时会明确记录“未收到回执”。</view>
+
+      <view class="period-test">
+        <view class="period-test-head">
+          <view>
+            <view class="period-test-title">华为 MTU / 历史链路测试</view>
+            <view class="period-test-desc">校验实际 MTU、历史 Notify 长度/分片、物理断开与连接恢复</view>
+          </view>
+        </view>
+        <view class="battery-test-guide">
+          <text>测试只发送一次 0x36 增量历史命令并观察10秒；不主动断开、不删除历史、不上传健康数据。请在设备已连接时执行。</text>
+        </view>
+        <view v-if="lastMtuHistoryReport" class="battery-test-guide">
+          <text>{{ lastMtuHistoryReport.conclusion }}</text>
+          <text>实际 MTU：{{ lastMtuHistoryReport.mtu?.actual ?? '未读取到' }}；历史包：{{ lastMtuHistoryReport.history?.historyPacketCount ?? 0 }}；物理断开：{{ lastMtuHistoryReport.connection?.disconnected ? '是' : '否' }}</text>
+        </view>
+        <view class="battery-test-grid">
+          <button
+            class="period-test-btn"
+            :class="{ running: runningKey === 'mtuHistory' }"
+            :disabled="Boolean(runningKey)"
+            @click="runMtuHistoryCompatibilityTest"
+          >
+            {{ runningKey === 'mtuHistory' ? '测试中（约10秒）...' : '开始链路测试' }}
+          </button>
+          <button class="period-test-btn secondary" :disabled="!lastMtuHistoryReport || Boolean(runningKey)" @click="copyMtuHistoryReport">
+            复制测试报告
+          </button>
+        </view>
+      </view>
 
       <view class="period-test">
         <view class="period-test-head">

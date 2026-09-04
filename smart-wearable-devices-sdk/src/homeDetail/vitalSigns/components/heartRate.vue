@@ -238,7 +238,7 @@ const measureText = computed(() => {
   }
   // 共享锁在 legacy 固件返回数值后仍会保留一段时间，用于避免立即下发下一条
   // 测量命令触发“设备繁忙”。它是内部冷却状态，不代表页面仍在测量。
-  if (measureStatus.value === 'measuring') return '测量中';
+  if (measureStatus.value === 'measuring') return '心率测量中';
   return '测量';
 });
 // 监听 userStore.receivedData 变化
@@ -309,7 +309,9 @@ watch(
 let measureTimeout: any = null;
 let measureCompleteTimer: any = null;
 let isMeasureCompletePending = false;
+let isMeasurementFinalizing = false;
 let measureStartedAt = 0;
+let measurementDeadlineAt = 0;
 let completedMeasurementReading: any = null;
 let wearGatePending = false;
 let wearConfirmedForRun = false;
@@ -389,9 +391,11 @@ const stopMeasureForWearGate = async (wearState: Exclude<RingWearState, 'unknown
   }
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
   popup.value?.close?.();
   measureStatus.value = 'idle';
   measureStartedAt = 0;
+  measurementDeadlineAt = 0;
   wearConfirmedForRun = false;
   legacyMeasurementValueReady = false;
   if (isRwDevice()) {
@@ -405,22 +409,27 @@ const startMeasureFallbackTimer = () => {
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }
+  const remainingMs = Math.max(0, measurementDeadlineAt - Date.now());
+  if (remainingMs <= 0) {
+    void completeMeasureWithLatestReading(true);
+    return;
+  }
   measureTimeout = setTimeout(() => {
-    if (measureStatus.value === 'measuring') {
-      void completeMeasureWithLatestReading();
-    }
     measureTimeout = null;
-  }, MAX_VITAL_MEASUREMENT_DURATION_MS);
+    if (measureStatus.value === 'measuring') {
+      void completeMeasureWithLatestReading(true);
+    }
+  }, remainingMs);
 };
-const completeMeasureWithLatestReading = async () => {
-  if (measureStatus.value !== 'measuring' || isMeasureCompletePending) return;
+const completeMeasureWithLatestReading = async (forceDeadline = false) => {
+  if (measureStatus.value !== 'measuring' || isMeasurementFinalizing || (!forceDeadline && isMeasureCompletePending)) return;
   const wearState = getCurrentHeartRateWearState();
   if (wearState === 'not_worn' || wearState === 'charging') {
     await stopMeasureForWearGate(wearState);
     return;
   }
-  if (wearState !== 'worn') {
-    if (Date.now() - measureStartedAt >= MAX_VITAL_MEASUREMENT_DURATION_MS - 250) {
+  if (wearState !== 'worn' && !forceDeadline) {
+    if (Date.now() >= measurementDeadlineAt - 250) {
       await stopMeasureForWearGate('no_data');
     }
     return;
@@ -428,12 +437,12 @@ const completeMeasureWithLatestReading = async () => {
   // B7/6E 不保证返回进度 100 或 status=1；首个合法值只表示本轮已有候选结果，
   // 仍需保持弹层和独占锁到完整采集窗口结束。
   const latestReading = getLatestHeartRateReading(userStore, measureStartedAt);
-  const hasReachedFallback = Date.now() - measureStartedAt >= MAX_VITAL_MEASUREMENT_DURATION_MS - 250;
-  if (!isCurrentLegacyHeartRateValueReady() || !latestReading) {
+  const hasReachedFallback = Date.now() >= measurementDeadlineAt - 250;
+  if ((!forceDeadline && !isCurrentLegacyHeartRateValueReady()) || !latestReading) {
     if (hasReachedFallback) await stopMeasureForWearGate('no_data');
     return;
   }
-  const remainingMs = getRemainingVitalMeasurementMs(measureStartedAt, getMeasurementMinimumDurationMs());
+  const remainingMs = forceDeadline ? 0 : getRemainingVitalMeasurementMs(measureStartedAt, getMeasurementMinimumDurationMs());
   if (remainingMs > 0) {
     isMeasureCompletePending = true;
     clearMeasureCompleteTimer();
@@ -444,18 +453,39 @@ const completeMeasureWithLatestReading = async () => {
     }, remainingMs);
     return;
   }
+  isMeasurementFinalizing = true;
   if (measureTimeout) {
     clearTimeout(measureTimeout);
     measureTimeout = null;
   }
   clearMeasureCompleteTimer();
+  measurementDeadlineAt = 0;
   completedMeasurementReading = { ...latestReading };
   popup.value?.close();
   if (isRwDevice()) {
-    await stopActiveRwMeasurement('RW VITAL');
+    await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
   }
   completeOwnVitalMeasurement();
   measureStatus.value = 'completed';
+};
+const cancelMeasurement = async () => {
+  if (measureTimeout) {
+    clearTimeout(measureTimeout);
+    measureTimeout = null;
+  }
+  clearMeasureCompleteTimer();
+  isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
+  popup.value?.close?.();
+  if (measureStatus.value !== 'measuring') return;
+  measureStatus.value = 'idle';
+  measureStartedAt = 0;
+  measurementDeadlineAt = 0;
+  wearConfirmedForRun = false;
+  legacyMeasurementValueReady = false;
+  if (isRwDevice()) await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
+  settleOwnVitalMeasurementLock('user-cancelled');
+  uni.showToast({ title: '已结束测量', icon: 'none' });
 };
 // 开始测量
 const handleMeasure = () => {
@@ -524,10 +554,12 @@ const startMeasure = async () => {
   }
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
   wearGatePending = false;
 
   measureStatus.value = 'measuring';
   measureStartedAt = Date.now();
+  measurementDeadlineAt = measureStartedAt + MAX_VITAL_MEASUREMENT_DURATION_MS;
   completedMeasurementReading = null;
 
   appendRingDiagnosticLog('VITAL HEART', 'heart-rate-command-dispatch-start', {
@@ -560,7 +592,7 @@ const startMeasure = async () => {
     });
     await completeMeasureWithLatestReading();
   } catch (error) {
-    if (measureStatus.value !== 'measuring') return;
+    if (measureStatus.value !== 'measuring' || isMeasurementFinalizing) return;
     popup.value?.close();
     if (isRwDevice()) {
       await stopActiveRwMeasurement('RW VITAL');
@@ -568,6 +600,7 @@ const startMeasure = async () => {
     settleOwnVitalMeasurementLock('command-failed');
     measureStatus.value = 'idle';
     measureStartedAt = 0;
+    measurementDeadlineAt = 0;
     wearConfirmedForRun = false;
     legacyMeasurementValueReady = false;
     appendRingDiagnosticLog('VITAL HEART', 'heart-rate-command-dispatch-failed', {
@@ -586,11 +619,15 @@ onLoad(async () => {});
 onShow(async () => {
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
+  isMeasurementFinalizing = false;
   wearGatePending = false;
   wearConfirmedForRun = false;
   legacyMeasurementValueReady = false;
   completedMeasurementReading = null;
   measureStatus.value = 'idle';
+  measureStartedAt = 0;
+  measurementDeadlineAt = 0;
+  popup.value?.close?.();
 });
 onUnload(() => {
   if (measureTimeout) {
@@ -657,7 +694,8 @@ onUnload(() => {
         <view class="heartbeat-animation">
 <uv-image src="/static/images/homeDetail/love.png" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
         </view>
-        <view class="ml-20 t-white">测量中...</view>
+        <view class="ml-20 t-white">心率测量中...</view>
+        <view class="measurement-exit" @tap.stop="cancelMeasurement">结束测量</view>
       </view>
     </uv-popup>
     <uv-popup round="20" ref="measurePopup" mode="center" @change="measureChange">
@@ -678,6 +716,14 @@ onUnload(() => {
 }
 .is-measure-locked {
   opacity: 0.55;
+}
+.measurement-exit {
+  margin-top: 24rpx;
+  padding: 10rpx 28rpx;
+  border: 1rpx solid rgba(255, 255, 255, 0.65);
+  border-radius: 28rpx;
+  color: #fff;
+  font-size: 24rpx;
 }
 
 @keyframes heartbeat {

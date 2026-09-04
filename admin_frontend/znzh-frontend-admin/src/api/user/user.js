@@ -107,3 +107,11 @@ export function getUserBatteryLogList(query) {
     params: query
   })
 }
+
+export function getUserMeasurementAnomalyList(query) {
+  return request({
+    url: '/admin/user/measurementAnomaly/list',
+    method: 'get',
+    params: query
+  })
+}

@@ -51,12 +51,17 @@ if (qkeerFirstKeys.some((key) => qkeerSecondKeys.includes(key))) {
 const discoveredCallbacks: Array<(result: { devices: any[] }) => void> = [];
 const adapterStateCallbacks: Array<(result: { available: boolean; discovering: boolean }) => void> = [];
 let mtuFailureCount = 0;
+let mtuRequestCount = 0;
+let mtuShouldFail = true;
+let currentMtu = 23;
+let systemPlatform = 'android';
+let systemName = 'Android 14';
 let writeFailure: unknown = null;
 let bluetoothAdapterAvailable = true;
 let bluetoothAdapterOpenCount = 0;
 const serviceCache: Record<string, string> = {};
 (globalThis as any).uni = {
-  getSystemInfoSync: () => ({ platform: 'android', system: 'Android 14', uniPlatform: 'mp-weixin' }),
+  getSystemInfoSync: () => ({ platform: systemPlatform, system: systemName, uniPlatform: 'mp-weixin' }),
   getBluetoothAdapterState: ({ success }: { success: (result: unknown) => void }) =>
     success({ available: bluetoothAdapterAvailable, discovering: false }),
   openBluetoothAdapter: ({ success }: { success: (result: unknown) => void }) => {
@@ -81,10 +86,17 @@ const serviceCache: Record<string, string> = {};
   stopBluetoothDevicesDiscovery: ({ success }: { success: (result: unknown) => void }) => success({}),
   getBluetoothDevices: () => undefined,
   createBLEConnection: ({ success }: { success: (result: unknown) => void }) => success({}),
-  setBLEMTU: ({ fail }: { fail: (error: unknown) => void }) => {
-    mtuFailureCount += 1;
-    fail({ errMsg: 'setBLEMTU:fail:internal' });
+  setBLEMTU: ({ mtu, success, fail }: { mtu: number; success: (result: unknown) => void; fail: (error: unknown) => void }) => {
+    mtuRequestCount += 1;
+    if (mtuShouldFail) {
+      mtuFailureCount += 1;
+      fail({ errMsg: 'setBLEMTU:fail:internal' });
+      return;
+    }
+    currentMtu = mtu;
+    success({ mtu, errMsg: 'setBLEMTU:ok' });
   },
+  getBLEMTU: ({ success }: { success: (result: unknown) => void }) => success({ mtu: currentMtu, errMsg: 'getBLEMTU:ok' }),
   getBLEDeviceServices: ({ success }: { success: (result: unknown) => void }) =>
     success({
       services: [{ uuid: '0000BAE8-4F05-4503-8E65-3AF1F7329D1F' }]
@@ -219,6 +231,30 @@ if (
 const connectedFromGattCache = await mtuFailureAdapter.connectAndDiscover('mtu-fail-id', 'QKeeRingL19');
 if (connectedFromGattCache.notifyEnabled !== true) {
   throw new Error(`Legacy GATT cache restore should retain live Notify readiness: ${JSON.stringify(connectedFromGattCache)}`);
+}
+
+systemPlatform = 'ohos';
+systemName = 'OpenHarmonyOS 6.1.0';
+mtuShouldFail = false;
+currentMtu = 23;
+const mtuRequestsBeforeOhosConnect = mtuRequestCount;
+const ohosAdapter = createLegacyRingAdapter({
+  devices: { value: [] as any[] },
+  isScanning: { value: false }
+} as any);
+const connectedOnOhos = await ohosAdapter.connectAndDiscover('ohos-mtu-id', 'QKeeRingL19');
+if (
+  mtuRequestCount !== mtuRequestsBeforeOhosConnect + 1 ||
+  currentMtu !== 247 ||
+  connectedOnOhos.deviceId !== 'ohos-mtu-id' ||
+  connectedOnOhos.notifyEnabled !== true
+) {
+  throw new Error(`Legacy/L19 connect should negotiate and verify MTU on OpenHarmony: ${JSON.stringify({
+    mtuRequestCount,
+    mtuRequestsBeforeOhosConnect,
+    currentMtu,
+    connectedOnOhos
+  })}`);
 }
 
 export const legacyAdapterParityPassed = true;
