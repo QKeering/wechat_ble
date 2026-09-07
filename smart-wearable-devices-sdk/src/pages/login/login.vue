@@ -1,7 +1,8 @@
 <script setup>
 import { ref } from 'vue';
 import { onPageScroll } from '@dcloudio/uni-app';
-import { wxLogin } from '@/common/api/login';
+import { wechatQuickLogin } from '@/common/api/login';
+import { getWechatLoginCode } from '@/utils/wechatLogin';
 import { useUserStore } from '@/stores/user';
 import { formatBleErrorMessage } from '@/utils/bleError';
 
@@ -57,14 +58,11 @@ const handleWechatLogin = async () => {
   isLoggingIn.value = true;
   try {
     uni.showLoading({ title: '登录中' });
-    const wxResult = await withTimeout(wx.login(), 10000, '登录凭证获取超时');
-    if (!wxResult?.code) {
-      throw new Error('登录凭证获取失败');
-    }
+    const code = await withTimeout(getWechatLoginCode(), 10000, '登录凭证获取超时');
     const response = await withTimeout(
-      wxLogin(
+      wechatQuickLogin(
         {
-          openIdCode: wxResult.code
+          openIdCode: code
         },
         { custom: { auth: false } }
       ),
