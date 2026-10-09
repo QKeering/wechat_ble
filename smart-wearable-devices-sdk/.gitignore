@@ -13,6 +13,10 @@ node_modules
 dist
 *.local
 
+# Android 签名证书（私钥，严禁提交）
+*.keystore
+.keystore-password.txt
+
 # Editor directories and files
 .idea
 *.suo

@@ -113,10 +113,19 @@ const leftClick = () => {
       </view>
 
       <view class="login-actions">
+        <!-- #ifndef APP-PLUS -->
         <button class="login-btn login-btn-primary" :disabled="isLoggingIn" hover-class="none" @click="handleWechatLogin">
           {{ isLoggingIn ? '登录中...' : '快捷登录' }}
         </button>
+        <!-- #endif -->
+        <!-- #ifdef APP-PLUS -->
+        <button class="login-btn login-btn-primary" :disabled="isLoggingIn" hover-class="none" @click="handleMobileLoginEntry">
+          手机号登录
+        </button>
+        <!-- #endif -->
+        <!-- #ifndef APP-PLUS -->
         <button class="login-mobile-entry" :disabled="isLoggingIn" hover-class="none" @click="handleMobileLoginEntry">手机验证登录</button>
+        <!-- #endif -->
       </view>
 
       <view @click="agreementChecked = !agreementChecked" class="agreement-row">

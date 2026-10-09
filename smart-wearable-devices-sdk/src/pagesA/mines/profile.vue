@@ -10,6 +10,7 @@ const { disconnect } = useRingBLE();
 const userStore = useUserStore();
 const DEFAULT_AVATAR = '/static/images/mine/logo3.png';
 const avatarLoadFailed = ref(false);
+const avatarUploading = ref(false);
 
 const userInfo = ref({
   id: '',
@@ -112,13 +113,41 @@ const uploadFilePromise = (url) => {
   });
 };
 
-const onChooseAvatar = async (e) => {
-  const { avatarUrl } = e.detail;
+const uploadAvatar = async (avatarUrl) => {
+  if (!avatarUrl) return;
   avatarLoadFailed.value = false;
-  userInfo.value.avatar = await uploadFilePromise(avatarUrl);
-  if (userInfo.value.avatar) {
-    await userStore.refreshUserInfo({ avatar: userInfo.value.avatar });
+  avatarUploading.value = true;
+  try {
+    const uploaded = await uploadFilePromise(avatarUrl);
+    userInfo.value.avatar = uploaded;
+    if (uploaded) {
+      await userStore.refreshUserInfo({ avatar: uploaded });
+    }
+  } catch (error) {
+    uni.showToast({ title: '头像上传失败，请重试', icon: 'none' });
+  } finally {
+    avatarUploading.value = false;
   }
+};
+
+const onChooseAvatar = (e) => {
+  // #ifdef MP-WEIXIN
+  uploadAvatar(e.detail.avatarUrl);
+  // #endif
+};
+
+const onChooseAvatarTap = () => {
+  // #ifndef MP-WEIXIN
+  uni.chooseImage({
+    count: 1,
+    sizeType: ['compressed'],
+    sourceType: ['album', 'camera'],
+    success: (res) => {
+      const path = (res.tempFilePaths && res.tempFilePaths[0]) || (res.tempFiles && res.tempFiles[0] && res.tempFiles[0].path);
+      uploadAvatar(path);
+    }
+  });
+  // #endif
 };
 
 const handleLogout = () => {
@@ -210,7 +239,7 @@ const confirm = async (e) => {
   <view class="p-30 bg-white min-h-screen">
     <!-- 头像区域 -->
     <view class="avatar-section flex jc-center ai-center mb-60">
-      <button class="uv-reset-button" open-type="chooseAvatar" :disabled="avatarUploading" @chooseavatar="onChooseAvatar">
+      <button class="uv-reset-button" open-type="chooseAvatar" :disabled="avatarUploading" @chooseavatar="onChooseAvatar" @tap="onChooseAvatarTap">
         <view style="width: 216rpx; height: 216rpx" class="relative">
           <uv-image :src="avatar" width="216rpx" height="216rpx" radius="50rpx" @error="handleAvatarError" observe-lazy-load></uv-image>
           <view class="camera-overlay absolute bottom-0 right-0">

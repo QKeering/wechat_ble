@@ -1,61 +1,100 @@
 {
-  "name": "smart-wearable-devices-next",
-  "appid": "__UNI__QKEER_NEXT",
-  "description": "QKeer next mini-program frontend",
-  "versionName": "0.1.0",
-  "versionCode": "10",
-  "transformPx": false,
-  "vueVersion": "3",
-  "mp-weixin": {
-    "appid": "wx52f427a73d7678cb",
-    "setting": {
-      "urlCheck": true,
-      "postcss": false,
-      "minified": true,
-      "ignoreDevUnusedFiles": true,
-      "ignoreUploadUnusedFiles": true
+    "name" : "qkeer-ring",
+    "appid" : "__UNI__31A4F95",
+    "description" : "qkeer ring app",
+    "versionName" : "0.1.0",
+    "versionCode" : "10",
+    "transformPx" : false,
+    "vueVersion" : "3",
+    "mp-weixin" : {
+        "appid" : "wx52f427a73d7678cb",
+        "setting" : {
+            "urlCheck" : true,
+            "postcss" : false,
+            "minified" : true,
+            "ignoreDevUnusedFiles" : true,
+            "ignoreUploadUnusedFiles" : true
+        },
+        "networkTimeout" : {
+            "request" : 120000,
+            "connectSocket" : 60000,
+            "uploadFile" : 180000,
+            "downloadFile" : 120000
+        },
+        "lazyCodeLoading" : "requiredComponents",
+        "permission" : {
+            "scope.bluetooth" : {
+                "desc" : "用于搜索并连接附近的智能戒指设备"
+            }
+        },
+        "usingComponents" : true
     },
-    "networkTimeout": {
-      "request": 120000,
-      "connectSocket": 60000,
-      "uploadFile": 180000,
-      "downloadFile": 120000
-    },
-    "lazyCodeLoading": "requiredComponents",
-    "permission": {
-      "scope.bluetooth": {
-        "desc": "用于搜索并连接附近的智能戒指设备"
-      }
-    },
-    "usingComponents": true
-  },
-  "app-plus": {
-    "compilerVersion": 3,
-    "usingComponents": true,
-    "distribute": {
-      "android": {
-        "permissions": [
-          "<uses-permission android:name=\"android.permission.INTERNET\"/>",
-          "<uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\"/>",
-          "<uses-permission android:name=\"android.permission.ACCESS_WIFI_STATE\"/>",
-          "<uses-permission android:name=\"android.permission.CHANGE_WIFI_STATE\"/>",
-          "<uses-permission android:name=\"android.permission.BLUETOOTH\"/>",
-          "<uses-permission android:name=\"android.permission.BLUETOOTH_ADMIN\"/>",
-          "<uses-permission android:name=\"android.permission.ACCESS_FINE_LOCATION\"/>",
-          "<uses-permission android:name=\"android.permission.ACCESS_COARSE_LOCATION\"/>",
-          "<uses-permission android:name=\"android.permission.BLUETOOTH_SCAN\" android:usesPermissionFlags=\"neverForLocation\"/>",
-          "<uses-permission android:name=\"android.permission.BLUETOOTH_CONNECT\"/>"
-        ]
-      },
-      "ios": {},
-      "sdkConfigs": {
-        "oauth": {
-          "weixin": {
-            "appid": "wx0000000000000000",
-            "UniversalLinks": ""
-          }
+    "app-plus" : {
+        "compilerVersion" : 3,
+        "usingComponents" : true,
+        "modules" : {
+            "Bluetooth" : {}
+        },
+        "distribute" : {
+            "android" : {
+                "package" : "com.qkeer.smartring",
+                "permissions" : [
+                    "<uses-permission android:name=\"android.permission.INTERNET\"/>",
+                    "<uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\"/>",
+                    "<uses-permission android:name=\"android.permission.ACCESS_WIFI_STATE\"/>",
+                    "<uses-permission android:name=\"android.permission.CHANGE_WIFI_STATE\"/>",
+                    "<uses-permission android:name=\"android.permission.BLUETOOTH\"/>",
+                    "<uses-permission android:name=\"android.permission.BLUETOOTH_ADMIN\"/>",
+                    "<uses-permission android:name=\"android.permission.BLUETOOTH_SCAN\"/>",
+                    "<uses-permission android:name=\"android.permission.BLUETOOTH_CONNECT\"/>",
+                    "<uses-permission android:name=\"android.permission.ACCESS_FINE_LOCATION\"/>",
+                    "<uses-permission android:name=\"android.permission.ACCESS_COARSE_LOCATION\"/>",
+                    "<uses-permission android:name=\"android.permission.CAMERA\"/>",
+                    "<uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>",
+                    "<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"/>",
+                    "<uses-permission android:name=\"android.permission.READ_MEDIA_IMAGES\"/>"
+                ]
+            },
+            "ios" : {
+                "dSYMs" : false,
+                "privacyDescription" : {
+                    "NSPhotoLibraryUsageDescription" : "用于在意见反馈中上传图片",
+                    "NSPhotoLibraryAddUsageDescription" : "用于保存客服二维码到相册",
+                    "NSCameraUsageDescription" : "用于拍摄反馈图片"
+                }
+            },
+            "icons" : {
+                "android" : {
+                    "hdpi" : "unpackage/res/icons/72x72.png",
+                    "xhdpi" : "unpackage/res/icons/96x96.png",
+                    "xxhdpi" : "unpackage/res/icons/144x144.png",
+                    "xxxhdpi" : "unpackage/res/icons/192x192.png"
+                },
+                "ios" : {
+                    "appstore" : "unpackage/res/icons/1024x1024.png",
+                    "ipad" : {
+                        "app" : "unpackage/res/icons/76x76.png",
+                        "app@2x" : "unpackage/res/icons/152x152.png",
+                        "notification" : "unpackage/res/icons/20x20.png",
+                        "notification@2x" : "unpackage/res/icons/40x40.png",
+                        "proapp@2x" : "unpackage/res/icons/167x167.png",
+                        "settings" : "unpackage/res/icons/29x29.png",
+                        "settings@2x" : "unpackage/res/icons/58x58.png",
+                        "spotlight" : "unpackage/res/icons/40x40.png",
+                        "spotlight@2x" : "unpackage/res/icons/80x80.png"
+                    },
+                    "iphone" : {
+                        "app@2x" : "unpackage/res/icons/120x120.png",
+                        "app@3x" : "unpackage/res/icons/180x180.png",
+                        "notification@2x" : "unpackage/res/icons/40x40.png",
+                        "notification@3x" : "unpackage/res/icons/60x60.png",
+                        "settings@2x" : "unpackage/res/icons/58x58.png",
+                        "settings@3x" : "unpackage/res/icons/87x87.png",
+                        "spotlight@2x" : "unpackage/res/icons/80x80.png",
+                        "spotlight@3x" : "unpackage/res/icons/120x120.png"
+                    }
+                }
+            }
         }
-      }
     }
-  }
 }

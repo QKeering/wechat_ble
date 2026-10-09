@@ -1,6 +1,12 @@
 <template>
   <view>
-    <web-view :src="url" @message="handleWebViewMessage"></web-view>
+    <web-view
+      v-if="url"
+      :src="url"
+      @message="handleWebViewMessage"
+      @load="handleWebViewLoad"
+      @error="handleWebViewError"
+    ></web-view>
   </view>
 </template>
 
@@ -42,6 +48,15 @@ const handleWebViewMessage = (event: any) => {
     return action === 'back' || action === 'close' || action === 'navigateback';
   });
   if (shouldLeave) leaveWebViewPage();
+};
+
+const handleWebViewLoad = () => {
+  console.info('[WebView] 页面加载成功', { url: url.value });
+};
+
+const handleWebViewError = (event: any) => {
+  console.error('[WebView] 页面加载失败', { url: url.value, detail: event?.detail });
+  uni.showToast({ title: '页面加载失败，请稍后重试', icon: 'none' });
 };
 
 onBackPress(() => {

@@ -52,11 +52,7 @@ import {
 import { parseRwRingData } from './parser';
 import { getRwHistoryDataType } from './history';
 import { enqueueRwDiagnosticUpload } from '@/utils/rwDiagnosticUpload';
-import {
-  ensureWechatBluetoothPrivacyAuthorization,
-  isBluetoothPrivacyError,
-  normalizeBluetoothPrivacyError
-} from '@/utils/wechatBluetoothPrivacy';
+import { ensureWechatBluetoothPrivacyAuthorization, isBluetoothPrivacyError, normalizeBluetoothPrivacyError } from '@/utils/wechatBluetoothPrivacy';
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
 type BleConnectionStateCallback = Parameters<typeof uni.onBLEConnectionStateChange>[0];
@@ -222,9 +218,7 @@ const normalizeDiagnosticDetails = (details: unknown) => {
       text = String(details);
     }
   }
-  return text.length > RW_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH
-    ? `${text.slice(0, RW_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH)}...<truncated>`
-    : text;
+  return text.length > RW_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH ? `${text.slice(0, RW_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH)}...<truncated>` : text;
 };
 
 const appendRingDiagnosticLog = (source: string, event: string, details?: unknown) => {
@@ -308,6 +302,42 @@ const rwBleLog = (event: string, details: Record<string, unknown>) => {
   }
 };
 
+const ensureAndroidBleRuntimePermissions = (): Promise<void> => {
+  // #ifdef APP-PLUS
+  let platform = '';
+  try {
+    platform = uni.getSystemInfoSync().platform;
+  } catch {
+    // 无法确认平台时放行，交给 openBluetoothAdapter 报错
+  }
+  if (platform === 'android') {
+    const requestPermissions = (
+      globalThis as typeof globalThis & {
+        plus?: { android?: { requestPermissions?: (permissions: string[], success?: () => void, error?: () => void) => void } };
+      }
+    ).plus?.android?.requestPermissions;
+    if (typeof requestPermissions === 'function') {
+      return new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        try {
+          requestPermissions(['android.permission.BLUETOOTH_SCAN', 'android.permission.BLUETOOTH_CONNECT', 'android.permission.ACCESS_FINE_LOCATION'], finish, finish);
+        } catch {
+          finish();
+        }
+        // 部分机型（尤其已授权）回调可能不触发，超时放行，避免卡住连接流程
+        setTimeout(finish, 2000);
+      });
+    }
+  }
+  // #endif
+  return Promise.resolve();
+};
+
 const formatRwFrameByte = (value: number | undefined) => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
   return `0x${value.toString(16).padStart(2, '0')}`;
@@ -345,9 +375,9 @@ const summarizeParsedForRwBleLog = (parsed: RingParsedData) => {
     value: item.value,
     battery: item.battery,
     batteryLevel: item.batteryLevel ?? item.battery,
-    batteryDisplay: parsed.type === 'battery' ? item.value ?? item.batteryLevel ?? item.battery : undefined,
+    batteryDisplay: parsed.type === 'battery' ? (item.value ?? item.batteryLevel ?? item.battery) : undefined,
     batteryStatus: parsed.type === 'battery' ? item.status : undefined,
-    batteryRawValue: parsed.type === 'battery' ? item.batteryRawValue ?? item.batteryInfo : undefined,
+    batteryRawValue: parsed.type === 'battery' ? (item.batteryRawValue ?? item.batteryInfo) : undefined,
     heartRate: item.heartRate,
     bloodOxygen: item.bloodOxygen,
     firmwareVersion: item.firmwareVersion,
@@ -458,7 +488,9 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     const device = getRuntimeDevice();
     const candidates = [device.name, device.deviceName, device.model, device.modelKey, device.productName];
     return candidates.some((value) => {
-      const normalized = String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const normalized = String(value || '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '');
       return normalized.includes('QKEERINGL19') || normalized.includes('QKL19');
     });
   };
@@ -581,33 +613,25 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         resolve(snapshot);
       };
       const timer = setTimeout(() => {
-        finish(
-          { available: false, discovering: false, source: 'timeout' },
-          'bluetooth-adapter-state-check-timeout'
-        );
+        finish({ available: false, discovering: false, source: 'timeout' }, 'bluetooth-adapter-state-check-timeout');
       }, BLUETOOTH_ADAPTER_STATE_CHECK_TIMEOUT_MS);
 
       if (typeof uni.getBluetoothAdapterState !== 'function') {
-        finish(
-          { available: false, discovering: false, source: 'unsupported' },
-          'bluetooth-adapter-state-check-unsupported'
-        );
+        finish({ available: false, discovering: false, source: 'unsupported' }, 'bluetooth-adapter-state-check-unsupported');
         return;
       }
 
       uni.getBluetoothAdapterState({
-        success: (result) => finish(
-          {
-            available: Boolean(result.available),
-            discovering: Boolean(result.discovering),
-            source: 'state'
-          },
-          'bluetooth-adapter-state-check-result'
-        ),
-        fail: (error) => finish(
-          { available: false, discovering: false, source: 'failed', error },
-          'bluetooth-adapter-state-check-failed'
-        )
+        success: (result) =>
+          finish(
+            {
+              available: Boolean(result.available),
+              discovering: Boolean(result.discovering),
+              source: 'state'
+            },
+            'bluetooth-adapter-state-check-result'
+          ),
+        fail: (error) => finish({ available: false, discovering: false, source: 'failed', error }, 'bluetooth-adapter-state-check-failed')
       });
     });
   };
@@ -625,73 +649,72 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       callbackExpiryMs: BLUETOOTH_ADAPTER_OPEN_CALLBACK_EXPIRY_MS
     });
 
-    operation.promise = ensureWechatBluetoothPrivacyAuthorization().then(() => new Promise<unknown>((resolve, reject) => {
-      let callbackSettled = false;
-      const expiryTimer = setTimeout(() => {
-        if (callbackSettled) return;
-        callbackSettled = true;
-        rwBleLog('bluetooth-adapter-open-callback-expired', {
-          elapsedMs: Date.now() - startedAt,
-          foregroundTimedOut: operation.foregroundTimedOut
-        });
-        reject(new Error('Open Bluetooth adapter callback expired.'));
-      }, BLUETOOTH_ADAPTER_OPEN_CALLBACK_EXPIRY_MS);
+    operation.promise = ensureWechatBluetoothPrivacyAuthorization()
+      .then(
+        () =>
+          new Promise<unknown>((resolve, reject) => {
+            let callbackSettled = false;
+            const expiryTimer = setTimeout(() => {
+              if (callbackSettled) return;
+              callbackSettled = true;
+              rwBleLog('bluetooth-adapter-open-callback-expired', {
+                elapsedMs: Date.now() - startedAt,
+                foregroundTimedOut: operation.foregroundTimedOut
+              });
+              reject(new Error('Open Bluetooth adapter callback expired.'));
+            }, BLUETOOTH_ADAPTER_OPEN_CALLBACK_EXPIRY_MS);
 
-      uni.openBluetoothAdapter({
-        success: (result) => {
-          if (callbackSettled) {
-            rwBleLog('bluetooth-adapter-open-expired-success', {
-              elapsedMs: Date.now() - startedAt
+            uni.openBluetoothAdapter({
+              success: (result) => {
+                if (callbackSettled) {
+                  rwBleLog('bluetooth-adapter-open-expired-success', {
+                    elapsedMs: Date.now() - startedAt
+                  });
+                  runtime?.onBluetoothReadyChange?.(true);
+                  return;
+                }
+                callbackSettled = true;
+                clearTimeout(expiryTimer);
+                rwBleLog(operation.foregroundTimedOut ? 'bluetooth-adapter-open-late-success' : 'bluetooth-adapter-open-success', {
+                  elapsedMs: Date.now() - startedAt,
+                  foregroundTimedOut: operation.foregroundTimedOut
+                });
+                runtime?.onBluetoothReadyChange?.(true);
+                resolve(result);
+              },
+              fail: (error) => {
+                const normalizedError = normalizeBluetoothPrivacyError(error);
+                if (callbackSettled) {
+                  rwBleLog('bluetooth-adapter-open-expired-failed', {
+                    elapsedMs: Date.now() - startedAt,
+                    error: formatError(normalizedError)
+                  });
+                  return;
+                }
+                callbackSettled = true;
+                clearTimeout(expiryTimer);
+                rwBleLog(operation.foregroundTimedOut ? 'bluetooth-adapter-open-late-failed' : 'bluetooth-adapter-open-failed', {
+                  elapsedMs: Date.now() - startedAt,
+                  foregroundTimedOut: operation.foregroundTimedOut,
+                  error: formatError(normalizedError),
+                  privacyBlocked: isBluetoothPrivacyError(normalizedError)
+                });
+                reject(normalizedError);
+              }
             });
-            runtime?.onBluetoothReadyChange?.(true);
-            return;
-          }
-          callbackSettled = true;
-          clearTimeout(expiryTimer);
-          rwBleLog(
-            operation.foregroundTimedOut ? 'bluetooth-adapter-open-late-success' : 'bluetooth-adapter-open-success',
-            {
-              elapsedMs: Date.now() - startedAt,
-              foregroundTimedOut: operation.foregroundTimedOut
-            }
-          );
-          runtime?.onBluetoothReadyChange?.(true);
-          resolve(result);
-        },
-        fail: (error) => {
-          const normalizedError = normalizeBluetoothPrivacyError(error);
-          if (callbackSettled) {
-            rwBleLog('bluetooth-adapter-open-expired-failed', {
-              elapsedMs: Date.now() - startedAt,
-              error: formatError(normalizedError)
-            });
-            return;
-          }
-          callbackSettled = true;
-          clearTimeout(expiryTimer);
-          rwBleLog(
-            operation.foregroundTimedOut ? 'bluetooth-adapter-open-late-failed' : 'bluetooth-adapter-open-failed',
-            {
-              elapsedMs: Date.now() - startedAt,
-              foregroundTimedOut: operation.foregroundTimedOut,
-              error: formatError(normalizedError),
-              privacyBlocked: isBluetoothPrivacyError(normalizedError)
-            }
-          );
-          reject(normalizedError);
+          })
+      )
+      .catch((error) => {
+        const normalizedError = normalizeBluetoothPrivacyError(error);
+        if (isBluetoothPrivacyError(normalizedError)) {
+          rwBleLog('bluetooth-privacy-authorization-required', {
+            elapsedMs: Date.now() - startedAt,
+            retryable: false,
+            error: formatError(normalizedError)
+          });
         }
+        throw normalizedError;
       });
-    })).catch((error) => {
-      const normalizedError = normalizeBluetoothPrivacyError(error);
-      if (isBluetoothPrivacyError(normalizedError)) {
-        rwBleLog('bluetooth-privacy-authorization-required', {
-          elapsedMs: Date.now() - startedAt,
-          retryable: false,
-          error: formatError(normalizedError)
-        });
-      }
-      throw normalizedError;
-    });
 
     bluetoothAdapterOpenOperation = operation;
     operation.promise.then(
@@ -705,7 +728,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     return operation;
   };
 
-  const openBluetoothAdapter = () => {
+  const openBluetoothAdapter = async () => {
+    await ensureAndroidBleRuntimePermissions();
     const existingOperation = bluetoothAdapterOpenOperation;
     const operation = existingOperation || startBluetoothAdapterOpenOperation();
     if (existingOperation) {
@@ -876,9 +900,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     const mergeFoundDevices = (devices: any[] = []) => {
       if (!state.isScanning.value || !Array.isArray(devices)) return;
 
-      const found = devices
-        .map((device) => normalizeScanDevice(device))
-        .filter((device) => isRwScanDevice(device, prefixes) || isAllowedBusinessScanDevice(device, options));
+      const found = devices.map((device) => normalizeScanDevice(device)).filter((device) => isRwScanDevice(device, prefixes) || isAllowedBusinessScanDevice(device, options));
 
       if (found.length === 0) return;
       rwBleLog('scan-found', {
@@ -897,8 +919,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         if (existingIndex >= 0) {
           const previous = merged[existingIndex];
           const protocol = device.protocol || previous.protocol;
-          const stableIdentity =
-            protocol === 'rw' ? getRwStableMetadataIdentity(device) || getRwStableMetadataIdentity(previous) : '';
+          const stableIdentity = protocol === 'rw' ? getRwStableMetadataIdentity(device) || getRwStableMetadataIdentity(previous) : '';
           merged.splice(existingIndex, 1, {
             ...previous,
             ...device,
@@ -1155,9 +1176,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     const writeCandidates = findWritableCharacteristics(characteristicGroups);
     const writeCandidate = writeCandidates[0];
     if (!writeCandidate) {
-      throw new Error(
-        `RW ring characteristics not found. services=${services.map((service) => service.uuid).join(',')} details=${serviceErrors.join(' | ')}`
-      );
+      throw new Error(`RW ring characteristics not found. services=${services.map((service) => service.uuid).join(',')} details=${serviceErrors.join(' | ')}`);
     }
 
     const notifyCandidates = findNotifyCharacteristics(characteristicGroups, writeCandidate.serviceId);
@@ -1263,9 +1282,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         elapsedMs: Date.now() - handshakeStartedAt
       });
       const notifyCandidates = uniqueNotifyCandidates([
-        ...(device.dataServiceId && device.dataCharId
-          ? [{ serviceId: device.dataServiceId || device.serviceId || '', characteristicId: device.dataCharId }]
-          : []),
+        ...(device.dataServiceId && device.dataCharId ? [{ serviceId: device.dataServiceId || device.serviceId || '', characteristicId: device.dataCharId }] : []),
         ...(((device as RingDeviceInfo).notifyCandidates || []) as RwNotifyCandidate[])
       ]).filter((candidate) => candidate.serviceId && candidate.characteristicId);
 
@@ -1369,16 +1386,17 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     const targetChar = chars.find((char) => sameUuid(char.uuid, characteristicId));
     const charSummary = targetChar ? formatCharacteristic(targetChar) : `${characteristicId}(not found in characteristic list)`;
 
-    const changeNotify = (state: boolean) => new Promise((resolve, reject) => {
-      uni.notifyBLECharacteristicValueChange({
-        state,
-        deviceId,
-        serviceId,
-        characteristicId,
-        success: resolve,
-        fail: reject
+    const changeNotify = (state: boolean) =>
+      new Promise((resolve, reject) => {
+        uni.notifyBLECharacteristicValueChange({
+          state,
+          deviceId,
+          serviceId,
+          characteristicId,
+          success: resolve,
+          fail: reject
+        });
       });
-    });
 
     const errors: string[] = [];
 
@@ -1413,11 +1431,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     });
   };
 
-  const enableAlternateNotifyChannels = async (
-    deviceId: string,
-    candidates: RwNotifyCandidate[],
-    primary: RwNotifyCandidate
-  ) => {
+  const enableAlternateNotifyChannels = async (deviceId: string, candidates: RwNotifyCandidate[], primary: RwNotifyCandidate) => {
     const errors: string[] = [];
     const alternateCandidates = candidates
       .filter((candidate) => !sameUuid(candidate.serviceId, primary.serviceId) || !sameUuid(candidate.characteristicId, primary.characteristicId))
@@ -1465,10 +1479,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     }
 
     const frameLog = summarizeRwBleFrameForLog(bytes, label, probeLabel);
-    const writeBuffer =
-      bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-        ? bytes.buffer
-        : bytes.slice().buffer;
+    const writeBuffer = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer;
     rwBleLog('tx', {
       ...frameLog,
       deviceId: device.deviceId,
@@ -1476,34 +1487,35 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       characteristicId: candidate.characteristicId
     });
 
-    const writeValue = (writeType: 'write' | 'writeNoResponse') => new Promise((resolve, reject) => {
-      uni.writeBLECharacteristicValue({
-        deviceId: device.deviceId!,
-        serviceId: candidate.serviceId,
-        characteristicId: candidate.characteristicId,
-        value: writeBuffer as unknown as any[],
-        writeType,
-        success: (result) => {
-          rwBleLog('tx-ok', {
-            ...frameLog,
-            writeType,
-            serviceId: candidate.serviceId,
-            characteristicId: candidate.characteristicId
-          });
-          resolve(result);
-        },
-        fail: (error) => {
-          rwBleLog('tx-fail', {
-            ...frameLog,
-            writeType,
-            serviceId: candidate.serviceId,
-            characteristicId: candidate.characteristicId,
-            error: formatError(error)
-          });
-          reject(error);
-        }
+    const writeValue = (writeType: 'write' | 'writeNoResponse') =>
+      new Promise((resolve, reject) => {
+        uni.writeBLECharacteristicValue({
+          deviceId: device.deviceId!,
+          serviceId: candidate.serviceId,
+          characteristicId: candidate.characteristicId,
+          value: writeBuffer as unknown as any[],
+          writeType,
+          success: (result) => {
+            rwBleLog('tx-ok', {
+              ...frameLog,
+              writeType,
+              serviceId: candidate.serviceId,
+              characteristicId: candidate.characteristicId
+            });
+            resolve(result);
+          },
+          fail: (error) => {
+            rwBleLog('tx-fail', {
+              ...frameLog,
+              writeType,
+              serviceId: candidate.serviceId,
+              characteristicId: candidate.characteristicId,
+              error: formatError(error)
+            });
+            reject(error);
+          }
+        });
       });
-    });
 
     return enqueueWrite(() =>
       writeValue('write').catch(() =>
@@ -1521,10 +1533,14 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       throw new Error('RW ring device is not ready for command writes.');
     }
 
-    return sendBytesToWriteCandidate(bytes, {
-      serviceId: device.serviceId,
-      characteristicId: device.cmdCharId
-    }, label);
+    return sendBytesToWriteCandidate(
+      bytes,
+      {
+        serviceId: device.serviceId,
+        characteristicId: device.cmdCharId
+      },
+      label
+    );
   };
 
   const sendL19HistoryBytes = (bytes: Uint8Array, label?: string) => {
@@ -1538,10 +1554,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     }
 
     const frameLog = summarizeRwBleFrameForLog(bytes, label);
-    const writeBuffer =
-      bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-        ? bytes.buffer
-        : bytes.slice().buffer;
+    const writeBuffer = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer;
     rwBleLog('tx', {
       ...frameLog,
       deviceId,
@@ -1551,37 +1564,40 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       historyCompatibility: 'l19'
     });
 
-    return enqueueWrite(() => new Promise((resolve, reject) => {
-      uni.writeBLECharacteristicValue({
-        deviceId,
-        serviceId,
-        characteristicId,
-        value: writeBuffer as unknown as any[],
-        success: (result) => {
-          rwBleLog('tx-ok', {
-            ...frameLog,
+    return enqueueWrite(
+      () =>
+        new Promise((resolve, reject) => {
+          uni.writeBLECharacteristicValue({
             deviceId,
             serviceId,
             characteristicId,
-            writeType: 'platform-default',
-            historyCompatibility: 'l19'
+            value: writeBuffer as unknown as any[],
+            success: (result) => {
+              rwBleLog('tx-ok', {
+                ...frameLog,
+                deviceId,
+                serviceId,
+                characteristicId,
+                writeType: 'platform-default',
+                historyCompatibility: 'l19'
+              });
+              resolve(result);
+            },
+            fail: (error) => {
+              rwBleLog('tx-fail', {
+                ...frameLog,
+                deviceId,
+                serviceId,
+                characteristicId,
+                writeType: 'platform-default',
+                historyCompatibility: 'l19',
+                error: formatError(error)
+              });
+              reject(error);
+            }
           });
-          resolve(result);
-        },
-        fail: (error) => {
-          rwBleLog('tx-fail', {
-            ...frameLog,
-            deviceId,
-            serviceId,
-            characteristicId,
-            writeType: 'platform-default',
-            historyCompatibility: 'l19',
-            error: formatError(error)
-          });
-          reject(error);
-        }
-      });
-    }));
+        })
+    );
   };
 
   const getAlternateWriteCandidates = () => {
@@ -1654,18 +1670,10 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
 
     const safeCommandCount = Math.max(1, commandCount) * Math.max(1, candidateCount);
     const perCommandDelayMs = Math.max(80, delayMs);
-    return Math.min(
-      RW_FALLBACK_RESPONSE_TIMEOUT_CAP_MS,
-      Math.max(RW_ALT_WRITE_PROBE_TIMEOUT_MS, safeCommandCount * perCommandDelayMs + RW_FALLBACK_RESPONSE_GRACE_MS)
-    );
+    return Math.min(RW_FALLBACK_RESPONSE_TIMEOUT_CAP_MS, Math.max(RW_ALT_WRITE_PROBE_TIMEOUT_MS, safeCommandCount * perCommandDelayMs + RW_FALLBACK_RESPONSE_GRACE_MS));
   };
 
-  const sendSequentialWithAlternateProbe = async (
-    commands: RwCommandWrite[],
-    delayMs: number,
-    reason: string,
-    predicate: (parsed: RingParsedData) => boolean
-  ) => {
+  const sendSequentialWithAlternateProbe = async (commands: RwCommandWrite[], delayMs: number, reason: string, predicate: (parsed: RingParsedData) => boolean) => {
     const mainFallbackWait = waitForParsedData(predicate, getSequentialProbeTimeoutMs(commands.length, delayMs));
     mainFallbackWait.catch(() => undefined);
     await sendSequential(commands, delayMs);
@@ -1679,10 +1687,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     const alternateCandidateCount = getAlternateWriteCandidates().length;
     if (alternateCandidateCount === 0) return false;
 
-    const altFallbackWait = waitForParsedData(
-      predicate,
-      getSequentialProbeTimeoutMs(commands.length, delayMs, alternateCandidateCount)
-    );
+    const altFallbackWait = waitForParsedData(predicate, getSequentialProbeTimeoutMs(commands.length, delayMs, alternateCandidateCount));
     altFallbackWait.catch(() => undefined);
     await sendCommandsToAlternateWriteCandidates(commands, delayMs, reason);
     try {
@@ -1773,17 +1778,15 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     if (!device.deviceId) return;
 
     const reads = [
-      ...(alias === 'softwareVersion'
-        ? [{ label: 'software', serviceId: device.standardSoftwareServiceId, characteristicId: device.standardSoftwareCharId }]
-        : []),
-      ...(alias === 'hardwareVersion'
-        ? [{ label: 'hardware', serviceId: device.standardHardwareServiceId, characteristicId: device.standardHardwareCharId }]
-        : []),
-      ...(alias ? [] : [
-        { label: 'firmware', serviceId: device.standardFirmwareServiceId, characteristicId: device.standardFirmwareCharId },
-        { label: 'hardware', serviceId: device.standardHardwareServiceId, characteristicId: device.standardHardwareCharId },
-        { label: 'software', serviceId: device.standardSoftwareServiceId, characteristicId: device.standardSoftwareCharId }
-      ]),
+      ...(alias === 'softwareVersion' ? [{ label: 'software', serviceId: device.standardSoftwareServiceId, characteristicId: device.standardSoftwareCharId }] : []),
+      ...(alias === 'hardwareVersion' ? [{ label: 'hardware', serviceId: device.standardHardwareServiceId, characteristicId: device.standardHardwareCharId }] : []),
+      ...(alias
+        ? []
+        : [
+            { label: 'firmware', serviceId: device.standardFirmwareServiceId, characteristicId: device.standardFirmwareCharId },
+            { label: 'hardware', serviceId: device.standardHardwareServiceId, characteristicId: device.standardHardwareCharId },
+            { label: 'software', serviceId: device.standardSoftwareServiceId, characteristicId: device.standardSoftwareCharId }
+          ]),
       { label: 'firmware', serviceId: device.standardFirmwareServiceId, characteristicId: device.standardFirmwareCharId }
     ];
     const seen = new Set<string>();
@@ -1896,10 +1899,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     }))
   ];
 
-  const runRwAppReadyPreflight = async (
-    reason = 'manual',
-    options: { force?: boolean; timezone?: number } = {}
-  ) => {
+  const runRwAppReadyPreflight = async (reason = 'manual', options: { force?: boolean; timezone?: number } = {}) => {
     const device = getRuntimeDevice();
     if (!device.deviceId || !device.serviceId || !device.cmdCharId) {
       rwBleLog('rw-app-preflight-skip', {
@@ -1958,10 +1958,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     const commands: RwAppHistoryReadCommand[] = [];
 
     if (shouldRead('step')) {
-      commands.push(
-        { label: 'history/rw-app-current-day-step', key: RwKey.ActivityCurrentDay },
-        { label: 'history/rw-app-step-history', key: RwKey.Activity }
-      );
+      commands.push({ label: 'history/rw-app-current-day-step', key: RwKey.ActivityCurrentDay }, { label: 'history/rw-app-step-history', key: RwKey.Activity });
     }
     if (shouldRead('sleep')) {
       commands.push({ label: 'history/rw-app-sleep', key: RwKey.Sleep });
@@ -1984,29 +1981,20 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     return commands;
   };
 
-  const isRwAppHistoryResponseFor = (parsed: RingParsedData, key: RwKey, flag: RwKeyFlag) => (
-    parsed.protocol === 'rw' &&
-    ['rw_health_data', 'rw_health_data_ack'].includes(parsed.type) &&
-    Number(parsed.key) === key &&
-    (Number(parsed.flag) & 0xff) === flag
-  );
+  const isRwAppHistoryResponseFor = (parsed: RingParsedData, key: RwKey, flag: RwKeyFlag) =>
+    parsed.protocol === 'rw' && ['rw_health_data', 'rw_health_data_ack'].includes(parsed.type) && Number(parsed.key) === key && (Number(parsed.flag) & 0xff) === flag;
 
   const hasRwAppHistoryPayload = (parsed: RingParsedData) => {
     if (Array.isArray(parsed.records) && parsed.records.length > 0) return true;
     if (parsed.value != null && parsed.value !== '') return true;
-    const data = Array.isArray((parsed as { data?: unknown }).data)
-      ? ((parsed as { data?: unknown[] }).data || [])
-      : [];
+    const data = Array.isArray((parsed as { data?: unknown }).data) ? (parsed as { data?: unknown[] }).data || [] : [];
     return data.length > 1;
   };
 
   const sendRwAppHistoryReadDeleteLoop = async (command: RwAppHistoryReadCommand, source: string) => {
     let readCount = 0;
     for (; readCount < RW_APP_HISTORY_SYNC_LOOP_MAX_READS; readCount += 1) {
-      const pendingRead = waitForParsedData(
-        (parsed) => isRwAppHistoryResponseFor(parsed, command.key, RwKeyFlag.Read),
-        RW_APP_HISTORY_SYNC_RESPONSE_WAIT_MS
-      );
+      const pendingRead = waitForParsedData((parsed) => isRwAppHistoryResponseFor(parsed, command.key, RwKeyFlag.Read), RW_APP_HISTORY_SYNC_RESPONSE_WAIT_MS);
       pendingRead.catch(() => undefined);
 
       await sendBytes(buildRwReadHealthDataCommand(command.key), `${command.label}/read`);
@@ -2039,10 +2027,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
 
       if (!hasPayload) break;
 
-      const pendingDelete = waitForParsedData(
-        (deleteParsed) => isRwAppHistoryResponseFor(deleteParsed, command.key, RwKeyFlag.Delete),
-        RW_APP_HISTORY_SYNC_DELETE_WAIT_MS
-      );
+      const pendingDelete = waitForParsedData((deleteParsed) => isRwAppHistoryResponseFor(deleteParsed, command.key, RwKeyFlag.Delete), RW_APP_HISTORY_SYNC_DELETE_WAIT_MS);
       pendingDelete.catch(() => undefined);
 
       await sendBytes(buildRwDeleteHealthDataCommand(command.key), `${command.label}/delete-current-block`);
@@ -2107,22 +2092,24 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     });
   };
 
-  const isRwDeviceAppDataControlRequestFrame = (rawBytes: Uint8Array) => (
+  const isRwDeviceAppDataControlRequestFrame = (rawBytes: Uint8Array) =>
     rawBytes.length >= 12 &&
     rawBytes[0] === 0xab &&
     rawBytes[1] === 0x01 &&
-    rawBytes[6] === (RwKey.AppDataControl >> 8) &&
+    rawBytes[6] === RwKey.AppDataControl >> 8 &&
     rawBytes[7] === (RwKey.AppDataControl & 0xff) &&
     rawBytes[8] === 0x00 &&
-    rawBytes[10] === 0x05
-  );
+    rawBytes[10] === 0x05;
 
-  const acknowledgeRwDeviceAppDataControlRequest = (rawBytes: Uint8Array, meta: {
-    deviceId?: string;
-    serviceId?: string;
-    characteristicId?: string;
-    rawHex?: string;
-  }) => {
+  const acknowledgeRwDeviceAppDataControlRequest = (
+    rawBytes: Uint8Array,
+    meta: {
+      deviceId?: string;
+      serviceId?: string;
+      characteristicId?: string;
+      rawHex?: string;
+    }
+  ) => {
     if (!isRwDeviceAppDataControlRequestFrame(rawBytes)) return;
     const controlKey = rawBytes[9];
     const controlAction = rawBytes[11];
@@ -2300,12 +2287,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
 
     if (fallbacks.length > 0) {
       const fallbackCommands = fallbacks.map((item) => ({ bytes: item.bytes, label: `battery/${item.label}` }));
-      await sendSequentialWithAlternateProbe(
-        fallbackCommands,
-        80,
-        'battery-fallback-no-rx',
-        (parsed) => parsed.type === 'battery'
-      );
+      await sendSequentialWithAlternateProbe(fallbackCommands, 80, 'battery-fallback-no-rx', (parsed) => parsed.type === 'battery');
       void readStandardBatteryLevel('fallback');
     }
   };
@@ -2457,12 +2439,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
 
       if (fallbacks.length > 0) {
         const fallbackCommands = fallbacks.map((item) => ({ bytes: item.bytes, label: `${targetLabel}/${item.label}` }));
-        await sendSequentialWithAlternateProbe(
-          fallbackCommands,
-          80,
-          `${targetLabel}-fallback-no-rx`,
-          (parsed) => isVersionAliasParsed(parsed, alias)
-        );
+        await sendSequentialWithAlternateProbe(fallbackCommands, 80, `${targetLabel}-fallback-no-rx`, (parsed) => isVersionAliasParsed(parsed, alias));
       }
     } catch (error) {
       clearPendingFirmwareAlias();
@@ -2592,11 +2569,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     }
   };
 
-  const waitForParsedData = (
-    predicate: (parsed: RingParsedData) => boolean,
-    timeoutMs = 15000,
-    options?: { replayRecent?: boolean }
-  ) => {
+  const waitForParsedData = (predicate: (parsed: RingParsedData) => boolean, timeoutMs = 15000, options?: { replayRecent?: boolean }) => {
     const cachedParsed = options?.replayRecent ? takeRecentParsedData(predicate) : null;
     if (cachedParsed) {
       rwBleLog('wait-cache-hit', {
@@ -2754,8 +2727,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       totalNum: 0,
       totalFileCount,
       selectedFileCount,
-      filteredFileCount:
-        typeof parsed.filteredFileCount === 'number' ? parsed.filteredFileCount : Math.max(0, totalFileCount - selectedFileCount),
+      filteredFileCount: typeof parsed.filteredFileCount === 'number' ? parsed.filteredFileCount : Math.max(0, totalFileCount - selectedFileCount),
       readAll: parsed.readAll,
       sinceTimestamp: parsed.sinceTimestamp,
       message:
@@ -2779,7 +2751,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       pendingCollectPeriodReadAlias = null;
       const intervalMinutes = typeof parsed.interval === 'number' ? parsed.interval : Number(parsed.minutes || 0);
       const period = typeof parsed.period === 'number' ? parsed.period : intervalMinutes > 0 ? intervalMinutes * 60 : undefined;
-      const minutes = Number.isFinite(intervalMinutes) && intervalMinutes > 0 ? (intervalMinutes).toFixed(1) : parsed.minutes;
+      const minutes = Number.isFinite(intervalMinutes) && intervalMinutes > 0 ? intervalMinutes.toFixed(1) : parsed.minutes;
       return {
         ...parsed,
         type: 'collect_period_read',
@@ -2791,10 +2763,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       };
     }
 
-    if (
-      pendingCollectPeriodSetAlias &&
-      (parsed.type === 'rw_health_monitoring_ack' || parsed.type === 'rw_health_monitoring')
-    ) {
+    if (pendingCollectPeriodSetAlias && (parsed.type === 'rw_health_monitoring_ack' || parsed.type === 'rw_health_monitoring')) {
       pendingCollectPeriodSetAlias = null;
       return {
         ...parsed,
@@ -2822,8 +2791,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
           protocol: 'rw',
           value:
             type === 'hardwareVersion'
-              ? parsed.hardwareVersion ?? parsed.firmwareVersion ?? parsed.softwareVersion ?? parsed.uiVersion
-              : parsed.softwareVersion ?? parsed.uiVersion ?? parsed.firmwareVersion ?? parsed.hardwareVersion,
+              ? (parsed.hardwareVersion ?? parsed.firmwareVersion ?? parsed.softwareVersion ?? parsed.uiVersion)
+              : (parsed.softwareVersion ?? parsed.uiVersion ?? parsed.firmwareVersion ?? parsed.hardwareVersion),
           status: parsed.status || 'normal',
           timestamp: parsed.timestamp || Date.now()
         })
@@ -2862,7 +2831,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       const notifyServiceId = (device as RingDeviceInfo).dataServiceId || device.serviceId;
       if (device.deviceId && res.deviceId !== device.deviceId) return;
 
-      const rawBytes = new Uint8Array(res.value as unknown as ArrayBuffer);
+      const rawBytes = coerceBytes(res.value);
       const rawHex = bytesToHex(rawBytes);
       const frameLog = summarizeRwBleFrameForLog(rawBytes);
       const receivedAt = Date.now();
@@ -2900,9 +2869,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         return;
       }
       const parsed = parseRwRingData(rawBytes);
-      const isExpectedNotifyChannel =
-        (!notifyServiceId || sameUuid(res.serviceId, notifyServiceId)) &&
-        (!device.dataCharId || sameUuid(res.characteristicId, device.dataCharId));
+      const isExpectedNotifyChannel = (!notifyServiceId || sameUuid(res.serviceId, notifyServiceId)) && (!device.dataCharId || sameUuid(res.characteristicId, device.dataCharId));
       if (!isExpectedNotifyChannel && !parsed) {
         rwBleLog('rx-ignored-channel', {
           ...frameLog,
@@ -2951,19 +2918,21 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         });
       }
       const parsedWithControlContext = takePendingHealthControlForAck(parsed, pendingHealthControls);
-      const parsedWithDevice = markParsedAsEmitted(enrichRwFileListWithReadIntent({
-        ...parsedWithControlContext,
-        protocol: 'rw',
-        deviceId: res.deviceId,
-        uniMacId: stableIdentity,
-        mac: stableIdentity,
-        advertis: (device as RingDeviceInfo).advertis,
-        deviceName: (device as RingDeviceInfo).name,
-        serviceId: res.serviceId,
-        characteristicId: res.characteristicId,
-        receivedAt,
-        parsedAt: receivedAt
-      }));
+      const parsedWithDevice = markParsedAsEmitted(
+        enrichRwFileListWithReadIntent({
+          ...parsedWithControlContext,
+          protocol: 'rw',
+          deviceId: res.deviceId,
+          uniMacId: stableIdentity,
+          mac: stableIdentity,
+          advertis: (device as RingDeviceInfo).advertis,
+          deviceName: (device as RingDeviceInfo).name,
+          serviceId: res.serviceId,
+          characteristicId: res.characteristicId,
+          receivedAt,
+          parsedAt: receivedAt
+        })
+      );
       const parsedVariants = [parsedWithDevice, ...takeL19CompatAliases(parsedWithDevice)];
       acknowledgeRwDeviceAppDataControlRequest(rawBytes, {
         rawHex,
@@ -3078,11 +3047,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
 
       const capturedGeneration = connectionGeneration;
       const historySession = activeL19HistorySession;
-      if (
-        historySession &&
-        historySession.deviceId === res.deviceId &&
-        historySession.generation === capturedGeneration
-      ) {
+      if (historySession && historySession.deviceId === res.deviceId && historySession.generation === capturedGeneration) {
         const serviceId = currentDevice.serviceId || runtimeDevice.serviceId || '';
         void isDeviceConnected(historySession.deviceId, serviceId).then((stillConnected) => {
           if (capturedGeneration !== connectionGeneration) {
@@ -3131,8 +3096,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       runtime?.onDisconnected?.({
         reason: 'bluetooth_adapter_unavailable',
         available: false,
-          discovering: result.discovering
-        });
+        discovering: result.discovering
+      });
     };
     uni.onBluetoothAdapterStateChange?.(adapterStateCallback);
   };
@@ -3224,10 +3189,7 @@ const isMetricAliasMatch = (alias: L19MetricAliasType, parsed: RingParsedData) =
   if (alias === 'active_measure') return Boolean(getActiveMeasureAliasName(parsed));
   const expectedKey = RW_L19_METRIC_ALIAS_REALTIME_KEY_MAP[alias];
   const expectedControlKey = RW_L19_METRIC_ALIAS_CONTROL_KEY_MAP[alias];
-  if (
-    (!expectedKey || !isRwRealtimeMetricKey(parsed, expectedKey)) &&
-    (!expectedControlKey || !isRwMetricControlFailure(parsed, expectedControlKey))
-  ) {
+  if ((!expectedKey || !isRwRealtimeMetricKey(parsed, expectedKey)) && (!expectedControlKey || !isRwMetricControlFailure(parsed, expectedControlKey))) {
     return false;
   }
   if (alias === 'active_OxyGenMeasure') return parsed.name === 'blood_oxygen' || parsed.name === 'spo2';
@@ -3250,10 +3212,7 @@ const isRwMetricAliasSource = (parsed: RingParsedData) => {
   return Array.isArray(parsed.data) && parsed.data.includes(0x31);
 };
 
-const takePendingHealthControlForAck = (
-  parsed: RingParsedData,
-  pendingControls: RwPendingHealthControl[]
-): RingParsedData => {
+const takePendingHealthControlForAck = (parsed: RingParsedData, pendingControls: RwPendingHealthControl[]): RingParsedData => {
   if (parsed.type !== 'rw_health_data_control_ack') return parsed;
 
   const now = Date.now();
@@ -3267,8 +3226,7 @@ const takePendingHealthControlForAck = (
   const parsedControlAction = Number(parsed.controlAction);
   let pendingIndex = pendingControls.findIndex(
     (item) =>
-      ((parsedName !== 'unknown' && item.name === parsedName) ||
-        (Number.isFinite(parsedControlKey) && parsedControlKey > 0 && item.controlKey === parsedControlKey)) &&
+      ((parsedName !== 'unknown' && item.name === parsedName) || (Number.isFinite(parsedControlKey) && parsedControlKey > 0 && item.controlKey === parsedControlKey)) &&
       (!Number.isFinite(parsedControlAction) || item.enabled === (parsedControlAction !== 0))
   );
   if (pendingIndex < 0 && (parsedName === 'unknown' || !parsed.name)) pendingIndex = 0;
@@ -3278,8 +3236,7 @@ const takePendingHealthControlForAck = (
   return {
     ...parsed,
     name: parsedName === 'unknown' ? pending.name : parsedName,
-    controlKey:
-      Number.isFinite(parsedControlKey) && parsedControlKey > 0 ? parsedControlKey : pending.controlKey,
+    controlKey: Number.isFinite(parsedControlKey) && parsedControlKey > 0 ? parsedControlKey : pending.controlKey,
     controlAction: parsed.controlAction ?? (pending.enabled ? 1 : 0),
     enabled: pending.enabled
   };
@@ -3381,12 +3338,7 @@ const RW_MONITORING_WRITE_KEYS = [
   RwKey.BloodPressureMonitoring,
   RwKey.TemperatureDetecting
 ];
-const RW_APP_READY_MONITORING_KEYS = [
-  RwKey.HrMonitoring,
-  RwKey.Spo2Monitoring,
-  RwKey.HrvMonitoring,
-  RwKey.StressMonitoring
-];
+const RW_APP_READY_MONITORING_KEYS = [RwKey.HrMonitoring, RwKey.Spo2Monitoring, RwKey.HrvMonitoring, RwKey.StressMonitoring];
 
 const secondsToRwIntervalMinutes = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds <= 0) return 30;
@@ -3395,12 +3347,7 @@ const secondsToRwIntervalMinutes = (seconds: number) => {
 
 const numberToUint32LE = (value: number) => {
   const normalized = Math.max(0, Math.floor(Number.isFinite(value) ? value : 0)) >>> 0;
-  return new Uint8Array([
-    normalized & 0xff,
-    (normalized >> 8) & 0xff,
-    (normalized >> 16) & 0xff,
-    (normalized >> 24) & 0xff
-  ]);
+  return new Uint8Array([normalized & 0xff, (normalized >> 8) & 0xff, (normalized >> 16) & 0xff, (normalized >> 24) & 0xff]);
 };
 
 const parseCollectPeriodPayload = (payload?: LegacyCommandPayload) => {
@@ -3435,9 +3382,7 @@ const parseUpdateTimePayload = (payload?: LegacyCommandPayload) => {
 
 const resolveRwLocalDataReadIntent = (options: LegacyReadLocalDataOptions = {}): RwLocalDataReadIntent => {
   const readAll = options.readAll ?? false;
-  const sinceTimestamp = normalizeRwReadTimestamp(
-    options.sinceTimestamp === undefined ? (readAll ? 0 : getTodayZeroTimestamp()) : options.sinceTimestamp
-  );
+  const sinceTimestamp = normalizeRwReadTimestamp(options.sinceTimestamp === undefined ? (readAll ? 0 : getTodayZeroTimestamp()) : options.sinceTimestamp);
   return {
     readAll,
     sinceTimestamp,
@@ -3636,10 +3581,7 @@ function normalizeScanDevice(device: UniApp.OnBluetoothDeviceFoundResult['device
     displayName: device.name || device.localName,
     protocol,
     advertis,
-    uniMacId:
-      protocol === 'rw'
-        ? rawDevice.mac || advertis?.macInfo || (isColonSeparatedBleMac(rawDevice.uniMacId) ? rawDevice.uniMacId : '')
-        : rawDevice.uniMacId,
+    uniMacId: protocol === 'rw' ? rawDevice.mac || advertis?.macInfo || (isColonSeparatedBleMac(rawDevice.uniMacId) ? rawDevice.uniMacId : '') : rawDevice.uniMacId,
     mac: rawDevice.mac || advertis?.macInfo,
     lastSeenAt: Date.now()
   };
@@ -3710,7 +3652,11 @@ export const getRwScannedDeviceMergeKeys = (device: RingDeviceInfo) => {
 function getRwAdvertisHex(value?: RingDeviceInfo['advertisData']) {
   if (!value) return '';
   if (typeof value === 'string') return value.replace(/\s+/g, '').toUpperCase();
-  if (Array.isArray(value)) return value.map((byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase();
+  if (Array.isArray(value))
+    return value
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
   return bufferToHex(value as unknown as ArrayBuffer).toUpperCase();
 }
 
@@ -3740,10 +3686,7 @@ function getServices(deviceId: string): Promise<UniApp.GetBLEDeviceServicesSucce
   });
 }
 
-function getCharacteristics(
-  deviceId: string,
-  serviceId: string
-): Promise<UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics']> {
+function getCharacteristics(deviceId: string, serviceId: string): Promise<UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics']> {
   return new Promise((resolve, reject) => {
     uni.getBLEDeviceCharacteristics({
       deviceId,
@@ -3766,14 +3709,82 @@ function readBleCharacteristicValue(deviceId: string, serviceId: string, charact
   });
 }
 
-function findStandardBatteryLevelCharacteristic(
-  groups: Array<{ serviceId: string; chars: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'] }>
-) {
+const BLE_CHAR_PROP_READ = 0x02;
+const BLE_CHAR_PROP_WRITE_NO_RESPONSE = 0x04;
+const BLE_CHAR_PROP_WRITE = 0x08;
+const BLE_CHAR_PROP_NOTIFY = 0x10;
+const BLE_CHAR_PROP_INDICATE = 0x20;
+
+type NormalizedCharacteristicProperties = {
+  read?: boolean;
+  write?: boolean;
+  writeNoResponse?: boolean;
+  notify?: boolean;
+  indicate?: boolean;
+};
+
+// App(Android) 端 getBLEDeviceCharacteristics 返回的 properties 可能是数字位掩码，
+// 而 mp-weixin 是对象 { read, write, notify, indicate }。统一归一化为对象，兼容两种格式。
+function normalizeCharacteristicProperties(properties: unknown): NormalizedCharacteristicProperties {
+  if (!properties) return {};
+  if (typeof properties === 'object') {
+    const record = properties as Record<string, unknown>;
+    return {
+      read: Boolean(record.read),
+      write: Boolean(record.write),
+      writeNoResponse: Boolean(record.writeNoResponse),
+      notify: Boolean(record.notify),
+      indicate: Boolean(record.indicate)
+    };
+  }
+  const bits = Number(properties);
+  if (!Number.isFinite(bits)) return {};
+  return {
+    read: Boolean(bits & BLE_CHAR_PROP_READ),
+    writeNoResponse: Boolean(bits & BLE_CHAR_PROP_WRITE_NO_RESPONSE),
+    write: Boolean(bits & BLE_CHAR_PROP_WRITE),
+    notify: Boolean(bits & BLE_CHAR_PROP_NOTIFY),
+    indicate: Boolean(bits & BLE_CHAR_PROP_INDICATE)
+  };
+}
+
+// BLE 通知/读回的 value 在 mp-weixin 是 ArrayBuffer，App 端历史可能返回 base64 字符串，统一转成 Uint8Array。
+function coerceBytes(value: unknown): Uint8Array {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) {
+    const view = value as ArrayBufferView;
+    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const decodeBase64 = (uni as unknown as { base64ToArrayBuffer?: (data: string) => ArrayBuffer }).base64ToArrayBuffer;
+    if (typeof decodeBase64 === 'function') {
+      try {
+        const buffer = decodeBase64(value);
+        if (buffer) return new Uint8Array(buffer);
+      } catch {
+        // ignore, fall through to atob
+      }
+    }
+    if (typeof atob === 'function') {
+      try {
+        const binary = atob(value);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        return bytes;
+      } catch {
+        // ignore, return empty below
+      }
+    }
+  }
+  return new Uint8Array();
+}
+
+function findStandardBatteryLevelCharacteristic(groups: Array<{ serviceId: string; chars: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'] }>) {
   for (const group of groups) {
     if (!sameUuid(group.serviceId, BLE_BATTERY_SERVICE_UUID)) continue;
     const characteristic =
-      group.chars.find((char) => sameUuid(char.uuid, BLE_BATTERY_LEVEL_CHAR_UUID) && char.properties?.read) ||
-      group.chars.find((char) => char.properties?.read);
+      group.chars.find((char) => sameUuid(char.uuid, BLE_BATTERY_LEVEL_CHAR_UUID) && normalizeCharacteristicProperties(char.properties).read) ||
+      group.chars.find((char) => normalizeCharacteristicProperties(char.properties).read);
     if (characteristic) {
       return {
         serviceId: group.serviceId,
@@ -3784,48 +3795,70 @@ function findStandardBatteryLevelCharacteristic(
   return null;
 }
 
-function findStandardHeartRateMeasurementCharacteristic(
-  groups: Array<{ serviceId: string; chars: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'] }>
-) {
+function findStandardHeartRateMeasurementCharacteristic(groups: Array<{ serviceId: string; chars: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'] }>) {
   for (const group of groups) {
     if (!sameUuid(group.serviceId, BLE_HEART_RATE_SERVICE_UUID)) continue;
     const characteristic =
-      group.chars.find((char) => sameUuid(char.uuid, BLE_HEART_RATE_MEASUREMENT_CHAR_UUID) && (char.properties?.notify || char.properties?.indicate || char.properties?.read)) ||
-      group.chars.find((char) => char.properties?.notify || char.properties?.indicate || char.properties?.read);
+      group.chars.find(
+        (char) =>
+          sameUuid(char.uuid, BLE_HEART_RATE_MEASUREMENT_CHAR_UUID) &&
+          (normalizeCharacteristicProperties(char.properties).notify ||
+            normalizeCharacteristicProperties(char.properties).indicate ||
+            normalizeCharacteristicProperties(char.properties).read)
+      ) ||
+      group.chars.find(
+        (char) =>
+          normalizeCharacteristicProperties(char.properties).notify ||
+          normalizeCharacteristicProperties(char.properties).indicate ||
+          normalizeCharacteristicProperties(char.properties).read
+      );
     if (characteristic) {
       return {
         serviceId: group.serviceId,
         characteristicId: characteristic.uuid,
-        canRead: Boolean(characteristic.properties?.read)
+        canRead: Boolean(normalizeCharacteristicProperties(characteristic.properties).read)
       };
     }
   }
   return null;
 }
 
-function findStandardPulseOximeterCharacteristic(
-  groups: Array<{ serviceId: string; chars: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'] }>
-) {
+function findStandardPulseOximeterCharacteristic(groups: Array<{ serviceId: string; chars: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'] }>) {
   for (const group of groups) {
     if (!sameUuid(group.serviceId, BLE_PULSE_OXIMETER_SERVICE_UUID)) continue;
     const characteristic =
-      group.chars.find((char) => sameUuid(char.uuid, BLE_PLX_CONTINUOUS_CHAR_UUID) && (char.properties?.notify || char.properties?.indicate || char.properties?.read)) ||
-      group.chars.find((char) => sameUuid(char.uuid, BLE_PLX_SPOT_CHECK_CHAR_UUID) && (char.properties?.notify || char.properties?.indicate || char.properties?.read)) ||
-      group.chars.find((char) => char.properties?.notify || char.properties?.indicate || char.properties?.read);
+      group.chars.find(
+        (char) =>
+          sameUuid(char.uuid, BLE_PLX_CONTINUOUS_CHAR_UUID) &&
+          (normalizeCharacteristicProperties(char.properties).notify ||
+            normalizeCharacteristicProperties(char.properties).indicate ||
+            normalizeCharacteristicProperties(char.properties).read)
+      ) ||
+      group.chars.find(
+        (char) =>
+          sameUuid(char.uuid, BLE_PLX_SPOT_CHECK_CHAR_UUID) &&
+          (normalizeCharacteristicProperties(char.properties).notify ||
+            normalizeCharacteristicProperties(char.properties).indicate ||
+            normalizeCharacteristicProperties(char.properties).read)
+      ) ||
+      group.chars.find(
+        (char) =>
+          normalizeCharacteristicProperties(char.properties).notify ||
+          normalizeCharacteristicProperties(char.properties).indicate ||
+          normalizeCharacteristicProperties(char.properties).read
+      );
     if (characteristic) {
       return {
         serviceId: group.serviceId,
         characteristicId: characteristic.uuid,
-        canRead: Boolean(characteristic.properties?.read)
+        canRead: Boolean(normalizeCharacteristicProperties(characteristic.properties).read)
       };
     }
   }
   return null;
 }
 
-function findStandardDeviceInformationCharacteristics(
-  groups: Array<{ serviceId: string; chars: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'] }>
-) {
+function findStandardDeviceInformationCharacteristics(groups: Array<{ serviceId: string; chars: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'] }>) {
   const result: {
     firmware?: { serviceId: string; characteristicId: string };
     hardware?: { serviceId: string; characteristicId: string };
@@ -3833,7 +3866,7 @@ function findStandardDeviceInformationCharacteristics(
   } = {};
   for (const group of groups) {
     if (!sameUuid(group.serviceId, BLE_DEVICE_INFORMATION_SERVICE_UUID)) continue;
-    const readableChars = group.chars.filter((char) => char.properties?.read);
+    const readableChars = group.chars.filter((char) => normalizeCharacteristicProperties(char.properties).read);
     const firmware = readableChars.find((char) => sameUuid(char.uuid, BLE_FIRMWARE_REVISION_CHAR_UUID));
     const hardware = readableChars.find((char) => sameUuid(char.uuid, BLE_HARDWARE_REVISION_CHAR_UUID));
     const software = readableChars.find((char) => sameUuid(char.uuid, BLE_SOFTWARE_REVISION_CHAR_UUID));
@@ -3844,13 +3877,13 @@ function findStandardDeviceInformationCharacteristics(
   return result;
 }
 
-function findNotifyCharacteristics(
-  groups: Array<{ serviceId: string; chars: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'] }>,
-  preferredServiceId: string
-) {
+function findNotifyCharacteristics(groups: Array<{ serviceId: string; chars: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'] }>, preferredServiceId: string) {
   const candidates = groups.flatMap((group) =>
     group.chars
-      .filter((char) => char.properties.notify || char.properties.indicate)
+      .filter((char) => {
+        const properties = normalizeCharacteristicProperties(char.properties);
+        return properties.notify || properties.indicate;
+      })
       .map((char) => ({
         serviceId: group.serviceId,
         characteristicId: char.uuid
@@ -3867,22 +3900,17 @@ function findNotifyCharacteristics(
 
 function findWritableCharacteristics(groups: Array<{ serviceId: string; chars: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'] }>) {
   const candidates = groups.flatMap((group) =>
-    group.chars
-      .filter(isWritableCharacteristic)
-      .map((characteristic) => ({
-        serviceId: group.serviceId,
-        characteristic
-      }))
+    group.chars.filter(isWritableCharacteristic).map((characteristic) => ({
+      serviceId: group.serviceId,
+      characteristic
+    }))
   );
 
-  return uniqueWriteCandidates([
-    ...candidates.filter((candidate) => sameUuid(candidate.characteristic.uuid, RW_WRITE_CHAR_UUID)),
-    ...candidates
-  ]);
+  return uniqueWriteCandidates([...candidates.filter((candidate) => sameUuid(candidate.characteristic.uuid, RW_WRITE_CHAR_UUID)), ...candidates]);
 }
 
 function formatCharacteristic(characteristic: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'][number]) {
-  const props = Object.entries(characteristic.properties || {})
+  const props = Object.entries(normalizeCharacteristicProperties(characteristic.properties))
     .filter(([, enabled]) => enabled)
     .map(([name]) => name)
     .join('/');
@@ -3890,7 +3918,8 @@ function formatCharacteristic(characteristic: UniApp.GetBLEDeviceCharacteristics
 }
 
 function isWritableCharacteristic(characteristic: UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics'][number]) {
-  return Boolean(characteristic.properties?.write || characteristic.properties?.writeNoResponse);
+  const properties = normalizeCharacteristicProperties(characteristic.properties);
+  return Boolean(properties.write || properties.writeNoResponse);
 }
 
 function uniqueStrings(values: string[]) {
@@ -3945,16 +3974,12 @@ function parseStandardBatteryLevelNotification(
   stableIdentity: string,
   receivedAt: number
 ): RingParsedData | null {
-  const isStandardBatteryChannel =
-    sameUuid(res.serviceId, BLE_BATTERY_SERVICE_UUID) && sameUuid(res.characteristicId, BLE_BATTERY_LEVEL_CHAR_UUID);
+  const isStandardBatteryChannel = sameUuid(res.serviceId, BLE_BATTERY_SERVICE_UUID) && sameUuid(res.characteristicId, BLE_BATTERY_LEVEL_CHAR_UUID);
   const isDiscoveredBatteryChannel =
     Boolean(device.standardBatteryServiceId && device.standardBatteryCharId) &&
     sameUuid(res.serviceId, device.standardBatteryServiceId || '') &&
     sameUuid(res.characteristicId, device.standardBatteryCharId || '');
-  if (
-    (!isStandardBatteryChannel && !isDiscoveredBatteryChannel) ||
-    rawBytes.length < 1
-  ) {
+  if ((!isStandardBatteryChannel && !isDiscoveredBatteryChannel) || rawBytes.length < 1) {
     return null;
   }
 
@@ -3998,14 +4023,11 @@ function parseStandardDeviceInformationNotification(
   if (!version) return null;
 
   const isFirmware =
-    sameUuid(res.characteristicId, BLE_FIRMWARE_REVISION_CHAR_UUID) ||
-    Boolean(device.standardFirmwareCharId && sameUuid(res.characteristicId, device.standardFirmwareCharId));
+    sameUuid(res.characteristicId, BLE_FIRMWARE_REVISION_CHAR_UUID) || Boolean(device.standardFirmwareCharId && sameUuid(res.characteristicId, device.standardFirmwareCharId));
   const isHardware =
-    sameUuid(res.characteristicId, BLE_HARDWARE_REVISION_CHAR_UUID) ||
-    Boolean(device.standardHardwareCharId && sameUuid(res.characteristicId, device.standardHardwareCharId));
+    sameUuid(res.characteristicId, BLE_HARDWARE_REVISION_CHAR_UUID) || Boolean(device.standardHardwareCharId && sameUuid(res.characteristicId, device.standardHardwareCharId));
   const isSoftware =
-    sameUuid(res.characteristicId, BLE_SOFTWARE_REVISION_CHAR_UUID) ||
-    Boolean(device.standardSoftwareCharId && sameUuid(res.characteristicId, device.standardSoftwareCharId));
+    sameUuid(res.characteristicId, BLE_SOFTWARE_REVISION_CHAR_UUID) || Boolean(device.standardSoftwareCharId && sameUuid(res.characteristicId, device.standardSoftwareCharId));
   if (!isFirmware && !isHardware && !isSoftware) return null;
 
   return {
@@ -4037,17 +4059,12 @@ function parseStandardHeartRateMeasurementNotification(
   stableIdentity: string,
   receivedAt: number
 ): RingParsedData | null {
-  const isStandardHeartRateChannel =
-    sameUuid(res.serviceId, BLE_HEART_RATE_SERVICE_UUID) &&
-    sameUuid(res.characteristicId, BLE_HEART_RATE_MEASUREMENT_CHAR_UUID);
+  const isStandardHeartRateChannel = sameUuid(res.serviceId, BLE_HEART_RATE_SERVICE_UUID) && sameUuid(res.characteristicId, BLE_HEART_RATE_MEASUREMENT_CHAR_UUID);
   const isDiscoveredHeartRateChannel =
     Boolean(device.standardHeartRateServiceId && device.standardHeartRateCharId) &&
     sameUuid(res.serviceId, device.standardHeartRateServiceId || '') &&
     sameUuid(res.characteristicId, device.standardHeartRateCharId || '');
-  if (
-    (!isStandardHeartRateChannel && !isDiscoveredHeartRateChannel) ||
-    rawBytes.length < 2
-  ) {
+  if ((!isStandardHeartRateChannel && !isDiscoveredHeartRateChannel) || rawBytes.length < 2) {
     return null;
   }
 
@@ -4091,10 +4108,7 @@ function parseStandardPulseOximeterNotification(
     Boolean(device.standardPulseOximeterServiceId && device.standardPulseOximeterCharId) &&
     sameUuid(res.serviceId, device.standardPulseOximeterServiceId || '') &&
     sameUuid(res.characteristicId, device.standardPulseOximeterCharId || '');
-  if (
-    (!isStandardPulseOximeterChannel && !isDiscoveredPulseOximeterChannel) ||
-    rawBytes.length < 2
-  ) {
+  if ((!isStandardPulseOximeterChannel && !isDiscoveredPulseOximeterChannel) || rawBytes.length < 2) {
     return null;
   }
 
@@ -4104,18 +4118,12 @@ function parseStandardPulseOximeterNotification(
   const roundedSfloatHeartRate = typeof sfloatHeartRate === 'number' ? Math.round(sfloatHeartRate) : null;
   const compactBloodOxygen = parseCompactPulseOximeterValue(rawBytes, 1);
   const compactHeartRate = parseCompactPulseOximeterValue(rawBytes, 2);
-  const roundedBloodOxygen =
-    isLikelyBloodOxygenValue(roundedSfloatBloodOxygen)
-      ? roundedSfloatBloodOxygen
-      : isLikelyBloodOxygenValue(compactBloodOxygen)
-        ? compactBloodOxygen
-        : null;
-  const roundedHeartRate =
-    isLikelyHeartRateValue(roundedSfloatHeartRate)
-      ? roundedSfloatHeartRate
-      : isLikelyHeartRateValue(compactHeartRate)
-        ? compactHeartRate
-        : null;
+  const roundedBloodOxygen = isLikelyBloodOxygenValue(roundedSfloatBloodOxygen)
+    ? roundedSfloatBloodOxygen
+    : isLikelyBloodOxygenValue(compactBloodOxygen)
+      ? compactBloodOxygen
+      : null;
+  const roundedHeartRate = isLikelyHeartRateValue(roundedSfloatHeartRate) ? roundedSfloatHeartRate : isLikelyHeartRateValue(compactHeartRate) ? compactHeartRate : null;
   if (!isLikelyBloodOxygenValue(roundedBloodOxygen)) return null;
 
   return {
@@ -4168,7 +4176,10 @@ function isLikelyBloodOxygenValue(value: unknown): value is number {
 function decodeStandardBleText(bytes: Uint8Array) {
   const nonZero = Array.from(bytes).filter((byte) => byte !== 0);
   if (nonZero.length === 0) return '';
-  const ascii = nonZero.map((byte) => (byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : '')).join('').trim();
+  const ascii = nonZero
+    .map((byte) => (byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : ''))
+    .join('')
+    .trim();
   return ascii;
 }
 
@@ -4177,4 +4188,3 @@ function bufferToHex(buffer: ArrayBuffer) {
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
 }
-
