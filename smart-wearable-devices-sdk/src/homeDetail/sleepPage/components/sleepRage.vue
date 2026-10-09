@@ -5,7 +5,7 @@ import { sleepRageOption } from '@/homeDetail/sleepPage/echartOptions';
 import type { sleepSegment, Point } from '@/types/api/homeDetail';
 import { SLEEP_STAGE_COLORS, SLEEP_STAGE_ORDER, type SleepStageName } from '@/homeDetail/sleepPage/sleepStageColors';
 
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 
 const props = defineProps({
   sleepSegmentObj: {

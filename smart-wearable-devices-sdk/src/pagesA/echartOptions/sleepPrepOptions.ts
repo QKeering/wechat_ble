@@ -1,7 +1,7 @@
 // utils/echartOptions.ts
 // 引入 echarts （用于渐变等功能，若不需要可省略）
 // @ts-nocheck
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 type AnyEchartOption = any;
 // import * as echarts from '@/static/echarts.min.js';
 let temperatureGradient = '#4cae4c'; // 降级默认色

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 import { categoryOption } from '@/homeDetail/exercise/echartOptions';
 const categoryRef = ref<any>(null);
 const initCategory = async () => {

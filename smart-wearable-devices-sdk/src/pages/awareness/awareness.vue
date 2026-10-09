@@ -121,7 +121,7 @@ import { getLegacyBleHistoryExclusiveSnapshot, resolveRingProtocol, type RwHisto
 
 const { isPopupActive, fixedPageStyle } = usePopupFixer();
 
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 
 const userStore = useUserStore();
 const ringStore = useRingStore();

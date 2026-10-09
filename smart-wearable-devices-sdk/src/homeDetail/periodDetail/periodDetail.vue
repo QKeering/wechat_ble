@@ -266,7 +266,7 @@ import {
   type PeriodPhaseKey
 } from '@/utils/periodPhase';
 
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 
 const PERIOD_INTRO_DISMISSED_KEY = 'periodDetailIntroDismissed';
 

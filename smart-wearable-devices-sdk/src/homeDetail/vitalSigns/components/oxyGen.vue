@@ -56,7 +56,7 @@ const {
   syncVitalMeasurementLockWithLegacyBusy
 } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const props = defineProps({
   oxyGenData: {
     type: Object as () => heartRateDetail,

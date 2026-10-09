@@ -13,7 +13,7 @@ import { useUserStore } from '@/stores/user';
 import { pickMetricNumber, withMetricDetailFallback } from './metricFallback';
 import { buildDailyDetailTimeTicks, buildDetailTimeTicks } from './detailTimeAxis';
 const userStore = useUserStore();
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const getVitalDetailSilentRequestConfig = (): HistoryPageSilentRequestConfig => ({
   timeout: 90000,
   custom: { toast: false, catch: true }

@@ -16,7 +16,7 @@ import { normalizeHealthLevel, normalizeHealthText } from '@/utils/healthText';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { isAnyDeviceSyncSessionRunning } from '@/utils/deviceSyncSession';
 
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const userStore = useUserStore();
 const ringStore = useRingStore();
 const {

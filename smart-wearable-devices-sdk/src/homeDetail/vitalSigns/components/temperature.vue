@@ -36,7 +36,7 @@ const {
   syncVitalMeasurementLockWithLegacyBusy
 } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const props = defineProps({
   temperatureData: {
     type: Object as () => heartRateDetail,

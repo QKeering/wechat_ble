@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, ref } from 'vue';
 // import * as echarts from '../../static/echarts.esm.min.js';
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const chartRef = ref(null);
 // 图表配置项
 const option = ref({

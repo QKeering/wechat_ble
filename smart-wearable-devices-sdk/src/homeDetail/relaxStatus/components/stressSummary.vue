@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // @ts-nocheck
 import { computed, ref, watch } from 'vue';
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 import { lastWeekOption, todayOption } from '@/homeDetail/relaxStatus/echartOptions';
 import type { Point, stressSummaryType } from '@/types/api/homeDetail';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';

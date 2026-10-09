@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 import { calorieOption } from '@/homeDetail/exercise/echartOptions';
 import type { motionCalorie, Point } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';

@@ -9,7 +9,7 @@ import type { motionDetail, Point } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
 import { MOTION_CALORIE_DISPLAY_UNIT, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 import { normalizeCalorieGoalKcal } from '@/utils/calorieGoal';
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const list = ref(['日', '周', '月']);
 const current = ref<number>(0);
 const currentName = ref('day');

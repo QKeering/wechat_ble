@@ -1,7 +1,7 @@
 // src/utils/echartOptions.ts
 // 定义 ECharts Option 的类型（若项目中已引入 ECharts 类型，可直接使用）
 // @ts-nocheck
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 type AnyEchartOption = any;
 // 第一个配置：baseOption
 export const baseOption: AnyEchartOption = {

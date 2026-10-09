@@ -1,5 +1,5 @@
 // @ts-nocheck
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 type AnyEchartOption = any;
 let temperatureGradient = '#rgba(255, 107, 139, 0)'; // 降级默认色
 if (echarts && echarts.graphic && typeof echarts.graphic.LinearGradient === 'function') {

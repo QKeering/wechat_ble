@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 import { pressureOption } from '@/homeDetail/exercise/echartOptions';
 import type { motionOverview, motionSummary } from '@/types/api/homeDetail';
 import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';

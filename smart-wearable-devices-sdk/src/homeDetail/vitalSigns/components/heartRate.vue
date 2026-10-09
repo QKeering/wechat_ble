@@ -52,7 +52,7 @@ const {
 } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
 const userStore = useUserStore();
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const chartRef = ref<any>(null);
 const popup = ref<any>(null);
 const measurePopup = ref<any>(null);

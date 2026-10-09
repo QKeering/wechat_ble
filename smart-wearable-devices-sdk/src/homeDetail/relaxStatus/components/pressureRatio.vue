@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // @ts-nocheck
 import { ref, watch } from 'vue';
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 import { pressureOption } from '@/homeDetail/relaxStatus/echartOptions';
 import type { Point, stressProportion } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';

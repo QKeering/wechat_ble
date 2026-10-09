@@ -9,7 +9,7 @@ import { cloneDeep } from 'lodash-es';
 import { heartRateOption, sleepTimeOption, sleepRageOption } from '@/homeDetail/sleepDetail/echartOptions';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import { formatBleErrorMessage } from '@/utils/bleError';
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const list = ref(['日', '周', '月']);
 const current = ref<number>(0);
 const currentName = ref('day');

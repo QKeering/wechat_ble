@@ -7,7 +7,7 @@ import lineProgresss from '@/pagesA/components/lineProgress.vue';
 import { getSleepRhythmDetail } from '@/common/api/heatlthSummary';
 import type { SleepRhythmResp, TrendChartItemS } from '@/types/api/healthSummary';
 import { cloneDeep } from 'lodash-es';
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 
 const sleepRhythmInfo = ref<SleepRhythmResp>();
 const getProcessedOption = () => {

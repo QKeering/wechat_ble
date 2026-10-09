@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // @ts-nocheck
 import { computed, ref, watch } from 'vue';
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 import { baseOption } from '@/homeDetail/relaxStatus/echartOptions';
 import type { Point, stressDetail, stressSummaryType } from '@/types/api/homeDetail';
 import { resolveStressDisplayStatus } from '@/utils/stressDisplay';

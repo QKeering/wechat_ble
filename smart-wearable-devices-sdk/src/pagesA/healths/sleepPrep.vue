@@ -7,7 +7,7 @@ import lineProgresss from '@/pagesA/components/lineProgress.vue';
 import { getSleepPreparationDetail } from '@/common/api/heatlthSummary';
 import type { SleepPreparationResp, TrendChartItem } from '@/types/api/healthSummary';
 import { cloneDeep } from 'lodash-es';
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 
 const sleepPrepInfo = ref<SleepPreparationResp>();
 // 左边最大变化范围

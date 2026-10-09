@@ -6,7 +6,7 @@ import { defaultEchartOption, sleepTimeOption } from '@/pagesA/echartOptions/sle
 import { getSleepRecoveryDetail } from '@/common/api/heatlthSummary';
 import type { SleepRecoveryResp, TrendChartItemS, durationItem } from '@/types/api/healthSummary';
 import { cloneDeep } from 'lodash-es';
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const sleepRecoveryInfo = ref<SleepRecoveryResp>();
 const getProcessedOption = () => {
   const testTrendChartData = [

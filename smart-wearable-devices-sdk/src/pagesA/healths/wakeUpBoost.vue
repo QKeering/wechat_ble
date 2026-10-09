@@ -6,7 +6,7 @@ import { defaultEchartOption, lightOption } from '@/pagesA/echartOptions/wakeUpB
 import { getSleepActivationDetail } from '@/common/api/heatlthSummary';
 import type { getSleepActivationResp } from '@/types/api/healthSummary';
 import { cloneDeep } from 'lodash-es';
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 
 const sleepActivationInfo = ref<getSleepActivationResp>();
 const getProcessedOption = () => {

@@ -8,7 +8,7 @@ import { getSittingRiskDetail } from '@/common/api/heatlthSummary';
 import type { SittingRiskResp } from '@/types/api/healthSummary';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';
 import { cloneDeep } from 'lodash-es';
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const sittingRiskInfo = ref<SittingRiskResp>();
 const getProcessedOption = () => {
   const testTrendChartData = [

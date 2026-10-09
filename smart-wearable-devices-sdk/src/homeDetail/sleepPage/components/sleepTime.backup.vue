@@ -3,7 +3,7 @@ import { ref, computed, watch } from 'vue';
 import { sleepTimeOption } from '@/homeDetail/sleepPage/echartOptions';
 import type { sleepDetail, Point } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const chartRef = ref<any>(null);
 const chartData = ref<Point[]>([]);
 const props = defineProps({

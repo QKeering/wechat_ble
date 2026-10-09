@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 import { todayOption, lastDayOption } from '@/homeDetail/exercise/echartOptions';
 import type { motionSummary, Point } from '@/types/api/homeDetail';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';

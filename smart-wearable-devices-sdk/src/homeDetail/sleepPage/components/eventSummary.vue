@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import ProgressBar from '@/components/progressBar.vue';
 import { todayOption, lastWeekOption } from '@/homeDetail/relaxStatus/echartOptions';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const todayRef = ref(null);
 const lastWeekRef = ref(null);
 import type { sleepSummaryData } from '@/types/api/homeDetail';

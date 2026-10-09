@@ -8,7 +8,7 @@ import { getActivityRegularityDetail } from '@/common/api/heatlthSummary';
 import type { RegularityResp } from '@/types/api/healthSummary';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';
 import { cloneDeep } from 'lodash-es';
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 const activityIntensity = ref<RegularityResp>();
 const getProcessedOption = () => {
   const testTrendChartData = [

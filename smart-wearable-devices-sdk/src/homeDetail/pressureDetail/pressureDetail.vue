@@ -14,7 +14,7 @@ import {
   resolveStressDisplayStatus
 } from '@/utils/stressDisplay';
 import { cloneDeep } from 'lodash-es';
-const echarts = require('../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 // 压力算法接口在并发场景下可能超过 3 秒。详情页允许稍长等待，但详情与总结必须独立失败，
 // 避免其中一路超时把另一路已经返回的有效数据一起丢掉。
 const PRESSURE_DETAIL_REQUEST_SOFT_TIMEOUT_MS = 6000;

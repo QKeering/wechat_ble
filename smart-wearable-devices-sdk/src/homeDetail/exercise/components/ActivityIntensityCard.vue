@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
-const echarts = require('../../../static/echarts.min.js');
+import echarts from '@/utils/echarts';
 import { actIntensityOption, activePieOption } from '@/homeDetail/exercise/echartOptions';
 import type { motionIntensity, Point } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
