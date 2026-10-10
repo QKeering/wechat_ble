@@ -675,21 +675,31 @@ const confirmBind = async () => {
   try {
     userStore.updateIsUnbinding(true);
     await controller.disconnect().catch(() => undefined);
+    // 取不到真实设备号时 deviceMacText 会给出占位符（'-'/'未连接' 等），必须跳过：
+    // 否则请求会带着 mac='-' 发给后端，归一化后为空，直接报"设备 MAC 不能为空"。
     const mac =
-      getBoundRingIdentity(boundInfo.value) ||
-      getDeviceIdentityCacheMacFromDevice(boundInfo.value) ||
-      deviceMacText.value ||
-      userStore.normalMac ||
-      userStore.iosMacId ||
-      '';
-    if (mac) {
-      await unbind({ mac }).catch(() => undefined);
+      [
+        getBoundRingIdentity(boundInfo.value),
+        getDeviceIdentityCacheMacFromDevice(boundInfo.value),
+        deviceMacText.value,
+        userStore.normalMac,
+        userStore.iosMacId
+      ].find((value) => normalizeDeviceInfoDisplayText(value) !== DEVICE_INFO_EMPTY_TEXT) || '';
+    if (!mac) {
+      throw new Error('未获取到戒指设备号，请重新连接戒指后重试');
     }
+    // 这里不能吞掉异常：后端解绑失败时必须让用户看到，否则会误报"已解绑"，
+    // 而服务端绑定关系仍然存在。
+    await unbind({ mac });
     await clearFrontendRingBindingState(userStore, ringStore);
     boundInfo.value = null;
     singleReadResults.value = {};
     lastActionText.value = '已解绑';
     uni.showToast({ title: '已解绑', icon: 'success' });
+  } catch (error) {
+    const message = formatBleErrorMessage(error, '解除绑定失败，请稍后重试');
+    lastActionText.value = message;
+    uni.showToast({ title: message, icon: 'none' });
   } finally {
     busyText.value = '';
     setTimeout(() => {
@@ -1006,7 +1016,7 @@ onUnload(() => {
       </view>
     </view>
 
-    <uv-modal ref="modalPopup" :showCancelButton="true" align="center" :content="content" @confirm.stop="confirmBind"></uv-modal>
+    <uv-modal ref="modalPopup" :showCancelButton="true" align="center" :content="content" @confirm="confirmBind"></uv-modal>
 
     <view>
       <view class="mb-50 fs-36 pl-40 pr-40">设备信息</view>
