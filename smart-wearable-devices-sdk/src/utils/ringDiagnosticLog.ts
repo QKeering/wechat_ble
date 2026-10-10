@@ -121,21 +121,9 @@ const DIAGNOSTIC_DEFAULT_HIDDEN_EVENTS = new Set([
   'single-metric-skip-disable'
 ]);
 
-const DIAGNOSTIC_DEFAULT_HIDDEN_PREFIXES = [
-  'legacy-notify-',
-  'legacy-command-write-'
-];
+const DIAGNOSTIC_DEFAULT_HIDDEN_PREFIXES = ['legacy-notify-', 'legacy-command-write-'];
 
-const DIAGNOSTIC_IMPORTANT_EVENT_KEYWORDS = [
-  'fail',
-  'error',
-  'timeout',
-  'mismatch',
-  'blocked',
-  'invalid',
-  'unparsed',
-  'disconnect'
-];
+const DIAGNOSTIC_IMPORTANT_EVENT_KEYWORDS = ['fail', 'error', 'timeout', 'mismatch', 'blocked', 'invalid', 'unparsed', 'disconnect'];
 
 const DIAGNOSTIC_NOISY_STATE_MAX_COUNT = 240;
 const diagnosticNoiseStates = new Map<string, DiagnosticNoiseState>();
@@ -180,7 +168,7 @@ const parseDiagnosticDetailsObject = (details: unknown): Record<string, any> => 
   if (typeof details !== 'string' || !details.trim()) return {};
   try {
     const parsed = JSON.parse(details);
-    return parsed && typeof parsed === 'object' ? parsed as Record<string, any> : {};
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, any>) : {};
   } catch {
     return {};
   }
@@ -202,11 +190,9 @@ const buildNoisyDiagnosticKey = (source: string, event: string, details: unknown
     return [source, event, deviceKey, scanKey].filter(Boolean).join('|') || `${source}|${event}`;
   }
   if (event === 'legacy-notify-received' || event === 'legacy-notify-parsed' || event === 'legacy-notify-unparsed') {
-    const notifyKey = [
-      pickDiagnosticDetailText(parsedDetails, ['cmd']),
-      pickDiagnosticDetailText(parsedDetails, ['subcmd']),
-      pickDiagnosticDetailText(parsedDetails, ['status'])
-    ].filter(Boolean).join('/');
+    const notifyKey = [pickDiagnosticDetailText(parsedDetails, ['cmd']), pickDiagnosticDetailText(parsedDetails, ['subcmd']), pickDiagnosticDetailText(parsedDetails, ['status'])]
+      .filter(Boolean)
+      .join('/');
     return [source, event, deviceKey, notifyKey].filter(Boolean).join('|') || `${source}|${event}`;
   }
   const commandKey = [
@@ -214,7 +200,9 @@ const buildNoisyDiagnosticKey = (source: string, event: string, details: unknown
     pickDiagnosticDetailText(parsedDetails, ['cmd']),
     pickDiagnosticDetailText(parsedDetails, ['subcmd']),
     pickDiagnosticDetailText(parsedDetails, ['status'])
-  ].filter(Boolean).join('/');
+  ]
+    .filter(Boolean)
+    .join('/');
   return [source, event, deviceKey, commandKey].filter(Boolean).join('|') || `${source}|${event}`;
 };
 
@@ -236,7 +224,9 @@ const appendSampledSkipCount = (details: unknown, skipped: number) => {
 const cleanupNoisyDiagnosticStates = () => {
   if (diagnosticNoiseStates.size <= DIAGNOSTIC_NOISY_STATE_MAX_COUNT) return;
   const overflow = diagnosticNoiseStates.size - Math.floor(DIAGNOSTIC_NOISY_STATE_MAX_COUNT * 0.75);
-  Array.from(diagnosticNoiseStates.keys()).slice(0, overflow).forEach((key) => diagnosticNoiseStates.delete(key));
+  Array.from(diagnosticNoiseStates.keys())
+    .slice(0, overflow)
+    .forEach((key) => diagnosticNoiseStates.delete(key));
 };
 
 const sampleDiagnosticLog = (source: string, event: string, details: unknown) => {
@@ -279,9 +269,7 @@ const normalizeDiagnosticDetails = (details: unknown) => {
       text = String(details);
     }
   }
-  return text.length > RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH
-    ? `${text.slice(0, RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH)}...<truncated>`
-    : text;
+  return text.length > RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH ? `${text.slice(0, RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH)}...<truncated>` : text;
 };
 
 const readDiagnosticLogCache = () => {
@@ -342,26 +330,29 @@ export const appendRingDiagnosticLog = (source: string, event: string, details?:
     const sampled = sampleDiagnosticLog(source, event, details);
     if (!sampled.keep) return;
     const logs = readDiagnosticLogCache();
-    const versionedDetails = sampled.details && typeof sampled.details === 'object' && !Array.isArray(sampled.details)
-      ? {
-          ...(sampled.details as Record<string, unknown>),
-          appBuild: QKEER_BUILD_INFO,
-          buildId: QKEER_BUILD_TAG,
-          appInstanceId: APP_RUNTIME_INSTANCE_ID
-        }
-      : {
-          value: sampled.details,
-          appBuild: QKEER_BUILD_INFO,
-          buildId: QKEER_BUILD_TAG,
-          appInstanceId: APP_RUNTIME_INSTANCE_ID
-        };
+    const versionedDetails =
+      sampled.details && typeof sampled.details === 'object' && !Array.isArray(sampled.details)
+        ? {
+            ...(sampled.details as Record<string, unknown>),
+            appBuild: QKEER_BUILD_INFO,
+            buildId: QKEER_BUILD_TAG,
+            appInstanceId: APP_RUNTIME_INSTANCE_ID
+          }
+        : {
+            value: sampled.details,
+            appBuild: QKEER_BUILD_INFO,
+            buildId: QKEER_BUILD_TAG,
+            appInstanceId: APP_RUNTIME_INSTANCE_ID
+          };
     const entry = {
       id: Date.now() * 1000 + Math.floor(Math.random() * 1000),
       time: formatDiagnosticTime(),
       source,
       event,
       details: normalizeDiagnosticDetails(versionedDetails),
-      buildTag: QKEER_BUILD_TAG
+      buildTag: QKEER_BUILD_TAG,
+      // 打上噪声标记：上传队列溢出时优先淘汰这些，保住稀疏的关键埋点。
+      noisy: Boolean(DIAGNOSTIC_NOISY_EVENT_RULES[event])
     };
     logs.push(entry);
     if (logs.length > RING_DIAGNOSTIC_LOG_MAX_COUNT) {

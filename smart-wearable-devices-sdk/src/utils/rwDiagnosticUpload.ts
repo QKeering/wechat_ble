@@ -12,6 +12,12 @@ export interface RwDiagnosticUploadEntry {
   deviceId?: string;
   userId?: number;
   sessionId?: string;
+  /**
+   * 高频噪声事件（`DIAGNOSTIC_NOISY_EVENT_RULES` 里那些，例如一次扫描每个设备一条的
+   * `scan-device-record`）。队列溢出时优先淘汰这些，避免「一次成功扫描的几百条噪声
+   * 把同一时刻的稀疏关键埋点挤掉」——那种丢失会让日志对成功路径完全撒谎。
+   */
+  noisy?: boolean;
 }
 
 const QUEUE_STORAGE_KEY = 'qkeer:rw-diagnostic-upload-queue';
@@ -167,7 +173,8 @@ const normalizeUploadEntry = (entry: RwDiagnosticUploadEntry): RwDiagnosticUploa
     buildTag: pickBuildTag(entry),
     deviceId: pickDeviceId(entry),
     userId: pickUserId(entry),
-    sessionId
+    sessionId,
+    noisy: entry.noisy === true
   };
 };
 
@@ -249,13 +256,33 @@ export const setRwDiagnosticBusinessUploadActive = (active: boolean) => {
   }
 };
 
+/**
+ * 淘汰到上限以内。先按「最旧的噪声事件」淘汰，只有噪声不够淘汰时才动最旧的普通事件——
+ * 否则一次搜到几百个设备的扫描会瞬间灌满队列，把同一时刻的 `scan-start` 之类的
+ * 稀疏关键埋点冲掉，排查时会误判成「那段代码根本没执行」。
+ */
+const trimQueue = (queue: RwDiagnosticUploadEntry[]) => {
+  let overflow = queue.length - MAX_QUEUE_COUNT;
+  if (overflow <= 0) return queue;
+
+  for (let index = 0; index < queue.length && overflow > 0;) {
+    if (queue[index]?.noisy === true) {
+      queue.splice(index, 1);
+      overflow -= 1;
+      continue;
+    }
+    index += 1;
+  }
+
+  if (overflow > 0) queue.splice(0, overflow);
+  return queue;
+};
+
 export const enqueueRwDiagnosticUpload = (entry: RwDiagnosticUploadEntry) => {
   if (isNodeRuntime()) return;
   const queue = readQueue();
   queue.push(normalizeUploadEntry(entry));
-  if (queue.length > MAX_QUEUE_COUNT) {
-    queue.splice(0, queue.length - MAX_QUEUE_COUNT);
-  }
+  trimQueue(queue);
   writeQueue(queue, false);
   scheduleRwDiagnosticUploadFlush();
 };
