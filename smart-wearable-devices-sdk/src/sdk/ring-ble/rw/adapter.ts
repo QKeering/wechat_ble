@@ -51,6 +51,7 @@ import {
 } from './protocol';
 import { parseRwRingData } from './parser';
 import { getRwHistoryDataType } from './history';
+import { ensureAndroidBleRuntimePermissions } from '../androidBlePermissions';
 import { enqueueRwDiagnosticUpload } from '@/utils/rwDiagnosticUpload';
 import { ensureWechatBluetoothPrivacyAuthorization, isBluetoothPrivacyError, normalizeBluetoothPrivacyError } from '@/utils/wechatBluetoothPrivacy';
 
@@ -302,41 +303,12 @@ const rwBleLog = (event: string, details: Record<string, unknown>) => {
   }
 };
 
-const ensureAndroidBleRuntimePermissions = (): Promise<void> => {
-  // #ifdef APP-PLUS
-  let platform = '';
-  try {
-    platform = uni.getSystemInfoSync().platform;
-  } catch {
-    // 无法确认平台时放行，交给 openBluetoothAdapter 报错
-  }
-  if (platform === 'android') {
-    const requestPermissions = (
-      globalThis as typeof globalThis & {
-        plus?: { android?: { requestPermissions?: (permissions: string[], success?: () => void, error?: () => void) => void } };
-      }
-    ).plus?.android?.requestPermissions;
-    if (typeof requestPermissions === 'function') {
-      return new Promise<void>((resolve) => {
-        let settled = false;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          resolve();
-        };
-        try {
-          requestPermissions(['android.permission.BLUETOOTH_SCAN', 'android.permission.BLUETOOTH_CONNECT', 'android.permission.ACCESS_FINE_LOCATION'], finish, finish);
-        } catch {
-          finish();
-        }
-        // 部分机型（尤其已授权）回调可能不触发，超时放行，避免卡住连接流程
-        setTimeout(finish, 2000);
-      });
-    }
-  }
-  // #endif
-  return Promise.resolve();
-};
+/**
+ * Android 运行时权限的申请已抽到 `../androidBlePermissions`：**legacy adapter 也必须申请**，
+ * 而「未绑定设备时的首次扫描」走的正是 legacy（见 useRingBleSdk.startScan），
+ * 只在 rw 这边申请等于永远不申请。
+ * 这里保留一道保险，因为 RW adapter 也可能不经 ensureLegacyBluetoothReady 被直接使用。
+ */
 
 const formatRwFrameByte = (value: number | undefined) => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
@@ -900,9 +872,22 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     const mergeFoundDevices = (devices: any[] = []) => {
       if (!state.isScanning.value || !Array.isArray(devices)) return;
 
-      const found = devices.map((device) => normalizeScanDevice(device)).filter((device) => isRwScanDevice(device, prefixes) || isAllowedBusinessScanDevice(device, options));
+      const normalized = devices.map((device) => normalizeScanDevice(device));
+      const found = normalized.filter((device) => isRwScanDevice(device, prefixes) || isAllowedBusinessScanDevice(device, options));
 
-      if (found.length === 0) return;
+      if (found.length === 0) {
+        // 有名有姓地记下「收到了广播但全被过滤掉」，否则这种情况与「扫描本身没结果」
+        // 在日志里完全无法区分——而这正是排查「搜索不到设备」最关键的一条信息。
+        if (normalized.length > 0) {
+          rwBleLog('scan-filtered-out', {
+            received: normalized.length,
+            prefixes,
+            includeUnknown: options.includeUnknown,
+            samples: normalized.slice(0, 6).map(summarizeScanDeviceForRwBleLog)
+          });
+        }
+        return;
+      }
       rwBleLog('scan-found', {
         count: found.length,
         devices: found.slice(0, 6).map(summarizeScanDeviceForRwBleLog)

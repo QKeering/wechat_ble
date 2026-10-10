@@ -2,16 +2,10 @@ import { RING_PARSED_EMITTED, type RingBleRuntime, type RingDeviceInfo, type Rin
 import type { LegacyRingAdapter } from './adapter';
 import { syncRwHistoryFiles } from '../rw/history';
 import { resolveRingProtocol } from '../protocolRegistry';
+import { ensureAndroidBleRuntimePermissions } from '../androidBlePermissions';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
-import {
-  BLUETOOTH_PRIVACY_REQUIRED_HINT,
-  isBluetoothPrivacyError
-} from '@/utils/wechatBluetoothPrivacy';
-import {
-  claimLegacyBleHistoryExclusive,
-  getLegacyBleHistoryExclusiveSnapshot,
-  isLegacyBleHistoryExclusiveActive
-} from './commandSession';
+import { BLUETOOTH_PRIVACY_REQUIRED_HINT, isBluetoothPrivacyError } from '@/utils/wechatBluetoothPrivacy';
+import { claimLegacyBleHistoryExclusive, getLegacyBleHistoryExclusiveSnapshot, isLegacyBleHistoryExclusiveActive } from './commandSession';
 
 export { getLegacyBleHistoryExclusiveSnapshot, isLegacyBleHistoryExclusiveActive } from './commandSession';
 
@@ -96,11 +90,7 @@ const isColonSeparatedBleMac = (value?: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F
 const isFullColonSeparatedBleMac = (value?: unknown) => /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(String(value || '').trim());
 const getRwStableMacCandidate = (device?: RingDeviceInfo | null) => {
   if (!device) return '';
-  return (
-    device.mac ||
-    device.advertis?.macInfo ||
-    (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '')
-  );
+  return device.mac || device.advertis?.macInfo || (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '');
 };
 
 const getLegacyStableMacCandidate = (device?: RingDeviceInfo | null, fallback?: unknown) => {
@@ -125,7 +115,9 @@ const getLegacyStableMacCandidate = (device?: RingDeviceInfo | null, fallback?: 
 
 const normalizeFullBleMacText = (value?: unknown) => {
   if (!isFullColonSeparatedBleMac(value)) return '';
-  return String(value || '').trim().toUpperCase();
+  return String(value || '')
+    .trim()
+    .toUpperCase();
 };
 
 const getMacFromAdvertisData = (buffer?: ArrayBuffer | number[] | any[]) => {
@@ -159,8 +151,7 @@ const showToast = (title: string) => {
   uni.showToast({ title, icon: 'none' });
 };
 
-const isBluetoothForegroundTimeout = (error: unknown) =>
-  error instanceof Error && /Bluetooth adapter foreground timeout/i.test(error.message);
+const isBluetoothForegroundTimeout = (error: unknown) => error instanceof Error && /Bluetooth adapter foreground timeout/i.test(error.message);
 
 const getBluetoothInitializationErrorMessage = (error: unknown) => {
   if (isBluetoothPrivacyError(error)) return BLUETOOTH_PRIVACY_REQUIRED_HINT;
@@ -176,11 +167,7 @@ const getBluetoothInitializationErrorMessage = (error: unknown) => {
   return '蓝牙初始化失败';
 };
 
-export const ensureLegacyBluetoothReady = async (
-  adapter: LegacyRingAdapter,
-  runtime?: RingBleRuntime,
-  options: EnsureBluetoothOptions = {}
-) => {
+export const ensureLegacyBluetoothReady = async (adapter: LegacyRingAdapter, runtime?: RingBleRuntime, options: EnsureBluetoothOptions = {}) => {
   const showToastOnFail = options.showToastOnFail ?? true;
   const systemInfo = uni.getSystemInfoSync();
   const isWeixin = systemInfo.uniPlatform === 'mp-weixin';
@@ -196,6 +183,12 @@ export const ensureLegacyBluetoothReady = async (
       isWeixin,
       locationPreflight: 'skipped'
     });
+
+    // App 端（非微信宿主）必须先拿到 Android 运行时权限：BLUETOOTH_SCAN / BLUETOOTH_CONNECT
+    // 归我们自己的 APK 所有，不申请就等于没授予。缺权限时下面的 initBluetooth 以及随后的
+    // startBluetoothDevicesDiscovery 都是「不报错、只返回空列表」，看起来就像扫描功能整个坏了。
+    // 这里是 legacy / rw 两条协议共用的入口，所以申请放在这里，而不是某一家的 adapter 里。
+    await ensureAndroidBleRuntimePermissions();
 
     let result: unknown;
     try {
@@ -300,11 +293,7 @@ export const transformLegacyMacToUuid = (targetMac: string, timeoutMs = 10000) =
   });
 };
 
-export const connectLegacyRing = async (
-  adapter: LegacyRingAdapter,
-  runtime: RingBleRuntime | undefined,
-  options: ConnectLegacyRingOptions
-) => {
+export const connectLegacyRing = async (adapter: LegacyRingAdapter, runtime: RingBleRuntime | undefined, options: ConnectLegacyRingOptions) => {
   if (!options.deviceId || !options.deviceName) {
     throw new Error('缺少设备 ID 或设备名称');
   }
@@ -315,8 +304,7 @@ export const connectLegacyRing = async (
   let deviceId = options.deviceId;
   let bindMac =
     adapter.protocol === 'rw'
-      ? getRwStableMacCandidate(options.sourceDevice) ||
-        (isColonSeparatedBleMac(options.uniMacId) ? options.uniMacId || '' : '')
+      ? getRwStableMacCandidate(options.sourceDevice) || (isColonSeparatedBleMac(options.uniMacId) ? options.uniMacId || '' : '')
       : getLegacyStableMacCandidate(options.sourceDevice, options.uniMacId || options.deviceId);
 
   if (adapter.protocol === 'legacy' && isIOS() && options.fromScan) {
@@ -352,11 +340,7 @@ export const connectLegacyRing = async (
     connectedProtocol === 'rw'
       ? getRwStableMacCandidate(deviceInfo) || getRwStableMacCandidate(options.sourceDevice) || bindMac
       : getLegacyStableMacCandidate(deviceInfo, bindMac) || bindMac;
-  const bindUniMacId = isColonSeparatedBleMac(bindMac)
-    ? bindMac
-    : connectedProtocol === 'rw'
-      ? bindMac
-      : options.uniMacId;
+  const bindUniMacId = isColonSeparatedBleMac(bindMac) ? bindMac : connectedProtocol === 'rw' ? bindMac : options.uniMacId;
 
   const boundDevice = {
     ...deviceInfo,
@@ -422,11 +406,7 @@ export const connectLegacyRing = async (
   return boundDevice;
 };
 
-export const autoReconnectLegacyRing = async (
-  adapter: LegacyRingAdapter,
-  runtime?: RingBleRuntime,
-  options: AutoReconnectOptions = {}
-) => {
+export const autoReconnectLegacyRing = async (adapter: LegacyRingAdapter, runtime?: RingBleRuntime, options: AutoReconnectOptions = {}) => {
   const maxAttempts = options.maxAttempts ?? 3;
   const delayMs = options.delayMs ?? 2000;
   let lastError: unknown;
@@ -497,16 +477,11 @@ export const autoReconnectLegacyRing = async (
             })
           : '';
       const legacyReadyStableIdentity =
-        readyProtocol === 'rw'
-          ? ''
-          : getLegacyStableMacCandidate(connected, reconnectDevice?.mac) || reconnectDevice?.mac || reconnectDevice?.advertis?.macInfo || '';
+        readyProtocol === 'rw' ? '' : getLegacyStableMacCandidate(connected, reconnectDevice?.mac) || reconnectDevice?.mac || reconnectDevice?.advertis?.macInfo || '';
       const readyStableIdentity = readyProtocol === 'rw' ? rwReadyStableIdentity : legacyReadyStableIdentity;
       const readyDevice: RingDeviceInfo = {
         ...connected,
-        mac:
-          readyProtocol === 'rw'
-            ? readyStableIdentity
-            : readyStableIdentity || connected.mac || deviceId,
+        mac: readyProtocol === 'rw' ? readyStableIdentity : readyStableIdentity || connected.mac || deviceId,
         uniMacId: isColonSeparatedBleMac(readyStableIdentity)
           ? readyStableIdentity
           : readyProtocol === 'rw'
@@ -607,8 +582,7 @@ const isLegacyLocalDataChunkComplete = (parsed: RingParsedData) => {
   return records.length >= totalNum || maxSeq >= totalNum || maxSeq + 1 >= totalNum;
 };
 
-const getLegacySyncErrorMessage = (error: unknown) =>
-  error instanceof Error ? error.message : `${(error as any)?.errMsg || error || ''}`;
+const getLegacySyncErrorMessage = (error: unknown) => (error instanceof Error ? error.message : `${(error as any)?.errMsg || error || ''}`);
 
 const yieldLegacyHistoryProcessing = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -646,25 +620,25 @@ const combineLegacyLocalDataChunks = async (chunks: RingParsedData[], status?: s
   };
 };
 
-const readLegacyLocalDataUntilComplete = async (
-  adapter: LegacyRingAdapter,
-  options: Pick<SyncLegacyHistoryOptions, 'sinceTimestamp' | 'readAll'>,
-  timeoutMs: number
-) => {
+const readLegacyLocalDataUntilComplete = async (adapter: LegacyRingAdapter, options: Pick<SyncLegacyHistoryOptions, 'sinceTimestamp' | 'readAll'>, timeoutMs: number) => {
   const chunks: RingParsedData[] = [];
   const useL19Compatibility = Boolean(adapter.isL19HistoryDevice?.());
-  const pendingLocalData = adapter.waitForParsedData((parsed) => {
-    if (parsed.type !== 'local_data') return false;
-    chunks.push(parsed);
-    return isLegacyLocalDataChunkComplete(parsed);
-  }, timeoutMs, {
-    // The ring streams history in many chunks. A fixed wall-clock timeout can
-    // expire while valid chunks are still arriving, so the active session is
-    // sealed only after the stream has been quiet for a bounded period.
-    resetTimeoutOnData: true,
-    activityPredicate: parsed => parsed.type === 'local_data',
-    activityTimeoutMs: 6000
-  });
+  const pendingLocalData = adapter.waitForParsedData(
+    (parsed) => {
+      if (parsed.type !== 'local_data') return false;
+      chunks.push(parsed);
+      return isLegacyLocalDataChunkComplete(parsed);
+    },
+    timeoutMs,
+    {
+      // The ring streams history in many chunks. A fixed wall-clock timeout can
+      // expire while valid chunks are still arriving, so the active session is
+      // sealed only after the stream has been quiet for a bounded period.
+      resetTimeoutOnData: true,
+      activityPredicate: (parsed) => parsed.type === 'local_data',
+      activityTimeoutMs: 6000
+    }
+  );
   // The command write itself can fail before we reach the await below. Attach a
   // passive rejection observer so that the still-running waiter cannot surface
   // as an unhandled rejection after the workflow has already failed.
@@ -688,7 +662,10 @@ const readLegacyLocalDataUntilComplete = async (
 
     if (useL19Compatibility && pendingL19FirstFrame) {
       const firstFrame = await Promise.race([
-        pendingL19FirstFrame.then(() => true, () => false),
+        pendingL19FirstFrame.then(
+          () => true,
+          () => false
+        ),
         sleep(1000).then(() => false)
       ]);
       if (!firstFrame) {
@@ -728,11 +705,7 @@ const isLegacyHistoryUploadSafeToDelete = (uploadResult: unknown) => {
   return Number(result.count) > 0 || Number(result.storedCount) > 0;
 };
 
-export const syncLegacyHistory = async (
-  adapter: LegacyRingAdapter,
-  runtime?: RingBleRuntime,
-  options: SyncLegacyHistoryOptions = {}
-): Promise<SyncLegacyHistoryResult> => {
+export const syncLegacyHistory = async (adapter: LegacyRingAdapter, runtime?: RingBleRuntime, options: SyncLegacyHistoryOptions = {}): Promise<SyncLegacyHistoryResult> => {
   const sinceTimestamp = options.sinceTimestamp;
   const timeoutMs = options.timeoutMs ?? 20000;
   const deleteAfterUpload = options.deleteAfterUpload ?? false;
@@ -765,12 +738,12 @@ export const syncLegacyHistory = async (
       });
       try {
         const { parsed, records } = await syncRwHistoryFiles(adapter, {
-            sinceTimestamp,
-            readAll: options.readAll,
-            dataType: options.dataType,
-            dataTypes: options.dataTypes,
-            timeoutMs
-          });
+          sinceTimestamp,
+          readAll: options.readAll,
+          dataType: options.dataType,
+          dataTypes: options.dataTypes,
+          timeoutMs
+        });
         // The BLE receive lease ends as soon as the device stream is complete.
         // Identity attachment, local persistence and network upload must not
         // keep ordinary device-info commands blocked.
@@ -794,12 +767,7 @@ export const syncLegacyHistory = async (
         }
 
         let deleted = false;
-        if (
-          recordsWithDevice.length > 0 &&
-          deleteAfterUpload &&
-          parsedWithDevice.status !== 'partial' &&
-          isLegacyHistoryUploadSafeToDelete(uploadResult)
-        ) {
+        if (recordsWithDevice.length > 0 && deleteAfterUpload && parsedWithDevice.status !== 'partial' && isLegacyHistoryUploadSafeToDelete(uploadResult)) {
           releaseHistoryExclusive = claimLegacyBleHistoryExclusive(timeoutMs, {
             protocol: adapter.protocol,
             deviceId: currentDevice?.deviceId,
@@ -846,16 +814,18 @@ export const syncLegacyHistory = async (
       readAll: options.readAll
     });
     let parsedLocalData: RingParsedData;
-    parsedLocalData = await readLegacyLocalDataUntilComplete(adapter, {
-      sinceTimestamp,
-      readAll: options.readAll
-    }, timeoutMs);
+    parsedLocalData = await readLegacyLocalDataUntilComplete(
+      adapter,
+      {
+        sinceTimestamp,
+        readAll: options.readAll
+      },
+      timeoutMs
+    );
     // Only the on-air receive phase owns the history lease. CPU work and HTTP
     // upload continue after it is released, keeping the BLE session responsive.
     releaseClaimedHistoryExclusive();
-    const recordsWithDevice = getLegacyLocalDataChunkRecords(parsedLocalData).map((record) =>
-      attachDeviceIdentityToRecord(record, currentDevice)
-    );
+    const recordsWithDevice = getLegacyLocalDataChunkRecords(parsedLocalData).map((record) => attachDeviceIdentityToRecord(record, currentDevice));
     const parsed = attachDeviceIdentityToParsed(
       {
         ...parsedLocalData,
@@ -961,18 +931,14 @@ export const refreshLegacyBusinessMetrics = async (
   const includeCollectPeriod = options.includeCollectPeriod ?? !hasTargetedRealtimeMetrics;
   const legacyRealtimeMetricNames = ['heart_rate', 'blood_oxygen', 'temperature'] as const;
   type LegacyRealtimeMetricName = (typeof legacyRealtimeMetricNames)[number];
-  const isLegacyRealtimeMetricName = (name: string): name is LegacyRealtimeMetricName =>
-    legacyRealtimeMetricNames.includes(name as LegacyRealtimeMetricName);
+  const isLegacyRealtimeMetricName = (name: string): name is LegacyRealtimeMetricName => legacyRealtimeMetricNames.includes(name as LegacyRealtimeMetricName);
   const requestedRealtimeMetricNames = new Set<LegacyRealtimeMetricName>(
-    (options.realtimeMetricNames?.length ? options.realtimeMetricNames : legacyRealtimeMetricNames)
-      .map(normalizeRwWorkflowMetricName)
-      .filter(isLegacyRealtimeMetricName)
+    (options.realtimeMetricNames?.length ? options.realtimeMetricNames : legacyRealtimeMetricNames).map(normalizeRwWorkflowMetricName).filter(isLegacyRealtimeMetricName)
   );
   if (includeRealtimeMetrics && requestedRealtimeMetricNames.size === 0) {
     legacyRealtimeMetricNames.forEach((name) => requestedRealtimeMetricNames.add(name));
   }
-  const shouldReadRealtimeMetric = (name: LegacyRealtimeMetricName) =>
-    includeRealtimeMetrics && requestedRealtimeMetricNames.has(name);
+  const shouldReadRealtimeMetric = (name: LegacyRealtimeMetricName) => includeRealtimeMetrics && requestedRealtimeMetricNames.has(name);
 
   const runStep = async (step: string, task: () => Promise<unknown>, wait?: () => Promise<RingParsedData>) => {
     try {
@@ -995,31 +961,21 @@ export const refreshLegacyBusinessMetrics = async (
       () => adapter.sendBatteryCommand(),
       () => adapter.waitForParsedData((parsed) => parsed.type === 'battery', timeoutMs)
     );
-
   }
 
   if (includeFirmwareVersion) {
     await runStep(
       'firmware',
       () => adapter.sendFirmwareVersion(),
-      () =>
-        adapter.waitForParsedData(
-          (parsed) => parsed.type === 'firmware_version' || parsed.type === 'hardwareVersion',
-          timeoutMs
-        )
+      () => adapter.waitForParsedData((parsed) => parsed.type === 'firmware_version' || parsed.type === 'hardwareVersion', timeoutMs)
     );
-
   }
 
   if (includeSoftwareVersion) {
     await runStep(
       'software',
       () => adapter.sendSoftwareVersion(),
-      () =>
-        adapter.waitForParsedData(
-          (parsed) => parsed.type === 'firmware_version' || parsed.type === 'softwareVersion',
-          timeoutMs
-        )
+      () => adapter.waitForParsedData((parsed) => parsed.type === 'firmware_version' || parsed.type === 'softwareVersion', timeoutMs)
     );
   }
 
@@ -1035,13 +991,7 @@ export const refreshLegacyBusinessMetrics = async (
     await runStep(
       'heart_rate',
       () => adapter.sendActiveMeasureCommand(),
-      () =>
-        adapter.waitForParsedData(
-          (parsed) =>
-            parsed.type === 'active_measure' ||
-            isRwHealthDataValue(parsed, 'heart_rate'),
-          timeoutMs
-        )
+      () => adapter.waitForParsedData((parsed) => parsed.type === 'active_measure' || isRwHealthDataValue(parsed, 'heart_rate'), timeoutMs)
     );
   }
 
@@ -1049,11 +999,7 @@ export const refreshLegacyBusinessMetrics = async (
     await runStep(
       'blood_oxygen',
       () => adapter.sendOxyGenCommand(),
-      () =>
-        adapter.waitForParsedData(
-          (parsed) => isRwHealthDataValue(parsed, 'blood_oxygen'),
-          timeoutMs
-        )
+      () => adapter.waitForParsedData((parsed) => isRwHealthDataValue(parsed, 'blood_oxygen'), timeoutMs)
     );
   }
 
@@ -1120,7 +1066,6 @@ const refreshQkeerV2BusinessMetrics = async (
       () => adapter.sendBatteryCommand(),
       () => adapter.waitForParsedData((parsed) => parsed.type === 'battery', waitTimeoutMs)
     );
-
   }
 
   if (includeFirmwareVersion) {
@@ -1134,11 +1079,7 @@ const refreshQkeerV2BusinessMetrics = async (
     await runStep(
       'software',
       () => adapter.sendSoftwareVersion(),
-      () =>
-        adapter.waitForParsedData(
-          (parsed) => parsed.type === 'softwareVersion' || parsed.type === 'firmware_version',
-          waitTimeoutMs
-        )
+      () => adapter.waitForParsedData((parsed) => parsed.type === 'softwareVersion' || parsed.type === 'firmware_version', waitTimeoutMs)
     );
   }
 
@@ -1156,9 +1097,7 @@ const refreshQkeerV2BusinessMetrics = async (
       () => adapter.sendActiveMeasureCommand(),
       () =>
         adapter.waitForParsedData(
-          (parsed) =>
-            parsed.type === 'active_measure' ||
-            (parsed.type === 'qkeer_v2_health' && (parsed.heartRate != null || parsed.heartrate != null)),
+          (parsed) => parsed.type === 'active_measure' || (parsed.type === 'qkeer_v2_health' && (parsed.heartRate != null || parsed.heartrate != null)),
           waitTimeoutMs
         )
     );
@@ -1168,9 +1107,7 @@ const refreshQkeerV2BusinessMetrics = async (
       () => adapter.sendOxyGenCommand(),
       () =>
         adapter.waitForParsedData(
-          (parsed) =>
-            parsed.type === 'active_OxyGenMeasure' ||
-            (parsed.type === 'qkeer_v2_health' && (parsed.bloodOxygen != null || parsed.spo2 != null)),
+          (parsed) => parsed.type === 'active_OxyGenMeasure' || (parsed.type === 'qkeer_v2_health' && (parsed.bloodOxygen != null || parsed.spo2 != null)),
           waitTimeoutMs
         )
     );
@@ -1181,10 +1118,7 @@ const refreshQkeerV2BusinessMetrics = async (
       () =>
         adapter.waitForParsedData(
           (parsed) =>
-            parsed.type === 'active_Temperature' ||
-            parsed.type === 'qkeer_v2_last_data' ||
-            parsed.type === 'qkeer_v2_last_data_sleep' ||
-            parsed.type === 'qkeer_v2_heartbeat',
+            parsed.type === 'active_Temperature' || parsed.type === 'qkeer_v2_last_data' || parsed.type === 'qkeer_v2_last_data_sleep' || parsed.type === 'qkeer_v2_heartbeat',
           waitTimeoutMs
         )
     );
@@ -1204,11 +1138,7 @@ const refreshQkeerV2BusinessMetrics = async (
       () => adapter.readLocalData({ sinceTimestamp: todayZeroMs, readAll: false }),
       () =>
         adapter.waitForParsedData(
-          (parsed) =>
-            parsed.type === 'local_data' ||
-            parsed.type === 'qkeer_v2_health_list' ||
-            parsed.type === 'qkeer_v2_step_list' ||
-            parsed.type === 'qkeer_v2_sleep_list',
+          (parsed) => parsed.type === 'local_data' || parsed.type === 'qkeer_v2_health_list' || parsed.type === 'qkeer_v2_step_list' || parsed.type === 'qkeer_v2_sleep_list',
           historyWaitTimeoutMs
         )
     );
@@ -1230,10 +1160,7 @@ const refreshRwBusinessMetrics = async (
   const coreTimeoutMs = Math.min(requestedTimeoutMs, 3500);
   const useMediumRwRealtimeWait = requestedTimeoutMs >= 8000;
   const useExtendedRwRealtimeWait = requestedTimeoutMs >= 20000;
-  const healthQuickWaitMs = Math.min(
-    requestedTimeoutMs,
-    useExtendedRwRealtimeWait ? Math.max(1000, requestedTimeoutMs - 1000) : useMediumRwRealtimeWait ? 3500 : 1000
-  );
+  const healthQuickWaitMs = Math.min(requestedTimeoutMs, useExtendedRwRealtimeWait ? Math.max(1000, requestedTimeoutMs - 1000) : useMediumRwRealtimeWait ? 3500 : 1000);
   const healthBackgroundTimeoutMs = Math.min(
     requestedTimeoutMs,
     useExtendedRwRealtimeWait ? Math.max(1000, requestedTimeoutMs - 500) : useMediumRwRealtimeWait ? 4500 : healthQuickWaitMs
@@ -1257,14 +1184,11 @@ const refreshRwBusinessMetrics = async (
       .map(normalizeRwWorkflowMetricName)
       .filter((name) => allRealtimeNames.includes(name as (typeof allRealtimeNames)[number]))
   );
-  const shouldReadRealtimeMetric = (name: string) =>
-    includeRealtimeMetrics && requestedRealtimeNames.has(normalizeRwWorkflowMetricName(name));
+  const shouldReadRealtimeMetric = (name: string) => includeRealtimeMetrics && requestedRealtimeNames.has(normalizeRwWorkflowMetricName(name));
   const heartRateRequested = shouldReadRealtimeMetric('heart_rate');
   const bloodOxygenRequested = shouldReadRealtimeMetric('blood_oxygen');
   const temperatureRequested = shouldReadRealtimeMetric('temperature');
-  const additionalRealtimeNames = (['blood_sugar', 'hrv', 'stress', 'blood_pressure'] as const).filter(
-    shouldReadRealtimeMetric
-  );
+  const additionalRealtimeNames = (['blood_sugar', 'hrv', 'stress', 'blood_pressure'] as const).filter(shouldReadRealtimeMetric);
   const optionalRealtimeFailures: Array<{ step: string; message: string }> = [];
 
   const emitRwHealthDataPending = (name: string, message = '\u8bbe\u5907\u672a\u8fd4\u56de\u5b9e\u65f6\u6570\u503c', status = 'pending') => {
@@ -1288,15 +1212,11 @@ const refreshRwBusinessMetrics = async (
     });
   };
 
-  const isRuntimeBleParsedPacket = (parsed: RingParsedData) =>
-    Boolean(parsed.serviceId || parsed.characteristicId || parsed.receivedAt || parsed.parsedAt);
+  const isRuntimeBleParsedPacket = (parsed: RingParsedData) => Boolean(parsed.serviceId || parsed.characteristicId || parsed.receivedAt || parsed.parsedAt);
 
   const emitParsedIfNotAlreadyEmitted = (parsed?: RingParsedData | null, replayCurrentBlePacket = false) => {
     if (!parsed) return;
-    if (
-      (parsed as unknown as Record<PropertyKey, unknown>)[RING_PARSED_EMITTED] &&
-      !(replayCurrentBlePacket && isRuntimeBleParsedPacket(parsed))
-    ) {
+    if ((parsed as unknown as Record<PropertyKey, unknown>)[RING_PARSED_EMITTED] && !(replayCurrentBlePacket && isRuntimeBleParsedPacket(parsed))) {
       return;
     }
     runtime?.onParsedData?.(attachDeviceIdentityToParsed(parsed, runtime?.getDeviceInfo?.() as RingDeviceInfo | undefined));
@@ -1322,18 +1242,14 @@ const refreshRwBusinessMetrics = async (
 
   const waitWithinHealthWindow = (promise: Promise<RingParsedData>) => {
     return Promise.race([
-      promise
-        .then((parsed) => ({ status: 'fulfilled' as const, parsed }))
-        .catch((reason) => ({ status: 'rejected' as const, reason })),
+      promise.then((parsed) => ({ status: 'fulfilled' as const, parsed })).catch((reason) => ({ status: 'rejected' as const, reason })),
       sleep(healthQuickWaitMs).then(() => ({ status: 'timeout' as const }))
     ]);
   };
 
   const waitWithinCoreWindow = <T>(promise: Promise<T>) => {
     return Promise.race([
-      promise
-        .then((parsed) => ({ status: 'fulfilled' as const, parsed }))
-        .catch((reason) => ({ status: 'rejected' as const, reason })),
+      promise.then((parsed) => ({ status: 'fulfilled' as const, parsed })).catch((reason) => ({ status: 'rejected' as const, reason })),
       sleep(coreTimeoutMs).then(() => ({ status: 'timeout' as const }))
     ]);
   };
@@ -1350,70 +1266,44 @@ const refreshRwBusinessMetrics = async (
       let pending = promises.length;
       let lastError: unknown;
       promises.forEach((promise) => {
-        promise
-          .then(resolve)
-          .catch((error) => {
-            lastError = error;
-            pending -= 1;
-            if (pending <= 0) reject(lastError);
-          });
+        promise.then(resolve).catch((error) => {
+          lastError = error;
+          pending -= 1;
+          if (pending <= 0) reject(lastError);
+        });
       });
     });
   };
 
-  const batteryWait = includeBattery
-    ? adapter.waitForParsedData((parsed) => parsed.type === 'battery', coreTimeoutMs)
-    : Promise.resolve(null);
+  const batteryWait = includeBattery ? adapter.waitForParsedData((parsed) => parsed.type === 'battery', coreTimeoutMs) : Promise.resolve(null);
   const firmwareWait = includeFirmwareVersion
-    ? adapter.waitForParsedData(
-        (parsed) => parsed.type === 'firmware_version' || parsed.type === 'hardwareVersion',
-        coreTimeoutMs
-      )
+    ? adapter.waitForParsedData((parsed) => parsed.type === 'firmware_version' || parsed.type === 'hardwareVersion', coreTimeoutMs)
     : Promise.resolve(null);
   const softwareWait = includeSoftwareVersion
     ? adapter.waitForParsedData(
-        (parsed) =>
-          parsed.type === 'softwareVersion' ||
-          (parsed.type === 'firmware_version' && (parsed as Record<string, any>).softwareVersion != null),
+        (parsed) => parsed.type === 'softwareVersion' || (parsed.type === 'firmware_version' && (parsed as Record<string, any>).softwareVersion != null),
         coreTimeoutMs
       )
     : Promise.resolve(null);
-  const deviceTimeWait = includeDeviceTime
-    ? adapter.waitForParsedData((parsed) => parsed.type === 'device_time', coreTimeoutMs)
-    : Promise.resolve(null);
+  const deviceTimeWait = includeDeviceTime ? adapter.waitForParsedData((parsed) => parsed.type === 'device_time', coreTimeoutMs) : Promise.resolve(null);
   batteryWait.catch(() => undefined);
   firmwareWait.catch(() => undefined);
   softwareWait.catch(() => undefined);
   deviceTimeWait.catch(() => undefined);
   const heartRateWait = heartRateRequested
-    ? adapter.waitForParsedData(
-        (parsed) => isRwHealthDataValue(parsed, 'heart_rate'),
-        healthBackgroundTimeoutMs
-      )
+    ? adapter.waitForParsedData((parsed) => isRwHealthDataValue(parsed, 'heart_rate'), healthBackgroundTimeoutMs)
     : Promise.resolve(null as any);
   const bloodOxygenWait = bloodOxygenRequested
-    ? adapter.waitForParsedData(
-        (parsed) => isRwHealthDataValue(parsed, 'blood_oxygen'),
-        healthBackgroundTimeoutMs
-      )
+    ? adapter.waitForParsedData((parsed) => isRwHealthDataValue(parsed, 'blood_oxygen'), healthBackgroundTimeoutMs)
     : Promise.resolve(null as any);
   const temperatureWait = temperatureRequested
-    ? adapter.waitForParsedData(
-        (parsed) => isRwHealthDataValue(parsed, 'temperature'),
-        healthBackgroundTimeoutMs
-      )
+    ? adapter.waitForParsedData((parsed) => isRwHealthDataValue(parsed, 'temperature'), healthBackgroundTimeoutMs)
     : Promise.resolve(null as any);
   heartRateWait.catch(() => undefined);
   bloodOxygenWait.catch(() => undefined);
   temperatureWait.catch(() => undefined);
   const historySnapshotWait = includeHistorySnapshot
-    ? adapter.waitForParsedData(
-        (parsed) =>
-          parsed.type === 'rw_file_list' ||
-          parsed.type === 'local_data' ||
-          parsed.type === 'rw_history_pending',
-        historyBackgroundTimeoutMs
-      )
+    ? adapter.waitForParsedData((parsed) => parsed.type === 'rw_file_list' || parsed.type === 'local_data' || parsed.type === 'rw_history_pending', historyBackgroundTimeoutMs)
     : Promise.resolve(null as any);
   historySnapshotWait.catch(() => undefined);
 
@@ -1439,7 +1329,11 @@ const refreshRwBusinessMetrics = async (
 
   if (includeDeviceTime) {
     try {
-      await withTaskTimeout(Promise.resolve().then(() => adapter.readDeviceTime()), commandTimeoutMs, 'device_time_command timeout');
+      await withTaskTimeout(
+        Promise.resolve().then(() => adapter.readDeviceTime()),
+        commandTimeoutMs,
+        'device_time_command timeout'
+      );
     } catch {
       ok.push('device_time_command_pending');
     }
@@ -1458,30 +1352,20 @@ const refreshRwBusinessMetrics = async (
       ok.push('history_snapshot_command_pending');
       emitRwHistoryPending(message, 'pending', message);
     }
-    void historySnapshotWait
-      .then(emitParsedIfNotAlreadyEmitted)
-      .catch((error) => emitRwHistoryPending(getSettledErrorMessage(error), 'pending', getSettledErrorMessage(error)));
+    void historySnapshotWait.then(emitParsedIfNotAlreadyEmitted).catch((error) => emitRwHistoryPending(getSettledErrorMessage(error), 'pending', getSettledErrorMessage(error)));
   }
 
   const monitoringWaits =
-    options.includeCollectPeriod ?? true
+    (options.includeCollectPeriod ?? true)
       ? monitoringNames.map((name) => ({
           name,
-          wait: adapter.waitForParsedData(
-            (parsed) => parsed.type === 'rw_health_monitoring' && (parsed as Record<string, any>).name === name,
-            coreTimeoutMs
-          )
+          wait: adapter.waitForParsedData((parsed) => parsed.type === 'rw_health_monitoring' && (parsed as Record<string, any>).name === name, coreTimeoutMs)
         }))
       : [];
   monitoringWaits.forEach(({ wait }) => {
-    wait
-      .then(emitParsedIfNotAlreadyEmitted)
-      .catch(() => undefined);
+    wait.then(emitParsedIfNotAlreadyEmitted).catch(() => undefined);
   });
-  const collectPeriodQuickWait =
-    monitoringWaits.length > 0
-      ? waitForFirstParsed(monitoringWaits.map(({ wait }) => wait))
-      : Promise.resolve(null);
+  const collectPeriodQuickWait = monitoringWaits.length > 0 ? waitForFirstParsed(monitoringWaits.map(({ wait }) => wait)) : Promise.resolve(null);
   collectPeriodQuickWait.catch(() => undefined);
 
   if (options.includeCollectPeriod ?? true) {
@@ -1501,16 +1385,11 @@ const refreshRwBusinessMetrics = async (
   const additionalRealtimeWaits = includeRealtimeMetrics
     ? additionalRealtimeNames.map((name) => ({
         name,
-        wait: adapter.waitForParsedData(
-          (parsed) => isRwHealthDataValue(parsed, name),
-          additionalRealtimeTimeoutMs
-        )
+        wait: adapter.waitForParsedData((parsed) => isRwHealthDataValue(parsed, name), additionalRealtimeTimeoutMs)
       }))
     : [];
   additionalRealtimeWaits.forEach(({ wait }) => wait.catch(() => undefined));
-  const additionalRealtimeResultsPromise = Promise.all(
-    additionalRealtimeWaits.map(({ wait }) => waitWithinHealthWindow(wait))
-  );
+  const additionalRealtimeResultsPromise = Promise.all(additionalRealtimeWaits.map(({ wait }) => waitWithinHealthWindow(wait)));
   additionalRealtimeResultsPromise.catch(() => undefined);
 
   if (heartRateRequested) {
@@ -1548,12 +1427,7 @@ const refreshRwBusinessMetrics = async (
     waitWithinHealthWindow(temperatureWait)
   ]);
   const additionalRealtimeResults = await Promise.all(
-    additionalRealtimeWaits.map(({ wait }) =>
-      Promise.race([
-        waitWithinHealthWindow(wait),
-        sleep(0).then(() => ({ status: 'pending' as const }))
-      ])
-    )
+    additionalRealtimeWaits.map(({ wait }) => Promise.race([waitWithinHealthWindow(wait), sleep(0).then(() => ({ status: 'pending' as const }))]))
   );
   const hasPendingAdditionalRealtime = additionalRealtimeResults.some((result) => result.status === 'pending');
 
@@ -1635,9 +1509,7 @@ const refreshRwBusinessMetrics = async (
 
   if (monitoringWaits.length > 0) {
     const collectPeriodReady = await Promise.race([
-      collectPeriodQuickWait
-        .then((parsed) => ({ status: 'fulfilled' as const, parsed }))
-        .catch((reason) => ({ status: 'rejected' as const, reason })),
+      collectPeriodQuickWait.then((parsed) => ({ status: 'fulfilled' as const, parsed })).catch((reason) => ({ status: 'rejected' as const, reason })),
       sleep(0).then(() => ({ status: 'pending' as const, parsed: null }))
     ]);
 
@@ -1647,9 +1519,7 @@ const refreshRwBusinessMetrics = async (
       ok.push('collect_period_pending');
       emitRwHealthDataPending(
         'collect_period',
-        collectPeriodReady.status === 'rejected'
-          ? getSettledErrorMessage(collectPeriodReady.reason)
-          : '\u76d1\u542c\u914d\u7f6e\u5df2\u8bf7\u6c42',
+        collectPeriodReady.status === 'rejected' ? getSettledErrorMessage(collectPeriodReady.reason) : '\u76d1\u542c\u914d\u7f6e\u5df2\u8bf7\u6c42',
         'requested'
       );
     }
@@ -1730,9 +1600,7 @@ const getSettledErrorMessage = (error: unknown) => {
 
 const sendRwDirectReadFallbacks = async (adapter: LegacyRingAdapter, names?: readonly string[]) => {
   if (!adapter.readRwHealthData) return;
-  const readNames = (names?.length
-    ? names
-    : ['heart_rate', 'blood_oxygen', 'temperature', 'blood_sugar', 'hrv', 'stress', 'blood_pressure']) as Parameters<
+  const readNames = (names?.length ? names : ['heart_rate', 'blood_oxygen', 'temperature', 'blood_sugar', 'hrv', 'stress', 'blood_pressure']) as Parameters<
     NonNullable<LegacyRingAdapter['readRwHealthData']>
   >[0][];
   for (const name of readNames) {
@@ -1759,10 +1627,7 @@ const getDeviceIdentityPayload = (device?: RingDeviceInfo) => {
 };
 
 const getRingDeviceStableIdentity = (device?: RingDeviceInfo) => {
-  const stableMac =
-    resolveRingProtocol(device || {}) === 'rw'
-      ? getRwStableMacCandidate(device)
-      : getLegacyStableMacCandidate(device);
+  const stableMac = resolveRingProtocol(device || {}) === 'rw' ? getRwStableMacCandidate(device) : getLegacyStableMacCandidate(device);
   if (stableMac) return stableMac;
 
   if (device && resolveRingProtocol(device) === 'rw') {
@@ -1773,7 +1638,10 @@ const getRingDeviceStableIdentity = (device?: RingDeviceInfo) => {
   return device?.uniMacId || device?.deviceId || '';
 };
 
-const normalizeLegacyIdentity = (value?: unknown) => String(value || '').replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+const normalizeLegacyIdentity = (value?: unknown) =>
+  String(value || '')
+    .replace(/[^0-9a-fA-F]/g, '')
+    .toUpperCase();
 
 const isMacSameAsDeviceId = (mac?: unknown, deviceId?: unknown) => {
   const macKey = normalizeLegacyIdentity(mac);
@@ -1876,20 +1744,12 @@ const isRwWorkflowBloodOxygenRecord = (item: Record<string, any>) => {
   const kind = String(item.type ?? item.name ?? item.metric ?? item.metricName ?? item.kind ?? '').trim();
   const normalizedKind = normalizeRwWorkflowMetricName(kind);
   const lowerKind = kind.toLowerCase();
-  return (
-    kind === 'active_OxyGenMeasure' ||
-    normalizedKind === 'blood_oxygen' ||
-    lowerKind.includes('oxygen') ||
-    lowerKind.includes('oxy') ||
-    lowerKind.includes('spo2')
-  );
+  return kind === 'active_OxyGenMeasure' || normalizedKind === 'blood_oxygen' || lowerKind.includes('oxygen') || lowerKind.includes('oxy') || lowerKind.includes('spo2');
 };
 
 const sendRwControlFallbacks = async (adapter: LegacyRingAdapter, names?: readonly string[]) => {
   if (!adapter.controlRwHealthData) return;
-  const controlNames = (names?.length ? names : ['temperature', 'blood_sugar', 'blood_pressure']) as Parameters<
-    NonNullable<LegacyRingAdapter['controlRwHealthData']>
-  >[0][];
+  const controlNames = (names?.length ? names : ['temperature', 'blood_sugar', 'blood_pressure']) as Parameters<NonNullable<LegacyRingAdapter['controlRwHealthData']>>[0][];
   for (const name of controlNames) {
     await sleep(120);
     try {
@@ -1922,9 +1782,7 @@ const isRwHealthDataValue = (parsed: RingParsedData, name: string) => {
   }
 
   if (metricName === 'blood_oxygen' && isRwWorkflowBloodOxygenRecord(item)) {
-    return isReturnedMetricValue(
-      getFirstRwWorkflowMetricValue(item, ['bloodOxygen', 'blood_oxygen', 'bloodOxygenSaturation', 'bloodOxy', 'spo2', 'oxygen'])
-    );
+    return isReturnedMetricValue(getFirstRwWorkflowMetricValue(item, ['bloodOxygen', 'blood_oxygen', 'bloodOxygenSaturation', 'bloodOxy', 'spo2', 'oxygen']));
   }
 
   if (metricName === 'temperature' && parsed.type === 'active_Temperature') {
