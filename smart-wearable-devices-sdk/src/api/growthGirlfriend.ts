@@ -1,6 +1,7 @@
 import { useUserStore } from '@/stores/user';
+import { getApiBase } from '@/utils/apiBase';
 
-const API_BASE = (((import.meta as any).env?.VITE_API_BASE as string | undefined) || '').replace(/\/$/, '');
+const API_BASE = getApiBase();
 
 interface ApiResponse<T> {
   code: number;

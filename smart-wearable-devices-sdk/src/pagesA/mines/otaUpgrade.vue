@@ -39,6 +39,7 @@ import { useRingBLE } from '@/composables/useRingBLE';
 import { getOtaInfo, getBindInfo, reportOtaUpdate } from '@/common/api/device';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { getApiBase } from '@/utils/apiBase';
 const userStore = useUserStore();
 
 // --- 配置常量 ---
@@ -242,7 +243,7 @@ const buildFirmwareDownloadUrl = (url) => {
     return encodeURI(rewritten);
   }
 
-  const apiBase = String(import.meta.env.VITE_API_BASE || '').replace(/\/+$/, '');
+  const apiBase = getApiBase();
   let path = rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`;
   const isProdGateway = /^https:\/\/sh\.qkeering\.com$/i.test(apiBase);
   if (isProdGateway && (path.startsWith('/admin/files/') || path.startsWith('/profile/ota/'))) {

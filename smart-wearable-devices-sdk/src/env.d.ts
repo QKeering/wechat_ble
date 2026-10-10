@@ -9,6 +9,8 @@ declare module '*.vue' {
 
 interface ImportMetaEnv {
   readonly VITE_API_BASE: string;
+  /** App 端接口根地址覆盖，优先级高于 VITE_API_BASE；未配置时回退。 */
+  readonly VITE_API_BASE_APP?: string;
   readonly VITE_ERROR_TOAST_ENABLED?: string;
 }
 

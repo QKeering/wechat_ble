@@ -1,3 +1,5 @@
+import { getApiBase } from '@/utils/apiBase';
+
 /**
  * 将相对路径转换为完整 API 绝对 URL
  * - 若已是完整 URL（含 http/https），直接返回
@@ -12,7 +14,7 @@ export const getFullUrl = (url) => {
     return '';
   }
 
-  const baseUrl = import.meta.env.VITE_API_BASE;
+  const baseUrl = getApiBase();
 
   // 已是完整 URL（http/https 开头），直接返回
   if (/^https?:\/\//i.test(url)) {

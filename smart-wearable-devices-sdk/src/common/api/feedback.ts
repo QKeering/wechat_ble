@@ -1,16 +1,9 @@
 import { useUserStore } from '@/stores/user';
+import { getApiBase } from '@/utils/apiBase';
 
-const API_BASE = (((import.meta as any).env?.VITE_API_BASE as string | undefined) || '').replace(/\/$/, '');
+const API_BASE = getApiBase();
 
-export type FeedbackCategory =
-  | 'connect_failed'
-  | 'sync_failed'
-  | 'data_abnormal'
-  | 'charge_failed'
-  | 'bind_failed'
-  | 'wear_measure'
-  | 'account_family'
-  | 'other';
+export type FeedbackCategory = 'connect_failed' | 'sync_failed' | 'data_abnormal' | 'charge_failed' | 'bind_failed' | 'wear_measure' | 'account_family' | 'other';
 
 export type FeedbackPayload = {
   category: FeedbackCategory;
@@ -83,13 +76,7 @@ export const uploadFeedbackImage = (filePath: string): Promise<string> => {
             reject(new Error(payload?.msg || '图片上传失败'));
             return;
           }
-          const url =
-            payload?.data?.url ||
-            payload?.data?.fileName ||
-            payload?.url ||
-            payload?.fileName ||
-            payload?.newFileName ||
-            '';
+          const url = payload?.data?.url || payload?.data?.fileName || payload?.url || payload?.fileName || payload?.newFileName || '';
           if (!url) {
             reject(new Error('图片上传接口未返回地址'));
             return;

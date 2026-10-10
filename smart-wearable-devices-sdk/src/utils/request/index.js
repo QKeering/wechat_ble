@@ -1,4 +1,5 @@
 import { useUserStore } from '@/stores/user';
+import { getApiBase } from '@/utils/apiBase';
 import { showErrorToast } from '@/utils/errorToast';
 import { formatBleErrorMessage } from '@/utils/bleError';
 export const Request = () => {
@@ -26,11 +27,12 @@ export const Request = () => {
   // 初始化请求配置
   uni.$uv.http.setConfig((defaultConfig) => {
     /*
-     * 设置根域名（baseURL），从环境变量中获取。
+     * 设置根域名（baseURL），由 @/utils/apiBase 统一解析（App 端可被
+     * VITE_API_BASE_APP 覆盖）。
      * 设置自定义参数 custom，默认需要认证，并由调用方捕获错误。
      */
     return Object.assign(defaultConfig, {
-      baseURL: import.meta.env.VITE_API_BASE,
+      baseURL: getApiBase(),
       custom: {
         auth: true,
         catch: true,

@@ -1,3 +1,4 @@
+import { getApiBase } from '@/utils/apiBase';
 import { getFullUrl } from '@/utils/utils.js';
 
 export interface RwDiagnosticUploadEntry {
@@ -35,7 +36,7 @@ let businessUploadActiveDepth = 0;
 const isNodeRuntime = () => Boolean((globalThis as any).process?.versions?.node);
 
 const getRwDiagnosticLogsUrl = () => {
-  const baseUrl = String(import.meta.env.VITE_API_BASE || '').replace(/\/+$/, '');
+  const baseUrl = getApiBase();
   if (/^https:\/\/sh\.qkeering\.com$/i.test(baseUrl)) {
     return getFullUrl('/api/app/rw-debug/logs');
   }
@@ -117,7 +118,7 @@ const parseDetails = (details: unknown): Record<string, any> | null => {
   if (typeof details !== 'string') return null;
   try {
     const parsed = JSON.parse(details);
-    return parsed && typeof parsed === 'object' ? parsed as Record<string, any> : null;
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, any>) : null;
   } catch {
     return null;
   }
@@ -241,9 +242,7 @@ export const scheduleRwDiagnosticUploadFlush = (delayMs = FLUSH_DELAY_MS) => {
 };
 
 export const setRwDiagnosticBusinessUploadActive = (active: boolean) => {
-  businessUploadActiveDepth = active
-    ? businessUploadActiveDepth + 1
-    : Math.max(0, businessUploadActiveDepth - 1);
+  businessUploadActiveDepth = active ? businessUploadActiveDepth + 1 : Math.max(0, businessUploadActiveDepth - 1);
   if (businessUploadActiveDepth === 0 && (pendingFlush || readQueue().length > 0)) {
     pendingFlush = false;
     scheduleRwDiagnosticUploadFlush();
