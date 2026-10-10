@@ -2,8 +2,8 @@
     "name" : "qkeer-ring",
     "appid" : "__UNI__31A4F95",
     "description" : "qkeer ring app",
-    "versionName" : "0.1.0",
-    "versionCode" : "10",
+    "versionName" : "0.1.1",
+    "versionCode" : "11",
     "transformPx" : false,
     "vueVersion" : "3",
     "mp-weixin" : {

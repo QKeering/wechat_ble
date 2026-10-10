@@ -414,7 +414,18 @@ const prepareConnectDevice = (device: ScanDeviceInfo) => {
 };
 
 const handleConnect = (device: ScanDeviceInfo) => {
-  if (isConnectedBusinessDevice(device)) return;
+  // 「点了连接没反应」有两条零日志的死路：命中「已是当前已连接设备」的静默早退，
+  // 以及 popup 引用拿不到导致 `?.open?.()` 变成空操作。这条埋点把两者分开。
+  const alreadyConnected = isConnectedBusinessDevice(device);
+  const popupRef = popup.value;
+  appendConnectPageDiagnosticLog('connect-page-handle-connect', {
+    alreadyConnected,
+    hasPopupRef: Boolean(popupRef),
+    hasOpen: typeof popupRef?.open === 'function',
+    target: summarizeConnectPageDevice(device),
+    snapshot: getConnectPageSnapshot()
+  });
+  if (alreadyConnected) return;
   prepareConnectDevice(device);
   popup.value?.open?.();
 };
