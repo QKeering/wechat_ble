@@ -4,17 +4,8 @@ import { parseQkeerV2AdvertisInfo, parseRwAdvertisInfo, resolveRingProtocol } fr
 import { LegacyRingCommand } from './commands';
 import { parseLegacyRingData } from './parser';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
-import {
-  ensureWechatBluetoothPrivacyAuthorization,
-  isBluetoothPrivacyError,
-  normalizeBluetoothPrivacyError
-} from '@/utils/wechatBluetoothPrivacy';
-import {
-  getLegacyBleHistoryExclusiveSnapshot,
-  onLegacyBleCommandSessionIdle,
-  renewLegacyBleCommandSessionActivity,
-  releaseLegacyBleCommandSessions
-} from './commandSession';
+import { ensureWechatBluetoothPrivacyAuthorization, isBluetoothPrivacyError, normalizeBluetoothPrivacyError } from '@/utils/wechatBluetoothPrivacy';
+import { getLegacyBleHistoryExclusiveSnapshot, onLegacyBleCommandSessionIdle, renewLegacyBleCommandSessionActivity, releaseLegacyBleCommandSessions } from './commandSession';
 import {
   buildLegacyBloodOxygenMeasurementPayload,
   buildLegacyCommandByName,
@@ -245,10 +236,11 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 // WeChat may return BLE identifiers with different casing/separators between
 // scan/connect and characteristic callbacks (especially on Android/Harmony).
 // Compare their canonical hex identity instead of dropping a valid notify.
-const normalizeBleIdentifier = (value: unknown) => `${value || ''}`
-  .trim()
-  .replace(/[{}:\-\s]/g, '')
-  .toLowerCase();
+const normalizeBleIdentifier = (value: unknown) =>
+  `${value || ''}`
+    .trim()
+    .replace(/[{}:\-\s]/g, '')
+    .toLowerCase();
 
 const isAlreadyConnectedError = (error: unknown) => {
   const record = (error && typeof error === 'object' ? error : {}) as Record<string, unknown>;
@@ -259,8 +251,7 @@ const isAlreadyConnectedError = (error: unknown) => {
 const isBleConnectOperateTimeout = (error: unknown) => {
   const record = (error && typeof error === 'object' ? error : {}) as Record<string, unknown>;
   const message = `${record.errMsg || record.message || error || ''}`.toLowerCase();
-  return message.includes('createbleconnection')
-    && (message.includes('operate time out') || message.includes('operation timeout'));
+  return message.includes('createbleconnection') && (message.includes('operate time out') || message.includes('operation timeout'));
 };
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
@@ -268,16 +259,20 @@ type BleConnectionStateCallback = Parameters<typeof uni.onBLEConnectionStateChan
 type BleCharacteristicValueCallback = Parameters<typeof uni.onBLECharacteristicValueChange>[0];
 type BluetoothAdapterStateCallback = (result: { available?: boolean; discovering?: boolean }) => void;
 
+// 这三个原本是裸调用。App 端只要某个 off* API 不存在，调用处就会抛 TypeError；
+// 调用点如果在 Promise 之外（startScan 就是），整次扫描会当场静默死掉 —— 日志里
+// 只剩 log 起点、列表永远是空的，且没有任何报错。全部改成可选调用，与下面的
+// offBluetoothAdapterStateChange 保持一致。
 const offBluetoothDeviceFound = (callback: BluetoothDeviceFoundCallback) => {
-  (uni.offBluetoothDeviceFound as unknown as (callback: BluetoothDeviceFoundCallback) => void)(callback);
+  (uni.offBluetoothDeviceFound as unknown as ((callback?: BluetoothDeviceFoundCallback) => void) | undefined)?.(callback);
 };
 
 const offBleConnectionStateChange = (callback: BleConnectionStateCallback) => {
-  (uni.offBLEConnectionStateChange as unknown as (callback?: BleConnectionStateCallback) => void)(callback);
+  (uni.offBLEConnectionStateChange as unknown as ((callback?: BleConnectionStateCallback) => void) | undefined)?.(callback);
 };
 
 const offBleCharacteristicValueChange = (callback: BleCharacteristicValueCallback) => {
-  (uni.offBLECharacteristicValueChange as unknown as (callback?: BleCharacteristicValueCallback) => void)(callback);
+  (uni.offBLECharacteristicValueChange as unknown as ((callback?: BleCharacteristicValueCallback) => void) | undefined)?.(callback);
 };
 
 const offBluetoothAdapterStateChange = (callback: BluetoothAdapterStateCallback) => {
@@ -316,9 +311,14 @@ const getAdvertisHex = (value?: ArrayBuffer | string | number[]) => {
   if (!value) return '';
   if (typeof value === 'string') return value.replace(/\s+/g, '').toUpperCase();
   if (Array.isArray(value)) {
-    return value.map((byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase();
+    return value
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
   }
-  return Array.from(new Uint8Array(value), (byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase();
+  return Array.from(new Uint8Array(value), (byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase();
 };
 
 const formatLegacyFrameByte = (value: number | undefined) => {
@@ -328,7 +328,9 @@ const formatLegacyFrameByte = (value: number | undefined) => {
 
 const getLegacyBytesHex = (bytes: Uint8Array | ArrayBuffer | number[]) => {
   if (bytes instanceof Uint8Array) {
-    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase();
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
   }
   return getAdvertisHex(bytes);
 };
@@ -402,13 +404,7 @@ const sanitizeScanLogValue = (value: unknown, depth = 0, seen = new WeakSet<obje
   return String(value);
 };
 
-const appendScanDeviceRecordLog = (
-  rawDevice: unknown,
-  matchedDevice: RingDeviceInfo,
-  parsedMac: string,
-  advertisHex: string,
-  matchedKeys: string[]
-) => {
+const appendScanDeviceRecordLog = (rawDevice: unknown, matchedDevice: RingDeviceInfo, parsedMac: string, advertisHex: string, matchedKeys: string[]) => {
   const logKey = `${matchedDevice.deviceId || ''}|${parsedMac || matchedDevice.uniMacId || ''}|${matchedDevice.mac || ''}|${advertisHex}`;
   const now = Date.now();
   const lastLoggedAt = scanDeviceRecordLogTimes.get(logKey) || 0;
@@ -493,9 +489,39 @@ type BluetoothAdapterOpenOperation = {
   foregroundTimedOut: boolean;
 };
 
+/**
+ * 平台回调里的错误形状不确定（uni 的 errMsg / 原生 message / 纯字符串），
+ * 统一压成纯对象再进日志，避免 Error 实例被序列化成 {}。
+ */
+const describeScanError = (error: unknown): Record<string, unknown> => {
+  if (error && typeof error === 'object') {
+    const record = error as Record<string, unknown>;
+    return {
+      errMsg: `${record.errMsg ?? record.message ?? ''}`,
+      errCode: record.errCode ?? record.code ?? ''
+    };
+  }
+  return { errMsg: `${error ?? ''}` };
+};
+
+/**
+ * `startBluetoothDevicesDiscovery` 正常在毫秒级就会回调；等 5 秒还没有动静，
+ * 基本可以判定这个平台的回调不会来了，而不是「回调很快但日志没传上去」。
+ */
+const SCAN_CALLBACK_WATCHDOG_MS = 5000;
+
 export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRuntime): LegacyRingAdapter => {
   let scanTimeout: ReturnType<typeof setTimeout> | null = null;
   let scanPollTimer: ReturnType<typeof setInterval> | null = null;
+  // `startBluetoothDevicesDiscovery` 的 success/fail「一个都不回」是本项目 App 端最难查的
+  // 一种故障（不报错、列表为空、日志空白）。有了这个看门狗，就能把「平台没回调」
+  // 和「回调了但日志没传上去」两件事彻底分开。
+  let scanCallbackWatchdog: ReturnType<typeof setTimeout> | null = null;
+  // 本次扫描 `startBluetoothDevicesDiscovery` 到底回没回回调。这是「Android 静默失败」的
+  // 唯一判据；但一次成功扫描会产出几百条 `scan-device-record` 把上传队列灌满、按「丢最旧」
+  // 淘汰，队头的 `legacy-scan-armed` / `legacy-scan-discovery-*` 会被挤掉。所以这个信号
+  // 必须搭在队尾的 `legacy-scan-stop` 上，才能活着传到后端。
+  let scanStartCallbackState: 'none' | 'success' | 'fail' = 'none';
   let scanPrefixes = DEFAULT_SCAN_PREFIXES;
   let includeUnknownScanDevices = false;
   let rawScanDiagnostic: RawScanDiagnosticContext | null = null;
@@ -560,7 +586,9 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     const device = runtime?.getDeviceInfo?.() as RingDeviceInfo | undefined;
     const candidates = [device?.name, device?.deviceName, device?.model, device?.modelKey, device?.productName];
     return candidates.some((value) => {
-      const normalized = String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const normalized = String(value || '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '');
       return normalized.includes('QKEERINGL19') || normalized.includes('QKL19');
     });
   };
@@ -605,9 +633,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   // transfer (the B7 long-session failure).  The age cap prevents a lost terminal
   // packet from protecting a dead connection forever.
   const getActiveHistoryReadGuard = () => {
-    const session = getLegacyBleHistoryExclusiveSnapshot(
-      runtime?.getDeviceInfo?.() || dataListenerDeviceId
-    );
+    const session = getLegacyBleHistoryExclusiveSnapshot(runtime?.getDeviceInfo?.() || dataListenerDeviceId);
     const wireElapsedMs = historyWireTrace ? Date.now() - historyWireTrace.startedAt : 0;
     const wireActive = Boolean(historyWireTrace && wireElapsedMs <= 120000);
     return {
@@ -619,12 +645,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     };
   };
 
-  const appendHistoryWireNotifyLog = (
-    event: string,
-    result: any,
-    notifyFrame: ReturnType<typeof summarizeLegacyBleFrame>,
-    parsed?: RingParsedData | null
-  ) => {
+  const appendHistoryWireNotifyLog = (event: string, result: any, notifyFrame: ReturnType<typeof summarizeLegacyBleFrame>, parsed?: RingParsedData | null) => {
     const trace = historyWireTrace;
     if (!trace) return;
 
@@ -717,33 +738,25 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         resolve(snapshot);
       };
       const timer = setTimeout(() => {
-        finish(
-          { available: false, discovering: false, source: 'timeout' },
-          'legacy-bluetooth-adapter-state-check-timeout'
-        );
+        finish({ available: false, discovering: false, source: 'timeout' }, 'legacy-bluetooth-adapter-state-check-timeout');
       }, BLUETOOTH_ADAPTER_STATE_CHECK_TIMEOUT_MS);
 
       if (typeof uni.getBluetoothAdapterState !== 'function') {
-        finish(
-          { available: false, discovering: false, source: 'unsupported' },
-          'legacy-bluetooth-adapter-state-check-unsupported'
-        );
+        finish({ available: false, discovering: false, source: 'unsupported' }, 'legacy-bluetooth-adapter-state-check-unsupported');
         return;
       }
 
       uni.getBluetoothAdapterState({
-        success: (result) => finish(
-          {
-            available: Boolean(result.available),
-            discovering: Boolean(result.discovering),
-            source: 'state'
-          },
-          'legacy-bluetooth-adapter-state-check-result'
-        ),
-        fail: (error) => finish(
-          { available: false, discovering: false, source: 'failed', error },
-          'legacy-bluetooth-adapter-state-check-failed'
-        )
+        success: (result) =>
+          finish(
+            {
+              available: Boolean(result.available),
+              discovering: Boolean(result.discovering),
+              source: 'state'
+            },
+            'legacy-bluetooth-adapter-state-check-result'
+          ),
+        fail: (error) => finish({ available: false, discovering: false, source: 'failed', error }, 'legacy-bluetooth-adapter-state-check-failed')
       });
     });
   };
@@ -761,80 +774,73 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       callbackExpiryMs: BLUETOOTH_ADAPTER_OPEN_CALLBACK_EXPIRY_MS
     });
 
-    operation.promise = ensureWechatBluetoothPrivacyAuthorization().then(() => new Promise<unknown>((resolve, reject) => {
-      let callbackSettled = false;
-      const expiryTimer = setTimeout(() => {
-        if (callbackSettled) return;
-        callbackSettled = true;
-        const error = new Error('Open Bluetooth adapter callback expired.');
-        appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-adapter-open-callback-expired', {
-          elapsedMs: Date.now() - startedAt,
-          foregroundTimedOut: operation.foregroundTimedOut
-        });
-        reject(error);
-      }, BLUETOOTH_ADAPTER_OPEN_CALLBACK_EXPIRY_MS);
+    operation.promise = ensureWechatBluetoothPrivacyAuthorization()
+      .then(
+        () =>
+          new Promise<unknown>((resolve, reject) => {
+            let callbackSettled = false;
+            const expiryTimer = setTimeout(() => {
+              if (callbackSettled) return;
+              callbackSettled = true;
+              const error = new Error('Open Bluetooth adapter callback expired.');
+              appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-adapter-open-callback-expired', {
+                elapsedMs: Date.now() - startedAt,
+                foregroundTimedOut: operation.foregroundTimedOut
+              });
+              reject(error);
+            }, BLUETOOTH_ADAPTER_OPEN_CALLBACK_EXPIRY_MS);
 
-      uni.openBluetoothAdapter({
-        success: (result) => {
-          if (callbackSettled) {
-            appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-adapter-open-expired-success', {
-              elapsedMs: Date.now() - startedAt
+            uni.openBluetoothAdapter({
+              success: (result) => {
+                if (callbackSettled) {
+                  appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-adapter-open-expired-success', {
+                    elapsedMs: Date.now() - startedAt
+                  });
+                  runtime?.onBluetoothReadyChange?.(true);
+                  return;
+                }
+                callbackSettled = true;
+                clearTimeout(expiryTimer);
+                appendRingDiagnosticLog('L19 BLE', operation.foregroundTimedOut ? 'legacy-bluetooth-adapter-open-late-success' : 'legacy-bluetooth-adapter-open-success', {
+                  elapsedMs: Date.now() - startedAt,
+                  foregroundTimedOut: operation.foregroundTimedOut
+                });
+                runtime?.onBluetoothReadyChange?.(true);
+                resolve(result);
+              },
+              fail: (error) => {
+                const normalizedError = normalizeBluetoothPrivacyError(error);
+                if (callbackSettled) {
+                  appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-adapter-open-expired-failed', {
+                    elapsedMs: Date.now() - startedAt,
+                    error: formatLegacyBleError(normalizedError)
+                  });
+                  return;
+                }
+                callbackSettled = true;
+                clearTimeout(expiryTimer);
+                appendRingDiagnosticLog('L19 BLE', operation.foregroundTimedOut ? 'legacy-bluetooth-adapter-open-late-failed' : 'legacy-bluetooth-adapter-open-failed', {
+                  elapsedMs: Date.now() - startedAt,
+                  foregroundTimedOut: operation.foregroundTimedOut,
+                  error: formatLegacyBleError(normalizedError),
+                  privacyBlocked: isBluetoothPrivacyError(normalizedError)
+                });
+                reject(normalizedError);
+              }
             });
-            runtime?.onBluetoothReadyChange?.(true);
-            return;
-          }
-          callbackSettled = true;
-          clearTimeout(expiryTimer);
-          appendRingDiagnosticLog(
-            'L19 BLE',
-            operation.foregroundTimedOut
-              ? 'legacy-bluetooth-adapter-open-late-success'
-              : 'legacy-bluetooth-adapter-open-success',
-            {
-              elapsedMs: Date.now() - startedAt,
-              foregroundTimedOut: operation.foregroundTimedOut
-            }
-          );
-          runtime?.onBluetoothReadyChange?.(true);
-          resolve(result);
-        },
-        fail: (error) => {
-          const normalizedError = normalizeBluetoothPrivacyError(error);
-          if (callbackSettled) {
-            appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-adapter-open-expired-failed', {
-              elapsedMs: Date.now() - startedAt,
-              error: formatLegacyBleError(normalizedError)
-            });
-            return;
-          }
-          callbackSettled = true;
-          clearTimeout(expiryTimer);
-          appendRingDiagnosticLog(
-            'L19 BLE',
-            operation.foregroundTimedOut
-              ? 'legacy-bluetooth-adapter-open-late-failed'
-              : 'legacy-bluetooth-adapter-open-failed',
-            {
-              elapsedMs: Date.now() - startedAt,
-              foregroundTimedOut: operation.foregroundTimedOut,
-              error: formatLegacyBleError(normalizedError),
-              privacyBlocked: isBluetoothPrivacyError(normalizedError)
-            }
-          );
-          reject(normalizedError);
+          })
+      )
+      .catch((error) => {
+        const normalizedError = normalizeBluetoothPrivacyError(error);
+        if (isBluetoothPrivacyError(normalizedError)) {
+          appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-privacy-authorization-required', {
+            elapsedMs: Date.now() - startedAt,
+            retryable: false,
+            error: formatLegacyBleError(normalizedError)
+          });
         }
+        throw normalizedError;
       });
-    })).catch((error) => {
-      const normalizedError = normalizeBluetoothPrivacyError(error);
-      if (isBluetoothPrivacyError(normalizedError)) {
-        appendRingDiagnosticLog('L19 BLE', 'legacy-bluetooth-privacy-authorization-required', {
-          elapsedMs: Date.now() - startedAt,
-          retryable: false,
-          error: formatLegacyBleError(normalizedError)
-        });
-      }
-      throw normalizedError;
-    });
 
     bluetoothAdapterOpenOperation = operation;
     operation.promise.then(
@@ -906,15 +912,11 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       const eventDeviceId = `${result?.deviceId || ''}`;
       const currentDeviceId = runtime?.getDeviceInfo?.().deviceId;
       if (currentDeviceId && eventDeviceId && eventDeviceId !== currentDeviceId) {
-        appendRingDiagnosticLog(
-          'L19 BLE',
-          result.connected ? 'connection-state-ignore-non-target-connected' : 'connection-state-ignore-non-target-disconnected',
-          {
-            currentDeviceId,
-            eventDeviceId,
-            connected: Boolean(result.connected)
-          }
-        );
+        appendRingDiagnosticLog('L19 BLE', result.connected ? 'connection-state-ignore-non-target-connected' : 'connection-state-ignore-non-target-disconnected', {
+          currentDeviceId,
+          eventDeviceId,
+          connected: Boolean(result.connected)
+        });
         return;
       }
 
@@ -1052,15 +1054,39 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     rawScanDiagnosticDevices.clear();
   };
 
+  // 无绑定设备时的扫描是唯一没有 bound 诊断兜底的路径：它一旦悄悄失败，日志里
+  // 什么都不剩，只看到「扫描列表为空」。这里按批次指纹变化记一条汇总，只回答三个
+  // 问题：系统到底给了几个设备、几个进了列表、几个被名字前缀挡掉了。
+  let lastScanBatchSignature = '';
+
+  const reportScanBatch = (source: string, received: number, merged: number, filteredByPrefix: number) => {
+    const signature = `${received}|${merged}|${filteredByPrefix}`;
+    if (signature === lastScanBatchSignature) return;
+    lastScanBatchSignature = signature;
+    appendRingDiagnosticLog('L19 BLE', 'legacy-scan-batch', {
+      source,
+      received,
+      merged,
+      filteredByPrefix,
+      listed: state.devices.value.length
+    });
+  };
+
   const mergeScannedDevices = (devices: any[], source = 'unknown') => {
     if (!state.isScanning.value || !Array.isArray(devices)) return;
     appendRawScanDiagnosticLogs(devices, source);
     const platform = uni.getSystemInfoSync().platform?.toLowerCase?.() || '';
+    let mergedCount = 0;
+    let filteredByPrefixCount = 0;
 
     devices.forEach((device: any) => {
       const name = device.name || device.localName;
       const protocol = resolveRingProtocol(device);
-      if (!includeUnknownScanDevices && protocol === 'legacy' && !isTargetDevice(name, scanPrefixes)) return;
+      if (!includeUnknownScanDevices && protocol === 'legacy' && !isTargetDevice(name, scanPrefixes)) {
+        filteredByPrefixCount += 1;
+        return;
+      }
+      mergedCount += 1;
 
       const parsedMac = getMacFromAdvertisData(device.advertisData);
       const uniMacId = parsedMac || (platform.includes('ios') ? device.uniMacId : undefined);
@@ -1105,6 +1131,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
       state.devices.value.push(matchedDevice);
     });
+    reportScanBatch(source, devices.length, mergedCount, filteredByPrefixCount);
   };
 
   const handleDeviceFound = (result: any) => {
@@ -1121,6 +1148,10 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         clearInterval(scanPollTimer);
         scanPollTimer = null;
       }
+      if (scanCallbackWatchdog) {
+        clearTimeout(scanCallbackWatchdog);
+        scanCallbackWatchdog = null;
+      }
 
       offBluetoothDeviceFound(handleDeviceFound);
 
@@ -1130,14 +1161,23 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         return;
       }
 
+      appendRingDiagnosticLog('L19 BLE', 'legacy-scan-stop', {
+        listed: state.devices.value.length,
+        // 'none' = startBluetoothDevicesDiscovery 的 success/fail 一个都没回，
+        // 即 Android 的静默失败：native 扫描可能已在跑，但 JS 侧一无所知。
+        startCallback: scanStartCallbackState
+      });
+      // 自己的扫描标志不能押在平台回调上：stopBluetoothDevicesDiscovery 在部分机型
+      // 或异常态下两个回调都不触发，那样 isScanning 会永远停在 true，之后每一次
+      // startScan 都被开头的短路静默吃掉（症状就是「扫描毫无反应、日志一片空白」）。
+      // rw adapter 的 stopScan 早就是先置位再调用，这里与之对齐。
+      state.isScanning.value = false;
       uni.stopBluetoothDevicesDiscovery({
         success: (result) => {
-          state.isScanning.value = false;
           finishRawScanDiagnostic('stop-success');
           resolve(result);
         },
         fail: (error) => {
-          state.isScanning.value = false;
           finishRawScanDiagnostic('stop-fail');
           resolve(error);
         }
@@ -1146,17 +1186,26 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   };
 
   const startScan = (options: LegacyScanOptions = {}) => {
-    if (state.isScanning.value) return Promise.resolve(undefined);
+    if (state.isScanning.value) {
+      // 以前这里是一行纯静默 return：上一次扫描没被正确收尾时，后续每次扫描都被它
+      // 悄悄吃掉，外面只能看到「点了扫描毫无反应」，日志里一条都不剩。
+      appendRingDiagnosticLog('L19 BLE', 'legacy-scan-skip-already-scanning', {
+        includeUnknown: Boolean(options.includeUnknown),
+        timeoutMs: options.timeoutMs ?? 20000
+      });
+      return Promise.resolve(undefined);
+    }
 
     scanPrefixes = options.prefixes?.length ? options.prefixes : DEFAULT_SCAN_PREFIXES;
     includeUnknownScanDevices = Boolean(options.includeUnknown);
-    rawScanDiagnostic = options.diagnosticLogAllDevices || options.diagnosticBoundMac
-      ? {
-          boundMac: options.diagnosticBoundMac || '',
-          sessionId: options.diagnosticSessionId || `scan-${Date.now()}`,
-          startedAt: Date.now()
-        }
-      : null;
+    rawScanDiagnostic =
+      options.diagnosticLogAllDevices || options.diagnosticBoundMac
+        ? {
+            boundMac: options.diagnosticBoundMac || '',
+            sessionId: options.diagnosticSessionId || `scan-${Date.now()}`,
+            startedAt: Date.now()
+          }
+        : null;
     rawScanDiagnosticLoggedKeys.clear();
     rawScanDiagnosticDevices.clear();
     if (rawScanDiagnostic) {
@@ -1170,21 +1219,69 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     }
     if (!options.preserveDevices) state.devices.value = [];
     state.isScanning.value = true;
-    offBluetoothDeviceFound(handleDeviceFound);
-    if (scanPollTimer) {
-      clearInterval(scanPollTimer);
-      scanPollTimer = null;
+    lastScanBatchSignature = '';
+    // 无绑定扫描在日志里原本完全没有起点标记（`scan-device-raw-start` 只对 bound 扫描开），
+    // 有了这条才能把「页面已经请求扫描」和「适配器真的开始扫描」区分开。
+    appendRingDiagnosticLog('L19 BLE', 'legacy-scan-start', {
+      prefixes: scanPrefixes,
+      includeUnknown: includeUnknownScanDevices,
+      allowDuplicatesKey: options.allowDuplicatesKey ?? true,
+      preserveDevices: Boolean(options.preserveDevices),
+      timeoutMs: options.timeoutMs ?? 20000
+    });
+    // 这一段必须兜住：它在 Promise 之外，任何同步异常都会直接掐死整次扫描，
+    // 而症状是「无报错、无 toast、列表为空、日志只剩 legacy-scan-start」——
+    // 这个项目 App 端最难查的一类故障就是这么来的。兜住后至少留下 errMsg。
+    try {
+      offBluetoothDeviceFound(handleDeviceFound);
+      if (scanPollTimer) {
+        clearInterval(scanPollTimer);
+        scanPollTimer = null;
+      }
+
+      scanTimeout = setTimeout(() => {
+        void stopScan();
+      }, options.timeoutMs ?? 20000);
+    } catch (error) {
+      // 扫描没能起步，标志位必须复位，否则后续每次点击都会被开头那句
+      // `if (state.isScanning.value) return` 静默吃掉。
+      state.isScanning.value = false;
+      appendRingDiagnosticLog('L19 BLE', 'legacy-scan-preflight-failed', {
+        ...describeScanError(error)
+      });
+      return Promise.reject(error);
     }
 
-    scanTimeout = setTimeout(() => {
-      void stopScan();
-    }, options.timeoutMs ?? 20000);
-
     return new Promise<unknown>((resolve, reject) => {
+      // 这条紧挨着平台调用：有它才能区分「调用真的发出去了」和「调用之前就抛了」——
+      // 这两种故障在日志里原本都只剩一片空白。
+      appendRingDiagnosticLog('L19 BLE', 'legacy-scan-armed', {
+        allowDuplicatesKey: options.allowDuplicatesKey ?? true
+      });
+      scanStartCallbackState = 'none';
+      if (scanCallbackWatchdog) clearTimeout(scanCallbackWatchdog);
+      scanCallbackWatchdog = setTimeout(() => {
+        scanCallbackWatchdog = null;
+        appendRingDiagnosticLog('L19 BLE', 'legacy-scan-discovery-no-callback', {
+          waitedMs: SCAN_CALLBACK_WATCHDOG_MS
+        });
+      }, SCAN_CALLBACK_WATCHDOG_MS);
+      // 必须先注册再调用（rw/adapter 就是这么做的）。Android 上 startBluetoothDevicesDiscovery
+      // 存在「不报错、success/fail 一个都不回」的静默失败，此时 native 扫描其实已经在跑；
+      // 原来把注册放在 success 里，这种情形下 JS 永远收不到设备广播 ——
+      // 表现就是「列表为空、日志空白、也没有任何报错」。
+      uni.onBluetoothDeviceFound(handleDeviceFound);
       uni.startBluetoothDevicesDiscovery({
         allowDuplicatesKey: options.allowDuplicatesKey ?? true,
         success: (result) => {
-          uni.onBluetoothDeviceFound(handleDeviceFound);
+          scanStartCallbackState = 'success';
+          if (scanCallbackWatchdog) {
+            clearTimeout(scanCallbackWatchdog);
+            scanCallbackWatchdog = null;
+          }
+          appendRingDiagnosticLog('L19 BLE', 'legacy-scan-discovery-success', {
+            allowDuplicatesKey: options.allowDuplicatesKey ?? true
+          });
           scanPollTimer = setInterval(() => {
             uni.getBluetoothDevices({
               success: (devicesResult) => mergeScannedDevices(devicesResult.devices, 'getBluetoothDevices'),
@@ -1194,6 +1291,13 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
           resolve(result);
         },
         fail: (error) => {
+          scanStartCallbackState = 'fail';
+          if (scanCallbackWatchdog) {
+            clearTimeout(scanCallbackWatchdog);
+            scanCallbackWatchdog = null;
+          }
+          // 这条以前也只 reject、不记日志，于是「扫描起不来」在日志里完全不可见。
+          appendRingDiagnosticLog('L19 BLE', 'legacy-scan-discovery-fail', describeScanError(error));
           state.isScanning.value = false;
           finishRawScanDiagnostic('start-fail');
           offBluetoothDeviceFound(handleDeviceFound);
@@ -1262,10 +1366,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     // HarmonyOS/OpenHarmony reports `ohos`, not `android`, even though its
     // WeChat BLE bridge supports setBLEMTU. Restricting this to exactly
     // `android` left Huawei phones at the default MTU 23.
-    const shouldNegotiate = platform === 'android'
-      || platform === 'ohos'
-      || system.includes('android')
-      || system.includes('harmony');
+    const shouldNegotiate = platform === 'android' || platform === 'ohos' || system.includes('android') || system.includes('harmony');
     if (!shouldNegotiate) {
       appendRingDiagnosticLog('L19 BLE', 'legacy-mtu-negotiation-skipped', {
         deviceId,
@@ -1298,18 +1399,14 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
       // Older WeChat bases may support setting MTU without exposing getBLEMTU.
       // In that case a successful set request is the strongest available proof.
-      const verified = actual.supported
-        ? actual.ok && Number(actual.mtu) >= LEGACY_HISTORY_MINIMUM_MTU
-        : request.ok;
+      const verified = actual.supported ? actual.ok && Number(actual.mtu) >= LEGACY_HISTORY_MINIMUM_MTU : request.ok;
       if (verified) break;
       if (attempt < LEGACY_MTU_MAX_ATTEMPTS) await sleep(250);
     }
 
     const lastAttempt = attempts[attempts.length - 1];
     const actualMtu = lastAttempt?.actual.mtu ?? before.mtu;
-    const verified = lastAttempt?.actual.supported
-      ? lastAttempt.actual.ok && Number(actualMtu) >= LEGACY_HISTORY_MINIMUM_MTU
-      : Boolean(lastAttempt?.request.ok);
+    const verified = lastAttempt?.actual.supported ? lastAttempt.actual.ok && Number(actualMtu) >= LEGACY_HISTORY_MINIMUM_MTU : Boolean(lastAttempt?.request.ok);
     const result = {
       verified,
       deviceId,
@@ -1323,11 +1420,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       elapsedMs: Date.now() - startedAt
     };
 
-    appendRingDiagnosticLog(
-      'L19 BLE',
-      verified ? 'legacy-mtu-negotiation-verified' : 'legacy-mtu-negotiation-insufficient',
-      result
-    );
+    appendRingDiagnosticLog('L19 BLE', verified ? 'legacy-mtu-negotiation-verified' : 'legacy-mtu-negotiation-insufficient', result);
     return result;
   };
 
@@ -1376,10 +1469,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     } catch (error) {
       const identitySource = sourceDevice as (RingDeviceInfo & { uniMacId?: string; mac?: string }) | undefined;
       const stableDeviceIdentity = normalizeBleIdentifier(identitySource?.uniMacId || identitySource?.mac);
-      const hasMappedTransportIdentity = Boolean(
-        stableDeviceIdentity
-        && stableDeviceIdentity !== normalizeBleIdentifier(deviceId)
-      );
+      const hasMappedTransportIdentity = Boolean(stableDeviceIdentity && stableDeviceIdentity !== normalizeBleIdentifier(deviceId));
       if (hasMappedTransportIdentity && isBleConnectOperateTimeout(error)) {
         appendRingDiagnosticLog('L19 BLE', 'legacy-mapped-device-connect-timeout-retry', {
           deviceId,
@@ -1437,9 +1527,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       normalMac?: string;
       advertis?: { macInfo?: string };
     };
-    return normalizeBleIdentifier(
-      source.uniMacId || source.mac || source.deviceMac || source.normalMac || source.advertis?.macInfo || deviceId
-    );
+    return normalizeBleIdentifier(source.uniMacId || source.mac || source.deviceMac || source.normalMac || source.advertis?.macInfo || deviceId);
   };
 
   const readGattCache = (): Record<string, string | LegacyGattCacheEntry> => {
@@ -1509,11 +1597,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     legacyCommandWriteType = cached.writeType === 'write' ? 'write' : 'writeNoResponse';
     setupDataListener(deviceInfo);
     try {
-      await withTimeout(
-        enableNotify(deviceId, cached.serviceId, cached.dataCharId),
-        3000,
-        'Enable cached BLE notify timeout.'
-      );
+      await withTimeout(enableNotify(deviceId, cached.serviceId, cached.dataCharId), 3000, 'Enable cached BLE notify timeout.');
       appendRingDiagnosticLog('L19 BLE', 'legacy-gatt-cache-hit', {
         deviceId,
         cacheKey,
@@ -1580,19 +1664,14 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       // names. Using only the latter made Harmony select ordinary `write` even
       // though the ring advertises write-without-response, which then fails
       // locally with errCode 10007 (`property not support`).
-      const supportsWriteNoResponse = Boolean(
-        characteristic.properties?.writeNoResponse
-        || characteristic.properties?.writeWithoutResponse
-      );
+      const supportsWriteNoResponse = Boolean(characteristic.properties?.writeNoResponse || characteristic.properties?.writeWithoutResponse);
       if (!cmdCharId && (characteristic.properties?.write || supportsWriteNoResponse)) {
         cmdCharId = characteristic.uuid;
         // The pre-SDK implementation did not force a write type, and WeChat
         // selected write-without-response for this L19 command channel. Some
         // phones expose both flags but reject an explicit ordinary `write`
         // with errCode 10007, so prefer the mode proven to work on-device.
-        discoveredCommandWriteType = supportsWriteNoResponse
-          ? 'writeNoResponse'
-          : 'write';
+        discoveredCommandWriteType = supportsWriteNoResponse ? 'writeNoResponse' : 'write';
         discoveredCommandProperties = { ...(characteristic.properties || {}) };
       }
 
@@ -1626,11 +1705,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       properties: discoveredCommandProperties
     });
     setupDataListener(deviceInfo);
-    await withTimeout(
-      enableNotify(deviceId, serviceId, dataCharId),
-      5000,
-      'Enable BLE notify timeout.'
-    );
+    await withTimeout(enableNotify(deviceId, serviceId, dataCharId), 5000, 'Enable BLE notify timeout.');
     cacheGattProfile(deviceId, sourceDevice, {
       serviceId,
       cmdCharId,
@@ -1739,9 +1814,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     const queueGeneration = legacyCommandWriteQueueGeneration;
     const queuedAt = Date.now();
     const frame = summarizeLegacyBleFrame(bytes, label);
-    const useL19PlatformDefaultHistoryWrite = Boolean(
-      isL19HistoryDevice() && bytes.length >= 3 && bytes[2] === 0x36
-    );
+    const useL19PlatformDefaultHistoryWrite = Boolean(isL19HistoryDevice() && bytes.length >= 3 && bytes[2] === 0x36);
     const run = legacyCommandWriteQueue
       .catch(() => undefined)
       .then(async () => {
@@ -1777,10 +1850,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
           ...frame
         });
 
-        const writeValue =
-          bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-            ? bytes.buffer
-            : bytes.slice().buffer;
+        const writeValue = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer;
         return new Promise<unknown>((resolve, reject) => {
           let settled = false;
           const writeTimeout = setTimeout(() => {
@@ -1949,10 +2019,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     const frameId = createLegacyFrameId();
     const timestampMs = Date.now();
     const timezone = 8;
-    const payload = concatBytes(
-      numberToUint64LE(timestampMs),
-      new Uint8Array([timezone, getLegacyPlatformType()])
-    );
+    const payload = concatBytes(numberToUint64LE(timestampMs), new Uint8Array([timezone, getLegacyPlatformType()]));
     const bytes = buildLegacyCommandBytes(0xa0, 0x01, {
       frameType: 0x00,
       frameId,
@@ -1967,13 +2034,13 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       timestampMs,
       timezone,
       platform: getLegacyPlatformType(),
-      payloadHex: Array.from(payload).map((value) => value.toString(16).padStart(2, '0')).join('').toUpperCase(),
+      payloadHex: Array.from(payload)
+        .map((value) => value.toString(16).padStart(2, '0'))
+        .join('')
+        .toUpperCase(),
       timeoutMs
     });
-    const ackPromise = waitForRawFrame(
-      (value) => value.length >= 4 && value[1] === frameId && value[2] === 0xa0 && value[3] === 0x01,
-      timeoutMs
-    );
+    const ackPromise = waitForRawFrame((value) => value.length >= 4 && value[1] === frameId && value[2] === 0xa0 && value[3] === 0x01, timeoutMs);
     try {
       const writeResult = await sendBytes(bytes, 'app-connect:A0:01');
       appendRingDiagnosticLog('L19 BLE', 'legacy-app-connect-write-result', {
@@ -1992,7 +2059,10 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         deviceId: runtime?.getDeviceInfo().deviceId,
         frameId,
         elapsedMs: Date.now() - startedAt,
-        ackHex: Array.from(ack).map((value) => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+        ackHex: Array.from(ack)
+          .map((value) => value.toString(16).padStart(2, '0'))
+          .join('')
+          .toUpperCase()
       });
       return { writeResult, ack, frameId };
     } catch (error) {
@@ -2092,9 +2162,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     // deviceId may be regenerated by WeChat on iOS/Harmony.  The listener
     // belongs to the physical ring, so use the advertised/backend MAC as the
     // stable identity and keep the current transport deviceId mutable.
-    const physicalIdentity = `${
-      identityDevice.uniMacId || identityDevice.mac || identityDevice.advertis?.macInfo || deviceId
-    }`.toLowerCase();
+    const physicalIdentity = `${identityDevice.uniMacId || identityDevice.mac || identityDevice.advertis?.macInfo || deviceId}`.toLowerCase();
     const identityKey = `${physicalIdentity}|${serviceId}|${dataCharId}`.toLowerCase();
     if (dataListenerHandler && dataListenerIdentityKey === identityKey) {
       dataListenerDeviceId = deviceId;
@@ -2121,9 +2189,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     }
 
     if (dataListenerHandler) {
-      const replacingPhysicalDevice = Boolean(
-        dataListenerStableDeviceId && dataListenerStableDeviceId !== physicalIdentity
-      );
+      const replacingPhysicalDevice = Boolean(dataListenerStableDeviceId && dataListenerStableDeviceId !== physicalIdentity);
       // A device switch can update runtime.getDeviceInfo() before the previous
       // history waiter has settled. Looking up the session with the new device
       // identity then misses the old lease, allowing the old waiter to consume
@@ -2182,14 +2248,12 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       const stableDeviceId = normalizeBleIdentifier(dataListenerStableDeviceId);
       const deviceMatches = resultDeviceId === transportDeviceId || resultDeviceId === stableDeviceId;
       const serviceMatches = normalizeBleIdentifier(result.serviceId) === normalizeBleIdentifier(dataListenerServiceId);
-      const characteristicMatches = normalizeBleIdentifier(result.characteristicId)
-        === normalizeBleIdentifier(dataListenerDataCharId);
+      const characteristicMatches = normalizeBleIdentifier(result.characteristicId) === normalizeBleIdentifier(dataListenerDataCharId);
       if (!deviceMatches || !serviceMatches || !characteristicMatches) return;
-      if (!dataListenerNormalizedIdentityLogged && (
-        result.deviceId !== dataListenerDeviceId
-        || result.serviceId !== dataListenerServiceId
-        || result.characteristicId !== dataListenerDataCharId
-      )) {
+      if (
+        !dataListenerNormalizedIdentityLogged &&
+        (result.deviceId !== dataListenerDeviceId || result.serviceId !== dataListenerServiceId || result.characteristicId !== dataListenerDataCharId)
+      ) {
         dataListenerNormalizedIdentityLogged = true;
         appendRingDiagnosticLog('L19 BLE', 'legacy-notify-identity-normalized', {
           callbackDeviceId: result.deviceId,
@@ -2213,15 +2277,18 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       const notifyFrame = summarizeLegacyBleFrame(notifyBytes);
       const isHistoryWireNotify = Boolean(historyWireTrace);
       if (isHistoryWireNotify) {
-        renewLegacyBleCommandSessionActivity({
-          ...runtime.getDeviceInfo(),
-          deviceId: dataListenerDeviceId,
-          mac: dataListenerStableDeviceId,
-          uniMacId: dataListenerStableDeviceId
-        }, {
-          source: 'notify',
-          byteLength: notifyBytes.byteLength
-        });
+        renewLegacyBleCommandSessionActivity(
+          {
+            ...runtime.getDeviceInfo(),
+            deviceId: dataListenerDeviceId,
+            mac: dataListenerStableDeviceId,
+            uniMacId: dataListenerStableDeviceId
+          },
+          {
+            source: 'notify',
+            byteLength: notifyBytes.byteLength
+          }
+        );
       }
       if (!isHistoryWireNotify) {
         appendRingDiagnosticLog('L19 BLE', 'legacy-notify-received', {
@@ -2245,7 +2312,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
             parsedType: parsed.type,
             status: parsedItem.status,
             recordCount: Array.isArray(parsedItem.records) ? parsedItem.records.length : undefined,
-            batteryLevel: parsed.type === 'battery' ? parsedItem.batteryLevel ?? parsedItem.battery : undefined,
+            batteryLevel: parsed.type === 'battery' ? (parsedItem.batteryLevel ?? parsedItem.battery) : undefined,
             batteryDisplay: parsed.type === 'battery' ? parsedItem.value : undefined,
             batteryStatus: parsed.type === 'battery' ? parsedItem.status : undefined,
             batteryRawValue: parsed.type === 'battery' ? parsedItem.batteryRawValue : undefined
@@ -2259,8 +2326,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         };
 
         for (const waiter of [...parsedWaiters]) {
-          const hasMatchingActivity = waiter.resetTimeoutOnData
-            && (waiter.activityPredicate?.(parsedWithDevice) ?? true);
+          const hasMatchingActivity = waiter.resetTimeoutOnData && (waiter.activityPredicate?.(parsedWithDevice) ?? true);
           if (hasMatchingActivity) {
             waiter.resetTimer(waiter.activityTimeoutMs);
           }
@@ -2346,27 +2412,27 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-clear-completed', metadata);
   };
 
-  onLegacyBleCommandSessionIdle(() => {
-    if (!pendingDataListenerClear) return;
-    const pending = pendingDataListenerClear;
-    pendingDataListenerClear = null;
-    if (
-      pending.listenerGeneration !== dataListenerGeneration ||
-      pending.listenerIdentityKey !== dataListenerIdentityKey
-    ) {
-      appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-deferred-clear-skipped-stale', {
-        reason: pending.reason,
-        caller: pending.caller,
-        deviceId: pending.deviceId,
-        pendingGeneration: pending.listenerGeneration,
-        currentGeneration: dataListenerGeneration,
-        pendingIdentityKey: pending.listenerIdentityKey,
-        currentIdentityKey: dataListenerIdentityKey
-      });
-      return;
-    }
-    clearDataListener({ ...pending, reason: pending.reason || 'deferred-session-idle', caller: pending.caller || 'session-idle' });
-  }, () => runtime?.getDeviceInfo?.() || dataListenerDeviceId);
+  onLegacyBleCommandSessionIdle(
+    () => {
+      if (!pendingDataListenerClear) return;
+      const pending = pendingDataListenerClear;
+      pendingDataListenerClear = null;
+      if (pending.listenerGeneration !== dataListenerGeneration || pending.listenerIdentityKey !== dataListenerIdentityKey) {
+        appendRingDiagnosticLog('L19 BLE', 'legacy-data-listener-deferred-clear-skipped-stale', {
+          reason: pending.reason,
+          caller: pending.caller,
+          deviceId: pending.deviceId,
+          pendingGeneration: pending.listenerGeneration,
+          currentGeneration: dataListenerGeneration,
+          pendingIdentityKey: pending.listenerIdentityKey,
+          currentIdentityKey: dataListenerIdentityKey
+        });
+        return;
+      }
+      clearDataListener({ ...pending, reason: pending.reason || 'deferred-session-idle', caller: pending.caller || 'session-idle' });
+    },
+    () => runtime?.getDeviceInfo?.() || dataListenerDeviceId
+  );
 
   return {
     protocol: 'legacy',
@@ -2396,14 +2462,8 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     setupDataListener,
     clearDataListener,
     sendBatteryCommand: () => sendNamedCommand(LegacyRingCommand.Battery),
-    sendActiveMeasureCommand: () => sendNamedCommand(
-      LegacyRingCommand.ActiveMeasure,
-      buildLegacyHeartRateMeasurementPayload()
-    ),
-    sendOxyGenCommand: () => sendNamedCommand(
-      LegacyRingCommand.BloodOxygen,
-      buildLegacyBloodOxygenMeasurementPayload()
-    ),
+    sendActiveMeasureCommand: () => sendNamedCommand(LegacyRingCommand.ActiveMeasure, buildLegacyHeartRateMeasurementPayload()),
+    sendOxyGenCommand: () => sendNamedCommand(LegacyRingCommand.BloodOxygen, buildLegacyBloodOxygenMeasurementPayload()),
     sendBodyTemperatureCommand: () => sendNamedCommand(LegacyRingCommand.BodyTemperature, 0x00),
     sendFirmwareVersion: () => sendNamedCommand(LegacyRingCommand.HardwareVersion),
     sendSoftwareVersion: () => sendNamedCommand(LegacyRingCommand.SoftwareVersion),
