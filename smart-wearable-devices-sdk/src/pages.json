@@ -447,6 +447,11 @@
   },
   "tabBar": {
     "custom": false,
+    // #ifdef APP-PLUS
+    // App 端底部 tabBar 高度，默认 50px 偏挤；仅 App 生效（H5 与小程序保持原样）。
+    // 原生 tabBar 的页面高度会自动扣除该值，页面无需额外改 padding。
+    "height": "64px",
+    // #endif
     "color": "#A0A0A0",
     "selectedColor": "#2E70FC",
     "backgroundColor": "#F1F3F6",
