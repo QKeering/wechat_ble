@@ -105,7 +105,8 @@ const uploadFilePromise = (url) => {
         resolve(res);
       })
       .catch((error) => {
-        reject(error.result);
+        // uploadImage 失败时抛出 Error（含后端 msg），保证 toast 能给出可读原因。
+        reject(error instanceof Error ? error : new Error(error?.msg || error?.errMsg || '图片上传失败'));
       })
       .finally(() => {
         uni.hideLoading();
@@ -118,13 +119,16 @@ const uploadAvatar = async (avatarUrl) => {
   avatarLoadFailed.value = false;
   avatarUploading.value = true;
   try {
+    // uploadImage 已从响应信封里取出地址字符串，这里始终是 string。
     const uploaded = await uploadFilePromise(avatarUrl);
     userInfo.value.avatar = uploaded;
-    if (uploaded) {
-      await userStore.refreshUserInfo({ avatar: uploaded });
-    }
+    await userStore.refreshUserInfo({ avatar: uploaded });
+    uni.showToast({ title: '头像已更新', icon: 'success' });
   } catch (error) {
-    uni.showToast({ title: '头像上传失败，请重试', icon: 'none' });
+    uni.showToast({
+      title: (error instanceof Error && error.message) || '头像上传失败，请重试',
+      icon: 'none'
+    });
   } finally {
     avatarUploading.value = false;
   }
@@ -144,7 +148,17 @@ const onChooseAvatarTap = () => {
     sourceType: ['album', 'camera'],
     success: (res) => {
       const path = (res.tempFilePaths && res.tempFilePaths[0]) || (res.tempFiles && res.tempFiles[0] && res.tempFiles[0].path);
+      if (!path) {
+        uni.showToast({ title: '未获取到图片，请重试', icon: 'none' });
+        return;
+      }
       uploadAvatar(path);
+    },
+    fail: (error) => {
+      // 权限被拒时 uni.chooseImage 只走 fail，不加这个分支会表现为「点了没反应」。
+      const message = String(error?.errMsg || '');
+      const denied = /deny|denied|auth|permission/i.test(message);
+      uni.showToast({ title: denied ? '请先允许访问相册和相机权限' : '打开相册失败，请重试', icon: 'none' });
     }
   });
   // #endif

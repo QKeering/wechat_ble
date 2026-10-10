@@ -76,6 +76,26 @@ const {
   waitForRwCompatHistoryIdle
 } = useRingBLE();
 const userStore = useUserStore();
+
+const MINE_DEFAULT_AVATAR = '/static/images/mine/avatar.png';
+// 头像地址可能为空或失效（历史上传遗留、后端返回空），<image> 加载失败时回退默认头像，
+// 否则「我的」页顶部会是一块空白（profile 页已有同类兜底）。
+const mineAvatarLoadFailed = ref(false);
+const mineAvatarSrc = computed(() => {
+  if (mineAvatarLoadFailed.value) return MINE_DEFAULT_AVATAR;
+  return getFullUrl(userStore.userInfo.avatar) || MINE_DEFAULT_AVATAR;
+});
+const handleMineAvatarError = () => {
+  if (mineAvatarSrc.value !== MINE_DEFAULT_AVATAR) {
+    mineAvatarLoadFailed.value = true;
+  }
+};
+watch(
+  () => userStore.userInfo.avatar,
+  () => {
+    mineAvatarLoadFailed.value = false;
+  }
+);
 const ringStore = useRingStore();
 const unifiedBattery = useUnifiedBatteryDisplay(userStore, ringStore);
 const controller = useRingBusinessController();
@@ -4360,7 +4380,7 @@ const handleMineRwL19Acceptance = async () => {
       <view class="pl-30 pr-30">
         <view class="user-section mb-50">
           <view v-if="userStore.userInfo.id" @tap.stop="navigateMinePage('/pagesA/mines/profile')" class="user-card user-card--logged flex ai-center">
-            <image class="user-avatar-image" :src="getFullUrl(userStore.userInfo.avatar) || '/static/images/mine/avatar.png' " mode="aspectFill"></image>
+            <image class="user-avatar-image" :src="mineAvatarSrc" mode="aspectFill" @error="handleMineAvatarError"></image>
             <view class="user-info flex-1 flex ai-center jc-between ml-30">
               <view class="user-nickname fs-48">{{ userStore.userInfo.nickName }}</view>
               <view class="mine-arrow"></view>
