@@ -8,27 +8,35 @@
         disable-scroll
         :style="{ width: layoutSizePx + 'px', height: layoutSizePx + 'px' }"
       />
-      <cover-view class="cycle-overlay" :class="cardPhaseClass">
-        <cover-view class="cycle-center">
-          <cover-view class="cycle-content">
+      <!--
+        这里原本是 cover-view（还嵌了 4 层）。cover-view 是给小程序原生组件做层级覆盖的，
+        在 app-vue 页面上用不了：官方明确「App 端 vue 页面 cover-view 不支持嵌套其它组件，
+        包括再次嵌套 cover-view」，而且它只能覆盖 video/map，样式也只认基本定位/布局/文本
+        （box-shadow、CSS 变量全丢）。症状就是中心文字和 ✎ 按钮样式错乱、点不动。
+        普通 view 才对：app-vue 的 canvas 是 webview 的 canvas，不是原生组件，靠 CSS 层叠
+        就能盖住；微信小程序 canvas type="2d" 也已同层渲染（官方建议用 view 替代 cover-view）。
+      -->
+      <view class="cycle-overlay" :class="cardPhaseClass">
+        <view class="cycle-center">
+          <view class="cycle-content">
             <template v-if="cycleDay > 0">
-              <cover-view class="cycle-phase">{{ phaseLabel }}</cover-view>
-              <cover-view class="cycle-day">第{{ currentDayNow }}天</cover-view>
+              <view class="cycle-phase">{{ phaseLabel }}</view>
+              <view class="cycle-day">第{{ currentDayNow }}天</view>
             </template>
             <template v-else>
-              <cover-view class="cycle-phase">暂无数据</cover-view>
+              <view class="cycle-phase">暂无数据</view>
             </template>
-          </cover-view>
-          <cover-view
+          </view>
+          <view
             v-if="cycleDay > 0"
             class="cycle-edit"
             hover-class="cycle-edit--hover"
             @tap.stop="onEdit"
           >
-            <cover-view class="cycle-edit-icon">✎</cover-view>
-          </cover-view>
-        </cover-view>
-      </cover-view>
+            <view class="cycle-edit-icon">✎</view>
+          </view>
+        </view>
+      </view>
     </view>
 
     <view class="cycle-legend">
@@ -47,11 +55,13 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, getCurrentInstance } from 'vue';
+import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 
 const GAP = 4;
 const CAP = 4;
 const RING_R = 110;
 const BASE_WRAPPER = 320;
+const CANVAS_INIT_MAX_RETRIES = 5;
 
 type PhaseKey = 'menstrual' | 'follicular' | 'ovulation' | 'luteal';
 
@@ -122,6 +132,7 @@ function pathCapPx(): number {
 
 const canvasCtx = ref<CanvasRenderingContext2D | null>(null);
 const canvasNode = ref<any>(null);
+let hasLoggedCanvasReady = false;
 
 function normalizeCycleDay(value: unknown): number {
   const numeric = Number(value);
@@ -337,7 +348,7 @@ watch(
   { deep: true }
 );
 
-function initCanvas(retries = 5): Promise<void> {
+function initCanvas(retries = CANVAS_INIT_MAX_RETRIES): Promise<void> {
   return new Promise((resolve) => {
     const L = layoutSizePx.value;
     const q = uni.createSelectorQuery().in(instance?.proxy as any);
@@ -349,6 +360,16 @@ function initCanvas(retries = 5): Promise<void> {
           if (retries > 0) {
             setTimeout(() => initCanvas(retries - 1).then(resolve), 80);
           } else {
+            // 拿不到 node 就等于圆环一根线都画不出来（drawAll 在 canvasCtx 为 null 时直接
+            // return），而这里原来完全静默 —— 症状是「图表不见了但没有任何报错」。记一条，
+            // 并用 couldGetRect 区分「选择器查不到元素」和「查到了但没有 node 实例」：
+            // 后者说明这个平台的 canvas 要退回 uni.createCanvasContext。
+            appendRingDiagnosticLog('PERIOD PAGE', 'wheel-canvas-node-missing', {
+              maxRetries: CANVAS_INIT_MAX_RETRIES,
+              couldGetRect: Boolean(res?.[0]?.width || res?.[0]?.height),
+              layoutSizePx: layoutSizePx.value,
+              canvasId: mainCanvasId
+            });
             canvasCtx.value = null;
             resolve();
           }
@@ -356,6 +377,7 @@ function initCanvas(retries = 5): Promise<void> {
         }
         const ctx = canvas.getContext('2d');
         if (!ctx) {
+          appendRingDiagnosticLog('PERIOD PAGE', 'wheel-canvas-context-missing', { canvasId: mainCanvasId });
           resolve();
           return;
         }
@@ -365,6 +387,15 @@ function initCanvas(retries = 5): Promise<void> {
         ctx.scale(dpr, dpr);
         canvasCtx.value = ctx as CanvasRenderingContext2D;
         canvasNode.value = canvas;
+        // 只记第一次：这几行能确认 App 端的 node 取法确实走通了（`fields({node:true})` 是否
+        // 可用在各平台并不一致，仓库里的 l-echart 就为它写了 createCanvasContext 兜底）。
+        if (!hasLoggedCanvasReady) {
+          hasLoggedCanvasReady = true;
+          appendRingDiagnosticLog('PERIOD PAGE', 'wheel-canvas-ready', {
+            layoutSizePx: layoutSizePx.value,
+            dpr
+          });
+        }
         resolve();
       });
   });
