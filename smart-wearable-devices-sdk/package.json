@@ -47,6 +47,7 @@
     "audit:rw-test-release": "node scripts/audit-rw-test-release.mjs",
     "audit:rw-l19": "node scripts/audit-rw-l19-parity.mjs",
     "verify:ring-ble": "node scripts/verify-ring-ble-parser.mjs",
+    "verify:legacy-scan": "node scripts/verify-legacy-scan-coalescing.mjs",
     "verify:rw-backend-health": "node scripts/verify-rw-backend-health.mjs",
     "verify:mp-weixin-artifact": "node scripts/verify-mp-weixin-artifact.mjs",
     "verify:rw-test-release": "npm run type-check && npm run build:mp-weixin && npm run verify:mp-weixin-artifact && npm run check:mp-weixin-size && npm run audit:rw-test-release",

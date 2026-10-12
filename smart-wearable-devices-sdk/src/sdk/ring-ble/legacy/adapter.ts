@@ -510,9 +510,66 @@ const describeScanError = (error: unknown): Record<string, unknown> => {
  */
 const SCAN_CALLBACK_WATCHDOG_MS = 5000;
 
+/** 扫描期间整表轮询的间隔。 */
+const SCAN_POLL_INTERVAL_MS = 1500;
+
+/**
+ * 整表轮询（`getBluetoothDevices`）是给「Harmony/iOS 不回写 `onBluetoothDeviceFound`」兜底的。
+ * 代价是每轮把原生累计的设备列表整份重合并一遍 —— 实测 267 台时 JS 侧约 200ms（真机更慢），
+ * 而且会把「上一轮扫描留在原生缓存里的历史设备」一起灌进列表（实测能到 267 台）。
+ *
+ * Android 上事件上报是活的（日志里 `advertisData` 齐全），这活就是纯重复劳动：每 1.5s 把
+ * 200+ 行对象换一遍，页面跟着整列表重渲染，点击（连接/取消/导航栏返回）就被挤在同一个
+ * 逻辑层队列里。所以「最近收到过设备广播」的时间窗内直接跳过整表轮询。
+ *
+ * 扫描刚开始、一条事件都还没收到时窗口不生效，轮询照常跑 —— 兜底平台的时序与改动前一致。
+ */
+const SCAN_POLL_EVENT_FLOW_WINDOW_MS = 4000;
+
+/**
+ * 轮询定时器迟到的上报阈值。健康的逻辑层里 1500ms 的 `setInterval` 偏差只有几十毫秒；
+ * 明显迟到就说明逻辑层线程被占住了 —— 点击和它排同一个队列，所以这条埋点是
+ * 「点了要等一会才响应」的直接度量：偏差只有几十毫秒时，点击不可能被延迟到有感。
+ */
+const SCAN_POLL_LATE_LOG_MS = 300;
+
+/**
+ * 设备广播的合并间隔。
+ *
+ * `allowDuplicatesKey: true` 时平台把**每一包广播**都回调一次 —— 真机日志实测
+ * 568~626 条 / 1.5s（约 400 条/秒）。每条都当场整表合并的话，逻辑层（单线程）根本
+ * 排不完：同一次扫描里 1500ms 的轮询定时器**迟到 10 秒**（`legacy-scan-poll-late`
+ * 的 `lateMs: 10055`），而点击事件和它排同一个队列 —— 症状就是「点连接/取消/导航栏
+ * 返回都要等一会才响应，搜索一停就立刻响应」。
+ *
+ * 所以收到的事件先攒进 `pendingScanDevices`，按这个间隔统一合并一次。合并本身是幂等的
+ * （同一台设备重复广告只会覆盖同一行），把 400 次/秒压到 4 次/秒不改变最终列表，
+ * 只是让列表最多晚 250ms 出现 —— 肉眼无感，逻辑层却空出来了。
+ */
+const SCAN_EVENT_MERGE_INTERVAL_MS = 250;
+
+/**
+ * 业务扫描「名字认得出是戒指」的前缀，与 rw adapter 的 `isAllowedBusinessScanDevice` 同源。
+ * 比 `DEFAULT_SCAN_PREFIXES` 多两个 qkeer-v2 的名字：v2 正常由 `registerRingProtocolDetector`
+ * 注册的检测器按协议认出，但检测器没注册时（只跑 legacy adapter 的场景）名字前缀是最后
+ * 一道识别，少了这两个就会把 v2 戒指当杂项设备挡掉。
+ */
+const BUSINESS_SCAN_EXTRA_NAME_PREFIXES = ['MUSLEEP_RING', 'QKV2'];
+
 export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRuntime): LegacyRingAdapter => {
   let scanTimeout: ReturnType<typeof setTimeout> | null = null;
   let scanPollTimer: ReturnType<typeof setInterval> | null = null;
+  // 本轮扫描最近一次收到设备广播的时刻；0 表示本轮还没收到过，此时整表轮询照常跑。
+  let lastScanDeviceEventAt = 0;
+  // 相邻两次轮询之间收到的设备广播条数，以及本次轮询理论上应触发的时刻。
+  // 只用于「轮询迟到」那条埋点：迟到说明逻辑层被占住，顺带把事件流强度一起带出来。
+  let scanDeviceEventCount = 0;
+  let scanPollDueAt = 0;
+  // 两次合并之间攒下来的原始广播。键取 `deviceId`（同一台设备在原生侧 id 稳定），
+  // 后到的覆盖先到的 —— 合并只关心「这轮看到过哪些设备、最后一次的广播长什么样」，
+  // 中间那几十包重复内容没有信息量，先丢掉能省掉绝大部分合并开销。
+  let pendingScanDevices = new Map<string, any>();
+  let scanMergeTimer: ReturnType<typeof setTimeout> | null = null;
   // `startBluetoothDevicesDiscovery` 的 success/fail「一个都不回」是本项目 App 端最难查的
   // 一种故障（不报错、列表为空、日志空白）。有了这个看门狗，就能把「平台没回调」
   // 和「回调了但日志没传上去」两件事彻底分开。
@@ -1072,17 +1129,72 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     });
   };
 
+  // 一轮合并里，「已列出设备」的合并键只算一次。
+  //
+  // 原来命中前要对列表里每个 item 重算一次 `getScannedDeviceMergeKeys`，而 `getBluetoothDevices`
+  // 轮询（见 startScan）会把整份已扫描列表重新灌进来 —— 设备越多越贵。实测（256 个已列出 /
+  // 267 个重灌，桌面 Node，真机更慢）单次轮询阻塞主线程约 200ms，扫描期间每 1.5s 来一次；
+  // 这段时间里点「连接」「取消」都要排队，症状就是「点一下要等一会才响应，而搜索一停就立刻
+  // 响应」—— 轮询随扫描一起停。
+  //
+  // 轮询现在按事件流门控（见 SCAN_POLL_EVENT_FLOW_WINDOW_MS），但事件流静默的兜底平台仍会跑，
+  // 这里该省的还是要省。
+  //
+  // 换成「合并键 -> 下标最小的持有者」之后，一轮合并从 O(N²) 降到 O(N)。语义用两点保证
+  // 不变：candidate 必然 `<=` 原来 findIndex 的结果，且 candidate 本身已校验确实与
+  // matchedKeys 相交，两者只能相等；万一表在本轮里失真（前面的合并让某项丢了某个键，
+  // 极少见），退回原来的线性查找，结果与改动前完全一致。
+  const buildScanMergeKeyIndex = (items: RingDeviceInfo[]) => {
+    const index = new Map<string, number>();
+    items.forEach((item, at) => {
+      getScannedDeviceMergeKeys(item).forEach((key) => {
+        if (!index.has(key)) index.set(key, at);
+      });
+    });
+    return index;
+  };
+
+  const findScanMergeCandidate = (mergeKeyIndex: Map<string, number>, matchedKeys: string[]) => {
+    let found = -1;
+    matchedKeys.forEach((key) => {
+      const at = mergeKeyIndex.get(key);
+      if (at === undefined) return;
+      if (found < 0 || at < found) found = at;
+    });
+    return found;
+  };
+
+  // 业务扫描（`includeUnknown: true`）要保留的是「协议已识别成 rw / qkeer-v2 的设备」和
+  // 「名字命中 legacy 戒指前缀的设备」，**不是「附近所有蓝牙设备」** —— 后者是 rw adapter
+  // 的 `isAllowedBusinessScanDevice` 早就否掉的语义，legacy 这边却写成了
+  // 「`includeUnknown` 为真就一律放行」，于是商场/办公室里上百台无关设备（实测日志里
+  // `EDIFIER BLE` / `LAPTOP-BQ7R2O3M` / 随机 base64 名字）全被灌进 `state.devices`，
+  // 列表涨到 252 台，每一包广播都要在 252 行的表上做一遍合并 —— 这才是上面那个
+  // 「逻辑层被占住 10 秒」的直接来源。这里与 rw 侧对齐：
+  // 名字认不出是戒指、协议也认不出是 rw/v2 的设备，一律不进列表。
+  const isResolvedRingScanDevice = (device: any, name: string, protocol: string) => {
+    if (protocol === 'rw' || protocol === 'qkeer-v2') return true;
+    // 名字字段各家平台填得不一样（`name` / `localName` / `bleName`），
+    // `resolveRingProtocol` 认的那几个字段这里也要一起认，避免漏掉真戒指。
+    const names = [name, device?.bleName, device?.displayName, device?.deviceName].map((candidate) => (candidate ? `${candidate}` : ''));
+    return names.some((candidate) => isTargetDevice(candidate, scanPrefixes) || isTargetDevice(candidate, BUSINESS_SCAN_EXTRA_NAME_PREFIXES));
+  };
+
   const mergeScannedDevices = (devices: any[], source = 'unknown') => {
     if (!state.isScanning.value || !Array.isArray(devices)) return;
     appendRawScanDiagnosticLogs(devices, source);
     const platform = uni.getSystemInfoSync().platform?.toLowerCase?.() || '';
     let mergedCount = 0;
     let filteredByPrefixCount = 0;
+    const mergeKeyIndex = buildScanMergeKeyIndex(state.devices.value);
 
     devices.forEach((device: any) => {
       const name = device.name || device.localName;
       const protocol = resolveRingProtocol(device);
-      if (!includeUnknownScanDevices && protocol === 'legacy' && !isTargetDevice(name, scanPrefixes)) {
+      // `includeUnknown` 只放宽「要不要认得 rw/v2 这类跨协议候选」，并不放宽
+      // 「认不出的杂项设备也要收」—— 见 isResolvedRingScanDevice 上的注释。
+      const allowed = !includeUnknownScanDevices && protocol === 'legacy' ? isTargetDevice(name, scanPrefixes) : isResolvedRingScanDevice(device, name, protocol);
+      if (!allowed) {
         filteredByPrefixCount += 1;
         return;
       }
@@ -1110,14 +1222,18 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       };
       const matchedKeys = getScannedDeviceMergeKeys(matchedDevice);
       appendScanDeviceRecordLog(device, matchedDevice, parsedMac, getAdvertisHex(device.advertisData), matchedKeys);
-      const existingIndex = state.devices.value.findIndex((item) => {
-        const itemKeys = getScannedDeviceMergeKeys(item);
-        return itemKeys.some((key) => matchedKeys.includes(key));
-      });
+      let existingIndex = findScanMergeCandidate(mergeKeyIndex, matchedKeys);
+      if (existingIndex >= 0) {
+        const candidateKeys = getScannedDeviceMergeKeys(state.devices.value[existingIndex]);
+        if (!candidateKeys.some((key) => matchedKeys.includes(key))) {
+          // 表失真时的兜底：走原来的线性查找，结果与改动前逐字一致。
+          existingIndex = state.devices.value.findIndex((item) => getScannedDeviceMergeKeys(item).some((key) => matchedKeys.includes(key)));
+        }
+      }
 
       if (existingIndex >= 0) {
         const previous = state.devices.value[existingIndex];
-        state.devices.value.splice(existingIndex, 1, {
+        const merged: RingDeviceInfo = {
           ...previous,
           ...matchedDevice,
           displayName: matchedDevice.displayName || previous.displayName,
@@ -1125,17 +1241,62 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
           localName: matchedDevice.localName || previous.localName,
           protocol: matchedDevice.protocol === 'legacy' ? previous.protocol || matchedDevice.protocol : matchedDevice.protocol,
           uniMacId: matchedDevice.uniMacId || previous.uniMacId
+        };
+        state.devices.value.splice(existingIndex, 1, merged);
+        // 合并后可能多解析出键（例如 advertis 解出了 macInfo），补进表里；已有映射不动，
+        // 表里存的是「下标最小的持有者」。表每轮重建，不存在跨轮过期。
+        getScannedDeviceMergeKeys(merged).forEach((key) => {
+          if (!mergeKeyIndex.has(key)) mergeKeyIndex.set(key, existingIndex);
         });
         return;
       }
 
       state.devices.value.push(matchedDevice);
+      matchedKeys.forEach((key) => {
+        if (!mergeKeyIndex.has(key)) mergeKeyIndex.set(key, state.devices.value.length - 1);
+      });
     });
     reportScanBatch(source, devices.length, mergedCount, filteredByPrefixCount);
   };
 
+  const flushPendingScanDevices = () => {
+    if (scanMergeTimer) {
+      clearTimeout(scanMergeTimer);
+      scanMergeTimer = null;
+    }
+    if (pendingScanDevices.size === 0) return;
+    // 先取走再合并：合并过程里若又收到广播，会重新开一个窗口，不会丢。
+    const buffered = Array.from(pendingScanDevices.values());
+    pendingScanDevices = new Map();
+    mergeScannedDevices(buffered, 'onBluetoothDeviceFound');
+  };
+
+  const schedulePendingScanFlush = () => {
+    if (scanMergeTimer) return;
+    scanMergeTimer = setTimeout(() => {
+      scanMergeTimer = null;
+      flushPendingScanDevices();
+    }, SCAN_EVENT_MERGE_INTERVAL_MS);
+  };
+
   const handleDeviceFound = (result: any) => {
-    mergeScannedDevices(result?.devices, 'onBluetoothDeviceFound');
+    // 事件计数和「最近一次广播时刻」必须按**收到**的时间算：整表轮询靠它判断事件流还活着。
+    scanDeviceEventCount += 1;
+    lastScanDeviceEventAt = Date.now();
+    if (!state.isScanning.value) return;
+
+    const devices = Array.isArray(result?.devices) ? result.devices : [];
+    // 原始广播记录（只有绑定设备的诊断扫描才开）必须按**包**记，不能等合并：
+    // 缓冲按 deviceId 去重，只留最后一份，同一台设备在一个窗口内变过的 advertisData
+    // 会被吃掉 —— 而抓广播原文正是这类扫描存在的理由。`rawScanDiagnostic` 没开时
+    // 这个调用在第一行就返回，业务扫描不受影响。
+    appendRawScanDiagnosticLogs(devices, 'onBluetoothDeviceFound');
+    devices.forEach((device: any) => {
+      // `deviceId` 是原生侧的稳定标识；拿不到时退回名字做粗粒度去重。
+      const key = device?.deviceId ? `id:${device.deviceId}` : `nm:${device?.name || device?.localName || ''}`;
+      pendingScanDevices.set(key, device);
+    });
+    if (pendingScanDevices.size > 0) schedulePendingScanFlush();
   };
 
   const stopScan = () => {
@@ -1154,6 +1315,9 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       }
 
       offBluetoothDeviceFound(handleDeviceFound);
+      // 停扫描前先把攒下的广播合并掉：Android 上事件流是活的、整表轮询被门控跳过，
+      // 直接丢掉这个窗口就等于丢掉最后 250ms 里新出现的设备。
+      flushPendingScanDevices();
 
       if (!state.isScanning.value) {
         finishRawScanDiagnostic('already-stopped');
@@ -1220,6 +1384,14 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     if (!options.preserveDevices) state.devices.value = [];
     state.isScanning.value = true;
     lastScanBatchSignature = '';
+    lastScanDeviceEventAt = 0;
+    scanDeviceEventCount = 0;
+    // 上一轮扫描残留的缓冲不能带进新的一轮。
+    if (scanMergeTimer) {
+      clearTimeout(scanMergeTimer);
+      scanMergeTimer = null;
+    }
+    pendingScanDevices = new Map();
     // 无绑定扫描在日志里原本完全没有起点标记（`scan-device-raw-start` 只对 bound 扫描开），
     // 有了这条才能把「页面已经请求扫描」和「适配器真的开始扫描」区分开。
     appendRingDiagnosticLog('L19 BLE', 'legacy-scan-start', {
@@ -1282,12 +1454,29 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
           appendRingDiagnosticLog('L19 BLE', 'legacy-scan-discovery-success', {
             allowDuplicatesKey: options.allowDuplicatesKey ?? true
           });
+          scanPollDueAt = Date.now() + SCAN_POLL_INTERVAL_MS;
           scanPollTimer = setInterval(() => {
+            const now = Date.now();
+            // 上一次轮询到这一次之间多等了多少毫秒。定时器不会早触发，所以负数只可能是
+            // 计时器精度抖动；>= 阈值就说明这段窗口里逻辑层被占住了。
+            const lateMs = now - scanPollDueAt;
+            scanPollDueAt = now + SCAN_POLL_INTERVAL_MS;
+            if (lateMs >= SCAN_POLL_LATE_LOG_MS) {
+              appendRingDiagnosticLog('L19 BLE', 'legacy-scan-poll-late', {
+                lateMs,
+                events: scanDeviceEventCount,
+                sinceLastEventMs: lastScanDeviceEventAt ? now - lastScanDeviceEventAt : -1,
+                listed: state.devices.value.length
+              });
+            }
+            scanDeviceEventCount = 0;
+            // 事件上报是活的：整表重合并纯属重复劳动，跳过（见 SCAN_POLL_EVENT_FLOW_WINDOW_MS）。
+            if (lastScanDeviceEventAt && now - lastScanDeviceEventAt < SCAN_POLL_EVENT_FLOW_WINDOW_MS) return;
             uni.getBluetoothDevices({
               success: (devicesResult) => mergeScannedDevices(devicesResult.devices, 'getBluetoothDevices'),
               fail: () => undefined
             });
-          }, 1500);
+          }, SCAN_POLL_INTERVAL_MS);
           resolve(result);
         },
         fail: (error) => {
@@ -1309,6 +1498,11 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
             clearInterval(scanPollTimer);
             scanPollTimer = null;
           }
+          if (scanMergeTimer) {
+            clearTimeout(scanMergeTimer);
+            scanMergeTimer = null;
+          }
+          pendingScanDevices = new Map();
           reject(error);
         }
       });
