@@ -12,7 +12,9 @@
 
 
     <!-- 底部弹出层 -->
-    <uv-popup ref="popupRef" mode="bottom" @change="onChange" @tap.stop="() => {}">
+    <!-- :scroll-guard="false"：面板正文 .panel-content 是 overflow:auto 的原生滚动，
+         uv-popup 默认的防穿透守卫靠 preventDefault 实现，会把这里的滚动一起按住。 -->
+    <uv-popup ref="popupRef" mode="bottom" :scroll-guard="false" @change="onChange" @tap.stop="() => {}">
       <view class="bottom-panel" @tap.stop="() => {}">
         <!-- 关闭按钮 -->
         <view class="close-btn" @tap="closePanel">

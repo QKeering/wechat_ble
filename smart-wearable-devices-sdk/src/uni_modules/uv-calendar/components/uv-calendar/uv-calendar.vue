@@ -1,8 +1,11 @@
 <template>
+	<!-- :scroll-guard="false"：下面月份列表是 scroll-view（原生滚动），
+	     uv-popup 默认的防穿透守卫靠 preventDefault 实现，会把月份列表的滚动一起按住。 -->
 	<uv-popup
 		ref="calendarPopup"
 		mode="bottom"
 		closeable
+		:scroll-guard="false"
 		:round="round"
 		:closeOnClickOverlay="closeOnClickOverlay"
 		@change="popupChange"

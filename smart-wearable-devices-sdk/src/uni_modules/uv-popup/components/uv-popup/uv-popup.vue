@@ -33,7 +33,36 @@
 					@click="clear"
 				>
 					<uv-status-bar v-if="safeAreaInsetTop"></uv-status-bar>
+					<!--
+						App 端「在弹窗内容上滑动，弹窗后面的页面跟着一起滚」的守卫。
+
+						成因：uv-popup 原本只在 H5 锁 body 的 overflow（见 showPopup 里的 H5
+						分支），因为 App 端页面滚动跑在 webview 上、而组件的逻辑层
+						(app-service.js) 和视图层 (__uniappview.html) 是两个上下文，逻辑层根本
+						够不到页面 DOM，锁不了；内容区本身又一点 touchmove 守卫都没有 ——
+						遮罩那层有 uv-overlay 的 @touchmove.stop.prevent 顶着，唯独内容区是空的，
+						所以只有「在弹窗里滑」才会穿透。
+
+						修法是照搬遮罩那套：在内容上挂 @touchmove.stop.prevent，由视图层直接
+						preventDefault。注意这里必须用模板修饰符（编译期生成、跑在视图层），
+						不能在逻辑层 addEventListener —— 逻辑层拿到的不是页面上的真节点。
+
+						代价：preventDefault 会把整条手势的默认滚动一起取消，弹窗内部真要滚的
+						地方就再也滚不动了（uv-calendar 的月份 scroll-view、DetailInfo 的
+						.panel-content 都是靠原生滚动的），所以这个守卫默认开、可按弹窗关闭，
+						见 props 里的 scrollGuard。
+					-->
+					<!-- #ifdef APP-PLUS -->
+					<view v-if="scrollGuard" class="uv-popup__guard" @touchmove.stop.prevent>
+						<slot />
+					</view>
+					<view v-else>
+						<slot />
+					</view>
+					<!-- #endif -->
+					<!-- #ifndef APP-PLUS -->
 					<slot />
+					<!-- #endif -->
 					<uv-safe-bottom v-if="safeAreaInsetBottom"></uv-safe-bottom>
 					<view
 						v-if="closeable"
@@ -170,6 +199,22 @@
 				type: Boolean,
 				default: true
 			},
+			/**
+			 * App 端内容区的滚动手势守卫，默认开（仅 App 生效，H5 靠锁 body、小程序不走这里）。
+			 *
+			 * 开着：在弹窗内容上滑动不会带着下层页面一起滚（修的是「底部弹窗里滑动，后面
+			 * 页面跟着滑」的穿透问题）。实现见模板里 uv-popup__guard 那段注释。
+			 *
+			 * 关掉：不做任何拦截。**弹窗内部有可滚动内容时必须关掉** —— 守卫是用
+			 * preventDefault 实现的，会把内部滚动一起按住。已知需要关闭的有两处：
+			 * uv-calendar 的月份列表（scroll-view）和 components/DetailInfo.vue
+			 * 的 .panel-content（overflow:auto），它们都已显式传 :scroll-guard="false"。
+			 * 新增弹窗如果内部要滚动，记得同样关掉。
+			 */
+			scrollGuard: {
+				type: Boolean,
+				default: true
+			},
 			round: {
 				type: [Number, String],
 				default: 0
@@ -200,6 +245,8 @@
 				// fix by mehaotian 处理 h5 滚动穿透的问题
 				document.getElementsByTagName('body')[0].style.overflow = show ? 'hidden' : 'visible'
 				// #endif
+				// App 端的内容区守卫是模板上的 @touchmove.stop.prevent，由视图层直接生效，
+				// 逻辑层这里不需要做任何事。详见模板里 uv-popup__guard 那段注释。
 			}
 		},
 		data() {
@@ -474,6 +521,17 @@
 			top: 0;
 			/* #endif */
 		}
+
+		/* App 端内容区的守卫层（见模板里 uv-popup__guard 的注释）。
+		   display: contents 让它本身不产生盒子 —— 只是多一个 DOM 节点用来接 touchmove
+		   冒泡，布局上完全透明，弹窗里按百分比算的高度也不会因为多了一层而失效。
+		   （老 WebView（Chrome<65）不认 display:contents，会退化成一个块级盒子，
+		   那种情况下弹窗内容仍会正常显示，只是内部百分比高度可能受影响。） */
+		/* #ifdef APP-PLUS */
+		.uv-popup__guard {
+			display: contents;
+		}
+		/* #endif */
 
 		.uv-popup__content {
 			/* #ifndef APP-NVUE */
