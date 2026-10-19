@@ -1888,6 +1888,46 @@ if (
 }
 await directSdkRandomRwEntry.cleanup();
 
+const directSdkSy15D9Entry = useRingBleSdk({
+  getBoundDevice: async () => null
+});
+parityStep('direct sdk SY15-A D9 scan identity checks');
+connectedDeviceIds.length = 0;
+await directSdkSy15D9Entry.connectDevice({
+  deviceId: '46:00:00:00:12:D9',
+  deviceName: 'SY15-A',
+  uniMacId: '46:00:00:00:12:D9',
+  protocol: 'rw',
+  fromScan: true,
+  sourceDevice: {
+    deviceId: '46:00:00:00:12:D9',
+    name: 'SY15-A',
+    localName: 'SY15-A',
+    protocol: 'rw',
+    mac: '46:00:00:00:12:D9',
+    // This stale diagnostic value reproduces the field seen in the failing D9 logs.
+    // The RW marker payload below is the authoritative device identity.
+    uniMacId: '32:30:30:30:36:34',
+    advertis: { macInfo: '46:00:00:00:12:D9' },
+    advertisData: 'D60602008100524600000012D98043443330343630303032',
+    RSSI: -52,
+    lastSeenAt: Date.now()
+  } as any
+});
+const sy15D9ConnectedDeviceId = connectedDeviceIds[0] as string | undefined;
+if (
+  sy15D9ConnectedDeviceId !== '46:00:00:00:12:D9' ||
+  directSdkSy15D9Entry.deviceInfo.value.mac !== '46:00:00:00:12:D9'
+) {
+  throw new Error(
+    `SY15-A D9 should validate the RW marker MAC instead of the ASCII advertisement tail: ${JSON.stringify({
+      connectedDeviceIds,
+      deviceInfo: directSdkSy15D9Entry.deviceInfo.value
+    })}`
+  );
+}
+await directSdkSy15D9Entry.cleanup();
+
 const directSdkColdRwUnbindPayloads: any[] = [];
 const directSdkColdRwUnbindEntry = useRingBleSdk({
   getBoundDevice: async () =>
