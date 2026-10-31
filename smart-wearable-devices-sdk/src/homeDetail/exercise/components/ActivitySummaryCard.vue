@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
 import echarts from '@/utils/echarts';
@@ -7,6 +9,8 @@ import type { motionSummary, Point } from '@/types/api/homeDetail';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';
 import { cloneDeep } from 'lodash-es';
 import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
+
+const { t } = useI18n();
 const props = defineProps({
   motionSummaryObj: {
     type: Object as () => motionSummary,
@@ -85,7 +89,7 @@ const getLastWeekDateRange = (): string => {
   const formatDate = (date: Date): string => {
     const month = date.getMonth() + 1;
     const day = date.getDate();
-    return `${month}月${day}日`;
+    return t('{month}月{day}日', { month, day });
   };
 
   return `${formatDate(monday)}-${formatDate(sunday)}`;
@@ -188,7 +192,7 @@ const getFirstOption = () => {
   const { xData, seriesData } = formatTimeData(data);
   const maxTime = getMaxTime(xData);
 
-  return configureChartOptions(newOption, xData, seriesData, `今天（${maxTime}）`);
+  return configureChartOptions(newOption, xData, seriesData, t('今天（{time}）', { time: maxTime }));
 };
 
 const getSecoundOption = () => {
@@ -229,26 +233,24 @@ onLoad(() => {});
   <view class="bg-white r-50 mb-30 p-30">
     <view class="flex jc-start">
       <view class="score-title fs-36">
-        活动总结
+        {{ t('活动总结') }}
         <slot></slot>
       </view>
     </view>
     <view class="fs-28 mt-30">
-      截止至此时，您的步数数量较昨天{{ stepDifference >= 0 ? '增加了' : '减少了' }}
-      <text style="color: #ffa86a">{{ stepDifferenceAbs }}</text>
-      <text>步。</text>
+      {{ t('截止至此时，您的步数数量较昨天{direction}{value}步。', { direction: t(stepDifference >= 0 ? '增加了' : '减少了'), value: stepDifferenceAbs }) }}
     </view>
     <view class="flex jc-between ai-center mt-50">
       <view class="itemBox p-30 flex fd-c jc-center ai-center">
         <view class="flex ai-center">
-          <text class="fs-28">今天</text>
+          <text class="fs-28">{{ t('今天') }}</text>
           <view :class="stepDifference > 0 ? 'arrow-up' : ''">
             <view class="trend-arrow"></view>
           </view>
         </view>
         <view class="">
           <text class="fs-36">{{ motionSummaryObj?.todayStep || '00' }}</text>
-          <text class="fs-24">步</text>
+          <text class="fs-24">{{ t('步') }}</text>
         </view>
       </view>
       <view class="flex ai-center jc-center chartBox">
@@ -258,11 +260,11 @@ onLoad(() => {});
     <view class="flex jc-between ai-center mt-30">
       <view class="itemBox p-30 flex fd-c jc-center ai-center">
         <view class="flex ai-center">
-          <text class="fs-28">昨天</text>
+          <text class="fs-28">{{ t('昨天') }}</text>
         </view>
         <view class="">
           <text class="fs-36">{{ motionSummaryObj?.yesterdayStep || '00' }}</text>
-          <text class="fs-24">步</text>
+          <text class="fs-24">{{ t('步') }}</text>
         </view>
       </view>
       <view class="flex ai-center jc-center chartBox">
@@ -272,7 +274,7 @@ onLoad(() => {});
     <view class="flex jc-between ai-center mt-50">
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start mr-30 pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">活动消耗</text>
+          <text class="fs-28">{{ t('活动消耗') }}</text>
         </view>
         <view class="">
           <text class="fs-36">{{ motionCalorieText }}</text>
@@ -281,35 +283,35 @@ onLoad(() => {});
       </view>
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">活动时长</text>
+          <text class="fs-28">{{ t('活动时长') }}</text>
         </view>
         <view class="">
           <text class="fs-36">{{ getSleepDurationHours(motionSummaryObj?.motionTime) || '00' }}</text>
-          <text class="fs-24">小时</text>
+          <text class="fs-24">{{ t('小时') }}</text>
           <text class="fs-36">{{ getSleepDurationMinutes(motionSummaryObj?.motionTime) || '00' }}</text>
-          <text class="fs-24">分钟</text>
+          <text class="fs-24">{{ t('分钟') }}</text>
         </view>
       </view>
     </view>
     <view class="flex jc-between ai-center mt-30">
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start mr-30 pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">中高强度时长</text>
+          <text class="fs-28">{{ t('中高强度时长') }}</text>
         </view>
         <view class="">
           <text class="fs-36">{{ getSleepDurationHours(motionSummaryObj?.midHighTime) || '00' }}</text>
-          <text class="fs-24">小时</text>
+          <text class="fs-24">{{ t('小时') }}</text>
           <text class="fs-36">{{ getSleepDurationMinutes(motionSummaryObj?.midHighTime) || '00' }}</text>
-          <text class="fs-24">分钟</text>
+          <text class="fs-24">{{ t('分钟') }}</text>
         </view>
       </view>
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">活动总分</text>
+          <text class="fs-28">{{ t('活动总分') }}</text>
         </view>
         <view class="">
           <text class="fs-36">{{ motionSummaryObj?.motionScore || '00' }}</text>
-          <text class="fs-24">分</text>
+          <text class="fs-24">{{ t('分') }}</text>
         </view>
       </view>
     </view>

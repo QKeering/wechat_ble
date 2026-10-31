@@ -1,8 +1,12 @@
 <script setup lang="ts">
+import '@/pagesA/healths/i18n/pack';
 import { computed, ref } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
+import { useI18n } from '@/i18n';
 
 type MetricKey = 'heartRate' | 'spo2' | 'temperature' | 'heartRateVariability';
+
+const { t } = useI18n();
 
 const metrics = ref<Record<MetricKey, string>>({
   heartRate: '',
@@ -93,20 +97,20 @@ onLoad((options = {}) => {
     <uv-navbar
       placeholder
       leftIcon="arrow-left"
-      title="检测报告"
+      :title="t('检测报告')"
       bgColor="#f1f3f6"
       @leftClick="leftClick"
     ></uv-navbar>
 
     <view class="hero">
-      <text class="hero-eyebrow">智能戒指</text>
-      <text class="hero-title">健康检测结果</text>
-      <text class="hero-desc">{{ hasValidResult ? '本次检测已完成' : '设备暂未返回有效检测值' }}</text>
+      <text class="hero-eyebrow">{{ t('智能戒指') }}</text>
+      <text class="hero-title">{{ t('健康检测结果') }}</text>
+      <text class="hero-desc">{{ hasValidResult ? t('本次检测已完成') : t('设备暂未返回有效检测值') }}</text>
     </view>
 
     <view class="metric-grid">
       <view v-for="item in metricCards" :key="item.key" class="metric-card">
-        <text class="metric-label">{{ item.label }}</text>
+        <text class="metric-label">{{ t(item.label) }}</text>
         <view class="metric-value-row">
           <text class="metric-value">{{ item.value }}</text>
           <text v-if="item.unit" class="metric-unit">{{ item.unit }}</text>
@@ -115,8 +119,8 @@ onLoad((options = {}) => {
     </view>
 
     <view class="tip-card">
-      <text class="tip-title">说明</text>
-      <text class="tip-text">健康提醒仅供用户关注自身状态，不作为医疗诊断结论。如数据持续异常、出现明显变化或身体不适，请及时咨询专业医护人员。</text>
+      <text class="tip-title">{{ t('说明') }}</text>
+      <text class="tip-text">{{ t('健康提醒仅供用户关注自身状态，不作为医疗诊断结论。如数据持续异常、出现明显变化或身体不适，请及时咨询专业医护人员。') }}</text>
     </view>
   </view>
 </template>

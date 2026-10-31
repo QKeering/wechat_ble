@@ -37,9 +37,9 @@
         </view>
       </view>
       <view v-if="showIntroCard" class="period-intro-card">
-        <view class="period-intro-text">完整的月经记录将帮助我们为您提供更好的健康建议</view>
+        <view class="period-intro-text">{{ t('完整的月经记录将帮助我们为您提供更好的健康建议') }}</view>
         <view class="period-intro-footer">  
-          <view class="intro-more-btn" @tap="onMore">了解更多</view>
+          <view class="intro-more-btn" @tap="onMore">{{ t('了解更多') }}</view>
           <view class="intro-close" @tap="onCloseIntro">×</view>
         </view>
       </view>
@@ -48,14 +48,14 @@
   
       
       <view v-if="periodTipsText" class="period-remind-card">
-        <view class="section-title">今日提醒</view>
+        <view class="section-title">{{ t('今日提醒') }}</view>
         <view class="section-content">{{ periodTipsText }}</view>
       </view>
 
       <view class="period-temp-card">
         <view class="temp-header">
           <view class="temp-title">
-            <text>皮肤温度 (℃)</text>
+            <text>{{ t('皮肤温度 (℃)') }}</text>
             <text class="temp-info">i</text>
           </view>
           <view class="temp-right-icon"></view>
@@ -71,7 +71,7 @@
 
       <!-- 重要提醒卡片 -->
       <view v-if="importantReminders.length" class="remind-important-card">
-        <view class="remind-important-title">重要提醒</view>
+        <view class="remind-important-title">{{ t('重要提醒') }}</view>
         <view
           v-for="(item, index) in importantReminders"
           :key="index"
@@ -92,6 +92,8 @@
 </template>
 
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { computed, ref, watch } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
 import { getGirlHealth, getHealthTempStats, getUserGirlHealthAll } from '@/common/api/homeDetail';
@@ -99,6 +101,8 @@ import type { HealthTempStatItem, UserGirlHealthAllResponse } from '@/types/api/
 
 import { updateGirlHealth } from '@/common/api/homeDetail';
 import { formatBleErrorMessage } from '@/utils/bleError';
+
+const { t } = useI18n();
 const GIRL_HEALTH_PROFILE_UPDATED_STORAGE_KEY = 'qkeer_girl_health_profile_updated_at';
 const GIRL_HEALTH_PROFILE_EXISTS_STORAGE_KEY_PREFIX = 'qkeer_girl_health_profile_exists';
 const GIRL_HEALTH_PROFILE_STORAGE_KEY_PREFIX = 'qkeer_girl_health_profile';
@@ -304,7 +308,7 @@ const editModalRef = ref<any>(null);
 
 
 /** 一周 7 格：index 0=今天 -4 … index 4=今天 … index 6=今天 +2；实线/虚线后续接接口，当前写死 */
-const WEEK_CN = ['日', '一', '二', '三', '四', '五', '六'];
+const WEEK_KEYS = ['@week.sun', '@week.mon', '@week.tue', '@week.wed', '@week.thu', '@week.fri', '@week.sat'];
 
 function startOfLocalDay(d: Date): Date {
   const x = new Date(d);
@@ -376,7 +380,7 @@ const weekStrip = computed(() => {
       ymd,
       date: d,
       dayOfMonth: d.getDate(),
-      topLabel: isToday ? '今天' : WEEK_CN[w],
+      topLabel: isToday ? t('今天') : t(WEEK_KEYS[w]),
       isToday,
       ringStyle
     });
@@ -413,10 +417,10 @@ const DEFAULT_HEALTH_TIPS: Record<string, string> = {
 };
 
 const PERIOD_PHASE_HEALTH_TIPS: Record<PeriodPhaseKey, string> = {
-  menstrual: '\u7ecf\u671f\u6ce8\u610f\u4fdd\u6696\uff0c\u907f\u514d\u751f\u51b7\u98df\u7269\uff0c\u4fdd\u8bc1\u5145\u8db3\u4f11\u606f\u3002',
-  ovulation: '\u6392\u5375\u671f\u6ce8\u610f\u8eab\u4f53\u53d8\u5316\uff0c\u4fdd\u6301\u89c4\u5f8b\u4f5c\u606f\u548c\u9002\u91cf\u8fd0\u52a8\u3002',
-  fertile: '\u6613\u5b55\u671f\u8bf7\u7ed3\u5408\u4e2a\u4eba\u8ba1\u5212\uff0c\u505a\u597d\u5907\u5b55\u6216\u907f\u5b55\u5b89\u6392\u3002',
-  safe: '\u5efa\u8bae\u4fdd\u6301\u89c4\u5f8b\u4f5c\u606f\uff0c\u6301\u7eed\u8bb0\u5f55\u5468\u671f\u53d8\u5316\u3002'
+  menstrual: '经期注意保暖，避免生冷食物，保证充足休息。',
+  ovulation: '排卵期注意身体变化，保持规律作息和适量运动。',
+  fertile: '易孕期请结合个人计划，做好备孕或避孕安排。',
+  safe: '建议保持规律作息，持续记录周期变化。'
 };
 
 const importantReminders = computed(() => {
@@ -431,15 +435,15 @@ const importantReminders = computed(() => {
     list.push({
       icon: 'calendar',
       color: '#9B6CF7',
-      title: '排卵期高峰',
-      desc: startLabel + '-' + endLabel + '为易孕期，备孕/避孕请注意'
+      title: t('排卵期高峰'),
+      desc: t('{start}-{end}为易孕期，备孕/避孕请注意', { start: startLabel, end: endLabel })
     });
   } else {
     list.push({
       icon: 'calendar',
       color: '#9B6CF7',
-      title: '排卵期高峰',
-      desc: '暂无排卵期数据，请完善经期记录'
+      title: t('排卵期高峰'),
+      desc: t('暂无排卵期数据，请完善经期记录')
     });
   }
 
@@ -452,27 +456,27 @@ const importantReminders = computed(() => {
     list.push({
       icon: 'bell',
       color: '#F5A623',
-      title: '下次经期提醒',
-      desc: '预计' + label + '来月经，建议提前准备卫生巾'
+      title: t('下次经期提醒'),
+      desc: t('预计{date}来月经，建议提前准备卫生巾', { date: label })
     });
   } else {
     list.push({
       icon: 'bell',
       color: '#F5A623',
-      title: '下次经期提醒',
-      desc: '暂无预测数据，请完善经期记录'
+      title: t('下次经期提醒'),
+      desc: t('暂无预测数据，请完善经期记录')
     });
   }
 
   // 健康建议：优先接口数据，否则按当前阶段给默认文案
   const tips = data?.periodTips;
   const phase = data?.predictedCycle ? detectCurrentPhase(data.predictedCycle) : 'safe';
-  const defaultTip = PERIOD_PHASE_HEALTH_TIPS[phase] || '\u8bf7\u4fdd\u6301\u89c4\u5f8b\u4f5c\u606f\uff0c\u5747\u8861\u996e\u98df\uff0c\u9002\u91cf\u8fd0\u52a8';
+  const defaultTip = PERIOD_PHASE_HEALTH_TIPS[phase] || '请保持规律作息，均衡饮食，适量运动';
   list.push({
     icon: 'bag',
     color: '#F05F8F',
-    title: '健康建议',
-    desc: tips || defaultTip
+    title: t('健康建议'),
+    desc: t(tips || defaultTip)
   });
 
   return list;
@@ -486,12 +490,12 @@ function detectCurrentPhase(pc: any): PeriodPhaseKey {
 function formatDateMD(ymd: string): string {
   const parts = ymd.split('-');
   if (parts.length < 3) return ymd;
-  return Number(parts[1]) + '月' + Number(parts[2]) + '日';
+  return t('{month}月{day}日', { month: Number(parts[1]), day: Number(parts[2]) });
 }
 
 const navbarTitle = computed(() => {
   const d = selectedDate.value;
-  return (d.getMonth() + 1) + '月' + d.getDate() + '日';
+  return t('{month}月{day}日', { month: d.getMonth() + 1, day: d.getDate() });
 });
 
 function formatTimeLabel(iso?: string): string {
@@ -573,8 +577,8 @@ const skinTempLatestDisplay = computed(() => {
 const skinTempSubtext = computed(() => {
   const n = skinTempPoints.value.length;
   if (!tempStatsLoaded.value) return '';
-  if (!n) return '暂无记录';
-  return '共 ' + n + ' 条';
+  if (!n) return t('暂无记录');
+  return t('共 {n} 条', { n });
 });
 
 function buildSkinTempChartOption() {
@@ -1235,7 +1239,7 @@ function onWeekDayTap(cell: { ymd: string }) {
 }
 
 function onCalendarTap() {
-  uni.showToast({ title: '日历', icon: 'none' });
+  uni.showToast({ title: t('日历'), icon: 'none' });
 }
 
 function onEdit() {
@@ -1296,11 +1300,11 @@ async function onSaveEdit(data: { startDate: string; cycleDays: number; periodDa
   editFormData.value = { ...data };
   const model = modelGirlHealth.value;
   if (!model) {
-    uni.showToast({ title: '未获取到生理周期资料，请刷新后重试', icon: 'none' });
+    uni.showToast({ title: t('未获取到生理周期资料，请刷新后重试'), icon: 'none' });
     return;
   }
   try {
-    uni.showLoading({ title: '提交中...', mask: true });
+    uni.showLoading({ title: t('提交中...'), mask: true });
 	const dates=getDateArray(data.startDate,data.periodDays)
      await updateGirlHealth({
 		    birthDay:modelGirlHealth.value.birthDay, //出生日期
@@ -1328,20 +1332,20 @@ async function onSaveEdit(data: { startDate: string; cycleDays: number; periodDa
       writeLocalGirlHealthProfile(profileCache, profileUserId);
     }
     uni.hideLoading();
-    uni.showToast({ title: '提交成功', icon: 'success' });	
+    uni.showToast({ title: t('提交成功'), icon: 'success' });	
       loadGirlHealthInfo()
 	
 
   } catch (err: any) {
     uni.hideLoading();
     uni.showToast({
-      title: formatBleErrorMessage(err, '提交失败，请重试'),
+      title: t(formatBleErrorMessage(err, '提交失败，请重试')),
       icon: 'none',
       duration: 2000
     });
   }
   uni.showToast({ 
-    title: '保存成功', 
+    title: t('保存成功'), 
     icon: 'success' 
   });
   
@@ -1350,7 +1354,7 @@ async function onSaveEdit(data: { startDate: string; cycleDays: number; periodDa
 }
 
 function onMore() {
-  uni.showToast({ title: '了解更多', icon: 'none' });
+  uni.showToast({ title: t('了解更多'), icon: 'none' });
 }
 
 function onCloseIntro() {

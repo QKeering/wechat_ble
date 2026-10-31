@@ -2,8 +2,8 @@
   <view class="ota-container">
     <view class="card">
       <view class="header">
-        <text class="title">系统固件更新</text>
-        <text class="version">{{ hasUpgradePackage ? `目标版本: ${otaBaseInfo?.versionCode || ''}` : '当前已是最新版本' }}</text>
+        <text class="title">{{ t('系统固件更新') }}</text>
+        <text class="version">{{ hasUpgradePackage ? t('目标版本: {version}', { version: otaBaseInfo?.versionCode || '' }) : t('当前已是最新版本') }}</text>
       </view>
 
       <view v-if="hasUpgradePackage || otaState.isUpgrading" class="progress-section">
@@ -13,24 +13,25 @@
 
       <view class="status-box">
         <text class="status-text" :class="{ error: otaState.error, success: otaState.success }">
-          {{ otaState.statusText }}
+          {{ t(otaState.statusText) }}
         </text>
       </view>
 
       <button v-if="hasUpgradePackage" type="primary" :loading="otaState.isUpgrading" :disabled="otaState.isUpgrading" @tap="startOtaProcess">
-        {{ otaState.isUpgrading ? '升级中...' : '开始安全升级' }}
+        {{ otaState.isUpgrading ? t('升级中...') : t('开始安全升级') }}
       </button>
-      <view v-else class="no-upgrade">当前已是最新版本</view>
+      <view v-else class="no-upgrade">{{ t('当前已是最新版本') }}</view>
 
       <view class="footer-hint">
-        <text class="hint-item">● 请保持手机蓝牙开启并靠近设备</text>
-        <text class="hint-item">● 升级过程中请勿关闭应用或断开电源</text>
+        <text class="hint-item">● {{ t('请保持手机蓝牙开启并靠近设备') }}</text>
+        <text class="hint-item">● {{ t('升级过程中请勿关闭应用或断开电源') }}</text>
       </view>
     </view>
   </view>
 </template>
 
 <script setup>
+import '@/pagesA/mines/i18n/pack';
 import { ref, onUnmounted, computed } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
 import { useUserStore } from '@/stores/user';
@@ -40,6 +41,10 @@ import { getOtaInfo, getBindInfo, reportOtaUpdate } from '@/common/api/device';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { getApiBase } from '@/utils/apiBase';
+import { useI18n, usePageTitle } from '@/i18n';
+
+const { t } = useI18n();
+usePageTitle(() => t('OTA升级'));
 const userStore = useUserStore();
 
 // --- 配置常量 ---
@@ -60,7 +65,7 @@ const SCAN_CONFIG = {
 const otaState = ref({
   isUpgrading: false,
   progress: 0,
-  statusText: '准备就绪',
+  statusText: t('准备就绪'),
   error: false,
   success: false
 });
@@ -271,7 +276,7 @@ const downloadFirmware = (url) => {
       responseType: 'text',
       success: (res) => {
         if (res.statusCode !== 200) {
-          reject(new Error(`固件下载失败: HTTP ${res.statusCode}`));
+          reject(new Error(t('固件下载失败：HTTP {status}', { status: res.statusCode })));
           return;
         }
         const content = typeof res.data === 'string' ? res.data.replace(/^\uFEFF/, '') : '';
@@ -284,7 +289,7 @@ const downloadFirmware = (url) => {
             contentLength: content.length,
             contentPrefix: content.slice(0, 32)
           });
-          reject(new Error('固件文件内容无效，请检查后台上传路径'));
+          reject(new Error(t('固件文件内容无效，请检查后台上传路径')));
           return;
         }
         appendRingDiagnosticLog('RING OTA', 'ota-firmware-download-ready', {
@@ -295,7 +300,7 @@ const downloadFirmware = (url) => {
         });
         resolve(content);
       },
-      fail: () => reject(new Error('网络请求异常'))
+      fail: () => reject(new Error(t('网络请求异常')))
     });
   });
 };
@@ -311,7 +316,7 @@ const sendCommand = (deviceId, data) => {
       success: () => resolve(),
       fail: (err) => {
         console.warn('[BLE] 发送命令失败:', err);
-        reject(new Error(`进入升级模式命令发送失败: ${err.errMsg || err.errCode || 'unknown'}`));
+        reject(new Error(t('进入升级模式命令发送失败：{reason}', { reason: err.errMsg || err.errCode || 'unknown' })));
       }
     });
   });
@@ -367,7 +372,7 @@ const connectDevice = (deviceId) => {
             });
             resolve();
           } catch (e) {
-            reject(new Error('获取服务失败'));
+            reject(new Error(t('获取服务失败')));
           }
         }, 1500);
       },
@@ -376,7 +381,7 @@ const connectDevice = (deviceId) => {
         if (err.errCode === 10006 || err.errMsg?.includes('already')) {
           resolve();
         } else {
-          reject(new Error(`连接失败: ${err.errMsg || err.errCode}`));
+          reject(new Error(t('连接失败：{reason}', { reason: err.errMsg || err.errCode })));
         }
       }
     });
@@ -413,7 +418,7 @@ const calculateAppMac = (bootMac) => calculateMacOffset(bootMac, -1);
 const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }) => {
   return new Promise((resolve, reject) => {
     const isBootMode = mode === 'BOOT';
-    otaState.value.statusText = isBootMode ? '正在搜索升级设备...' : '正在搜索设备...';
+    otaState.value.statusText = isBootMode ? t('正在搜索升级设备...') : t('正在搜索设备...');
 
     let found = false;
     let retryCount = 0;
@@ -473,7 +478,10 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
               uni.stopBluetoothDevicesDiscovery();
 
               if (++retryCount < SCAN_CONFIG.maxRetries) {
-                otaState.value.statusText = `搜索重试 (${retryCount}/${SCAN_CONFIG.maxRetries})...`;
+                otaState.value.statusText = t('搜索重试（{retry}/{max}）...', {
+                  retry: retryCount,
+                  max: SCAN_CONFIG.maxRetries
+                });
                 setTimeout(startScan, SCAN_CONFIG.retryDelay);
               } else if (rejectOnFail) {
                 appendRingDiagnosticLog('RING OTA', 'ota-scan-target-not-found', {
@@ -482,7 +490,7 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
                   retries: retryCount,
                   timeoutMs: SCAN_CONFIG.timeout
                 });
-                reject(new Error('未找到设备，请确保设备处于正确模式'));
+                reject(new Error(t('未找到设备，请确保设备处于正确模式')));
               } else {
                 resolve(null);
               }
@@ -521,7 +529,7 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
                       .join('')
                   );
                 }
-                otaState.value.statusText = '正在连接设备...';
+                otaState.value.statusText = t('正在连接设备...');
 
                 connectDevice(device.deviceId)
                   .then(() => resolve(isBootMode ? device.deviceId : { deviceId: device.deviceId, name }))
@@ -534,7 +542,7 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
         },
         fail: (err) => {
           console.error('[BLE] 扫描失败:', err);
-          rejectOnFail ? reject(new Error('蓝牙扫描失败')) : resolve(null);
+          rejectOnFail ? reject(new Error(t('蓝牙扫描失败'))) : resolve(null);
         }
       });
     };
@@ -545,7 +553,7 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
 
 /** 进入 BOOT 模式 */
 const enterBootMode = async (deviceId) => {
-  otaState.value.statusText = '正在进入升级模式...';
+  otaState.value.statusText = t('正在进入升级模式...');
 
   try {
     await connectDevice(deviceId);
@@ -561,7 +569,7 @@ const enterBootMode = async (deviceId) => {
     throw e;
   }
 
-  otaState.value.statusText = '等待设备重启...';
+  otaState.value.statusText = t('等待设备重启...');
   // 尽快开始扫描，避免错过部分固件较短的 BOOT 广播窗口。
   await new Promise((r) => setTimeout(r, 1500));
   await disconnectDevice(deviceId);
@@ -573,14 +581,14 @@ const startOtaProcess = async () => {
   if (otaState.value.isUpgrading) return;
   if (otaState.value.success) {
     uni.showToast({
-      title: hasUpgradePackage.value ? '升级已完成' : '已是最新版本',
+      title: hasUpgradePackage.value ? t('升级已完成') : t('已是最新版本'),
       icon: 'none'
     });
     return;
   }
   if (firmwareUrl.value === '' || firmwareUrl.value == null) {
     uni.showToast({
-      title: '未配置固件下载地址，请先在后台上传',
+      title: t('未配置固件下载地址，请先在后台上传'),
       icon: 'none'
     });
     return;
@@ -624,7 +632,7 @@ const startOtaProcess = async () => {
 
   try {
     // 1. 下载固件
-    otaState.value.statusText = '正在下载固件...';
+    otaState.value.statusText = t('正在下载固件...');
     const hexContent = await downloadFirmware(firmwareUrl.value);
     console.log('[OTA] 固件大小:', hexContent.length);
     otaState.value.progress = 5;
@@ -706,10 +714,10 @@ const startOtaProcess = async () => {
     console.log('[OTA] 目标 APP MAC:', appMac);
 
     // 5. 等待设备重启并重连
-    otaState.value.statusText = '等待设备重启...';
+    otaState.value.statusText = t('等待设备重启...');
     await new Promise((r) => setTimeout(r, 8000));
 
-    otaState.value.statusText = '正在重新连接设备...';
+    otaState.value.statusText = t('正在重新连接设备...');
     let reconnected = false;
 
     try {
@@ -743,13 +751,13 @@ const startOtaProcess = async () => {
     // 6. 完成
     otaState.value.progress = 100;
     otaState.value.success = true;
-    otaState.value.statusText = reconnected ? '✅ 升级完成，设备已连接！' : '✅ 固件升级成功！';
+    otaState.value.statusText = reconnected ? t('✅ 升级完成，设备已连接！') : t('✅ 固件升级成功！');
 
     uni.showModal({
-      title: '升级成功',
-      content: reconnected ? '固件已更新，设备已重新连接' : '固件已更新，请手动重新连接设备',
+      title: t('升级成功'),
+      content: reconnected ? t('固件已更新，设备已重新连接') : t('固件已更新，请手动重新连接设备'),
       showCancel: false,
-      confirmText: '返回',
+      confirmText: t('返回'),
       success: () =>
         uni.switchTab({
           url: '/pages/mine/mine'
@@ -765,7 +773,9 @@ const startOtaProcess = async () => {
       error: err?.message || String(err)
     });
     otaState.value.error = true;
-    otaState.value.statusText = `升级失败：${formatBleErrorMessage(err, '请稍后重试')}`;
+    otaState.value.statusText = t('升级失败：{reason}', {
+      reason: t(formatBleErrorMessage(err, '请稍后重试'))
+    });
   } finally {
     otaState.value.isUpgrading = false;
     cleanup();
@@ -790,7 +800,7 @@ onLoad(async () => {
       Object.assign(otaState.value, {
         isUpgrading: false,
         progress: 0,
-        statusText: '未获取到当前固件版本',
+        statusText: t('未获取到当前固件版本'),
         error: false,
         success: true
       });
@@ -806,7 +816,7 @@ onLoad(async () => {
       }
     );
     if (res?.code !== 200 || !res?.data) {
-      const msg = res?.msg || '暂无更新';
+      const msg = res?.msg || t('暂无更新');
       console.log('OTA状态:', msg);
 
       firmwareUrl.value = '';
@@ -814,7 +824,7 @@ onLoad(async () => {
       Object.assign(otaState.value, {
         isUpgrading: false,
         progress: 0,
-        statusText: formatBleErrorMessage(msg, '暂无更新'),
+        statusText: t(formatBleErrorMessage(msg, '暂无更新')),
         error: false,
         success: true
       });
@@ -832,14 +842,14 @@ onLoad(async () => {
       Object.assign(otaState.value, {
         isUpgrading: false,
         progress: 0,
-        statusText: '暂无可升级固件',
+        statusText: t('暂无可升级固件'),
         error: false,
         success: true
       });
     }
   } catch (err) {
     uni.showToast({
-      title: formatBleErrorMessage(err, '获取升级信息失败，请稍后重试'),
+      title: t(formatBleErrorMessage(err, '获取升级信息失败，请稍后重试')),
       icon: 'none',
       duration: 3000
     });

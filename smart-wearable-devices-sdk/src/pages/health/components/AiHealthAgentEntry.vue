@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { useI18n } from '@/i18n';
+
+const { t } = useI18n();
+
 interface Props {
   robotSrc?: string;
   sleepIconSrc?: string;
@@ -21,27 +25,27 @@ const emit = defineEmits<{
 <template>
   <view class="ai-health-agent-entry" @tap="emit('tap')">
     <view class="entry-copy">
-      <view class="entry-title">小轻AI健康智能体</view>
-      <view class="entry-subtitle">会听你说，也更懂你的状态</view>
+      <view class="entry-title">{{ t('小轻AI健康智能体') }}</view>
+      <view class="entry-subtitle">{{ t('会听你说，也更懂你的状态') }}</view>
 
       <view class="entry-features">
         <view class="feature-item">
           <view class="feature-icon purple">
             <image :src="sleepIconSrc" mode="aspectFit" />
           </view>
-          <text>自然对话</text>
+          <text>{{ t('自然对话') }}</text>
         </view>
         <view class="feature-item">
           <view class="feature-icon rose">
             <image :src="heartIconSrc" mode="aspectFit" />
           </view>
-          <text>状态洞察</text>
+          <text>{{ t('状态洞察') }}</text>
         </view>
         <view class="feature-item">
           <view class="feature-icon mint">
             <image :src="trendIconSrc" mode="aspectFit" />
           </view>
-          <text>个性建议</text>
+          <text>{{ t('个性建议') }}</text>
         </view>
       </view>
     </view>

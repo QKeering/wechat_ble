@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { onLoad, onShow, onUnload } from '@dcloudio/uni-app';
+import { useI18n } from '@/i18n';
 import { getAiLabStatus } from '@/common/api/aiLab';
 import AiHealthAgentEntry from '@/pages/health/components/AiHealthAgentEntry.vue';
 
@@ -11,6 +12,7 @@ enum APPLY_STATUS {
   rejected = 2
 }
 
+const { t } = useI18n();
 const applyStatus = ref<APPLY_STATUS>(APPLY_STATUS.not_apply);
 const jumpUrl = ref('');
 const remark = ref('');
@@ -46,23 +48,23 @@ const openFullWebviewUrl = (value: string, needsXiaoqingTicket = false) => {
 };
 
 const actionText = computed(() => {
-  if (isLoading.value || isOpeningH5.value) return '加载中';
+  if (isLoading.value || isOpeningH5.value) return t('加载中');
   switch (applyStatus.value) {
     case APPLY_STATUS.applying:
-      return '审核中';
+      return t('审核中');
     case APPLY_STATUS.passed:
-      return '进入';
+      return t('进入');
     case APPLY_STATUS.rejected:
-      return '重新申请';
+      return t('重新申请');
     default:
-      return '申请体验';
+      return t('申请体验');
   }
 });
 
 const openApprovedPage = async () => {
   const configuredUrl = jumpUrl.value.trim();
   if (!configuredUrl) {
-    uni.showToast({ title: '体验页面暂未配置，请稍后再试', icon: 'none' });
+    uni.showToast({ title: t('体验页面暂未配置，请稍后再试'), icon: 'none' });
     return;
   }
 
@@ -99,9 +101,9 @@ const handleApplyClick = () => {
 
   if (applyStatus.value === APPLY_STATUS.rejected && remark.value) {
     uni.showModal({
-      title: '申请未通过',
-      content: `拒绝原因：${remark.value}`,
-      confirmText: '重新申请',
+      title: t('申请未通过'),
+      content: t('拒绝原因：{remark}', { remark: remark.value }),
+      confirmText: t('重新申请'),
       success: ({ confirm }) => {
         if (confirm) uni.navigateTo({ url: '/pages/awareness/aiApply' });
       }

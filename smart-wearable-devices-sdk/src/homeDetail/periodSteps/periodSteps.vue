@@ -1,8 +1,16 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed } from 'vue';
 import { onLoad , onShow} from '@dcloudio/uni-app';
 import { addGirlHealth } from '@/common/api/homeDetail';
 import { formatBleErrorMessage } from '@/utils/bleError';
+
+const { t, locale } = useI18n();
+const showDateUnit = computed(() => locale.value !== 'en');
+const weekHeaders = computed(() =>
+  ['@week.mon', '@week.tue', '@week.wed', '@week.thu', '@week.fri', '@week.sat', '@week.sun'].map((k) => t(k))
+);
 
 const GIRL_HEALTH_PROFILE_UPDATED_STORAGE_KEY = 'qkeer_girl_health_profile_updated_at';
 const GIRL_HEALTH_PROFILE_EXISTS_STORAGE_KEY_PREFIX = 'qkeer_girl_health_profile_exists';
@@ -128,7 +136,7 @@ const submitQuestionnaire = async () => {
   const periodDatesArr = Array.from(selectedPeriodDates.value).sort();
   const lastMenstruationDate = periodDatesArr.length > 0 ? periodDatesArr[0] : '';
   if (!lastMenstruationDate) {
-    uni.showToast({ title: '请选择最近一次月经时间', icon: 'none' });
+    uni.showToast({ title: t('请选择最近一次月经时间'), icon: 'none' });
     return;
   }
   // Step5: 周期规律
@@ -159,7 +167,7 @@ const submitQuestionnaire = async () => {
 	userId:currentUserId
   };
   try {
-    uni.showLoading({ title: '提交中...', mask: true });
+    uni.showLoading({ title: t('提交中...'), mask: true });
     await addGirlHealth({ ...params, ...legacyParamsForReference });
     uni.setStorageSync(GIRL_HEALTH_PROFILE_UPDATED_STORAGE_KEY, Date.now());
     if (currentUserId) {
@@ -177,12 +185,12 @@ const submitQuestionnaire = async () => {
       });
     }
     uni.hideLoading();
-    uni.showToast({ title: '提交成功', icon: 'success' });
+    uni.showToast({ title: t('提交成功'), icon: 'success' });
     setTimeout(() => uni.navigateBack({ delta: 10 }), 1500);
   } catch (err: any) {
     uni.hideLoading();
     uni.showToast({
-      title: formatBleErrorMessage(err, '提交失败，请重试'),
+      title: t(formatBleErrorMessage(err, '提交失败，请重试')),
       icon: 'none',
       duration: 2000
     });
@@ -344,8 +352,8 @@ onLoad(async () => {
 
       <!-- ── Step 1: 出生日期 ── -->
       <view v-if="currentStep === 1" class="step-content">
-             <view class="question-title">请选择你的出生日期</view>
-             <view class="question-desc">提供准确的年龄，以便获得更准确的预测。</view>
+             <view class="question-title">{{ t('请选择你的出生日期') }}</view>
+             <view class="question-desc">{{ t('提供准确的年龄，以便获得更准确的预测。') }}</view>
         <!-- 滚轮选择器卡片 -->
         <view class="picker-card">
           <picker-view
@@ -358,21 +366,21 @@ onLoad(async () => {
             <picker-view-column>
               <view v-for="(y, i) in yearList" :key="i" class="picker-item">
                 <text class="picker-text">{{ y }}</text>
-                <text class="picker-unit" v-if="String(y) === selectedYear"> 年</text>
+                <text class="picker-unit" v-if="String(y) === selectedYear && showDateUnit"> {{ t('年') }}</text>
               </view>
             </picker-view-column>
             <!-- 月 -->
             <picker-view-column>
               <view v-for="(m, i) in monthList" :key="i" class="picker-item">
                 <text class="picker-text">{{ m }}</text>
-                <text class="picker-unit" v-if="m === selectedMonth"> 月</text>
+                <text class="picker-unit" v-if="m === selectedMonth && showDateUnit"> {{ t('月') }}</text>
               </view>
             </picker-view-column>
             <!-- 日 -->
             <picker-view-column>
               <view v-for="(d, i) in dayList" :key="i" class="picker-item">
                 <text class="picker-text">{{ d }}</text>
-                <text class="picker-unit" v-if="d === selectedDay"> 日</text>
+                <text class="picker-unit" v-if="d === selectedDay && showDateUnit"> {{ t('日') }}</text>
               </view>
             </picker-view-column>
           </picker-view>
@@ -380,8 +388,8 @@ onLoad(async () => {
       </view>
 
      <view v-if="currentStep === 2" class="step-content">
-            <view class="question-title">请选择你的平均生理周期天数</view>
-           <view class="question-desc">月经周期指上一次月经开始到下一次月经开始的周期，如果不确定周期天数，可以提供估计值。</view>
+            <view class="question-title">{{ t('请选择你的平均生理周期天数') }}</view>
+           <view class="question-desc">{{ t('月经周期指上一次月经开始到下一次月经开始的周期，如果不确定周期天数，可以提供估计值。') }}</view>
            <!-- 滚轮选择器卡片 -->
            <view class="picker-card">
              <picker-view
@@ -394,15 +402,15 @@ onLoad(async () => {
                <picker-view-column>
                  <view v-for="(y, i) in onlyDayList" :key="i" class="picker-item">
                    <text class="picker-text">{{ y }}</text>
-                   <text class="picker-unit" v-if="String(y) === selectedOnlyDay"> 天</text>
+                   <text class="picker-unit" v-if="String(y) === selectedOnlyDay"> {{ t('天') }}</text>
                  </view>
                </picker-view-column>
              </picker-view>
            </view>
          </view>
      <view v-if="currentStep === 3" class="step-content">
-            <view class="question-title">请选择你的经期持续的时间</view>
-           <view class="question-desc">提供经期持续的时间，以便获得更精准的预测。</view>
+            <view class="question-title">{{ t('请选择你的经期持续的时间') }}</view>
+           <view class="question-desc">{{ t('提供经期持续的时间，以便获得更精准的预测。') }}</view>
            <!-- 滚轮选择器卡片 -->
            <view class="picker-card">
              <picker-view
@@ -415,7 +423,7 @@ onLoad(async () => {
                <picker-view-column>
                  <view v-for="(y, i) in onlyLongDayList" :key="i" class="picker-item">
                    <text class="picker-text">{{ y }}</text>
-                   <text class="picker-unit" v-if="String(y) === selectedLongOnlyDay"> 天</text>
+                   <text class="picker-unit" v-if="String(y) === selectedLongOnlyDay"> {{ t('天') }}</text>
                  </view>
                </picker-view-column>
              </picker-view>
@@ -423,9 +431,9 @@ onLoad(async () => {
          </view>
       <!-- ── Step 3: 最近一次月经时间（月历） ── -->
       <view v-if="currentStep === 4" class="step-content">
-        <view class="question-title">请选择最近一次月经的时间</view>
+        <view class="question-title">{{ t('请选择最近一次月经的时间') }}</view>
         <view class="question-desc">
-          如果您通过QkeeRing记录了连续60晚的睡眠数据小程序将基于这些数据进行分析，为您提供更精准的经期预测。
+          {{ t('如果您通过QkeeRing记录了连续60晚的睡眠数据小程序将基于这些数据进行分析，为您提供更精准的经期预测。') }}
         </view>
 
         <!-- 日历卡片 -->
@@ -439,13 +447,13 @@ onLoad(async () => {
               :class="{ 'calendar-tab--active': tab.offset === calendarMonthOffset }"
               @tap="calendarMonthOffset = tab.offset"
             >
-              <text class="calendar-tab-text">{{ tab.year }}年{{ tab.month }}月</text>
+              <text class="calendar-tab-text">{{ t('{year}年{month}月', { year: tab.year, month: tab.month }) }}</text>
             </view>
           </view>
 
           <!-- 星期头 -->
           <view class="week-header flex">
-            <view v-for="w in ['一','二','三','四','五','六','日']" :key="w" class="week-cell ta-c">
+            <view v-for="(w, wi) in weekHeaders" :key="wi" class="week-cell ta-c">
               <text class="week-text">{{ w }}</text>
             </view>
           </view>
@@ -485,15 +493,15 @@ onLoad(async () => {
 
           <!-- 底部提示 -->
           <view class="calendar-tip ta-c mt-20">
-            <text class="fs-24" style="color:#999">点击日历添加或删除经期</text>
+            <text class="fs-24" style="color:#999">{{ t('点击日历添加或删除经期') }}</text>
           </view>
         </view>
       </view>
 
       <!-- ── Step 5: 生理周期规律情况 ── -->
       <view v-if="currentStep === 5" class="step-content">
-        <view class="question-title">请选择你的生理周期规律情况</view>
-        <view class="question-desc">月经周期指上一次月经开始到下一次月经开始，请选择最符合您情况的描述。</view>
+        <view class="question-title">{{ t('请选择你的生理周期规律情况') }}</view>
+        <view class="question-desc">{{ t('月经周期指上一次月经开始到下一次月经开始，请选择最符合您情况的描述。') }}</view>
 
         <view class="regularity-card">
           <view
@@ -504,8 +512,8 @@ onLoad(async () => {
             @tap="selectedRegularity = opt.value"
           >
             <view class="regularity-left">
-              <view class="regularity-label">{{ opt.label }}</view>
-              <view class="regularity-desc">{{ opt.desc }}</view>
+              <view class="regularity-label">{{ t(opt.label) }}</view>
+              <view class="regularity-desc">{{ t(opt.desc) }}</view>
             </view>
             <view class="regularity-radio">
               <view v-if="selectedRegularity === opt.value" class="radio radio--active">
@@ -519,7 +527,7 @@ onLoad(async () => {
 
       <!-- ── Step 6: 健康情况多选 ── -->
       <view v-if="currentStep === 6" class="step-content step-content--step6">
-        <view class="question-title">您是否具有以下情况（可多选）</view>
+        <view class="question-title">{{ t('您是否具有以下情况（可多选）') }}</view>
 
         <scroll-view scroll-y class="condition-card">
           <view
@@ -529,7 +537,7 @@ onLoad(async () => {
             :class="{ 'condition-item--last': idx === healthConditions.length - 1 }"
             @tap="toggleCondition(item.value)"
           >
-            <view class="condition-label">{{ item.label }}</view>
+            <view class="condition-label">{{ t(item.label) }}</view>
             <view class="condition-radio">
               <view v-if="selectedConditions.has(item.value)" class="radio radio--active">
                 <view class="radio-inner"></view>
@@ -548,7 +556,7 @@ onLoad(async () => {
         <uv-icon name="arrow-leftward" color="#333" size="22"></uv-icon>
       </view>
       <view class="step6-submit-btn" @tap="submitQuestionnaire">
-        <text class="step6-submit-text">提交问卷</text>
+        <text class="step6-submit-text">{{ t('提交问卷') }}</text>
       </view>
     </view>
     <template v-else>

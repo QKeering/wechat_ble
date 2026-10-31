@@ -1,4 +1,5 @@
 import { getApiBase } from '@/utils/apiBase';
+import { t } from '@/i18n';
 
 /**
  * 将相对路径转换为完整 API 绝对 URL
@@ -46,17 +47,21 @@ export const formatDate = (date, format = 'day') => {
 
   switch (format) {
     case 'day':
-      return `${month}月${day}号`;
+      return t('{month}月{day}日', { month, day });
     case 'week': {
       // 计算本周信息
       const weekInfo = getWeekInfo(date);
       // 修改这里：只显示日期区间，不显示第几周
-      return `${weekInfo.startMonth}月${weekInfo.startDay}-${weekInfo.endDay}号`;
+      return t('{startMonth}月{startDay}日-{endDay}日', {
+        startMonth: weekInfo.startMonth,
+        startDay: weekInfo.startDay,
+        endDay: weekInfo.endDay
+      });
     }
     case 'month':
-      return `${year}年${month}月`;
+      return t('{year}年{month}月', { year, month });
     default:
-      return `${month}月${day}号`;
+      return t('{month}月{day}日', { month, day });
   }
 };
 /**

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow, onUnload } from '@dcloudio/uni-app';
 import { baseOption } from '@/homeDetail/vitalSigns/echartOptions';
@@ -23,6 +25,8 @@ import {
   showRingWearGuidance,
   type RingWearState
 } from '@/utils/ringWearGate';
+
+const { t } = useI18n();
 const userStore = useUserStore();
 const {
   sendBodyTemperatureCommand,
@@ -66,7 +70,7 @@ let completedMeasurementReading: any = null;
 let wearGatePending = false;
 let wearConfirmedForRun = false;
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
-const showVitalMeasurementBusy = () => uni.showToast({ title: '设备正在测量，请稍候', icon: 'none' });
+const showVitalMeasurementBusy = () => uni.showToast({ title: t('设备正在测量，请稍候'), icon: 'none' });
 const settleOwnVitalMeasurementLock = (reason: string) => {
   if (!vitalMeasurementLockToken) return;
   if (!isRwDevice() && syncVitalMeasurementLockWithLegacyBusy(vitalMeasurementLockToken) > 0) return;
@@ -190,7 +194,7 @@ const cancelMeasurement = async () => {
   wearConfirmedForRun = false;
   if (isRwDevice()) await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
   settleOwnVitalMeasurementLock('user-cancelled');
-  uni.showToast({ title: '已结束测量', icon: 'none' });
+  uni.showToast({ title: t('已结束测量'), icon: 'none' });
 };
 // 是否为iOS的计算属性
 const isIOS = computed(() => {
@@ -223,7 +227,7 @@ const handleMeasure = () => {
 const startMeasure = async () => {
   measurePopup.value.close();
   if (!getSubmitDeviceMac(userStore, isIOS.value)) {
-    uni.showToast({ title: '请先连接设备', icon: 'none' });
+    uni.showToast({ title: t('请先连接设备'), icon: 'none' });
     (uni as any).$uv.route('/pagesA/mines/connectDevice');
     return;
   }
@@ -288,7 +292,7 @@ const startMeasure = async () => {
     measureStartedAt = 0;
     measurementDeadlineAt = 0;
     wearConfirmedForRun = false;
-    uni.showToast({ title: formatBleErrorMessage(error, '测量指令发送失败'), icon: 'none' });
+    uni.showToast({ title: t(formatBleErrorMessage(error, '测量指令发送失败')), icon: 'none' });
     return;
   }
 
@@ -346,10 +350,10 @@ watch(
 
       if (latest?.temperature) {
         temperature.value = latest.temperature;
-        uni.showToast({ title: '测量完成', icon: 'none' });
+        uni.showToast({ title: t('测量完成'), icon: 'none' });
         // 调用提交数据的接口
         try {
-          uni.showLoading({ title: '提交中...' });
+          uni.showLoading({ title: t('提交中...') });
           const recordTime = formatMetricRecordTime(latest.timestamp || Date.now());
           await submitData({
             deviceMac: getSubmitDeviceMac(userStore, isIOS.value),
@@ -364,7 +368,7 @@ watch(
           jumpDetail();
         } catch (error) {
           uni.hideLoading();
-          uni.showToast({ title: '数据提交失败', icon: 'none' });
+          uni.showToast({ title: t('数据提交失败'), icon: 'none' });
         }
       }
     }
@@ -374,19 +378,19 @@ watch(
 // 动态文本（计算属性）
 const measureText = computed(() => {
   if (!getSubmitDeviceMac(userStore, isIOS.value)) {
-    return '未连接';
+    return t('未连接');
   }
   // legacy 数值返回后的共享锁仅用于保护固件命令通道，不能显示为仍在测量。
-  if (measureStatus.value === 'measuring') return '皮肤温度测量中';
+  if (measureStatus.value === 'measuring') return t('皮肤温度测量中');
   // if (measureStatus.value === 'completed') {
   //   const latest: any = userStore.receivedData.filter((d) => d.type === 'active_Temperature').sort((a, b) => b.timestamp - a.timestamp)[0];
   //   if (latest?.temperature !== null && latest?.temperature !== undefined) {
   //     temperature.value = latest.temperature;
-  //     uni.showToast({ title: '测量完成', icon: 'none' });
+  //     uni.showToast({ title: t('测量完成'), icon: 'none' });
   //     jumpDetail();
   //   }
   // }
-  return '测量';
+  return t('测量');
 });
 onLoad(() => {});
 onShow(async () => {
@@ -415,7 +419,7 @@ onUnload(() => {
 <template>
   <view class="bg-white r-50 mb-30 p-30">
     <view class="flex jc-between ai-center">
-      <view class="fs-36">皮肤温度(℃)<slot></slot></view>
+      <view class="fs-36">{{ t('皮肤温度(℃)') }}<slot></slot></view>
       <view v-if="isHeartTate" class="textBox r-30 p-20 flex jc-between" :class="{ 'is-measure-locked': isVitalMeasurementLocked }" @tap="handleMeasure">
         <uv-image src="/static/images/homeDetail/Temperature.png" width="40rpx" height="40rpx"></uv-image>
         <text style="color: #69ca8d">{{ measureText }}</text>
@@ -425,19 +429,19 @@ onUnload(() => {
       <view class="flex jc-between mt-50 p-50">
         <view class="fd-c jc-around ai-center">
           <view class="ta-c fs-48">{{ formatTemperatureStat(temperatureData?.avgValue) }}</view>
-          <view class="ta-c t-979797 fs-24">平均</view>
+          <view class="ta-c t-979797 fs-24">{{ t('平均') }}</view>
         </view>
         <view>
           <!-- 测量数据  -->
           <!-- <view class="ta-c fs-48">{{ temperature || '00' }}</view> -->
           <!-- 接口数据 -->
           <view class="ta-c fs-48">{{ formatTemperatureStat(temperatureData.baseValue) }}</view>
-          <view class="ta-c t-979797 fs-24">基准温度</view>
+          <view class="ta-c t-979797 fs-24">{{ t('基准温度') }}</view>
         </view>
         <view>
           <!-- <view class="ta-c fs-48">{{ temperatureDiff }}</view> -->
           <view class="ta-c fs-48">{{ formatTemperatureStat(temperatureData?.diffValue, '0.0°C') }}</view>
-          <view class="ta-c t-979797 fs-24">温度差</view>
+          <view class="ta-c t-979797 fs-24">{{ t('温度差') }}</view>
         </view>
       </view>
     </view>
@@ -447,13 +451,13 @@ onUnload(() => {
         <view class="heartbeat-animation">
           <uv-image src="/static/images/homeDetail/Temperature.png" width="45rpx" height="45rpx"></uv-image>
         </view>
-        <view class="ml-20 t-white">皮肤温度测量中...</view>
-        <view class="measurement-exit" @tap.stop="cancelMeasurement">结束测量</view>
+        <view class="ml-20 t-white">{{ t('皮肤温度测量中...') }}</view>
+        <view class="measurement-exit" @tap.stop="cancelMeasurement">{{ t('结束测量') }}</view>
       </view>
     </uv-popup>
     <uv-popup round="20" ref="measurePopup" mode="center">
       <Action
-        title="皮肤温度测量提示"
+        :title="t('皮肤温度测量提示')"
         :agreementChecked="agreementChecked"
         @update:agreementChecked="agreementChecked = $event"
         @confirm="startMeasure"

@@ -1,12 +1,14 @@
-const RING_CONNECTION_TROUBLESHOOTING_URL =
-  `/pagesA/mines/detail?local=ring-connect-failed&title=${encodeURIComponent('连接不上戒指')}`;
+import { t } from '@/i18n';
+
+const buildRingConnectionTroubleshootingUrl = () =>
+  `/pagesA/mines/detail?local=ring-connect-failed&title=${encodeURIComponent(t('连接不上戒指'))}`;
 
 let promptVisible = false;
 
 export const openRingConnectionTroubleshooting = () => {
   return new Promise<boolean>((resolve) => {
     uni.navigateTo({
-      url: RING_CONNECTION_TROUBLESHOOTING_URL,
+      url: buildRingConnectionTroubleshootingUrl(),
       success: () => resolve(true),
       fail: () => resolve(false)
     });
@@ -30,10 +32,10 @@ export const showRingConnectionTroubleshootingPrompt = () => {
     uni.hideLoading();
     setTimeout(() => {
       uni.showModal({
-        title: '戒指连接不上？',
-        content: '暂时未能连接戒指，是否查看连接不上戒指的原因排查与自检方法？',
-        confirmText: '查看原因',
-        cancelText: '取消',
+        title: t('戒指连接不上？'),
+        content: t('暂时未能连接戒指，是否查看连接不上戒指的原因排查与自检方法？'),
+        confirmText: t('查看原因'),
+        cancelText: t('取消'),
         success: (result) => {
           if (!result.confirm) {
             resolve(false);

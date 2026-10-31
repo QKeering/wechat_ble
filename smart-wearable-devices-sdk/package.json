@@ -39,6 +39,7 @@
     "build:quickapp-webview-huawei": "uni build -p quickapp-webview-huawei",
     "build:quickapp-webview-union": "uni build -p quickapp-webview-union",
     "type-check": "vue-tsc --noEmit",
+    "i18n:check": "node scripts/i18n-check.mjs",
     "check:mp-weixin-size": "node scripts/inspect-mp-weixin-size.mjs",
     "fetch:rw-backend-log": "node scripts/fetch-rw-backend-log.mjs",
     "analyze:rw-log": "node scripts/analyze-rw-ble-log.mjs",

@@ -1,10 +1,14 @@
 <script setup lang="ts">
 // @ts-nocheck
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, watch } from 'vue';
 import echarts from '@/utils/echarts';
 import { pressureOption } from '@/homeDetail/relaxStatus/echartOptions';
 import type { Point, stressProportion } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
+
+const { t } = useI18n();
 
 const props = defineProps({
   stressProportion: {
@@ -27,11 +31,11 @@ const chartRef = ref<any>(null);
 
 const formatMinutesToTime = (minutes: number): string => {
   if (isNaN(minutes) || minutes < 0) {
-    return '0小时00分钟';
+    return t('{hours}小时{minutes}分钟', { hours: 0, minutes: '00' });
   }
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
-  return `${hours}小时${remainingMinutes.toString().padStart(2, '0')}分钟`;
+  return t('{hours}小时{minutes}分钟', { hours, minutes: remainingMinutes.toString().padStart(2, '0') });
 };
 
 const areAllValuesZero = (dataArray: any[] = []): boolean => {
@@ -89,9 +93,9 @@ const getSecoundOption = () => {
       }));
       newOption.legend.top = dataArray.length === 5 ? '10%' : dataArray.length > 5 ? '0%' : '20%';
       newOption.legend.formatter = function (name: string) {
-        const time = timeMap[name] || '0小时00分钟';
+        const time = timeMap[name] || t('{hours}小时{minutes}分钟', { hours: 0, minutes: '00' });
         const percent = percentMap[name] || '0%';
-        return `{nameStyle|${name}}{space|    }{percentStyle|${percent}}{space|    }{timeStyle|${time}}`;
+        return `{nameStyle|${t(name)}}{space|    }{percentStyle|${percent}}{space|    }{timeStyle|${time}}`;
       };
     }
   };
@@ -147,7 +151,7 @@ const initChart = async () => {
 <template>
   <view class="bg-white r-50 mb-30 p-30">
     <view>
-      <view class="score-title fs-36">压力比例</view>
+      <view class="score-title fs-36">{{ t('压力比例') }}</view>
     </view>
     <view class="flex ai-center jc-center">
       <l-echart ref="chartRef" @finished="initChart" style="width: 100%; height: 320rpx; margin: 0"></l-echart>

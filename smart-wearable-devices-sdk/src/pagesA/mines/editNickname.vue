@@ -1,8 +1,12 @@
 <script setup>
+import '@/pagesA/mines/i18n/pack';
 import { ref } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
 import { useUserStore } from '@/stores/user';
+import { useI18n, usePageTitle } from '@/i18n';
 
+const { t } = useI18n();
+usePageTitle(() => t('修改昵称'));
 const userStore = useUserStore();
 const nickName = ref('');
 const saving = ref(false);
@@ -19,7 +23,7 @@ const updateUserNickName = async () => {
   const nextNickName = nickName.value.trim();
   if (!nextNickName) {
     return uni.showToast({
-      title: '请输入昵称',
+      title: t('请输入昵称'),
       icon: 'error'
     });
   }
@@ -31,13 +35,13 @@ const updateUserNickName = async () => {
     });
     nickName.value = nextNickName;
     uni.showToast({
-      title: '修改成功',
+      title: t('修改成功'),
       icon: 'success'
     });
     uni.navigateBack();
   } catch {
     uni.showToast({
-      title: '保存失败，请稍后再试',
+      title: t('保存失败，请稍后再试'),
       icon: 'none'
     });
   } finally {
@@ -53,11 +57,11 @@ onLoad((e) => {
 <template>
   <view class="p-30">
     <view class="bg-white p-40 r-50">
-      <uv-input maxlength="20" border="none" placeholder="请输入内容" v-model="nickName" :customStyle="{ fontSize: '36rpx' }"></uv-input>
+      <uv-input maxlength="20" border="none" :placeholder="t('请输入内容')" v-model="nickName" :customStyle="{ fontSize: '36rpx' }"></uv-input>
     </view>
     <view class="footer p-30">
       <uv-button
-        text="保存"
+        :text="t('保存')"
         color="#2E70FC"
         :customTextStyle="{ 'font-size': '36rpx' }"
         :customStyle="{

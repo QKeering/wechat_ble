@@ -1,10 +1,14 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch } from 'vue';
 import echarts from '@/utils/echarts';
 import { pressureOption } from '@/homeDetail/exercise/echartOptions';
 import type { motionOverview, motionSummary } from '@/types/api/homeDetail';
 import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 import { normalizeCalorieGoalKcal } from '@/utils/calorieGoal';
+
+const { t } = useI18n();
 
 const props = defineProps({
   motionOverviewObj: {
@@ -131,7 +135,7 @@ const initPie = async () => {
     <view class="p-20 r-50" style="background-color: #fefdfb">
       <view class="flex ai-center jc-center" style="position: relative">
         <view class="" style="position: absolute; top: 0; right: 10rpx; z-index: 99" @tap="jumpSetting">
-          <view class="setting-button">设置</view>
+          <view class="setting-button">{{ t('设置') }}</view>
         </view>
         <l-echart ref="pieRef" @finished="initPie" style="width: 100%; height: 192rpx; margin: 0"></l-echart>
       </view>
@@ -141,7 +145,7 @@ const initPie = async () => {
       <view class="stat-item">
         <view class="indicator">
           <view class="dot heat-dot"></view>
-          <text class="fs-24 t-979797">活动热量</text>
+          <text class="fs-24 t-979797">{{ t('活动热量') }}</text>
         </view>
         <view>
           <text class="fs-36">{{ calorieNumber > 0 ? calorieText : '00' }}</text>
@@ -152,23 +156,23 @@ const initPie = async () => {
       <view class="stat-item">
         <view class="indicator">
           <view class="dot steps-dot"></view>
-          <text class="fs-24 t-979797">活动步数</text>
+          <text class="fs-24 t-979797">{{ t('活动步数') }}</text>
         </view>
         <view>
           <text class="fs-36">{{ stepNumber || '00' }}</text>
           <text class="fs-24 t-979797">/{{ targetStep }}</text>
-          <text class="fs-24 t-979797">步</text>
+          <text class="fs-24 t-979797">{{ t('步') }}</text>
         </view>
       </view>
       <view class="stat-item">
         <view class="indicator">
           <view class="dot time-dot"></view>
-          <text class="fs-24 t-979797">活动时间</text>
+          <text class="fs-24 t-979797">{{ t('活动时间') }}</text>
         </view>
         <view>
           <text class="fs-36">{{ motionTimeNumber || '00' }}</text>
           <text class="fs-24 t-979797">/{{ targetMotionTime }}</text>
-          <text class="fs-24 t-979797">分钟</text>
+          <text class="fs-24 t-979797">{{ t('分钟') }}</text>
         </view>
       </view>
     </view>

@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import '@/pagesA/healths/i18n/pack';
 import { ref, computed } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
+import { useI18n } from '@/i18n';
 import sleepEchartItem from '@/components/sleepEchartItem.vue';
 import { defaultEchartOption, sleepTimeOption } from '@/pagesA/echartOptions/sedentaryRiskOptions';
 import lineProgresss from '@/pagesA/components/lineProgress.vue';
@@ -9,6 +11,9 @@ import type { SittingRiskResp } from '@/types/api/healthSummary';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';
 import { cloneDeep } from 'lodash-es';
 import echarts from '@/utils/echarts';
+
+const { t } = useI18n();
+
 const sittingRiskInfo = ref<SittingRiskResp>();
 const getProcessedOption = () => {
   const testTrendChartData = [
@@ -160,7 +165,7 @@ onLoad(async () => {
   sittingRiskInfo.value = res;
   if (!sittingRiskInfo.value) {
     uni.showToast({
-      title: '暂无数据',
+      title: t('暂无数据'),
       icon: 'none'
     });
   }
@@ -170,50 +175,50 @@ onLoad(async () => {
 <template>
   <view class="pl-30 pr-30 pt-30">
     <sleepEchartItem
-      title="久坐风险"
-      :subtitle="sittingRiskInfo?.overview?.level || '--'"
+      :title="t('久坐风险')"
+      :subtitle="t(sittingRiskInfo?.overview?.level || '--')"
       :dateRange="sittingRiskInfo?.overview?.dateRange || '--'"
       @chart-finished="(chartRef) => initChart(chartRef)"
     >
       <template #comparison>
         <view class="tag flex ai-center ml-20 p-10">
-          <text>{{ sittingRiskInfo?.overview?.trend || '--' }}</text>
+          <text>{{ t(sittingRiskInfo?.overview?.trend || '--') }}</text>
         </view>
       </template>
     </sleepEchartItem>
     <sleepEchartItem
       :showChartDate="false"
-      title="步数"
-      :subtitle="'平均' + (sittingRiskInfo?.avgSteps || '--') + '步'"
+      :title="t('步数')"
+      :subtitle="t('平均{steps}步', { steps: sittingRiskInfo?.avgSteps || '--' })"
       @chart-finished="(chartRef) => lightSleepTimeChart(chartRef)"
     >
       <template #comparison>
         <view class="tag flex ai-center ml-20 pl-20 pr-20 pt-10 pb-10">
-          <text>{{ sittingRiskInfo?.stepsLevel || '--' }}</text>
+          <text>{{ t(sittingRiskInfo?.stepsLevel || '--') }}</text>
         </view>
       </template>
     </sleepEchartItem>
     <view class="bg-white r-50 mt-20 p-40">
       <view class="flex ai-center jc-between">
-        <text class="fs-36">步数</text>
-        <text class="fs-36">{{ sittingRiskInfo?.avgSteps || '00' }}步</text>
+        <text class="fs-36">{{ t('步数') }}</text>
+        <text class="fs-36">{{ t('{steps}步', { steps: sittingRiskInfo?.avgSteps || '00' }) }}</text>
       </view>
     </view>
     <view class="bg-white r-50 mt-20 p-40">
       <view class="flex ai-center jc-between">
-        <text class="fs-36">活动水平</text>
-        <text class="fs-36">{{ sittingRiskInfo?.activityLevel || '00' }}</text>
+        <text class="fs-36">{{ t('活动水平') }}</text>
+        <text class="fs-36">{{ t(String(sittingRiskInfo?.activityLevel || '00')) }}</text>
       </view>
     </view>
     <view class="bg-white r-50 mt-20 p-40">
       <view class="flex ai-center jc-between">
-        <text class="fs-36">活跃时间</text>
+        <text class="fs-36">{{ t('活跃时间') }}</text>
         <!-- <text class="fs-36">10小时4分钟</text> -->
         <view>
           <text class="fs-36">{{ getSleepDurationHours(sittingRiskInfo?.activeMinutes || 0) }}</text>
-          <text class="fs-36">小时</text>
+          <text class="fs-36">{{ t('小时') }}</text>
           <text class="fs-36">{{ getSleepDurationMinutes(sittingRiskInfo?.activeMinutes || 0) }}</text>
-          <text class="fs-36">分钟</text>
+          <text class="fs-36">{{ t('分钟') }}</text>
         </view>
       </view>
     </view>

@@ -15,8 +15,10 @@ import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthLevel, normalizeHealthText } from '@/utils/healthText';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { isAnyDeviceSyncSessionRunning } from '@/utils/deviceSyncSession';
+import { useI18n } from '@/i18n';
 
 import echarts from '@/utils/echarts';
+const { t, tt } = useI18n();
 const userStore = useUserStore();
 const ringStore = useRingStore();
 const {
@@ -54,6 +56,8 @@ type itemType = {
 const pullDownRefresh = ref(false);
 const pullDownProgress = ref(0);
 const habitTrendText = computed(() => normalizeHealthText(healthSummary.value?.habitScore?.trend, '--'));
+// normalizeHealthText 返回简体中文（parity 断言依赖），只在展示时翻译。
+const habitTrendDisplay = computed(() => tt(habitTrendText.value));
 const normalizeIndicatorScore = (value: unknown): number | null => {
   if (value === null || value === undefined || value === '') return null;
   const score = Number(value);
@@ -223,7 +227,7 @@ const jumpMeasureDetail = async () => {
   if (!hasBoundRingIdentity(boundDevice)) {
     await clearFrontendRingBindingState(userStore, ringStore);
     uni.showToast({
-      title: '请先配对戒指',
+      title: t('请先配对戒指'),
       icon: 'none',
       duration: 2000
     });
@@ -249,7 +253,7 @@ const jumpMeasureDetail = async () => {
   }
 
   uni.showToast({
-    title: '请先配对戒指',
+    title: t('请先配对戒指'),
     icon: 'none',
     duration: 2000
   });
@@ -296,7 +300,7 @@ onPullDownRefresh(async () => {
     pullDownProgress.value = 100;
   } catch (error) {
     uni.showToast({
-      title: formatBleErrorMessage(error, '刷新失败，请稍后再试'),
+      title: t(formatBleErrorMessage(error, '刷新失败，请稍后再试')),
       icon: 'none',
       duration: 2000
     });
@@ -310,15 +314,15 @@ onPullDownRefresh(async () => {
 
 <template>
   <view style="position: relative">
-    <uv-navbar placeholder leftIcon="" title="健康" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar placeholder leftIcon="" :title="t('健康')" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view style="position: absolute; top: 0; left: 0; width: 100%">
       <uv-image src="/static/images/bg01.png" width="100%" mode="widthFix"></uv-image>
     </view>
     <view class="pt-30 pr-30 pb-100 pl-30 relative" style="z-index: 1; box-sizing: border-box">
       <view class="flex fd-c ai-center">
         <view class="report-period flex fd-c ai-center jc-center">
-          <view class="period-date">{{ healthSummary?.dateRange || '00月00号-00月00号' }}</view>
-          <view class="period-label fs-24">本周</view>
+          <view class="period-date">{{ healthSummary?.dateRange || '--' }}</view>
+          <view class="period-label fs-24">{{ t('本周') }}</view>
         </view>
       </view>
 
@@ -328,13 +332,13 @@ onPullDownRefresh(async () => {
       </view>
 
       <view class="score-card mt-30 r-50 bg-white p-40">
-        <view class="score-title fs-36 mb-50">生活习惯评分</view>
+        <view class="score-title fs-36 mb-50">{{ t('生活习惯评分') }}</view>
         <view class="score-chart flex ai-center jc-center">
           <l-echart ref="chartRef1" @finished="initHabitChart" style="width: 524rpx; height: 262rpx"></l-echart>
         </view>
         <view class="score-trend flex fd-c ai-center">
-          <view class="trend-text fs-36">{{ habitTrendText }}</view>
-          <view class="trend-compare mt-10 t-979797">相比前四周</view>
+          <view class="trend-text fs-36">{{ habitTrendDisplay }}</view>
+          <view class="trend-compare mt-10 t-979797">{{ t('相比前四周') }}</view>
         </view>
         <score-progress-bar
           :current-score="normalizeIndicatorScore(healthSummary?.habitScore?.score) ?? 0"
@@ -345,12 +349,12 @@ onPullDownRefresh(async () => {
       </view>
 
       <view class="measure-guide mt-30 r-50 bg-white p-40">
-        <view class="guide-title fs-36">全面测量</view>
-        <view class="guide-desc mt-40 fs-32" style="color: #3d3d3d">我将从运动、皮肤温度、睡眠、心率、心率变异性、血氧、压力各项指标全面开始测量。</view>
+        <view class="guide-title fs-36">{{ t('全面测量') }}</view>
+        <view class="guide-desc mt-40 fs-32" style="color: #3d3d3d">{{ t('我将从运动、皮肤温度、睡眠、心率、心率变异性、血氧、压力各项指标全面开始测量。') }}</view>
         <view class="guide-action mt-90 flex jc-center ai-center relative" @click="jumpMeasureDetail">
           <view class="absolute center-xy flex fd-c ai-center" style="z-index: 1">
-            <view class="t-white fs-60">测量</view>
-            <view class="fs-24 mt-10" style="color: #ffffff80">点击开始</view>
+            <view class="t-white fs-60">{{ t('测量') }}</view>
+            <view class="fs-24 mt-10" style="color: #ffffff80">{{ t('点击开始') }}</view>
           </view>
           <view class="circle-shadow-btn">
             <uv-image src="/static/images/icon13.png" width="280rpx" height="280rpx"></uv-image>
@@ -360,15 +364,15 @@ onPullDownRefresh(async () => {
 
       <view class="module sleep-module mt-40">
         <view class="module-header flex jc-between ai-center">
-          <view class="module-title fs-36">睡眠</view>
+          <view class="module-title fs-36">{{ t('睡眠') }}</view>
           <view class="module-legend flex ai-center">
             <view class="legend-item flex ai-center mr-20">
               <uv-image src="/static/images/icon11.png" width="16rpx" height="16rpx"></uv-image>
-              <view class="legend-label ml-10">前四周平均</view>
+              <view class="legend-label ml-10">{{ t('前四周平均') }}</view>
             </view>
             <view class="legend-item flex ai-center">
               <uv-image src="/static/images/icon12.png" width="28rpx" height="28rpx"></uv-image>
-              <view class="legend-label ml-10">当前</view>
+              <view class="legend-label ml-10">{{ t('当前') }}</view>
             </view>
           </view>
         </view>
@@ -377,12 +381,12 @@ onPullDownRefresh(async () => {
           <view v-for="(item, index) in sleepIndicators" :key="index" class="indicator-item r-50 bg-white p-40 mt-30">
             <view class="indicator-header">
               <view class="indicator-name flex jc-between ai-center" @tap="jumpDetail(item)">
-                <text class="fs-36">{{ item.name }}</text>
+                <text class="fs-36">{{ t(item.name) }}</text>
                 <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
               </view>
               <view class="indicator-score mt-50">
                 <!-- <text class="fs-48">{{ item.score > 0 ? '+' + item.score : item.score }}</text> -->
-                <text class="score-level fs-36 ml-10">{{ item.level }}</text>
+                <text class="score-level fs-36 ml-10">{{ tt(item.level) }}</text>
               </view>
             </view>
             <score-progress-bar
@@ -398,15 +402,15 @@ onPullDownRefresh(async () => {
 
       <view class="module sleep-module mt-40">
         <view class="module-header flex jc-between ai-center">
-          <view class="module-title fs-36">活动</view>
+          <view class="module-title fs-36">{{ t('活动') }}</view>
           <view class="module-legend flex ai-center">
             <view class="legend-item flex ai-center mr-20">
               <uv-image src="/static/images/icon11.png" width="16rpx" height="16rpx"></uv-image>
-              <view class="legend-label ml-10">前四周平均</view>
+              <view class="legend-label ml-10">{{ t('前四周平均') }}</view>
             </view>
             <view class="legend-item flex ai-center">
               <uv-image src="/static/images/icon12.png" width="28rpx" height="28rpx"></uv-image>
-              <view class="legend-label ml-10">当前</view>
+              <view class="legend-label ml-10">{{ t('当前') }}</view>
             </view>
           </view>
         </view>
@@ -415,12 +419,12 @@ onPullDownRefresh(async () => {
           <view v-for="(item, index) in activityIndicators" :key="index" class="indicator-item r-50 bg-white p-40 mt-30">
             <view class="indicator-header">
               <view class="indicator-name flex jc-between ai-center" @tap="jumpDetail(item)">
-                <text class="fs-36">{{ item.name }}</text>
+                <text class="fs-36">{{ t(item.name) }}</text>
                 <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
               </view>
               <view class="indicator-score mt-50">
                 <!-- <text class="fs-48">{{ item.score > 0 ? '+' + item.score : item.score }}</text> -->
-                <text class="score-level fs-36 ml-10">{{ item.level }}</text>
+                <text class="score-level fs-36 ml-10">{{ tt(item.level) }}</text>
               </view>
             </view>
             <score-progress-bar

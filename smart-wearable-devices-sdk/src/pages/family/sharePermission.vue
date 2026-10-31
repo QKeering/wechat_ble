@@ -1,7 +1,11 @@
 <script setup lang="ts">
+import '@/pages/family/i18n/pack';
 import { ref } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
 import { getFamilyMemberDetail, updateFamilyPermissions, updateFamilyRelation, type FamilyMember } from '@/common/api/family';
+import { useI18n } from '@/i18n';
+
+const { t } = useI18n();
 
 const memberId = ref(0);
 const relationId = ref(0);
@@ -59,7 +63,7 @@ const save = async () => {
         permissions: permissions.value
       });
     }
-    uni.showToast({ title: '已保存', icon: 'success' });
+    uni.showToast({ title: t('已保存'), icon: 'success' });
     setTimeout(() => {
       uni.navigateBack();
     }, 500);
@@ -77,26 +81,26 @@ onLoad((query: any) => {
 
 <template>
   <view class="page">
-    <uv-navbar placeholder title="共享权限" bgColor="#f1f3f6"></uv-navbar>
+    <uv-navbar placeholder :title="t('共享权限')" bgColor="#f1f3f6"></uv-navbar>
 
     <view class="header">
-      <view class="title">{{ member?.name || '家人' }}的数据共享</view>
-      <view class="desc">关闭某项后，亲情账号将无法查看对应健康数据，后端接口也会同步拦截。</view>
-      <view class="auth-note">父母本人认领档案后，子女端仅可查看已有授权范围，不能继续调整。</view>
+      <view class="title">{{ t('{name}的数据共享', { name: member?.name || t('家人') }) }}</view>
+      <view class="desc">{{ t('关闭某项后，亲情账号将无法查看对应健康数据，后端接口也会同步拦截。') }}</view>
+      <view class="auth-note">{{ t('父母本人认领档案后，子女端仅可查看已有授权范围，不能继续调整。') }}</view>
     </view>
 
     <view class="list">
       <view v-for="item in items" :key="item.key" class="permission-item" @click="toggle(item.key)">
         <view>
-          <view class="item-title">{{ item.title }}</view>
-          <view class="item-desc">{{ item.desc }}</view>
+          <view class="item-title">{{ t(item.title) }}</view>
+          <view class="item-desc">{{ t(item.desc) }}</view>
         </view>
         <switch :checked="permissions[item.key]" color="#2E70FC" @click.stop @change.stop="setPermission(item.key, $event)" />
       </view>
     </view>
 
     <view class="bottom-action">
-      <uv-button :loading="saving" text="保存权限" color="#2E70FC" :customStyle="{ height: '96rpx' }" :customTextStyle="{ fontSize: '34rpx' }" @click="save" />
+      <uv-button :loading="saving" :text="t('保存权限')" color="#2E70FC" :customStyle="{ height: '96rpx' }" :customTextStyle="{ fontSize: '34rpx' }" @click="save" />
     </view>
   </view>
 </template>

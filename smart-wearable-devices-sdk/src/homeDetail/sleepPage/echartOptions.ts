@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { t } from '@/i18n';
 type AnyEchartOption = any;
 
 export const sleepTimeOption2: AnyEchartOption = {
@@ -35,7 +36,8 @@ export const sleepTimeOption2: AnyEchartOption = {
     axisLabel: {
       fontSize: 13,
       color: '#4b5563',
-      fontWeight: 500
+      fontWeight: 500,
+      formatter: (value: string) => t(value)
     },
     splitLine: {
       show: false
@@ -91,7 +93,7 @@ export const sleepTimeOption2: AnyEchartOption = {
       const endMinutes = Math.floor(endTotal % 60);
       const startTimeStr = `${startHours.toString().padStart(2, '0')}:${startMinutes.toString().padStart(2, '0')}`;
       const endTimeStr = `${endHours.toString().padStart(2, '0')}:${endMinutes.toString().padStart(2, '0')}`;
-      return `${params.seriesName}<br/>${startTimeStr}-${endTimeStr}<br/>${duration}分钟`;
+      return `${t(params.seriesName)}<br/>${startTimeStr}-${endTimeStr}<br/>${t('{value}分钟', { value: duration })}`;
     }
   },
   backgroundColor: '#f8f8fe'
@@ -131,7 +133,7 @@ export const sleepTimeOption: AnyEchartOption = {
           3: '浅睡',
           4: '深睡'
         };
-        return labelMap[value] || '';
+        return labelMap[value] ? t(labelMap[value]) : '';
       }
     },
     splitLine: {
@@ -184,7 +186,7 @@ export const sleepTimeOption: AnyEchartOption = {
 };
 export const sleepRageOption: AnyEchartOption = {
   title: {
-    subtext: '睡眠\n比例',
+    subtext: t('睡眠\n比例'),
     subtextStyle: {
       fontSize: 14,
       fontWeight: 'normal',
@@ -239,17 +241,17 @@ export const sleepRageOption: AnyEchartOption = {
       let value = '',
         time = '';
       if (name === '清醒') {
-        time = '00小时00分钟';
+        time = t('00小时00分钟');
       } else if (name === '快速眼动') {
-        time = '00小时00分钟';
+        time = t('00小时00分钟');
       } else if (name === '浅睡') {
-        time = '00小时00分钟';
+        time = t('00小时00分钟');
       } else if (name === '深睡') {
-        time = '00小时00分钟';
+        time = t('00小时00分钟');
       } else if (name === '小睡') {
-        time = '00小时00分钟';
+        time = t('00小时00分钟');
       }
-      return `{nameStyle|${name}}{space|    }{timeStyle|${time}}`;
+      return `{nameStyle|${t(name)}}{space|    }{timeStyle|${time}}`;
     },
     textStyle: {
       fontSize: 12,

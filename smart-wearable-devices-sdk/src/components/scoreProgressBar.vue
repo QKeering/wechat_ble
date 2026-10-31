@@ -21,13 +21,13 @@
     <!-- 评分等级标签 -->
     <view class="level-tag-container">
       <view class="level-tag left-level">
-        <text class="mb-20">待改善</text>
+        <text class="mb-20">{{ t('待改善') }}</text>
       </view>
       <view class="level-tag middle-level">
-        <text class="mb-20">良好</text>
+        <text class="mb-20">{{ t('良好') }}</text>
       </view>
       <view class="level-tag right-level">
-        <text class="mb-20">优秀</text>
+        <text class="mb-20">{{ t('优秀') }}</text>
       </view>
     </view>
   </view>
@@ -35,6 +35,9 @@
 
 <script setup>
 import { computed } from 'vue';
+import { useI18n } from '@/i18n';
+
+const { t } = useI18n();
 
 // 组件属性定义
 const props = defineProps({

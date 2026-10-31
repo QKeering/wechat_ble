@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
 import homeHeartChart from '@/components/homeHeartChart.vue';
@@ -10,7 +12,9 @@ import { cloneDeep } from 'lodash-es';
 import { MOTION_CALORIE_DISPLAY_UNIT, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 import { normalizeCalorieGoalKcal } from '@/utils/calorieGoal';
 import echarts from '@/utils/echarts';
-const list = ref(['日', '周', '月']);
+
+const { t } = useI18n();
+const list = computed<string[]>(() => [t('日'), t('周'), t('月')]);
 const current = ref<number>(0);
 const currentName = ref('day');
 const currentList = ref<string[]>(['day', 'week', 'month']);
@@ -118,7 +122,7 @@ const nextDay = async () => {
     await getMotionDetailData();
     refreshAllCharts();
   } else {
-    (uni as any).$uv.toast('不能导航到未来的日期');
+    (uni as any).$uv.toast(t('不能导航到未来的日期'));
   }
 };
 const getMotionDetailData = async (currentDate = new Date()) => {
@@ -298,7 +302,7 @@ onPageScroll((e) => {
 </script>
 <template>
   <view class="relative p-30">
-    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" title="活动详情" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" :title="t('活动详情')" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view class="bgcWrapper"></view>
     <view class="content">
       <uv-subsection
@@ -323,8 +327,8 @@ onPageScroll((e) => {
       </view>
       <view class="health-card p-30 bg-white r-50 mt-40">
         <view class="flex ai-center jc-between mb-20">
-          <text class="fs-36 fw-400">健康评分</text>
-          <text class="fs-28 t-979797">当前活动完成率</text>
+          <text class="fs-36 fw-400">{{ t('健康评分') }}</text>
+          <text class="fs-28 t-979797">{{ t('当前活动完成率') }}</text>
         </view>
         <view class="flex ai-center jc-between">
           <view class="flex ai-center">
@@ -334,7 +338,7 @@ onPageScroll((e) => {
               <text class="fs-24">%</text>
             </view>
           </view>
-          <view class="status-tag" :class="statusClass">{{ activeText }}</view>
+          <view class="status-tag" :class="statusClass">{{ t(activeText) }}</view>
         </view>
       </view>
       <view class="mt-30">
@@ -342,7 +346,7 @@ onPageScroll((e) => {
           ref="chartRefF"
           :currentRate="motionCalorieKcal"
           :rateUnit="'/' + motionTargetCalorie + MOTION_CALORIE_DISPLAY_UNIT"
-          card-title="活动总热量"
+          :card-title="t('活动总热量')"
           :showRigntBox="false"
           :showChartTitle="true"
           :showButtomCard="false"
@@ -353,8 +357,8 @@ onPageScroll((e) => {
         <homeHeartChart
           ref="chartRefS"
           :currentRate="motionDetailData?.step || 0"
-          :rateUnit="'/' + motionDetailData?.targetStep + '步'"
-          card-title="活动总步数"
+          :rateUnit="'/' + motionDetailData?.targetStep + t('步')"
+          :card-title="t('活动总步数')"
           :showRigntBox="false"
           :showChartTitle="true"
           :showButtomCard="false"
@@ -365,8 +369,8 @@ onPageScroll((e) => {
         <homeHeartChart
           ref="chartRefT"
           :currentRate="motionDetailData?.distance || 0"
-          rateUnit="公里"
-          card-title="活动总里程"
+          :rateUnit="t('公里')"
+          :card-title="t('活动总里程')"
           :showRigntBox="false"
           :showChartTitle="true"
           :showButtomCard="false"

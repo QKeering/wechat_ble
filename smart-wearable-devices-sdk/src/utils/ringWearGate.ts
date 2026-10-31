@@ -1,3 +1,5 @@
+import { t } from '@/i18n';
+
 export type RingWearState = 'unknown' | 'worn' | 'not_worn' | 'charging';
 
 const getRecordTimeMs = (record: Record<string, any>) => {
@@ -128,10 +130,10 @@ export const showRingWearGuidance = (kind: 'not_worn' | 'charging' | 'no_data') 
 
   guidanceVisible = true;
   uni.showModal({
-    title: guidance.title,
-    content: guidance.content,
+    title: t(guidance.title),
+    content: t(guidance.content),
     showCancel: false,
-    confirmText: '我知道了',
+    confirmText: t('我知道了'),
     complete: () => {
       guidanceVisible = false;
     }

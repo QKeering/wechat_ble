@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch, nextTick } from 'vue';
 import { onLoad, onShow, onUnload } from '@dcloudio/uni-app';
 import { applyVitalSignsLineStyle, baseOption } from '@/homeDetail/vitalSigns/echartOptions';
@@ -38,6 +40,8 @@ import {
   showRingWearGuidance,
   type RingWearState
 } from '@/utils/ringWearGate';
+
+const { t } = useI18n();
 const {
   sendActiveMeasureCommand,
   refreshHealthData,
@@ -234,12 +238,12 @@ let vitalMeasurementLockToken = '';
 // 动态文本（计算属性）
 const measureText = computed(() => {
   if (!getSubmitDeviceMac(userStore, isIOS.value)) {
-    return '未连接';
+    return t('未连接');
   }
   // 共享锁在 legacy 固件返回数值后仍会保留一段时间，用于避免立即下发下一条
   // 测量命令触发“设备繁忙”。它是内部冷却状态，不代表页面仍在测量。
-  if (measureStatus.value === 'measuring') return '心率测量中';
-  return '测量';
+  if (measureStatus.value === 'measuring') return t('心率测量中');
+  return t('测量');
 });
 // 监听 userStore.receivedData 变化
 watch(
@@ -278,10 +282,10 @@ watch(
       const latestStress: any = getLatestStressReading(userStore, measureStartedAt);
       if (latest?.heartRate) {
         heartRate.value = latest.heartRate;
-        uni.showToast({ title: '测量完成', icon: 'none' });
+        uni.showToast({ title: t('测量完成'), icon: 'none' });
         // 调用提交数据的接口
         try {
-          uni.showLoading({ title: '提交中...' });
+          uni.showLoading({ title: t('提交中...') });
           const recordTime = formatMetricRecordTime(latest.timestamp || Date.now());
           const stress = latestStress?.stressIndex ?? latestStress?.stress;
           const measurementRecord: { recordTime: string; heartRate: number; stress?: number } = {
@@ -299,7 +303,7 @@ watch(
           jumpDetail();
         } catch (error) {
           uni.hideLoading();
-          uni.showToast({ title: '数据提交失败', icon: 'none' });
+          uni.showToast({ title: t('数据提交失败'), icon: 'none' });
         }
       }
     }
@@ -320,7 +324,7 @@ const HEART_RATE_READY_TIMEOUT_MS = 12000;
 const measureChange = (e: any) => {};
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
 const showVitalMeasurementBusy = () => {
-  uni.showToast({ title: '设备正在测量，请稍候', icon: 'none' });
+  uni.showToast({ title: t('设备正在测量，请稍候'), icon: 'none' });
 };
 const settleOwnVitalMeasurementLock = (reason: string) => {
   if (!vitalMeasurementLockToken) return;
@@ -485,7 +489,7 @@ const cancelMeasurement = async () => {
   legacyMeasurementValueReady = false;
   if (isRwDevice()) await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
   settleOwnVitalMeasurementLock('user-cancelled');
-  uni.showToast({ title: '已结束测量', icon: 'none' });
+  uni.showToast({ title: t('已结束测量'), icon: 'none' });
 };
 // 开始测量
 const handleMeasure = () => {
@@ -512,7 +516,7 @@ const startMeasure = async () => {
   }
   measurePopup.value?.close?.();
   if (!getSubmitDeviceMac(userStore, isIOS.value)) {
-    uni.showToast({ title: '请先连接设备', icon: 'none' });
+    uni.showToast({ title: t('请先连接设备'), icon: 'none' });
     (uni as any).$uv.route('/pagesA/mines/connectDevice');
     return;
   }
@@ -524,7 +528,7 @@ const startMeasure = async () => {
   vitalMeasurementLockToken = acquiredLockToken;
 
   appendRingDiagnosticLog('VITAL HEART', 'heart-rate-measure-requested', getHeartRateMeasureSnapshot());
-  uni.showLoading({ title: '正在连接设备...' });
+  uni.showLoading({ title: t('正在连接设备...') });
   try {
     await ensureHeartRateCommunicationReady();
   } catch (error) {
@@ -534,7 +538,7 @@ const startMeasure = async () => {
       error: formatBleErrorMessage(error, '设备连接未就绪')
     });
     settleOwnVitalMeasurementLock('ready-check-failed');
-    uni.showToast({ title: formatBleErrorMessage(error, '设备未连接，请靠近设备后重试'), icon: 'none' });
+    uni.showToast({ title: t(formatBleErrorMessage(error, '设备未连接，请靠近设备后重试')), icon: 'none' });
     return;
   }
   uni.hideLoading();
@@ -607,7 +611,7 @@ const startMeasure = async () => {
       ...getHeartRateMeasureSnapshot(),
       error: formatBleErrorMessage(error, '测量指令发送失败')
     });
-    uni.showToast({ title: formatBleErrorMessage(error, '测量指令发送失败'), icon: 'none' });
+    uni.showToast({ title: t(formatBleErrorMessage(error, '测量指令发送失败')), icon: 'none' });
     return;
   }
 
@@ -646,7 +650,7 @@ onUnload(() => {
   <view class="score-card mb-30">
     <view class="metric-header">
       <view class="metric-title">
-        <text>心率</text>
+        <text>{{ t('心率') }}</text>
         <slot></slot>
       </view>
       <view v-if="isHeartTate" class="textBox" :class="{ 'is-measure-locked': isVitalMeasurementLocked }" @click.stop="handleMeasure">
@@ -659,7 +663,7 @@ onUnload(() => {
         <uv-image src="/static/images/homeDetail/love.png" width="44rpx" height="44rpx" mode="aspectFit"></uv-image>
         <view class="metric-current-copy">
           <text class="metric-current-value">{{ formatIntegerStat(isHeartTate ? heartRateData?.newValue : heartRateData?.avgValue) }}</text>
-          <text class="metric-current-unit">次/分钟</text>
+          <text class="metric-current-unit">{{ t('次/分钟') }}</text>
         </view>
       </view>
       <view class="metric-chart-wrap">
@@ -680,11 +684,11 @@ onUnload(() => {
       <view class="stats">
         <view class="stat-item">
           <view class="stat-value">{{ formatIntegerStat(heartRateData?.avgValue) }}</view>
-          <view class="stat-label">平均心率</view>
+          <view class="stat-label">{{ t('平均心率') }}</view>
         </view>
         <view class="stat-item">
           <view class="stat-value">{{ formatIntegerStat(heartRateData?.maxValue) }}</view>
-          <view class="stat-label">最大心率</view>
+          <view class="stat-label">{{ t('最大心率') }}</view>
         </view>
       </view>
     </view>
@@ -694,13 +698,13 @@ onUnload(() => {
         <view class="heartbeat-animation">
 <uv-image src="/static/images/homeDetail/love.png" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
         </view>
-        <view class="ml-20 t-white">心率测量中...</view>
-        <view class="measurement-exit" @tap.stop="cancelMeasurement">结束测量</view>
+        <view class="ml-20 t-white">{{ t('心率测量中...') }}</view>
+        <view class="measurement-exit" @tap.stop="cancelMeasurement">{{ t('结束测量') }}</view>
       </view>
     </uv-popup>
     <uv-popup round="20" ref="measurePopup" mode="center" @change="measureChange">
       <Action
-        tipText="测量时绿灯将亮起30-60秒"
+        :tipText="t('测量时绿灯将亮起30-60秒')"
         :agreementChecked="agreementChecked"
         @update:agreementChecked="agreementChecked = $event"
         @confirm="startMeasure"

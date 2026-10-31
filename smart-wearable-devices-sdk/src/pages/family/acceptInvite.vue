@@ -1,8 +1,12 @@
 <script setup lang="ts">
+import '@/pages/family/i18n/pack'
 import { computed, ref } from 'vue'
 import { onLoad } from '@dcloudio/uni-app'
 import { acceptFamilyInvite, getFamilyInvitePreview, type FamilyInvitePreview } from '@/common/api/family'
+import { useI18n } from '@/i18n'
 import { formatBleErrorMessage } from '@/utils/bleError'
+
+const { t } = useI18n()
 
 const inviteCode = ref('')
 const preview = ref<FamilyInvitePreview | null>(null)
@@ -36,10 +40,10 @@ const confirmAccept = async () => {
   submitting.value = true
   try {
     await acceptFamilyInvite(normalizedCode.value)
-    uni.showToast({ title: '已接受邀请', icon: 'success' })
+    uni.showToast({ title: t('已接受邀请'), icon: 'success' })
     setTimeout(() => uni.redirectTo({ url: '/pages/family/family' }), 800)
   } catch (error: any) {
-    uni.showToast({ title: formatBleErrorMessage(error, '接受失败，请稍后重试'), icon: 'none' })
+    uni.showToast({ title: t(formatBleErrorMessage(error, '接受失败，请稍后重试')), icon: 'none' })
   } finally {
     submitting.value = false
   }
@@ -53,22 +57,22 @@ onLoad((options) => {
 
 <template>
   <view class="page">
-    <view class="nav"><text class="back" @tap="goBack">‹</text><text class="title">确认邀请</text><view class="space" /></view>
+    <view class="nav"><text class="back" @tap="goBack">‹</text><text class="title">{{ t('确认邀请') }}</text><view class="space" /></view>
     <view class="card">
-      <text class="label">邀请码</text>
+      <text class="label">{{ t('邀请码') }}</text>
       <view class="code-row">
-        <input v-model="inviteCode" class="code-input" maxlength="16" placeholder="请输入邀请码" @blur="loadPreview" />
-        <button class="lookup" :disabled="loading || !normalizedCode" @tap="loadPreview">{{ loading ? '查询中' : '查询' }}</button>
+        <input v-model="inviteCode" class="code-input" maxlength="16" :placeholder="t('请输入邀请码')" @blur="loadPreview" />
+        <button class="lookup" :disabled="loading || !normalizedCode" @tap="loadPreview">{{ loading ? t('查询中') : t('查询') }}</button>
       </view>
-      <text v-if="errorText" class="error">{{ errorText }}</text>
+      <text v-if="errorText" class="error">{{ t(errorText) }}</text>
     </view>
 
     <view v-if="preview" class="card detail-card">
-      <text class="inviter">{{ preview.inviterName }} 邀请你共享健康数据</text>
+      <text class="inviter">{{ t('{name} 邀请你共享健康数据', { name: preview.inviterName }) }}</text>
       <text class="summary">{{ preview.permissionSummary }}</text>
-      <text class="expire">有效期至 {{ preview.expireTime }}</text>
-      <view v-if="!preview.canAccept" class="disabled-tip">{{ preview.disabledReason || '当前邀请不可接受' }}</view>
-      <button class="accept" :disabled="acceptDisabled" :loading="submitting" @tap="confirmAccept">接受邀请</button>
+      <text class="expire">{{ t('有效期至 {time}', { time: preview.expireTime }) }}</text>
+      <view v-if="!preview.canAccept" class="disabled-tip">{{ t(preview.disabledReason || '当前邀请不可接受') }}</view>
+      <button class="accept" :disabled="acceptDisabled" :loading="submitting" @tap="confirmAccept">{{ t('接受邀请') }}</button>
     </view>
   </view>
 </template>

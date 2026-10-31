@@ -1,3 +1,5 @@
+import { t } from '@/i18n';
+
 type WechatProfileForNickname = {
   nickName: string;
   avatarUrl?: string;
@@ -47,7 +49,7 @@ export const getWechatProfileForNickname = async (timeoutMs = 6000): Promise<Wec
     const result = await withTimeout(
       new Promise<unknown>((resolve, reject) => {
         runtime.getUserProfile({
-          desc: '用于完善用户资料',
+          desc: t('用于完善用户资料'),
           lang: 'zh_CN',
           success: resolve,
           fail: reject

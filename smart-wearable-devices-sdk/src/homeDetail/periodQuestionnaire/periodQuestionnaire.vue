@@ -1,5 +1,9 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { onLoad } from '@dcloudio/uni-app';
+
+const { t } = useI18n();
 
 onLoad(() => {});
 
@@ -50,9 +54,9 @@ const startQuestionnaire = () => {
 
       <!-- 文字内容 -->
       <view class="text-area">
-        <view class="main-title">生理期信息问卷</view>
+        <view class="main-title">{{ t('生理期信息问卷') }}</view>
         <view class="desc-text">
-          接下来会通过几个简单的问题来了解你的生理周期情况,这些信息将作为你的生理期预测的基准。如果你记不住确定的数字或日期,可以提供估计值。
+          {{ t('接下来会通过几个简单的问题来了解你的生理周期情况,这些信息将作为你的生理期预测的基准。如果你记不住确定的数字或日期,可以提供估计值。') }}
         </view>
       </view>
     </view>
@@ -60,7 +64,7 @@ const startQuestionnaire = () => {
     <!-- 底部按钮 -->
     <view class="bottom-btn-wrap">
       <view class="start-btn" @tap="startQuestionnaire">
-        <text class="start-btn-text">开始问卷</text>
+        <text class="start-btn-text">{{ t('开始问卷') }}</text>
       </view>
     </view>
   </view>

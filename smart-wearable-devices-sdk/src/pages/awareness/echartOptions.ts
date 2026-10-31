@@ -1,3 +1,5 @@
+import { t } from '@/i18n';
+
 export const chartOptionFirst = {
   series: [
     // ========== 第一圈：最外层环（#FF5B7B）==========
@@ -109,7 +111,7 @@ export const chartOptionSecound = {
     trigger: 'item', // 触发类型为数据项
     formatter: function (params: any) {
       const values = params.value;
-      const names = ['睡眠', '生命体征', '活动', '放松状态'];
+      const names = [t('睡眠'), t('生命体征'), t('活动'), t('放松状态')];
     }
   },
   legend: {
@@ -117,15 +119,15 @@ export const chartOptionSecound = {
   },
   radar: {
     indicator: [
-      { name: '睡眠', max: 100 },
-      { name: '生命体征', max: 100 },
-      { name: '活动', max: 100 },
-      { name: '放松状态', max: 100 }
+      { name: t('睡眠'), max: 100 },
+      { name: t('生命体征'), max: 100 },
+      { name: t('活动'), max: 100 },
+      { name: t('放松状态'), max: 100 }
     ]
   },
   series: [
     {
-      name: '个人健康评分',
+      name: t('个人健康评分'),
       type: 'radar',
       areaStyle: { color: '#81A9FD' }, // 蓝色填充
       lineStyle: { color: '#2E70FC' }, // 线条颜色
@@ -133,7 +135,7 @@ export const chartOptionSecound = {
       data: [
         {
           value: [93, 85, 92, 95],
-          name: '个人健康评分'
+          name: t('个人健康评分')
         }
       ]
     }
@@ -171,7 +173,7 @@ export const chartOptionThird = {
         fontSize: 24,
         color: '#010101'
       },
-      data: [{ value: 85, name: '睡眠评分', title: { offsetCenter: ['0%', '20%'] }, detail: { offsetCenter: ['0%', '-20%'] } }],
+      data: [{ value: 85, name: t('睡眠评分'), title: { offsetCenter: ['0%', '20%'] }, detail: { offsetCenter: ['0%', '-20%'] } }],
       radius: '100%',
       center: ['50%', '50%']
     }

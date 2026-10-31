@@ -1,5 +1,6 @@
 // utils/echartOptions.ts
 // @ts-nocheck
+import { t } from '@/i18n';
 type AnyEchartOption = any;
 
 export const heartRateOption: AnyEchartOption = {
@@ -85,7 +86,7 @@ export const sleepTimeOption: AnyEchartOption = {
           2: '快速眼动',
           3: '清醒'
         };
-        return labelMap[value] || '';
+        return labelMap[value] ? t(labelMap[value]) : '';
       }
     },
     splitLine: {
@@ -138,7 +139,7 @@ export const sleepTimeOption: AnyEchartOption = {
 };
 export const sleepRageOption: AnyEchartOption = {
   title: {
-    subtext: '睡眠\n比例',
+    subtext: t('睡眠\n比例'),
     subtextStyle: {
       fontSize: 14,
       fontWeight: 'normal',
@@ -197,7 +198,7 @@ export const sleepRageOption: AnyEchartOption = {
       } else if (name === '深睡') {
         time = '06小时03分钟';
       }
-      return `{nameStyle|${name}}{space|    }{timeStyle|${time}}`;
+      return `{nameStyle|${t(name)}}{space|    }{timeStyle|${time}}`;
     },
     textStyle: {
       fontSize: 12,

@@ -1,11 +1,15 @@
 <script setup lang="ts">
 // @ts-nocheck
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { computed, ref, watch } from 'vue';
 import echarts from '@/utils/echarts';
 import { baseOption } from '@/homeDetail/relaxStatus/echartOptions';
 import type { Point, stressDetail, stressSummaryType } from '@/types/api/homeDetail';
 import { resolveStressDisplayStatus } from '@/utils/stressDisplay';
 import { cloneDeep } from 'lodash-es';
+
+const { t } = useI18n();
 
 const props = defineProps({
   stressDetail: {
@@ -144,25 +148,25 @@ const initChart = async () => {
     <view class="p-20 r-50" style="background-color: #f5fdfb">
       <view class="ta-c">
         <text class="fs-72">{{ stressValue }}</text>
-        <text class="fs-28">{{ stressDisplayStatus }}</text>
+        <text class="fs-28">{{ t(stressDisplayStatus) }}</text>
       </view>
-      <view class="ta-c fs-28">压力值<slot></slot></view>
+      <view class="ta-c fs-28">{{ t('压力值') }}<slot></slot></view>
       <view class="flex ai-center jc-center">
         <l-echart ref="chartRef" @finished="initChart" style="width: 100%; height: 424rpx; margin: 0"></l-echart>
       </view>
       <view class="pl-65 pr-65 mt-50">
         <view class="flex jc-between">
-          <text class="t-979797 fs-28">最新 HRV</text>
-          <text class="t-979797 fs-28">当日平均 HRV</text>
+          <text class="t-979797 fs-28">{{ t('最新 HRV') }}</text>
+          <text class="t-979797 fs-28">{{ t('当日平均 HRV') }}</text>
         </view>
         <view class="flex jc-between mt-20">
           <view>
             <text class="fs-48">{{ latestHrvValue }}</text>
-            <text class="t-979797 fs-24">毫秒</text>
+            <text class="t-979797 fs-24">{{ t('毫秒') }}</text>
           </view>
           <view>
             <text class="fs-48">{{ dailyAvgHrvValue }}</text>
-            <text class="t-979797 fs-24">毫秒</text>
+            <text class="t-979797 fs-24">{{ t('毫秒') }}</text>
           </view>
         </view>
       </view>

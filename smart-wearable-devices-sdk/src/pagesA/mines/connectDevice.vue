@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import '@/pagesA/mines/i18n/pack';
 import { ref, computed, nextTick, watch } from 'vue';
 import { onLoad, onUnload } from '@dcloudio/uni-app';
+import { useI18n, usePageTitle } from '@/i18n';
 import {
   getRingBusinessDeviceKey,
   getRingBusinessDeviceName,
@@ -19,6 +21,9 @@ import {
 import { hasBoundRingIdentity } from '@/utils/ringBinding';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import type { DeviceModel } from '@/types/api/device';
+
+const { t } = useI18n();
+usePageTitle(() => t('连接设备'));
 
 const ring = useRingBusinessController();
 const { isScanning, stopScan } = ring;
@@ -48,29 +53,31 @@ const showBluetoothPrivacyPrompt = () => {
   if (bluetoothPrivacyPromptShown) return;
   bluetoothPrivacyPromptShown = true;
   uni.showModal({
-    title: '需要隐私授权',
-    content: `${BLUETOOTH_PRIVACY_REQUIRED_HINT}。如未出现授权窗口，请重新进入小程序后再试。`,
+    title: t('需要隐私授权'),
+    content: t('{hint}。如未出现授权窗口，请重新进入小程序后再试。', { hint: t(BLUETOOTH_PRIVACY_REQUIRED_HINT) }),
     showCancel: false,
-    confirmText: '我知道了'
+    confirmText: t('我知道了')
   });
 };
 
 const picker = ref<any>(null);
-const columns = ref([['全部']]);
 const type = ref<string[]>([]);
 const selectedTypeLabel = ref('');
-const t = (...codes: number[]) => String.fromCharCode(...codes);
-const copy = {
-  all: t(20840, 37096),
-  searchResult: t(25628, 32034, 32467, 26524),
-  specifiedModel: t(25351, 23450, 22411, 21495),
-  connect: t(36830, 25509),
-  cancel: t(21462, 28040),
-  unknownDevice: t(26032, 35774, 22791),
-  bindNewDevice: t(26159, 21542, 32465, 23450, 26032, 35774, 22791),
-  noDeviceTip: `1. ${t(26410, 26816, 27979, 21040, 30446, 26631, 35774, 22791, 65292, 35831, 28857, 20987, 37325, 26032, 25628, 32034, 12290)}`,
-  nearTip: `2. ${t(35831, 30830, 35748, 25106, 25351, 24050, 24320, 26426, 24182, 38752, 36817, 25163, 26426, 12290)}`
-};
+// 这里的中文原先是 \uXXXX 转义字面量，tx 负责解码，再交给 i18n。
+const tx = (...codes: number[]) => String.fromCharCode(...codes);
+const copy = computed(() => ({
+  all: t(tx(20840, 37096)),
+  searchResult: t(tx(25628, 32034, 32467, 26524)),
+  specifiedModel: t(tx(25351, 23450, 22411, 21495)),
+  connect: t(tx(36830, 25509)),
+  cancel: t(tx(21462, 28040)),
+  unknownDevice: t(tx(26032, 35774, 22791)),
+  bindNewDevice: t(tx(26159, 21542, 32465, 23450, 26032, 35774, 22791)),
+  noDeviceTip: `1. ${t(tx(26410, 26816, 27979, 21040, 30446, 26631, 35774, 22791, 65292, 35831, 28857, 20987, 37325, 26032, 25628, 32034, 12290))}`,
+  nearTip: `2. ${t(tx(35831, 30830, 35748, 25106, 25351, 24050, 24320, 26426, 24182, 38752, 36817, 25163, 26426, 12290))}`
+}));
+const modelKeys = ref<string[]>(['全部']);
+const columns = computed(() => [[copy.value.all, ...modelKeys.value]]);
 
 const FALLBACK_DEVICE_MODEL_KEYS = ['L19', 'RW', 'SY03', 'SY15', 'BH3', 'QK'];
 const normalizeModelSearchText = (value: unknown) =>
@@ -203,28 +210,28 @@ const directScanStatusClass = computed(() => {
   return isScanning.value || connecting.value ? 'connecting' : '';
 });
 const directScanTitle = computed(() => {
-  if (autoReconnectStatus.value === 'failed') return '未连接到二维码设备';
-  if (connecting.value) return '正在连接二维码设备';
-  if (isScanning.value) return '正在查找二维码设备';
-  return '搜索已结束，点击重新查找';
+  if (autoReconnectStatus.value === 'failed') return t('未连接到二维码设备');
+  if (connecting.value) return t('正在连接二维码设备');
+  if (isScanning.value) return t('正在查找二维码设备');
+  return t('搜索已结束，点击重新查找');
 });
 const directScanDesc = computed(() => {
-  if (autoReconnectMessage.value) return autoReconnectMessage.value;
-  if (autoReconnectStatus.value === 'failed') return '请靠近戒指后重新查找。';
-  if (connecting.value) return '已找到目标设备，正在建立蓝牙连接并绑定。';
-  if (isScanning.value) return '正在按二维码设备信息查找附近戒指，请保持戒指靠近手机。';
-  return '未找到目标设备时，请靠近戒指后重新查找。';
+  if (autoReconnectMessage.value) return t(autoReconnectMessage.value);
+  if (autoReconnectStatus.value === 'failed') return t('请靠近戒指后重新查找。');
+  if (connecting.value) return t('已找到目标设备，正在建立蓝牙连接并绑定。');
+  if (isScanning.value) return t('正在按二维码设备信息查找附近戒指，请保持戒指靠近手机。');
+  return t('未找到目标设备时，请靠近戒指后重新查找。');
 });
 const autoReconnectTitle = computed(() => {
-  if (autoReconnectStatus.value === 'success') return '已连接绑定设备';
-  if (autoReconnectStatus.value === 'failed') return '绑定设备连接失败';
-  return '正在连接绑定设备';
+  if (autoReconnectStatus.value === 'success') return t('已连接绑定设备');
+  if (autoReconnectStatus.value === 'failed') return t('绑定设备连接失败');
+  return t('正在连接绑定设备');
 });
 const autoReconnectDesc = computed(() => {
-  if (autoReconnectMessage.value) return autoReconnectMessage.value;
-  if (autoReconnectStatus.value === 'success') return '设备已恢复连接，即将返回。';
-  if (autoReconnectStatus.value === 'failed') return '未连接到已绑定设备，请靠近戒指后重试。';
-  return '已检测到当前账号有绑定设备，正在自动恢复连接。';
+  if (autoReconnectMessage.value) return t(autoReconnectMessage.value);
+  if (autoReconnectStatus.value === 'success') return t('设备已恢复连接，即将返回。');
+  if (autoReconnectStatus.value === 'failed') return t('未连接到已绑定设备，请靠近戒指后重试。');
+  return t('已检测到当前账号有绑定设备，正在自动恢复连接。');
 });
 
 const devices = computed(() => {
@@ -486,7 +493,7 @@ const confirmConnect = async () => {
         replaceBinding: isDirectScanMode.value
       });
     } else {
-      throw new Error('未找到可连接的戒指设备');
+      throw new Error(t('未找到可连接的戒指设备'));
     }
     appendConnectPageDiagnosticLog('connect-page-success', getConnectPageSnapshot());
     if (isDirectScanMode.value) {
@@ -517,7 +524,7 @@ const confirmConnect = async () => {
       uni.navigateBack();
     }, 1000);
   } catch (err) {
-    const errorMessage = formatBleErrorMessage(err, '请靠近戒指后重试');
+    const errorMessage = t(formatBleErrorMessage(err, '请靠近戒指后重试'));
     if (isDirectScanMode.value) {
       autoReconnectStatus.value = 'failed';
       autoReconnectMessage.value = errorMessage;
@@ -608,12 +615,12 @@ const openPicker = () => {
   picker.value.open();
 };
 const confirmType = (e: any) => {
-  if (e.value[0] == copy.all) {
+  if (e.value[0] == copy.value.all) {
     type.value = [];
-    selectedTypeLabel.value = copy.all;
+    selectedTypeLabel.value = copy.value.all;
   } else {
     type.value = e.value;
-    selectedTypeLabel.value = e.value[0] || copy.specifiedModel;
+    selectedTypeLabel.value = e.value[0] || copy.value.specifiedModel;
   }
   scanBusinessDevices({ force: true, reason: 'filter-change' });
 };
@@ -624,10 +631,10 @@ const loadDeviceModelsSafely = async () => {
     deviceModels.value = remoteModels;
     const remoteKeys = remoteModels.map((item) => item.modelKey || item.modelName).filter(Boolean);
     const mergedKeys = Array.from(new Set([...remoteKeys, ...FALLBACK_DEVICE_MODEL_KEYS]));
-    columns.value = [[copy.all, ...mergedKeys]];
+    modelKeys.value = mergedKeys;
   } catch {
     deviceModels.value = [];
-    columns.value = [[copy.all, ...FALLBACK_DEVICE_MODEL_KEYS]];
+    modelKeys.value = [...FALLBACK_DEVICE_MODEL_KEYS];
   }
 };
 
@@ -669,7 +676,7 @@ onUnload(() => {
       </view>
       <view v-if="autoReconnectStatus === 'failed'" class="bound-actions flex jc-center mt-40">
         <uv-button
-          text="重试连接"
+          :text="t('重试连接')"
           shape="circle"
           color="#2E70FC"
           :customTextStyle="{ 'font-size': '34rpx' }"
@@ -688,7 +695,7 @@ onUnload(() => {
       </view>
       <view v-if="!isScanning && !connecting" class="bound-actions flex jc-center mt-40">
         <uv-button
-          text="重新查找"
+          :text="t('重新查找')"
           shape="circle"
           color="#2E70FC"
           :customTextStyle="{ 'font-size': '34rpx' }"
@@ -706,15 +713,15 @@ onUnload(() => {
     >
       <uv-image src="/static/images/mine/logo3.png" width="260rpx" height="260rpx" mode="aspectFit" observe-lazy-load></uv-image>
       <view class="loading-title-row flex ai-center jc-center">
-        <view class="loading-title fs-36">{{ isScanning ? '正在搜索戒指…' : '搜索已结束，点击重新搜索' }}</view>
+        <view class="loading-title fs-36">{{ isScanning ? t('正在搜索戒指…') : t('搜索已结束，点击重新搜索') }}</view>
         <view v-if="isScanning" class="loading-title-spinner">
           <uv-loading-icon mode="circle" color="#2E70FC" size="22"></uv-loading-icon>
         </view>
       </view>
       <view class="loading-desc t-979797 mt-10">
-        {{ isScanning ? '正在查找附近可用戒指，请保持戒指靠近手机。' : '未找到目标设备时，请靠近戒指后点这里重新搜索。' }}
+        {{ isScanning ? t('正在查找附近可用戒指，请保持戒指靠近手机。') : t('未找到目标设备时，请靠近戒指后点这里重新搜索。') }}
       </view>
-      <view v-if="!isScanning" class="retry-search-button mt-24" @click.stop="handleSearchAreaClick">重新搜索</view>
+      <view v-if="!isScanning" class="retry-search-button mt-24" @click.stop="handleSearchAreaClick">{{ t('重新搜索') }}</view>
     </view>
 
     <!-- 搜索结果区域 -->
@@ -795,7 +802,7 @@ onUnload(() => {
           ></uv-button>
           <view style="width: 30rpx"></view>
           <uv-button
-            :text="connecting ? '连接中...' : copy.connect"
+            :text="connecting ? t('连接中...') : copy.connect"
             shape="circle"
             color="#2E70FC"
             :customTextStyle="{ 'font-size': '36rpx' }"

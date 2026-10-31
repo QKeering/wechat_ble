@@ -1,9 +1,13 @@
 <script setup lang="ts">
+import '@/pages/family/i18n/pack';
 import { computed, ref } from 'vue';
 import { onPullDownRefresh, onShow } from '@dcloudio/uni-app';
 import { createFamilyInvite, deleteFamilyRelation, getFamilyGuardians, type FamilyGuardian } from '@/common/api/family';
 import { getBindInfo } from '@/common/api/device';
+import { useI18n } from '@/i18n';
 import { hasBoundRingIdentity } from '@/utils/ringBinding';
+
+const { t } = useI18n();
 
 const loading = ref(false);
 const inviting = ref(false);
@@ -16,7 +20,7 @@ const hasBoundDevice = ref(false);
 
 const hasGuardians = computed(() => guardians.value.length > 0);
 
-const guardianName = (item: FamilyGuardian) => item.guardianName || item.guardianPhoneMasked || item.name || '亲友';
+const guardianName = (item: FamilyGuardian) => item.guardianName || item.guardianPhoneMasked || item.name || t('亲友');
 
 function goFamilyHome() {
   uni.redirectTo({
@@ -44,7 +48,7 @@ async function loadGuardians() {
     guardians.value = await getFamilyGuardians();
   } catch (error) {
     console.warn('[family-share] load guardians failed', error);
-    uni.showToast({ title: '共享关系加载失败', icon: 'none' });
+    uni.showToast({ title: t('共享关系加载失败'), icon: 'none' });
   } finally {
     loading.value = false;
   }
@@ -65,7 +69,7 @@ async function loadBinding() {
 async function createInvite() {
   if (inviting.value) return;
   if (!hasBoundDevice.value) {
-    uni.showToast({ title: '请先绑定设备后再邀请亲友', icon: 'none' });
+    uni.showToast({ title: t('请先绑定设备后再邀请亲友'), icon: 'none' });
     return;
   }
   inviting.value = true;
@@ -76,7 +80,7 @@ async function createInvite() {
     miniProgramCodeUrl.value = result.miniProgramCodeUrl;
   } catch (error) {
     console.warn('[family-share] create invite failed', error);
-    uni.showToast({ title: '邀请生成失败，请稍后重试', icon: 'none' });
+    uni.showToast({ title: t('邀请生成失败，请稍后重试'), icon: 'none' });
   } finally {
     inviting.value = false;
   }
@@ -86,30 +90,30 @@ function copyInvite() {
   if (!inviteCode.value) return;
   uni.setClipboardData({
     data: inviteCode.value,
-    success: () => uni.showToast({ title: '邀请码已复制', icon: 'success' })
+    success: () => uni.showToast({ title: t('邀请码已复制'), icon: 'success' })
   });
 }
 
 function cancelShare(item: FamilyGuardian) {
   const relationId = Number(item.relationId || item.memberId);
   if (!relationId) {
-    uni.showToast({ title: '共享关系信息缺失', icon: 'none' });
+    uni.showToast({ title: t('共享关系信息缺失'), icon: 'none' });
     return;
   }
   uni.showModal({
-    title: '取消共享',
-    content: `取消后，${guardianName(item)} 将不能继续查看你的健康数据；如需再次共享，需要重新申请。`,
-    confirmText: '确认取消',
+    title: t('取消共享'),
+    content: t('取消后，{name} 将不能继续查看你的健康数据；如需再次共享，需要重新申请。', { name: guardianName(item) }),
+    confirmText: t('确认取消'),
     confirmColor: '#ef4444',
     success: async ({ confirm }) => {
       if (!confirm) return;
       try {
         await deleteFamilyRelation(relationId);
-        uni.showToast({ title: '已取消共享', icon: 'success' });
+        uni.showToast({ title: t('已取消共享'), icon: 'success' });
         await loadGuardians();
       } catch (error) {
         console.warn('[family-share] cancel relation failed', error);
-        uni.showToast({ title: '取消失败，请稍后重试', icon: 'none' });
+        uni.showToast({ title: t('取消失败，请稍后重试'), icon: 'none' });
       }
     }
   });
@@ -126,29 +130,29 @@ onPullDownRefresh(async () => {
 
 <template>
   <view class="page">
-    <uv-navbar placeholder title="分享我的数据" bgColor="transparent" @leftClick="goBack" />
+    <uv-navbar placeholder :title="t('分享我的数据')" bgColor="transparent" @leftClick="goBack" />
 
     <view class="section-card">
-      <view class="section-title">我的共享</view>
-      <view class="section-desc">正在查看你健康数据的亲友。取消后需要重新申请才能恢复。</view>
-      <view v-if="loading" class="state-text">正在加载...</view>
-      <view v-else-if="!hasGuardians" class="empty-row">暂未分享给任何亲友</view>
+      <view class="section-title">{{ t('我的共享') }}</view>
+      <view class="section-desc">{{ t('正在查看你健康数据的亲友。取消后需要重新申请才能恢复。') }}</view>
+      <view v-if="loading" class="state-text">{{ t('正在加载...') }}</view>
+      <view v-else-if="!hasGuardians" class="empty-row">{{ t('暂未分享给任何亲友') }}</view>
       <view v-else class="guardian-list">
         <view v-for="item in guardians" :key="item.relationId || item.memberId" class="guardian-row">
           <view class="avatar">{{ guardianName(item).slice(0, 1) }}</view>
           <view class="guardian-info">
             <view class="guardian-name">{{ guardianName(item) }}</view>
-            <view class="guardian-status">健康数据共享中</view>
+            <view class="guardian-status">{{ t('健康数据共享中') }}</view>
           </view>
-          <view class="cancel-action" @click="cancelShare(item)">取消</view>
+          <view class="cancel-action" @click="cancelShare(item)">{{ t('取消') }}</view>
         </view>
       </view>
     </view>
 
     <view class="invite-card">
-      <view class="invite-icon">邀</view>
-      <view class="invite-title">邀请亲友关注你</view>
-      <view class="invite-desc">一键生成 7 天有效的邀请。对方接受后即可查看你的健康概览。</view>
+      <view class="invite-icon">{{ t('邀') }}</view>
+      <view class="invite-title">{{ t('邀请亲友关注你') }}</view>
+      <view class="invite-desc">{{ t('一键生成 7 天有效的邀请。对方接受后即可查看你的健康概览。') }}</view>
       <button
         v-if="!inviteCode"
         class="primary-button"
@@ -156,23 +160,23 @@ onPullDownRefresh(async () => {
         :disabled="bindingLoading || !hasBoundDevice"
         :loading="inviting || bindingLoading"
         @click="createInvite"
-      >{{ hasBoundDevice ? '生成邀请' : '请先绑定设备' }}</button>
+      >{{ hasBoundDevice ? t('生成邀请') : t('请先绑定设备') }}</button>
       <view
         v-if="!bindingLoading && !hasBoundDevice"
         class="bind-guide"
         @click="goBindDevice"
-      >去绑定设备</view>
+      >{{ t('去绑定设备') }}</view>
       <view v-if="inviteCode" class="result-panel">
-        <view class="result-label">方式一：微信扫码进入小程序</view>
+        <view class="result-label">{{ t('方式一：微信扫码进入小程序') }}</view>
         <view class="qr-box">
           <image v-if="miniProgramCodeUrl" class="mini-code" :src="miniProgramCodeUrl" mode="aspectFit" />
-          <view v-else class="code-loading">小程序码生成中...</view>
+          <view v-else class="code-loading">{{ t('小程序码生成中...') }}</view>
         </view>
-        <view class="result-expire">小程序码有效期至 {{ expireTime || '7 天后' }}</view>
-        <view class="result-label manual-label">方式二：输入邀请码</view>
+        <view class="result-expire">{{ t('小程序码有效期至 {time}', { time: expireTime || t('7 天后') }) }}</view>
+        <view class="result-label manual-label">{{ t('方式二：输入邀请码') }}</view>
         <view class="result-code">{{ inviteCode }}</view>
-        <button class="primary-button" @click="copyInvite">复制邀请码</button>
-        <view class="new-invite" @click="createInvite">重新生成</view>
+        <button class="primary-button" @click="copyInvite">{{ t('复制邀请码') }}</button>
+        <view class="new-invite" @click="createInvite">{{ t('重新生成') }}</view>
       </view>
     </view>
   </view>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import '@/pagesA/mines/i18n/pack';
 import { computed, ref } from 'vue';
 import { onLoad, onUnload } from '@dcloudio/uni-app';
 import { getBoundRingDevice } from '@/api/ringDevice';
@@ -10,16 +11,20 @@ import {
   type FeedbackSubmitResult
 } from '@/common/api/feedback';
 import { useUserStore } from '@/stores/user';
+import { useI18n, usePageTitle } from '@/i18n';
 import { formatBleErrorMessage } from '@/utils/bleError';
 
 type FeedbackCategoryOption = {
   value: FeedbackCategory;
+  // label 保持简体中文原文：既作为展示 key，也原样提交给后台。
   label: string;
 };
 
+const { t } = useI18n();
+usePageTitle(() => t('在线反馈'));
+
 const MAX_IMAGE_COUNT = 3;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
-const DESCRIPTION_PLACEHOLDER = '请描述出现问题的页面、操作步骤、设备状态或提示内容，至少10个字';
 
 const categoryOptions: FeedbackCategoryOption[] = [
   { value: 'connect_failed', label: '连接不上' },
@@ -51,6 +56,10 @@ const devicePreview = ref({
 });
 
 const descriptionLength = computed(() => description.value.trim().length);
+const descriptionPlaceholder = computed(
+  () => t('请描述出现问题的页面、操作步骤、设备状态或提示内容，至少10个字')
+);
+// 提交给后台的分类名保持简体中文原文，不跟随界面语言。
 const selectedCategoryLabel = computed(() => categoryOptions.find((item) => item.value === category.value)?.label || '');
 const canAddImage = computed(() => imagePaths.value.length < MAX_IMAGE_COUNT);
 const feedbackPageStyle = computed(() => ({
@@ -135,7 +144,7 @@ const chooseImages = () => {
       const validPaths: string[] = [];
       for (const file of files) {
         if (file.size && file.size > MAX_IMAGE_SIZE) {
-          uni.showToast({ title: '单张图片不能超过5MB', icon: 'none' });
+          uni.showToast({ title: t('单张图片不能超过5MB'), icon: 'none' });
           continue;
         }
         if (file.path) validPaths.push(file.path);
@@ -151,19 +160,19 @@ const removeImage = (index: number) => {
 
 const validateForm = () => {
   if (!category.value) {
-    uni.showToast({ title: '请选择问题类型', icon: 'none' });
+    uni.showToast({ title: t('请选择问题类型'), icon: 'none' });
     return false;
   }
   if (descriptionLength.value < 10) {
-    uni.showToast({ title: '问题描述至少10个字', icon: 'none' });
+    uni.showToast({ title: t('问题描述至少10个字'), icon: 'none' });
     return false;
   }
   if (descriptionLength.value > 500) {
-    uni.showToast({ title: '问题描述不能超过500个字', icon: 'none' });
+    uni.showToast({ title: t('问题描述不能超过500个字'), icon: 'none' });
     return false;
   }
   if (contact.value.trim().length > 50) {
-    uni.showToast({ title: '联系方式不能超过50个字', icon: 'none' });
+    uni.showToast({ title: t('联系方式不能超过50个字'), icon: 'none' });
     return false;
   }
   return true;
@@ -194,7 +203,7 @@ const handleSubmit = async () => {
     submitted.value = true;
   } catch (error: any) {
     uni.showToast({
-      title: formatBleErrorMessage(error, '提交失败，请稍后重试'),
+      title: t(formatBleErrorMessage(error, '提交失败，请稍后重试')),
       icon: 'none'
     });
   } finally {
@@ -221,16 +230,16 @@ const saveCustomerServiceQr = () => {
     url: qr,
     success: (downloadRes) => {
       if (downloadRes.statusCode !== 200 || !downloadRes.tempFilePath) {
-        uni.showToast({ title: '二维码保存失败', icon: 'none' });
+        uni.showToast({ title: t('二维码保存失败'), icon: 'none' });
         return;
       }
       uni.saveImageToPhotosAlbum({
         filePath: downloadRes.tempFilePath,
-        success: () => uni.showToast({ title: '已保存到相册', icon: 'none' }),
-        fail: () => uni.showToast({ title: '请允许保存到相册', icon: 'none' })
+        success: () => uni.showToast({ title: t('已保存到相册'), icon: 'none' }),
+        fail: () => uni.showToast({ title: t('请允许保存到相册'), icon: 'none' })
       });
     },
-    fail: () => uni.showToast({ title: '二维码下载失败', icon: 'none' })
+    fail: () => uni.showToast({ title: t('二维码下载失败'), icon: 'none' })
   });
 };
 
@@ -269,9 +278,9 @@ onUnload(() => {
   <view class="feedback-page" :style="feedbackPageStyle">
     <view v-if="submitted" class="success-card">
       <view class="success-icon">✓</view>
-      <view class="success-title">反馈已提交</view>
-      <view class="success-desc">我们会根据你提交的信息排查问题。</view>
-      <view v-if="submitResult.feedbackId" class="feedback-id">反馈编号：{{ submitResult.feedbackId }}</view>
+      <view class="success-title">{{ t('反馈已提交') }}</view>
+      <view class="success-desc">{{ t('我们会根据你提交的信息排查问题。') }}</view>
+      <view v-if="submitResult.feedbackId" class="feedback-id">{{ t('反馈编号：{id}', { id: submitResult.feedbackId }) }}</view>
 
       <image
         v-if="submitResult.customerServiceQr"
@@ -280,20 +289,20 @@ onUnload(() => {
         mode="aspectFit"
         @tap="previewCustomerServiceQr"
       />
-      <view v-if="submitResult.customerServiceQr" class="qr-tip">长按或点击查看二维码，添加客服继续沟通</view>
+      <view v-if="submitResult.customerServiceQr" class="qr-tip">{{ t('长按或点击查看二维码，添加客服继续沟通') }}</view>
       <view v-if="submitResult.customerServiceWechat" class="wechat-row">
-        <text>客服微信：{{ submitResult.customerServiceWechat }}</text>
-        <button class="copy-button" @tap="copyWechat">复制</button>
+        <text>{{ t('客服微信：{wechat}', { wechat: submitResult.customerServiceWechat }) }}</text>
+        <button class="copy-button" @tap="copyWechat">{{ t('复制') }}</button>
       </view>
-      <button v-if="submitResult.customerServiceQr" class="secondary-button" @tap="saveCustomerServiceQr">保存客服二维码</button>
+      <button v-if="submitResult.customerServiceQr" class="secondary-button" @tap="saveCustomerServiceQr">{{ t('保存客服二维码') }}</button>
 
-      <button class="primary-button" @tap="backToPrevious">返回上一页</button>
-      <button class="secondary-button" @tap="goHome">返回首页</button>
+      <button class="primary-button" @tap="backToPrevious">{{ t('返回上一页') }}</button>
+      <button class="secondary-button" @tap="goHome">{{ t('返回首页') }}</button>
     </view>
 
     <view v-else>
       <view class="section-card">
-        <view class="section-title">问题类型 <text class="required">*</text></view>
+        <view class="section-title">{{ t('问题类型') }} <text class="required">*</text></view>
         <view class="category-grid">
           <view
             v-for="item in categoryOptions"
@@ -302,18 +311,18 @@ onUnload(() => {
             :class="{ active: category === item.value }"
             @tap="category = item.value"
           >
-            {{ item.label }}
+            {{ t(item.label) }}
           </view>
         </view>
       </view>
 
       <view id="feedback-description-card" class="section-card">
-        <view class="section-title">问题描述 <text class="required">*</text></view>
+        <view class="section-title">{{ t('问题描述') }} <text class="required">*</text></view>
         <textarea
           v-model="description"
           class="description-input"
           maxlength="500"
-          :placeholder="descriptionFocused ? '' : DESCRIPTION_PLACEHOLDER"
+          :placeholder="descriptionFocused ? '' : descriptionPlaceholder"
           placeholder-class="placeholder"
           :adjust-position="true"
           :cursor-spacing="48"
@@ -325,7 +334,7 @@ onUnload(() => {
       </view>
 
       <view class="section-card">
-        <view class="section-title">上传图片 <text class="optional">最多3张，单张不超过5MB</text></view>
+        <view class="section-title">{{ t('上传图片') }} <text class="optional">{{ t('最多3张，单张不超过5MB') }}</text></view>
         <view class="image-list">
           <view v-for="(path, index) in imagePaths" :key="path" class="image-item">
             <image :src="path" mode="aspectFill" />
@@ -333,44 +342,44 @@ onUnload(() => {
           </view>
           <view v-if="canAddImage" class="add-image" @tap="chooseImages">
             <view class="add-plus">＋</view>
-            <view>添加图片</view>
+            <view>{{ t('添加图片') }}</view>
           </view>
         </view>
       </view>
 
       <view class="section-card">
-        <view class="section-title">联系方式 <text class="optional">选填</text></view>
+        <view class="section-title">{{ t('联系方式') }} <text class="optional">{{ t('选填') }}</text></view>
         <input
           v-model="contact"
           class="contact-input"
           maxlength="50"
-          placeholder="手机号、微信号或其他联系方式"
+          :placeholder="t('手机号、微信号或其他联系方式')"
           placeholder-class="placeholder"
         />
       </view>
 
       <view class="section-card">
-        <view class="section-title">设备信息</view>
+        <view class="section-title">{{ t('设备信息') }}</view>
         <view class="device-info-row">
-          <text>设备名称</text>
+          <text>{{ t('设备名称') }}</text>
           <text>{{ devicePreview.name }}</text>
         </view>
         <view class="device-info-row">
-          <text>设备 MAC</text>
+          <text>{{ t('设备 MAC') }}</text>
           <text>{{ devicePreview.mac }}</text>
         </view>
         <view class="device-info-row">
-          <text>当前版本</text>
+          <text>{{ t('当前版本') }}</text>
           <text>{{ devicePreview.version }}</text>
         </view>
       </view>
 
       <view class="privacy-note">
-        提交后会自动附带账号、设备、系统和来源页面信息，仅用于定位和处理本次问题。
+        {{ t('提交后会自动附带账号、设备、系统和来源页面信息，仅用于定位和处理本次问题。') }}
       </view>
 
       <button class="submit-button" :loading="submitting" :disabled="submitting" @tap="handleSubmit">
-        {{ submitting ? '提交中...' : '提交反馈' }}
+        {{ submitting ? t('提交中...') : t('提交反馈') }}
       </button>
     </view>
   </view>

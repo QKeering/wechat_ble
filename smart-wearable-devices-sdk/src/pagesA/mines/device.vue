@@ -1,7 +1,9 @@
 <!-- 设备信息 -->
 <script setup lang="ts">
+import '@/pagesA/mines/i18n/pack';
 import { computed, ref, watch } from 'vue';
 import { onShow, onUnload } from '@dcloudio/uni-app';
+import { useI18n, usePageTitle } from '@/i18n';
 import { getBindInfo, unbind } from '@/common/api/device';
 import { useRingBusinessController } from '@/composables/useRingBusinessController';
 import { useRingBusinessData } from '@/composables/useRingBusinessData';
@@ -23,6 +25,9 @@ import {
   normalizeDeviceIdentityMac
 } from '@/utils/deviceIdentityCache';
 
+const { t } = useI18n();
+usePageTitle(() => t('设备信息'));
+
 const userStore = useUserStore();
 const ringStore = useRingStore();
 const unifiedBattery = useUnifiedBatteryDisplay(userStore, ringStore);
@@ -30,7 +35,7 @@ const ring = useRingBusinessData();
 const controller = useRingBusinessController();
 const DEVICE_INFO_SNAPSHOT_WAIT_MS = 2000;
 const DEVICE_INFO_EMPTY_TEXT = '-';
-const content = '你确定要解除绑定吗？';
+const content = computed(() => t('你确定要解除绑定吗？'));
 const FIND_RING_RED_LIGHT_DURATION_MS = 10000;
 const FIND_RING_COMMAND_TIMEOUT_MS = 5000;
 const FIND_RING_HINT_DURATION_MS = 3000;
@@ -55,11 +60,11 @@ type FindRingCommandMode = 'rw-health-control' | 'oxygen-measure';
 
 const isBusy = computed(() => Boolean(busyText.value) || controller.isRefreshingBusinessData.value || controller.isRestoringDevice.value);
 const findRingStatusText = computed(() => {
-  if (findRingBusy.value) return '处理中';
-  if (isFindingRing.value) return '查找中';
+  if (findRingBusy.value) return t('处理中');
+  if (isFindingRing.value) return t('查找中');
   return '';
 });
-const connectionText = computed(() => (ring.isConnected.value ? '已连接' : '未连接'));
+const connectionText = computed(() => (ring.isConnected.value ? t('已连接') : t('未连接')));
 const deviceName = computed(() =>
   getFirstDeviceInfoValue(
     boundInfo.value?.deviceName,
@@ -244,14 +249,14 @@ const runDeviceInfoRefresh = async () => {
     (ring.deviceInfo.value as Record<string, any> | null | undefined) || boundInfo.value
   );
   if (activeHistoryExclusive.active) {
-    lastActionText.value = '同步中，设备信息稍后刷新';
+    lastActionText.value = t('同步中，设备信息稍后刷新');
     appendDeviceDiagnosticLog('device-info-refresh-skip-history-exclusive', {
       exclusive: activeHistoryExclusive,
       snapshot: getDevicePageSnapshot()
     });
     return;
   }
-  busyText.value = '读取设备信息中';
+  busyText.value = t('读取设备信息中');
   lastActionText.value = '';
   const startedAt = Date.now();
   appendDeviceDiagnosticLog('device-info-refresh-start', {
@@ -264,7 +269,7 @@ const runDeviceInfoRefresh = async () => {
       snapshot: getDevicePageSnapshot()
     });
     if (!ready) {
-      lastActionText.value = '设备连接恢复中，已保留上次设备信息';
+      lastActionText.value = t('设备连接恢复中，已保留上次设备信息');
       appendDeviceDiagnosticLog('device-info-refresh-deferred-not-ready', {
         reason: 'restore-last-business-device-failed'
       });
@@ -273,7 +278,7 @@ const runDeviceInfoRefresh = async () => {
     const refreshResult = await controller.refreshDeviceInfoData();
     const skippedByHistoryExclusive = refreshResult.failed.some((item) => item.step === 'history-exclusive');
     if (skippedByHistoryExclusive) {
-      lastActionText.value = '同步中，设备信息稍后刷新';
+      lastActionText.value = t('同步中，设备信息稍后刷新');
       appendDeviceDiagnosticLog('device-info-refresh-result', {
         skippedByHistoryExclusive,
         lastActionText: lastActionText.value,
@@ -284,14 +289,17 @@ const runDeviceInfoRefresh = async () => {
     }
     await waitForDeviceInfoSnapshot(startedAt, DEVICE_INFO_SNAPSHOT_WAIT_MS);
     persistDeviceIdentityCacheFromRefresh();
-    lastActionText.value = batteryValue.value != null || firmwareText.value !== '-' ? '电量/版本已更新' : '暂未获取到设备信息，请稍后刷新';
+    lastActionText.value =
+      batteryValue.value != null || firmwareText.value !== '-'
+        ? t('电量/版本已更新')
+        : t('暂未获取到设备信息，请稍后刷新');
     appendDeviceDiagnosticLog('device-info-refresh-result', {
       lastActionText: lastActionText.value,
       lastRefreshResult: controller.lastRefreshResult.value,
       snapshot: getDevicePageSnapshot()
     });
   } catch (error) {
-    lastActionText.value = formatBleErrorMessage(error, '设备信息读取失败');
+    lastActionText.value = t(formatBleErrorMessage(error, '设备信息读取失败'));
     appendDeviceDiagnosticLog('device-info-refresh-failed', {
       message: lastActionText.value,
       snapshot: getDevicePageSnapshot()
@@ -372,7 +380,7 @@ const readBatteryOnly = async (options: { silent?: boolean; source?: string } = 
   if (isBusy.value) return;
   const silent = options.silent === true;
   if (!silent) {
-    busyText.value = '读取电量中';
+    busyText.value = t('读取电量中');
     lastActionText.value = '';
   }
   const startedAt = Date.now();
@@ -382,7 +390,7 @@ const readBatteryOnly = async (options: { silent?: boolean; source?: string } = 
   });
   try {
     const ready = await ensureDeviceReady();
-    if (!ready) throw new Error('设备未连接，请重新连接后再试');
+    if (!ready) throw new Error(t('设备未连接，请重新连接后再试'));
     const directWaiter = waitForDirectParsedData(
       (parsed) =>
         parsed.type === 'battery' &&
@@ -395,16 +403,16 @@ const readBatteryOnly = async (options: { silent?: boolean; source?: string } = 
     const sharedWaiter = waitForSharedBattery(startedAt, 9000);
     sharedWaiter.catch(() => undefined);
     await controller.sendBatteryCommand();
-    const parsed = await waitForFirstSuccessful<Record<string, any>>([directWaiter, sharedWaiter], '电量读取超时，请靠近戒指后重试');
+    const parsed = await waitForFirstSuccessful<Record<string, any>>([directWaiter, sharedWaiter], t('电量读取超时，请靠近戒指后重试'));
     const value = getBatteryReadingValue(parsed);
     const status = getBatteryReadingStatus(parsed);
     const displayValue = formatBatteryStatusForDisplay(value, status, '-');
-    if (value == null && displayValue === '-') throw new Error('设备返回的电量格式无效');
+    if (value == null && displayValue === '-') throw new Error(t('设备返回的电量格式无效'));
     singleReadResults.value = { ...singleReadResults.value, battery: displayValue };
     const source = options.source || 'device-manual-read';
     writeDevicePageBatteryCache(value, status, source);
     if (value != null) reportDevicePageBatteryLog(value, source);
-    if (!silent) lastActionText.value = `电量读取成功：${displayValue}`;
+    if (!silent) lastActionText.value = t('电量读取成功：{value}', { value: displayValue });
     appendDeviceDiagnosticLog('battery-read-result', {
       source,
       value,
@@ -413,7 +421,7 @@ const readBatteryOnly = async (options: { silent?: boolean; source?: string } = 
       snapshot: getDevicePageSnapshot()
     });
   } catch (error) {
-    const message = formatBleErrorMessage(error, '电量读取失败');
+    const message = t(formatBleErrorMessage(error, '电量读取失败'));
     if (!silent) lastActionText.value = message;
     appendDeviceDiagnosticLog('battery-read-failed', {
       source: options.source || 'device-manual-read',
@@ -427,25 +435,28 @@ const readBatteryOnly = async (options: { silent?: boolean; source?: string } = 
 
 const readVersionOnly = async () => {
   if (isBusy.value) return;
-  busyText.value = '读取版本中';
+  busyText.value = t('读取版本中');
   lastActionText.value = '';
   appendDeviceDiagnosticLog('version-read-start', {
     snapshot: getDevicePageSnapshot()
   });
   try {
     const ready = await ensureDeviceReady();
-    if (!ready) throw new Error('设备未连接，请重新连接后再试');
+    if (!ready) throw new Error(t('设备未连接，请重新连接后再试'));
     const versionCommands = [controller.sendFirmwareVersion(), controller.sendSoftwareVersion()];
     await Promise.allSettled(versionCommands);
     await waitForVersionSnapshot(8000);
-    lastActionText.value = `版本读取成功：${firmwareText.value || '-'} / ${softwareText.value || '-'}`;
+    lastActionText.value = t('版本读取成功：{firmware} / {software}', {
+      firmware: firmwareText.value || '-',
+      software: softwareText.value || '-'
+    });
     appendDeviceDiagnosticLog('version-read-result', {
       firmware: firmwareText.value,
       software: softwareText.value,
       snapshot: getDevicePageSnapshot()
     });
   } catch (error) {
-    lastActionText.value = formatBleErrorMessage(error, '版本读取失败');
+    lastActionText.value = t(formatBleErrorMessage(error, '版本读取失败'));
     appendDeviceDiagnosticLog('version-read-failed', {
       message: lastActionText.value,
       snapshot: getDevicePageSnapshot()
@@ -461,7 +472,7 @@ const waitForVersionSnapshot = async (timeoutMs: number) => {
     if (firmwareText.value !== '-' || softwareText.value !== '-') return;
     await sleep(200);
   }
-  throw new Error('版本读取超时，请靠近戒指后重试');
+  throw new Error(t('版本读取超时，请靠近戒指后重试'));
 };
 
 const goConnect = () => {
@@ -525,13 +536,13 @@ const withFindRingCommandTimeout = <T,>(task: Promise<T>, timeoutMs = FIND_RING_
   Promise.race([
     task,
     new Promise<T>((_, reject) => {
-      setTimeout(() => reject(new Error('查找戒指指令超时')), timeoutMs);
+      setTimeout(() => reject(new Error(t('查找戒指指令超时'))), timeoutMs);
     })
   ]);
 
 const sendFindRingRedLightCommand = async (enabled: boolean) => {
   const ready = await ensureDeviceReady();
-  if (!ready) throw new Error('设备未连接，请重新连接后再查找戒指');
+  if (!ready) throw new Error(t('设备未连接，请重新连接后再查找戒指'));
   const protocol = resolveCurrentFindRingProtocol();
   const deviceName = resolveCurrentFindRingName();
   const commandMode = enabled ? resolveFindRingCommandMode() : activeFindRingCommandMode || resolveFindRingCommandMode();
@@ -577,15 +588,15 @@ const stopFindRingRedLight = async (options: { silent?: boolean; reason?: string
   try {
     await sendFindRingRedLightCommand(false);
     if (!options.silent) {
-      setFindRingHint('戒指查找已结束');
-      uni.showToast({ title: '查找已结束', icon: 'none' });
+      setFindRingHint(t('戒指查找已结束'));
+      uni.showToast({ title: t('查找已结束'), icon: 'none' });
     }
     appendDeviceDiagnosticLog('find-ring-red-light-stop-result', {
       reason: options.reason || 'manual',
       snapshot: getDevicePageSnapshot()
     });
   } catch (error) {
-    const message = formatBleErrorMessage(error, '关闭戒指红灯失败');
+    const message = t(formatBleErrorMessage(error, '关闭戒指红灯失败'));
     if (!options.silent) {
       lastActionText.value = message;
       uni.showToast({ title: message, icon: 'none' });
@@ -617,8 +628,8 @@ const startFindRingRedLight = async () => {
   try {
     activeFindRingCommandMode = await sendFindRingRedLightCommand(true);
     isFindingRing.value = true;
-    setFindRingHint('查找指令已发送，请观察戒指红灯，10秒后自动结束');
-    uni.showToast({ title: '查找指令已发送', icon: 'none' });
+    setFindRingHint(t('查找指令已发送，请观察戒指红灯，10秒后自动结束'));
+    uni.showToast({ title: t('查找指令已发送'), icon: 'none' });
     findRingStopTimer = setTimeout(() => {
       void stopFindRingRedLight({ silent: true, reason: 'auto-timeout' });
     }, FIND_RING_RED_LIGHT_DURATION_MS);
@@ -629,7 +640,7 @@ const startFindRingRedLight = async () => {
   } catch (error) {
     isFindingRing.value = false;
     activeFindRingCommandMode = null;
-    const message = formatBleErrorMessage(error, '查找戒指失败，请靠近戒指后重试');
+    const message = t(formatBleErrorMessage(error, '查找戒指失败，请靠近戒指后重试'));
     setFindRingHint(message, 5000);
     uni.showToast({ title: message, icon: 'none' });
     appendDeviceDiagnosticLog('find-ring-red-light-failed', {
@@ -648,7 +659,7 @@ const jumpSearch = async () => {
     return;
   }
   if (isBusy.value) {
-    uni.showToast({ title: '设备正在处理，请稍后再试', icon: 'none' });
+    uni.showToast({ title: t('设备正在处理，请稍后再试'), icon: 'none' });
     return;
   }
   await startFindRingRedLight();
@@ -657,12 +668,12 @@ const jumpSearch = async () => {
 const copyDeviceId = () => {
   const value = deviceMacText.value;
   if (!value || value === DEVICE_INFO_EMPTY_TEXT) {
-    uni.showToast({ title: '暂无设备ID', icon: 'none' });
+    uni.showToast({ title: t('暂无设备ID'), icon: 'none' });
     return;
   }
   uni.setClipboardData({
     data: String(value),
-    success: () => uni.showToast({ title: '已复制', icon: 'success' })
+    success: () => uni.showToast({ title: t('已复制'), icon: 'success' })
   });
 };
 
@@ -671,7 +682,7 @@ const openConfirmBind = () => {
 };
 
 const confirmBind = async () => {
-  busyText.value = '解绑中';
+  busyText.value = t('解绑中');
   try {
     userStore.updateIsUnbinding(true);
     await controller.disconnect().catch(() => undefined);
@@ -686,7 +697,7 @@ const confirmBind = async () => {
         userStore.iosMacId
       ].find((value) => normalizeDeviceInfoDisplayText(value) !== DEVICE_INFO_EMPTY_TEXT) || '';
     if (!mac) {
-      throw new Error('未获取到戒指设备号，请重新连接戒指后重试');
+      throw new Error(t('未获取到戒指设备号，请重新连接戒指后重试'));
     }
     // 这里不能吞掉异常：后端解绑失败时必须让用户看到，否则会误报"已解绑"，
     // 而服务端绑定关系仍然存在。
@@ -694,10 +705,10 @@ const confirmBind = async () => {
     await clearFrontendRingBindingState(userStore, ringStore);
     boundInfo.value = null;
     singleReadResults.value = {};
-    lastActionText.value = '已解绑';
-    uni.showToast({ title: '已解绑', icon: 'success' });
+    lastActionText.value = t('已解绑');
+    uni.showToast({ title: t('已解绑'), icon: 'success' });
   } catch (error) {
-    const message = formatBleErrorMessage(error, '解除绑定失败，请稍后重试');
+    const message = t(formatBleErrorMessage(error, '解除绑定失败，请稍后重试'));
     lastActionText.value = message;
     uni.showToast({ title: message, icon: 'none' });
   } finally {
@@ -957,7 +968,7 @@ const waitForSharedBattery = async (since: number, timeoutMs: number) => {
     if (parsed) return parsed;
     await sleep(200);
   }
-  throw new Error('电量读取超时，请靠近戒指后重试');
+  throw new Error(t('电量读取超时，请靠近戒指后重试'));
 };
 
 onShow(async () => {
@@ -1000,17 +1011,17 @@ onUnload(() => {
 <template>
   <view class="p-30">
     <view class="mb-50">
-      <view class="mb-50 fs-36 pl-40 pr-40">设置设备</view>
+      <view class="mb-50 fs-36 pl-40 pr-40">{{ t('设置设备') }}</view>
       <view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30" :class="{ 'find-ring-active': isFindingRing }" @tap="jumpSearch">
-          <view class="fs-36">戒指查找</view>
+          <view class="fs-36">{{ t('戒指查找') }}</view>
           <view class="flex ai-center">
             <view v-if="findRingStatusText" class="find-ring-status mr-20">{{ findRingStatusText }}</view>
             <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
           </view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center" @click="openConfirmBind">
-          <view class="fs-36">解除绑定</view>
+          <view class="fs-36">{{ t('解除绑定') }}</view>
           <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
         </view>
       </view>
@@ -1019,46 +1030,46 @@ onUnload(() => {
     <uv-modal ref="modalPopup" :showCancelButton="true" align="center" :content="content" @confirm="confirmBind"></uv-modal>
 
     <view>
-      <view class="mb-50 fs-36 pl-40 pr-40">设备信息</view>
+      <view class="mb-50 fs-36 pl-40 pr-40">{{ t('设备信息') }}</view>
       <view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
-          <view>连接状态</view>
+          <view>{{ t('连接状态') }}</view>
           <view>{{ connectionText }}</view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
-          <view>电量</view>
-          <view>{{ batteryText }}</view>
+          <view>{{ t('电量') }}</view>
+          <view>{{ t(batteryText) }}</view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
-          <view>戒指大小</view>
+          <view>{{ t('戒指大小') }}</view>
           <view>{{ ringSizeText }}</view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
-          <view>设备版本</view>
+          <view>{{ t('设备版本') }}</view>
           <view>{{ deviceVersionText }}</view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
-          <view>固件版本</view>
+          <view>{{ t('固件版本') }}</view>
           <view>{{ firmwareText }}</view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
-          <view>序列号</view>
+          <view>{{ t('序列号') }}</view>
           <view>{{ serialText }}</view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
-          <view>设备名称</view>
+          <view>{{ t('设备名称') }}</view>
           <view>{{ deviceNameText }}</view>
         </view>
         <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
-          <view>MAC地址</view>
+          <view>{{ t('MAC地址') }}</view>
           <view class="flex ai-center">
             <view>{{ macText }}</view>
-            <view class="copy-button" @click.stop="copyDeviceId">复制</view>
+            <view class="copy-button" @click.stop="copyDeviceId">{{ t('复制') }}</view>
           </view>
         </view>
         <view class="device-action">
           <uv-button
-            :text="isBusy ? '读取中' : '刷新设备信息'"
+            :text="isBusy ? t('读取中') : t('刷新设备信息')"
             :loading="isBusy"
             :disabled="isBusy"
             shape="circle"

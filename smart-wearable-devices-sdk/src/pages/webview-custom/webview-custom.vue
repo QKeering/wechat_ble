@@ -14,6 +14,7 @@
 import { onBackPress, onLoad } from '@dcloudio/uni-app';
 import { ref } from 'vue';
 import { useUserStore } from '@/stores/user';
+import { t } from '@/i18n';
 import { requestH5Ticket } from '@/common/api/aiLab';
 
 const userStore = useUserStore();
@@ -56,7 +57,7 @@ const handleWebViewLoad = () => {
 
 const handleWebViewError = (event: any) => {
   console.error('[WebView] 页面加载失败', { url: url.value, detail: event?.detail });
-  uni.showToast({ title: '页面加载失败，请稍后重试', icon: 'none' });
+  uni.showToast({ title: t('页面加载失败，请稍后重试'), icon: 'none' });
 };
 
 onBackPress(() => {
@@ -149,7 +150,7 @@ onLoad(async (options: any) => {
         hasTicket = true;
       } catch (error) {
         console.error('[WebView] 获取小轻登录票据失败', error);
-        uni.showToast({ title: '登录凭证获取失败，请稍后再试', icon: 'none' });
+        uni.showToast({ title: t('登录凭证获取失败，请稍后再试'), icon: 'none' });
         setTimeout(() => uni.navigateBack(), 1200);
         return;
       }
@@ -158,7 +159,7 @@ onLoad(async (options: any) => {
       console.error('[WebView] 小轻地址缺少登录票据', {
         source: handedOffUrl ? 'storage-handoff' : 'route-query'
       });
-      uni.showToast({ title: '登录参数传递失败，请重新进入', icon: 'none' });
+      uni.showToast({ title: t('登录参数传递失败，请重新进入'), icon: 'none' });
       setTimeout(() => uni.navigateBack(), 1200);
       return;
     }

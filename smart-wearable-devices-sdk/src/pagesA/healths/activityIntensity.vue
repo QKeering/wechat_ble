@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import '@/pagesA/healths/i18n/pack';
 import { ref, computed } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
+import { useI18n } from '@/i18n';
 import sleepEchartItem from '@/components/sleepEchartItem.vue';
 import { defaultEchartOption, sleepTimeOption } from '@/pagesA/echartOptions/activityIntensity';
 import lineProgresss from '@/pagesA/components/lineProgress.vue';
@@ -9,6 +11,9 @@ import type { ActivityIntensityResp } from '@/types/api/healthSummary';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';
 import { cloneDeep } from 'lodash-es';
 import echarts from '@/utils/echarts';
+
+const { t } = useI18n();
+
 const activityIntensity = ref<ActivityIntensityResp>();
 const getProcessedOption = () => {
   const testTrendChartData = [
@@ -160,7 +165,7 @@ onLoad(async () => {
   activityIntensity.value = res;
   if (!activityIntensity.value) {
     uni.showToast({
-      title: '暂无数据',
+      title: t('暂无数据'),
       icon: 'none'
     });
   }
@@ -170,26 +175,26 @@ onLoad(async () => {
 <template>
   <view class="pl-30 pr-30 pt-30">
     <sleepEchartItem
-      title="活动强度"
-      :subtitle="activityIntensity?.overview?.level || '--'"
+      :title="t('活动强度')"
+      :subtitle="t(activityIntensity?.overview?.level || '--')"
       :dateRange="activityIntensity?.overview?.dateRange || '--'"
       @chart-finished="(chartRef) => initChart(chartRef)"
     >
       <template #comparison>
         <view class="tag flex ai-center ml-20 p-10">
-          <text>{{ activityIntensity?.overview?.trend || '--' }}</text>
+          <text>{{ t(activityIntensity?.overview?.trend || '--') }}</text>
         </view>
       </template>
     </sleepEchartItem>
     <sleepEchartItem
       :showChartDate="false"
-      title="中高强度活动时长"
+      :title="t('中高强度活动时长')"
       :subtitle="(activityIntensity?.totalMinutes || '--') + 'min'"
       @chart-finished="(chartRef) => lightSleepTimeChart(chartRef)"
     >
       <template #comparison>
         <view class="tag flex ai-center ml-20 pl-20 pr-20 pt-10 pb-10">
-          <text>{{ activityIntensity?.intensityLevel || '--' }}</text>
+          <text>{{ t(activityIntensity?.intensityLevel || '--') }}</text>
         </view>
       </template>
     </sleepEchartItem>

@@ -5,7 +5,9 @@ import { wechatQuickLogin } from '@/common/api/login';
 import { getWechatLoginCode } from '@/utils/wechatLogin';
 import { useUserStore } from '@/stores/user';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { useI18n } from '@/i18n';
 
+const { t } = useI18n();
 const userStore = useUserStore();
 
 const scrollTop = ref(0);
@@ -26,7 +28,7 @@ const showToast = (title) => {
 
 const getErrorMessage = (error, fallback) => formatBleErrorMessage(error, fallback);
 
-const withTimeout = (promise, timeout = 15000, message = '请求超时，请稍后重试') => {
+const withTimeout = (promise, timeout = 15000, message = t('请求超时，请稍后重试')) => {
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error(message)), timeout);
@@ -40,7 +42,7 @@ const withTimeout = (promise, timeout = 15000, message = '请求超时，请稍�
 const finishLogin = async (response, loginOptions = {}) => {
   await userStore.applyLoginResponse(response, loginOptions);
   uni.showToast({
-    title: '登录成功',
+    title: t('登录成功'),
     icon: 'success'
   });
   setTimeout(() => {
@@ -51,14 +53,14 @@ const finishLogin = async (response, loginOptions = {}) => {
 const handleWechatLogin = async () => {
   if (isLoggingIn.value) return;
   if (!agreementChecked.value) {
-    showToast('请先同意用户协议');
+    showToast(t('请先同意用户协议'));
     return;
   }
 
   isLoggingIn.value = true;
   try {
-    uni.showLoading({ title: '登录中' });
-    const code = await withTimeout(getWechatLoginCode(), 10000, '登录凭证获取超时');
+    uni.showLoading({ title: t('登录中') });
+    const code = await withTimeout(getWechatLoginCode(), 10000, t('登录凭证获取超时'));
     const response = await withTimeout(
       wechatQuickLogin(
         {
@@ -67,11 +69,11 @@ const handleWechatLogin = async () => {
         { custom: { auth: false } }
       ),
       15000,
-      '微信登录超时，请稍后重试'
+      t('微信登录超时，请稍后重试')
     );
     await finishLogin(response);
   } catch (error) {
-    showToast(getErrorMessage(error, '微信登录失败'));
+    showToast(t(getErrorMessage(error, '微信登录失败')));
   } finally {
     isLoggingIn.value = false;
     uni.hideLoading();
@@ -95,7 +97,7 @@ const leftClick = () => {
       placeholder
       @leftClick="leftClick"
       leftIcon="arrow-left"
-      title="登录"
+      :title="t('登录')"
       :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"
     ></uv-navbar>
     <view class="login-bg">
@@ -107,24 +109,24 @@ const leftClick = () => {
       </view>
 
       <view class="login-hero">
-        <view class="login-title">欢迎登录</view>
-        <view class="login-subtitle">轻刻智能戒指</view>
+        <view class="login-title">{{ t('欢迎登录') }}</view>
+        <view class="login-subtitle">{{ t('轻刻智能戒指') }}</view>
         <view class="login-divider"></view>
       </view>
 
       <view class="login-actions">
         <!-- #ifndef APP-PLUS -->
         <button class="login-btn login-btn-primary" :disabled="isLoggingIn" hover-class="none" @click="handleWechatLogin">
-          {{ isLoggingIn ? '登录中...' : '快捷登录' }}
+          {{ isLoggingIn ? t('登录中...') : t('快捷登录') }}
         </button>
         <!-- #endif -->
         <!-- #ifdef APP-PLUS -->
         <button class="login-btn login-btn-primary" :disabled="isLoggingIn" hover-class="none" @click="handleMobileLoginEntry">
-          手机号登录
+          {{ t('手机号登录') }}
         </button>
         <!-- #endif -->
         <!-- #ifndef APP-PLUS -->
-        <button class="login-mobile-entry" :disabled="isLoggingIn" hover-class="none" @click="handleMobileLoginEntry">手机验证登录</button>
+        <button class="login-mobile-entry" :disabled="isLoggingIn" hover-class="none" @click="handleMobileLoginEntry">{{ t('手机验证登录') }}</button>
         <!-- #endif -->
       </view>
 
@@ -133,10 +135,10 @@ const leftClick = () => {
           <uv-icon v-if="agreementChecked" name="checkmark" color="#ffffff" size="13"></uv-icon>
         </view>
         <view class="agreement-text">
-          我已阅读并同意
-          <text class="agreement-link" @click.stop="$uv.route('/pages/login/agreement?type=user')">《用户协议》</text>
-          和
-          <text class="agreement-link" @click.stop="$uv.route('/pages/login/agreement?type=privacy')">《隐私政策》</text>
+          {{ t('我已阅读并同意') }}
+          <text class="agreement-link" @click.stop="$uv.route('/pages/login/agreement?type=user')">{{ t('《用户协议》') }}</text>
+          {{ t('和') }}
+          <text class="agreement-link" @click.stop="$uv.route('/pages/login/agreement?type=privacy')">{{ t('《隐私政策》') }}</text>
         </view>
       </view>
     </view>

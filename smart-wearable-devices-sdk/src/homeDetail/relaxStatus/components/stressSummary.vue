@@ -1,11 +1,15 @@
 <script setup lang="ts">
 // @ts-nocheck
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { computed, ref, watch } from 'vue';
 import echarts from '@/utils/echarts';
 import { lastWeekOption, todayOption } from '@/homeDetail/relaxStatus/echartOptions';
 import type { Point, stressSummaryType } from '@/types/api/homeDetail';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';
 import { cloneDeep } from 'lodash-es';
+
+const { t } = useI18n();
 
 const props = defineProps({
   stressSummaryObj: {
@@ -59,7 +63,7 @@ const getLastWeekDateRange = (): string => {
   const formatDate = (date: Date): string => {
     const month = date.getMonth() + 1;
     const day = date.getDate();
-    return `${month}月${day}日`;
+    return t('{month}月{day}日', { month, day });
   };
 
   return `${formatDate(monday)}-${formatDate(sunday)}`;
@@ -124,14 +128,14 @@ const getFirstOption = () => {
   const newOption = cloneDeep(todayOption);
   const data = props.stressSummaryObj?.todayStressChart || [];
   const { xData, seriesData } = formatTimeData(data);
-  return configureChartOptions(newOption, xData, seriesData, `今天：${getMaxTime(xData)}`);
+  return configureChartOptions(newOption, xData, seriesData, t('今天：{time}', { time: getMaxTime(xData) }));
 };
 
 const getSecondOption = () => {
   const newOption = cloneDeep(lastWeekOption);
   const data = props.stressSummaryObj?.weekStressChart || [];
   const { xData, seriesData } = formatTimeData(data);
-  return configureChartOptions(newOption, xData, seriesData, `${getLastWeekDateRange()}：${getMaxTime(xData)}`);
+  return configureChartOptions(newOption, xData, seriesData, t('{range}：{time}', { range: getLastWeekDateRange(), time: getMaxTime(xData) }));
 };
 
 const initTodayChart = async () => {
@@ -158,24 +162,22 @@ const initLastWeekChart = async () => {
 <template>
   <view class="bg-white r-50 mb-30 p-30">
     <view class="flex jc-start">
-      <view class="fs-36">压力总结</view>
+      <view class="fs-36">{{ t('压力总结') }}</view>
     </view>
     <view class="fs-28 mt-30">
-      截至当前，您的压力值较上周平均{{ stressDifference >= 0 ? '增加了' : '减少了' }}
-      <text style="color: #2e70fc">{{ stressDifferenceAbs || '00' }}</text>
-      <text>分。</text>
+      {{ t('截至当前，您的压力值较上周平均{direction}{value}分。', { direction: t(stressDifference >= 0 ? '增加了' : '减少了'), value: stressDifferenceAbs || '00' }) }}
     </view>
     <view class="flex jc-between ai-center mt-50">
       <view class="itemBox p-40 flex fd-c jc-center ai-center">
         <view class="flex ai-center">
-          <text class="fs-28">今天</text>
+          <text class="fs-28">{{ t('今天') }}</text>
           <view :class="stressDifference > 0 ? 'arrow-up' : ''">
             <view class="trend-arrow"></view>
           </view>
         </view>
         <view>
           <text class="fs-36">{{ todayScore }}</text>
-          <text class="fs-24">分</text>
+          <text class="fs-24">{{ t('分') }}</text>
         </view>
       </view>
       <view class="flex ai-center jc-center chartBox">
@@ -185,11 +187,11 @@ const initLastWeekChart = async () => {
     <view class="flex jc-between ai-center mt-30">
       <view class="itemBox p-40 flex fd-c jc-center ai-center">
         <view class="flex ai-center">
-          <text class="fs-28">上周</text>
+          <text class="fs-28">{{ t('上周') }}</text>
         </view>
         <view>
           <text class="fs-36">{{ weekScore }}</text>
-          <text class="fs-24">分</text>
+          <text class="fs-24">{{ t('分') }}</text>
         </view>
       </view>
       <view class="flex ai-center jc-center chartBox">
@@ -199,48 +201,48 @@ const initLastWeekChart = async () => {
     <view class="flex jc-between ai-center mt-50">
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start mr-30 pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">放松</text>
+          <text class="fs-28">{{ t('放松') }}</text>
         </view>
         <view>
           <text class="fs-36">{{ getSleepDurationHours(stressSummaryObj?.relaxDuration) || '00' }}</text>
-          <text class="fs-24">小时</text>
+          <text class="fs-24">{{ t('小时') }}</text>
           <text class="fs-36">{{ getSleepDurationMinutes(stressSummaryObj?.relaxDuration) || '00' }}</text>
-          <text class="fs-24">分钟</text>
+          <text class="fs-24">{{ t('分钟') }}</text>
         </view>
       </view>
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">正常</text>
+          <text class="fs-28">{{ t('正常') }}</text>
         </view>
         <view>
           <text class="fs-36">{{ getSleepDurationHours(stressSummaryObj?.normalDuration) || '00' }}</text>
-          <text class="fs-24">小时</text>
+          <text class="fs-24">{{ t('小时') }}</text>
           <text class="fs-36">{{ getSleepDurationMinutes(stressSummaryObj?.normalDuration) || '00' }}</text>
-          <text class="fs-24">分钟</text>
+          <text class="fs-24">{{ t('分钟') }}</text>
         </view>
       </view>
     </view>
     <view class="flex jc-between ai-center mt-30">
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start mr-30 pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">中等</text>
+          <text class="fs-28">{{ t('中等') }}</text>
         </view>
         <view>
           <text class="fs-36">{{ getSleepDurationHours(stressSummaryObj?.moderateStressDuration) || '00' }}</text>
-          <text class="fs-24">小时</text>
+          <text class="fs-24">{{ t('小时') }}</text>
           <text class="fs-36">{{ getSleepDurationMinutes(stressSummaryObj?.moderateStressDuration) || '00' }}</text>
-          <text class="fs-24">分钟</text>
+          <text class="fs-24">{{ t('分钟') }}</text>
         </view>
       </view>
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">偏高</text>
+          <text class="fs-28">{{ t('偏高') }}</text>
         </view>
         <view>
           <text class="fs-36">{{ getSleepDurationHours(stressSummaryObj?.highStressDuration) || '00' }}</text>
-          <text class="fs-24">小时</text>
+          <text class="fs-24">{{ t('小时') }}</text>
           <text class="fs-36">{{ getSleepDurationMinutes(stressSummaryObj?.highStressDuration) || '00' }}</text>
-          <text class="fs-24">分钟</text>
+          <text class="fs-24">{{ t('分钟') }}</text>
         </view>
       </view>
     </view>

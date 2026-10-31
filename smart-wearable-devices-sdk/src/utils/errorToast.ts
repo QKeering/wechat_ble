@@ -1,4 +1,5 @@
 import { formatBleErrorMessage } from './bleError';
+import { t } from '@/i18n';
 
 /**
  * 全局错误弹窗开关
@@ -32,7 +33,7 @@ export const setErrorToastEnabled = (enabled: boolean): void => {
  */
 export const showErrorToast = (message: unknown): void => {
   if (!errorToastEnabled) return;
-  const fallback = '网络错误';
+  const fallback = '网络错误'; // 传原文给 formatBleErrorMessage，出结果后再翻译
   let text = fallback;
   if (typeof message === 'string' && message.trim()) {
     text = message;
@@ -40,5 +41,5 @@ export const showErrorToast = (message: unknown): void => {
     const msg = (message as any).msg;
     if (typeof msg === 'string' && msg.trim()) text = msg;
   }
-  uni.$uv.toast(formatBleErrorMessage(message, text));
+  uni.$uv.toast(t(formatBleErrorMessage(message, text)));
 };

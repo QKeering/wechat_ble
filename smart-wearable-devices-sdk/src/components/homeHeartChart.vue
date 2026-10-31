@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
+import { useI18n } from '@/i18n';
+
+const { t } = useI18n();
+
 const props = defineProps({
   showRigntBox: {
     type: Boolean,
@@ -65,11 +69,15 @@ const emit = defineEmits(['measure-click', 'chart-finished']);
 const chartRef = ref(null);
 
 const imageSrc = computed(() => {
-  const srcMap = {
+  const srcMap: Record<string, string> = {
     心率: '/static/images/homeDetail/love.png',
     血氧饱和度: '/static/images/homeDetail/oxygen.png',
     心率变异性: '/static/images/homeDetail/heartLove.png'
   };
+  // 调用方可能传的是已翻译后的标题，两种都认
+  Object.entries(srcMap).forEach(([key, src]) => {
+    srcMap[t(key)] = src;
+  });
   return srcMap[props.cardTitle as keyof typeof srcMap] || '';
 });
 onLoad(() => {});
@@ -83,12 +91,12 @@ defineExpose({
       <!-- 标题栏 -->
       <view class="chart-card-header flex jc-between ai-center">
         <view class="chart-card-title">
-          <text v-if="showCardTitle" class="fs-36">{{ cardTitle }}</text>
-          <text v-if="showCardSmallTitle" class="fs-28 ml-10">{{ cardSmallTitle }}</text>
+          <text v-if="showCardTitle" class="fs-36">{{ t(cardTitle) }}</text>
+          <text v-if="showCardSmallTitle" class="fs-28 ml-10">{{ t(cardSmallTitle) }}</text>
         </view>
         <view v-if="showRigntBox" class="textBox r-30 p-20 flex jc-between ai-center" @click="$emit('measure-click')">
 <uv-image v-if="imageSrc" :src="imageSrc" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
-          <text style="color: #ff5959">{{ measureBtnText }}</text>
+          <text style="color: #ff5959">{{ t(measureBtnText) }}</text>
         </view>
       </view>
 
@@ -97,14 +105,14 @@ defineExpose({
 <uv-image v-if="imageSrc" :src="imageSrc" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
           <view class="ml-15">
             <text class="fs-48">{{ currentRate }}</text>
-            <text class="t-979797 fs-24">{{ rateUnit }}</text>
+            <text class="t-979797 fs-24">{{ t(rateUnit) }}</text>
           </view>
         </view>
       </view>
       <view class="top-stats flex jc-around ai-center mt-30" v-if="showTopCard">
         <view class="ta-c" v-for="(item, index) in stats" :key="index">
           <view class="fs-36 fw-600">{{ item.value }}</view>
-          <view class="fs-24 mt-10">{{ item.label }}</view>
+          <view class="fs-24 mt-10">{{ t(item.label) }}</view>
         </view>
       </view>
       <view class="chart-area flex ai-center jc-center">
@@ -122,7 +130,7 @@ defineExpose({
       <view class="stats" v-if="showButtomCard">
         <view class="stat-item" v-for="(item, index) in stats" :key="index">
           <view class="stat-value">{{ item.value }}</view>
-          <view class="stat-label">{{ item.label }}</view>
+          <view class="stat-label">{{ t(item.label) }}</view>
         </view>
       </view>
     </view>

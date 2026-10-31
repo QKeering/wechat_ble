@@ -1,6 +1,11 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
 import { reactive, ref } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
+import { useI18n, usePageTitle } from '@/i18n';
+
+const { t } = useI18n();
+usePageTitle(() => t('编辑卡片'));
 const form = reactive<Record<string, boolean>>({
   heartRate: true,
   bloodOxygenSaturation: true,
@@ -66,19 +71,19 @@ onLoad((options) => {
 </script>
 <template>
   <view class="p-30">
-    <view class="p-40 t-979797 fs-28">您可以选择是否显示，并调整卡片的排列顺序</view>
+    <view class="p-40 t-979797 fs-28">{{ t('您可以选择是否显示，并调整卡片的排列顺序') }}</view>
     <view class="bg-white r-50 p-40">
       <l-drag :list="list" @change="change" :column="1">
         <template #grid="{ active, content }">
           <view class="flex jc-between ai-center pb-35 border-b w-full">
-            <text>{{ content.name }}</text>
+            <text>{{ t(content.name) }}</text>
             <uv-switch v-model="form[content.value]" inactive-color="#f3f4f6" active-color="#2e70fc"></uv-switch>
           </view>
         </template>
       </l-drag>
     </view>
     <view class="purchase-section p-30">
-      <uv-button @click="handleOk" text="保存" shape="circle" color="#2e70fc"></uv-button>
+      <uv-button @click="handleOk" :text="t('保存')" shape="circle" color="#2e70fc"></uv-button>
       <uv-safe-bottom></uv-safe-bottom>
     </view>
   </view>

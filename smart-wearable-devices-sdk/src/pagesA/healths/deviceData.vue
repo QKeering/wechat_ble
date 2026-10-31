@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import '@/pagesA/healths/i18n/pack';
 import { computed, ref, watch } from 'vue';
 import { onBackPress, onHide, onLoad, onUnload } from '@dcloudio/uni-app';
+import { useI18n } from '@/i18n';
 import { useUserStore } from '@/stores/user';
 import { useRingBLE } from '@/composables/useRingBLE';
 import {
@@ -35,6 +37,8 @@ const {
 } = useRingBLE();
 const { runRwForegroundMeasurement, stopActiveRwMeasurement } = useRwForegroundMeasurement();
 const userStore = useUserStore();
+
+const { t } = useI18n();
 
 const measureStatus = ref<'idle' | 'measuring_hr' | 'measuring_hrv' | 'measuring_spo2' | 'measuring_temp' | 'completed'>('idle');
 const wearCheckStatus = ref<'idle' | 'checking' | 'worn'>('idle');
@@ -85,11 +89,12 @@ const PREVIOUS_MEASUREMENT_SETTLE_TIMEOUT_MS = 12_000;
 const RETRY_MEASUREMENT_SETTLE_TIMEOUT_MS = 45_000;
 const FULL_MEASUREMENT_TIMEOUT_MS = 180_000;
 
+// 失败标题/说明以中文原文保存（setMeasurementFailure 需要按关键字分类），展示时再翻译。
 const measureStatusText = computed(() => {
-  if (preflightStage.value === 'failed') return measurementFailureTitle.value || '测量未完成';
-  if (preflightStage.value === 'settling') return '正在结束上次测量';
-  if (preflightStage.value === 'checking_wear') return '正在确认佩戴';
-  if (preflightStage.value === 'connecting') return '正在连接设备';
+  if (preflightStage.value === 'failed') return t(measurementFailureTitle.value || '测量未完成');
+  if (preflightStage.value === 'settling') return t('正在结束上次测量');
+  if (preflightStage.value === 'checking_wear') return t('正在确认佩戴');
+  if (preflightStage.value === 'connecting') return t('正在连接设备');
   const statusMap = {
     idle: '准备测量',
     measuring_hr: '正在测量心率',
@@ -98,35 +103,35 @@ const measureStatusText = computed(() => {
     measuring_temp: '正在测量皮肤温度',
     completed: '测量完成'
   };
-  return statusMap[measureStatus.value] || '准备测量';
+  return t(statusMap[measureStatus.value] || '准备测量');
 });
 
 const measureHintText = computed(() => {
-  if (preflightStage.value === 'failed') return measurementFailureMessage.value;
-  if (preflightStage.value === 'settling') return '正在等待戒指结束上一轮测量，请稍候';
-  if (preflightStage.value === 'checking_wear') return '请正确佩戴戒指并保持手部静止';
-  if (preflightStage.value === 'connecting') return '正在连接戒指，请稍候';
-  if (measureStatus.value === 'completed') return '检测完成，正在整理报告';
-  return '请保持手部静止，戒指贴合手指，测量期间不要退出页面';
+  if (preflightStage.value === 'failed') return t(measurementFailureMessage.value);
+  if (preflightStage.value === 'settling') return t('正在等待戒指结束上一轮测量，请稍候');
+  if (preflightStage.value === 'checking_wear') return t('请正确佩戴戒指并保持手部静止');
+  if (preflightStage.value === 'connecting') return t('正在连接戒指，请稍候');
+  if (measureStatus.value === 'completed') return t('检测完成，正在整理报告');
+  return t('请保持手部静止，戒指贴合手指，测量期间不要退出页面');
 });
 
 const measureStepOrder = ['measuring_hr', 'measuring_hrv', 'measuring_spo2', 'measuring_temp'] as const;
 
 const getMeasureStepDesc = (stepStatus: (typeof measureStepOrder)[number], valueText: string | null) => {
-  if (wearCheckStatus.value === 'checking') return '等待测量';
-  if (measureStatus.value === stepStatus) return '测量中';
+  if (wearCheckStatus.value === 'checking') return t('等待测量');
+  if (measureStatus.value === stepStatus) return t('测量中');
   if (valueText) return valueText;
-  if (measureStatus.value === 'completed') return '等待数据';
+  if (measureStatus.value === 'completed') return t('等待数据');
 
   const currentIndex = measureStepOrder.indexOf(measureStatus.value as (typeof measureStepOrder)[number]);
-  if (currentIndex < 0) return '等待测量';
-  return measureStepOrder.indexOf(stepStatus) < currentIndex ? '等待数据' : '等待测量';
+  if (currentIndex < 0) return t('等待测量');
+  return measureStepOrder.indexOf(stepStatus) < currentIndex ? t('等待数据') : t('等待测量');
 };
 
 const measureStepItems = computed(() => [
   {
     key: 'heart-rate',
-    label: '心率',
+    label: t('心率'),
     desc: getMeasureStepDesc('measuring_hr', heartRate.value ? `${heartRate.value} bpm` : null),
     active: wearCheckStatus.value === 'worn' && measureStatus.value === 'measuring_hr',
     done: ['measuring_hrv', 'measuring_spo2', 'measuring_temp', 'completed'].includes(measureStatus.value) || Boolean(heartRate.value)
@@ -140,14 +145,14 @@ const measureStepItems = computed(() => [
   },
   {
     key: 'spo2',
-    label: '血氧',
+    label: t('血氧'),
     desc: getMeasureStepDesc('measuring_spo2', spo2Value.value ? `${spo2Value.value}%` : null),
     active: wearCheckStatus.value === 'worn' && measureStatus.value === 'measuring_spo2',
     done: ['measuring_temp', 'completed'].includes(measureStatus.value) || Boolean(spo2Value.value)
   },
   {
     key: 'skin-temperature',
-    label: '皮肤温度',
+    label: t('皮肤温度'),
     desc: getMeasureStepDesc('measuring_temp', temperature.value ? `${formatTemperatureMetric(temperature.value)}°C` : null),
     active: wearCheckStatus.value === 'worn' && measureStatus.value === 'measuring_temp',
     done: measureStatus.value === 'completed' || Boolean(temperature.value)
@@ -870,7 +875,7 @@ watch(
     if (latestBloodPressureData?.systolic) systolic.value = latestBloodPressureData.systolic;
     if (latestBloodPressureData?.diastolic) diastolic.value = latestBloodPressureData.diastolic;
 
-    uni.showLoading({ title: '提交数据中...', mask: false });
+    uni.showLoading({ title: t('提交数据中...'), mask: false });
     try {
       await submitData({
         deviceMac: getSubmitMac(),
@@ -884,7 +889,7 @@ watch(
       if (!isExpectedBleRuntimeError(error)) {
         formatBleErrorMessage(error);
       }
-      uni.showToast({ title: '测量已完成，数据稍后同步', icon: 'none', duration: 1500 });
+      uni.showToast({ title: t('测量已完成，数据稍后同步'), icon: 'none', duration: 1500 });
     } finally {
       uni.hideLoading();
     }
@@ -1009,12 +1014,12 @@ const handleMeasure = async (forceRestart = false) => {
     // 用户在前置流程中再次点了重新测量时，旧流程的异常属于已取消会话，
     // 不能覆盖排队中的新一轮状态或把按钮重新变成失败态。
     if (runToken !== measurementRunToken) return;
-    const message = formatBleErrorMessage(error);
+    const message = t(formatBleErrorMessage(error));
     if (!isExpectedBleRuntimeError(error)) formatBleErrorMessage(error);
     if (preflightStage.value === 'checking_wear') {
-      setMeasurementFailure('佩戴状态确认失败', `${message}，请保持戒指贴合手指后重新测量。`);
+      setMeasurementFailure('佩戴状态确认失败', t('{message}，请保持戒指贴合手指后重新测量。', { message }));
     } else if (preflightStage.value !== 'failed') {
-      setMeasurementFailure('戒指连接失败', `${message}，请确认戒指靠近手机后重新测量。`);
+      setMeasurementFailure('戒指连接失败', t('{message}，请确认戒指靠近手机后重新测量。', { message }));
     }
   } finally {
     isStartingMeasurement.value = false;
@@ -1080,14 +1085,14 @@ onHide(async () => {
     <uv-navbar
       placeholder
       leftIcon="arrow-left"
-      title="全面测量"
+      :title="t('全面测量')"
       bgColor="#f1f3f6"
       @leftClick="handleBack"
     ></uv-navbar>
 
     <view class="measure-hero">
       <view class="measure-hero-copy">
-        <text class="measure-eyebrow">智能戒指健康检测</text>
+        <text class="measure-eyebrow">{{ t('智能戒指健康检测') }}</text>
         <text class="measure-title">{{ measureStatusText }}</text>
         <text class="measure-desc">{{ measureHintText }}</text>
       </view>
@@ -1102,7 +1107,7 @@ onHide(async () => {
 
     <view class="progress-card">
       <view class="progress-header">
-        <text>测量进度</text>
+        <text>{{ t('测量进度') }}</text>
         <text>{{ measureProgress }}%</text>
       </view>
       <view class="progress-track">
@@ -1126,10 +1131,10 @@ onHide(async () => {
 
     <view v-if="preflightStage === 'failed'" class="measure-actions">
       <button class="measure-action measure-action--primary" hover-class="measure-action--pressed" @click="handleRetryMeasurement">
-        重新测量
+        {{ t('重新测量') }}
       </button>
       <button class="measure-action measure-action--secondary" hover-class="measure-action--pressed" @click="handleBack">
-        返回
+        {{ t('返回') }}
       </button>
     </view>
 
@@ -1140,10 +1145,10 @@ onHide(async () => {
         :disabled="isRetryQueued"
         @click="handleRetryMeasurement"
       >
-        {{ isRetryQueued ? '正在重新测量' : '重新测量' }}
+        {{ isRetryQueued ? t('正在重新测量') : t('重新测量') }}
       </button>
       <text class="measure-retry__hint">
-        {{ preflightStage === 'settling' ? '保持戒指连接，等待上一轮采集释放后自动重试' : '保持戒指连接，仅重置本轮测量' }}
+        {{ preflightStage === 'settling' ? t('保持戒指连接，等待上一轮采集释放后自动重试') : t('保持戒指连接，仅重置本轮测量') }}
       </text>
     </view>
 

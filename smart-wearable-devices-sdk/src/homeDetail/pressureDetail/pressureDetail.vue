@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow, onPullDownRefresh, onReachBottom } from '@dcloudio/uni-app';
 import homeHeartChart from '@/components/homeHeartChart.vue';
@@ -15,12 +17,14 @@ import {
 } from '@/utils/stressDisplay';
 import { cloneDeep } from 'lodash-es';
 import echarts from '@/utils/echarts';
+
+const { t } = useI18n();
 // 压力算法接口在并发场景下可能超过 3 秒。详情页允许稍长等待，但详情与总结必须独立失败，
 // 避免其中一路超时把另一路已经返回的有效数据一起丢掉。
 const PRESSURE_DETAIL_REQUEST_SOFT_TIMEOUT_MS = 6000;
 
 // 滑动日期相关
-const list = ref<string[]>(['日', '周', '月']);
+const list = computed<string[]>(() => [t('日'), t('周'), t('月')]);
 const current = ref<number>(0);
 const currentName = ref('day');
 const currentList = ref<string[]>(['day', 'week', 'month']);
@@ -163,7 +167,7 @@ const nextDay = async () => {
     calculateOffsetLocal();
     void refreshPressureDetailChart();
   } else {
-    (uni as any).$uv.toast('不能导航到未来的日期');
+    (uni as any).$uv.toast(t('不能导航到未来的日期'));
   }
 };
 const getProcessedOption = () => {
@@ -357,7 +361,7 @@ onPageScroll((e) => {
 </script>
 <template>
   <view class="relative p-30">
-    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" title="运动详情" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" :title="t('运动详情')" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view class="bgcWrapper"></view>
     <view class="content">
       <uv-subsection
@@ -382,34 +386,34 @@ onPageScroll((e) => {
       </view>
       <view class="health-card p-30 bg-white r-50 mt-40">
         <view class="flex ai-center jc-between mb-20">
-          <text class="fs-36 fw-400">健康评分</text>
-          <text class="fs-28 t-979797">当前压力值</text>
+          <text class="fs-36 fw-400">{{ t('健康评分') }}</text>
+          <text class="fs-28 t-979797">{{ t('当前压力值') }}</text>
         </view>
         <view class="flex ai-center jc-between">
           <view class="flex ai-center">
             <uv-image :src="pressureIcon" width="68rpx" height="68rpx"></uv-image>
             <view>
-              <text class="fs-72 ml-10">{{ pressureMainText }}</text>
-              <text v-if="hasPressureScore" class="fs-24">分</text>
+              <text class="fs-72 ml-10">{{ t(pressureMainText) }}</text>
+              <text v-if="hasPressureScore" class="fs-24">{{ t('分') }}</text>
             </view>
           </view>
-          <view v-if="hasPressureScore" class="status-tag" :class="statusClass">{{ pressureDisplayText }}</view>
+          <view v-if="hasPressureScore" class="status-tag" :class="statusClass">{{ t(pressureDisplayText) }}</view>
         </view>
       </view>
       <view v-if="!isPressureEmpty" class="mt-30 bg-white r-50 p-30">
-        <view class="fs-36">指标数据</view>
+        <view class="fs-36">{{ t('指标数据') }}</view>
         <view class="flex jc-between mt-30 pl-50 pr-50">
-          <text class="fs-28 t-979797">压力指数范围</text>
-          <text class="fs-28 t-979797">平均压力指数</text>
+          <text class="fs-28 t-979797">{{ t('压力指数范围') }}</text>
+          <text class="fs-28 t-979797">{{ t('平均压力指数') }}</text>
         </view>
         <view class="flex jc-between mt-20 pl-50 pr-50">
           <view>
             <text class="fs-48">{{ stressDetailObj?.stressRange }}</text>
-            <text class="fs-24 t-979797">分</text>
+            <text class="fs-24 t-979797">{{ t('分') }}</text>
           </view>
           <view>
             <text class="fs-48">{{ stressDetailObj?.avgStressValue }}</text>
-            <text class="fs-24 t-979797">分</text>
+            <text class="fs-24 t-979797">{{ t('分') }}</text>
           </view>
         </view>
         <view class="flex ai-center jc-center">

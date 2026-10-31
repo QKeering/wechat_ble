@@ -1,9 +1,14 @@
 <script setup lang="ts">
+import '@/pagesA/mines/i18n/pack';
 import { computed, ref } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
 import { getfqaGuidList } from '@/common/api/userGuide';
 import type { FqaGuidItem } from '@/types/api/userGuides';
 import { getMiniProgramVersionText } from '@/utils/miniProgramVersion';
+import { useI18n, usePageTitle } from '@/i18n';
+
+const { t } = useI18n();
+usePageTitle(() => t('使用指南'));
 
 type LocalGuideItem = {
   id: string;
@@ -74,7 +79,7 @@ const handleVersionTap = () => {
   if (debugTapCount.value >= 3) {
     debugTapCount.value = 0;
     showCommandDebugEntry.value = true;
-    uni.showToast({ title: '调试入口已开启', icon: 'none' });
+    uni.showToast({ title: t('调试入口已开启'), icon: 'none' });
     return;
   }
   debugTapTimer = setTimeout(() => {
@@ -102,19 +107,19 @@ onLoad(async () => {
 </script>
 <template>
   <view class="mine-list-page p-30">
-    <view class="page-title">使用指南</view>
+    <view class="page-title">{{ t('使用指南') }}</view>
     <view
       v-for="item in displayedGuideItems"
       :key="item.id"
       @click="openDetail(item)"
       class="bg-white p-40 r-50 flex jc-between ai-center mb-30"
     >
-      <view class="fs-36">{{ item.title }}</view>
+      <view class="fs-36">{{ t(item.title) }}</view>
       <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
     </view>
     <view v-if="!loading && guideList.length === 0" class="fallback-card">
       <view v-for="(item, index) in fallbackGuideItems" :key="item" class="fallback-item">
-        {{ index + 1 }}. {{ item }}
+        {{ index + 1 }}. {{ t(item) }}
       </view>
     </view>
 
@@ -124,14 +129,14 @@ onLoad(async () => {
       @click="openDetail(item)"
       class="bg-white p-40 r-50 flex jc-between ai-center mb-30"
     >
-      <view class="fs-36">{{ item.title }}</view>
+      <view class="fs-36">{{ t(item.title) }}</view>
       <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
     </view>
 
     <view v-if="showCommandDebugEntry" class="debug-entry" @click="openCommandDebug">
       <view>
-        <view class="debug-title">BLE 命令测试</view>
-        <view class="debug-desc">临时入口：验证血氧、心率、电量等命令回执</view>
+        <view class="debug-title">{{ t('BLE 命令测试') }}</view>
+        <view class="debug-desc">{{ t('临时入口：验证血氧、心率、电量等命令回执') }}</view>
       </view>
       <uv-icon name="arrow-right" color="#3478f6" size="14"></uv-icon>
     </view>

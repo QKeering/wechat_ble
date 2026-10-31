@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import '@/pagesA/mines/i18n/pack';
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useRingStore, useUserStore } from '@/stores';

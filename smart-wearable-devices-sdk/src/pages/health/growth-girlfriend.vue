@@ -1,33 +1,33 @@
 <template>
   <view class="growth-page">
-    <uv-navbar placeholder leftIcon="arrow-left" title="小轻智能体" bgColor="transparent" autoBack :leftIconColor="'#332b34'" :titleStyle="{ color: '#332b34' }"></uv-navbar>
+    <uv-navbar placeholder leftIcon="arrow-left" :title="t('小轻智能体')" bgColor="transparent" autoBack :leftIconColor="'#332b34'" :titleStyle="{ color: '#332b34' }"></uv-navbar>
     <view class="header">
-      <text class="title">小轻，今天也在你身边</text>
-      <text class="subtitle">AI融合多维健康大数据，生成你的专属状态洞察</text>
+      <text class="title">{{ t('小轻，今天也在你身边') }}</text>
+      <text class="subtitle">{{ t('AI融合多维健康大数据，生成你的专属状态洞察') }}</text>
       <view class="pills">
-        <text class="pill">已同步 · {{ syncTimeText }}</text>
-        <text class="pill">隐私可控</text>
+        <text class="pill">{{ t('已同步') }} · {{ syncTimeText }}</text>
+        <text class="pill">{{ t('隐私可控') }}</text>
       </view>
     </view>
 
     <view class="spectrum">
       <view class="spectrum-title">
-        <text class="spectrum-main">今日状态光谱</text>
-        <text class="spectrum-sub">AI实时理解健康、美丽、成长趋势，不只给数字。</text>
+        <text class="spectrum-main">{{ t('今日状态光谱') }}</text>
+        <text class="spectrum-sub">{{ t('AI实时理解健康、美丽、成长趋势，不只给数字。') }}</text>
       </view>
       <view class="metrics">
         <view class="metric health">
-          <text class="metric-label">健康</text>
+          <text class="metric-label">{{ t('健康') }}</text>
           <text class="metric-value">{{ healthScore }}</text>
           <view class="bar"><view class="fill" :style="{ width: `${healthScore}%` }" /></view>
         </view>
         <view class="metric beauty">
-          <text class="metric-label">美丽</text>
+          <text class="metric-label">{{ t('美丽') }}</text>
           <text class="metric-value">{{ beautyScore }}</text>
           <view class="bar"><view class="fill" :style="{ width: `${beautyScore}%` }" /></view>
         </view>
         <view class="metric growth">
-          <text class="metric-label">成长</text>
+          <text class="metric-label">{{ t('成长') }}</text>
           <text class="metric-value">{{ growthScore }}</text>
           <view class="bar"><view class="fill" :style="{ width: `${growthScore}%` }" /></view>
         </view>
@@ -35,8 +35,8 @@
     </view>
 
     <view class="pet-zone">
-      <text class="mood">温柔提醒中</text>
-      <view class="pet" aria-label="小轻毛绒形象">
+      <text class="mood">{{ t('温柔提醒中') }}</text>
+      <view class="pet" :aria-label="t('小轻毛绒形象')">
         <view class="fur-dot dot-a" />
         <view class="fur-dot dot-b" />
         <view class="fur-dot dot-c" />
@@ -50,30 +50,30 @@
       <view class="shadow" />
 
       <view class="dialog">
-        <text class="dialog-title">小轻正在听你说</text>
+        <text class="dialog-title">{{ t('小轻正在听你说') }}</text>
         <text class="dialog-copy">{{ listeningDisplayText }}</text>
         <view class="waves">
           <view v-for="item in 6" :key="item" class="wave" />
         </view>
         <view class="divider" />
         <view class="reply-head">
-          <text class="reply-title">小轻的回答</text>
-        <button class="reply-tag" @tap="playAnswer">播报</button>
+          <text class="reply-title">{{ t('小轻的回答') }}</text>
+        <button class="reply-tag" @tap="playAnswer">{{ t('播报') }}</button>
       </view>
-        <text class="reply-copy">{{ isAnswering ? '小轻正在整理回答...' : answerText }}</text>
+        <text class="reply-copy">{{ isAnswering ? t('小轻正在整理回答...') : answerText }}</text>
       </view>
     </view>
 
     <view class="quick">
       <button v-for="item in quickQuestions" :key="item" class="quick-button" @tap="askQuick(item)">
-        {{ item }}
+        {{ t(item) }}
       </button>
     </view>
 
     <view class="composer">
       <view class="voice-wrap" :class="{ active: isVoiceActive }">
         <view class="voice-halo" />
-        <text class="voice-tip">{{ isListening ? '松开后识别语音' : '按住说话' }}</text>
+        <text class="voice-tip">{{ isListening ? t('松开后识别语音') : t('按住说话') }}</text>
         <button
           class="voice-button"
           :class="{ listening: isListening, pressing: isPressingVoice }"
@@ -85,8 +85,8 @@
         </button>
       </view>
       <view class="text-entry">
-        <input v-model="question" class="question-input" placeholder="输入你的问题" confirm-type="send" @confirm="submitQuestion" />
-        <button class="today-button" @tap="submitQuestion">发送</button>
+        <input v-model="question" class="question-input" :placeholder="t('输入你的问题')" confirm-type="send" @confirm="submitQuestion" />
+        <button class="today-button" @tap="submitQuestion">{{ t('发送') }}</button>
       </view>
     </view>
   </view>
@@ -94,10 +94,12 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { useI18n } from '@/i18n';
 import { chatWithGrowthGirlfriend, getGrowthGirlfriendContext, synthesizeGrowthSpeech, transcribeGrowthAudio } from '@/api';
 import { useRingBusinessData } from '@/composables/useRingBusinessData';
 import { formatBleErrorMessage } from '@/utils/bleError';
 
+const { t } = useI18n();
 const ringBusinessData = useRingBusinessData();
 const question = ref('');
 const isListening = ref(false);
@@ -170,9 +172,9 @@ const greetingOptions = [
 ];
 
 const listeningDisplayText = computed(() => {
-  if (isListening.value) return '我正在听，松开后帮你整理成文字。';
-  if (heardText.value) return `你说：${heardText.value}`;
-  return greetingText.value || greetingOptions[0];
+  if (isListening.value) return t('我正在听，松开后帮你整理成文字。');
+  if (heardText.value) return t('你说：{text}', { text: heardText.value });
+  return t(greetingText.value || greetingOptions[0]);
 });
 
 const answerText = computed(() => {
@@ -180,9 +182,9 @@ const answerText = computed(() => {
   const serverAnswer = serverContext.value?.answer?.text;
   if (serverAnswer) return serverAnswer;
   if (latestQuestion.value) {
-    return `关于“${latestQuestion.value}”，小轻会结合AI健康大数据、今日体征趋势和你的个人上下文，整理成更适合你的建议。`;
+    return t('关于“{question}”，小轻会结合AI健康大数据、今日体征趋势和你的个人上下文，整理成更适合你的建议。', { question: latestQuestion.value });
   }
-  return '小轻已同步你的多维状态：今天建议先保持轻节奏，优先完成低压力事项，再根据恢复感安排重点任务。';
+  return t('小轻已同步你的多维状态：今天建议先保持轻节奏，优先完成低压力事项，再根据恢复感安排重点任务。');
 });
 
 const quickQuestions = ['我今天状态怎么样？', '帮我变美', '陪我准备面试'];
@@ -209,7 +211,7 @@ const scoreStress = (value: number, inverse = false) => {
 
 const startVoice = () => {
   if (!recorder) {
-    uni.showToast({ title: '当前环境不支持录音', icon: 'none' });
+    uni.showToast({ title: t('当前环境不支持录音'), icon: 'none' });
     return;
   }
   if (recorderBusy || isListening.value) {
@@ -232,7 +234,7 @@ const startVoice = () => {
     recorderBusy = false;
     isListening.value = false;
     isPressingVoice.value = false;
-    uni.showToast({ title: '录音正在准备，请稍后再试', icon: 'none' });
+    uni.showToast({ title: t('录音正在准备，请稍后再试'), icon: 'none' });
   }
 };
 
@@ -242,9 +244,9 @@ const stopVoice = () => {
   const duration = Date.now() - voiceStartAt;
   if (duration < VOICE_MIN_DURATION_MS) {
     ignoreNextVoiceResult = true;
-    uni.showToast({ title: '说得太短啦', icon: 'none' });
+    uni.showToast({ title: t('说得太短啦'), icon: 'none' });
   } else {
-    uni.showLoading({ title: '正在识别', mask: true });
+    uni.showLoading({ title: t('正在识别'), mask: true });
   }
   recorder.stop();
   isListening.value = false;
@@ -259,19 +261,19 @@ const cancelVoice = () => {
 };
 
 const voiceErrorMessage = (message?: string) => {
-  if (!message) return '语音识别暂不可用，请先文字输入';
+  if (!message) return t('语音识别暂不可用，请先文字输入');
   if (message.includes('dashscope') || message.includes('No module named')) {
-    return '语音服务正在配置中，请先文字输入';
+    return t('语音服务正在配置中，请先文字输入');
   }
   if (message.includes('time out') || message.includes('timeout') || message.includes('超时')) {
-    return '识别时间较长，请稍后再试';
+    return t('识别时间较长，请稍后再试');
   }
-  return formatBleErrorMessage(message, '语音识别失败，请稍后再试');
+  return t(formatBleErrorMessage(message, '语音识别失败，请稍后再试'));
 };
 
 const compactToastMessage = (message: string) => {
-  if (!message) return '语音识别暂不可用';
-  return message.length > 18 ? '语音识别失败，请看回答区原因' : message;
+  if (!message) return t('语音识别暂不可用');
+  return message.length > 18 ? t('语音识别失败，请看回答区原因') : message;
 };
 
 const withTimeout = async <T,>(task: Promise<T>, ms: number, message: string): Promise<T> => {
@@ -292,7 +294,7 @@ const askQuick = (value: string) => {
 const submitQuestion = async () => {
   const text = question.value.trim();
     if (!text) {
-      uni.showToast({ title: '先说一句或输入问题', icon: 'none' });
+      uni.showToast({ title: t('先说一句或输入问题'), icon: 'none' });
       return;
     }
   heardText.value = text;
@@ -320,8 +322,8 @@ const submitQuestion = async () => {
     aiAnswer.value = result.text || '';
     void playAnswer(false);
   } catch (error) {
-    aiAnswer.value = `关于“${text}”，小轻先基于本地状态数据给你一个轻量建议：今天不要硬撑，先完成低压力任务，再根据恢复感安排重点事项。`;
-    uni.showToast({ title: formatBleErrorMessage(error, '智能体请求失败，请稍后重试'), icon: 'none' });
+    aiAnswer.value = t('关于“{question}”，小轻先基于本地状态数据给你一个轻量建议：今天不要硬撑，先完成低压力任务，再根据恢复感安排重点事项。', { question: text });
+    uni.showToast({ title: t(formatBleErrorMessage(error, '智能体请求失败，请稍后重试')), icon: 'none' });
   } finally {
     isAnswering.value = false;
   }
@@ -352,21 +354,21 @@ onMounted(() => {
     }
     if (!res.tempFilePath) {
       uni.hideLoading();
-      aiAnswer.value = '没有拿到录音文件，请确认浏览器已允许使用麦克风。';
+      aiAnswer.value = t('没有拿到录音文件，请确认浏览器已允许使用麦克风。');
       return;
     }
     try {
-      heardText.value = '正在识别你的语音...';
+      heardText.value = t('正在识别你的语音...');
       const asr = await withTimeout(
         transcribeGrowthAudio(res.tempFilePath),
         VOICE_RECOGNIZE_TIMEOUT_MS,
-        '语音识别超过25秒，请先文字输入'
+        t('语音识别超过25秒，请先文字输入')
       );
       if (!asr.text) {
         const detail = [asr.status, asr.message].filter(Boolean).join('：');
-        const message = voiceErrorMessage(detail || '没有识别到语音内容，请稍微靠近麦克风再试一次。');
+        const message = voiceErrorMessage(detail || t('没有识别到语音内容，请稍微靠近麦克风再试一次。'));
         uni.hideLoading();
-        aiAnswer.value = `语音没有识别成文字。原因：${message}`;
+        aiAnswer.value = t('语音没有识别成文字。原因：{reason}', { reason: message });
         uni.showToast({ title: compactToastMessage(message), icon: 'none' });
         return;
       }
@@ -377,7 +379,7 @@ onMounted(() => {
     } catch (error) {
       const message = voiceErrorMessage(error instanceof Error ? error.message : '');
       uni.hideLoading();
-      aiAnswer.value = `语音识别失败。原因：${message}`;
+      aiAnswer.value = t('语音识别失败。原因：{reason}', { reason: message });
       uni.showToast({ title: compactToastMessage(message), icon: 'none' });
     } finally {
       uni.hideLoading();
@@ -389,8 +391,8 @@ onMounted(() => {
     recorderBusy = false;
     uni.hideLoading();
     const message = error.errMsg?.includes('audio is recording')
-      ? '上一段语音还在收尾，请稍后再按'
-      : formatBleErrorMessage(error, '录音失败，请稍后重试');
+      ? t('上一段语音还在收尾，请稍后再按')
+      : t(formatBleErrorMessage(error, '录音失败，请稍后重试'));
     uni.showToast({ title: message, icon: 'none' });
   });
   audio = uni.createInnerAudioContext();
@@ -420,14 +422,14 @@ const playAnswer = async (showPendingToast = true) => {
     const result = await synthesizeGrowthSpeech(answerText.value);
     const source = result.audioUrl || (result.audioBase64 ? `data:audio/mp3;base64,${result.audioBase64}` : '');
     if (!source) {
-      if (showPendingToast) uni.showToast({ title: formatBleErrorMessage(result.message, '语音播报暂不可用'), icon: 'none' });
+      if (showPendingToast) uni.showToast({ title: t(formatBleErrorMessage(result.message, '语音播报暂不可用')), icon: 'none' });
       return;
     }
     if (!audio) audio = uni.createInnerAudioContext();
     audio.src = source;
     audio.play();
   } catch (error) {
-    if (showPendingToast) uni.showToast({ title: formatBleErrorMessage(error, '语音播报失败，请稍后重试'), icon: 'none' });
+    if (showPendingToast) uni.showToast({ title: t(formatBleErrorMessage(error, '语音播报失败，请稍后重试')), icon: 'none' });
   } finally {
     isSpeaking.value = false;
   }

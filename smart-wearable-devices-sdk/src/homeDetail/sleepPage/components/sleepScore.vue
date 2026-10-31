@@ -1,8 +1,12 @@
 <script setup lang="ts">
 // @ts-nocheck
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed } from 'vue';
 import type { sleepOverview, sleepSegment } from '@/types/api/homeDetail';
 import { normalizeSleepScore } from '@/utils/sleepOverview';
+
+const { t } = useI18n();
 
 const props = defineProps({
   sleepOverviewObj: {
@@ -112,7 +116,7 @@ const toggleFactors = () => {
 <template>
   <view class="bg-white r-50 mb-30 p-30">
     <view class="score-title fs-36">
-      睡眠评分
+      {{ t('睡眠评分') }}
       <slot></slot>
     </view>
 
@@ -129,7 +133,7 @@ const toggleFactors = () => {
             {{ sleepScoreValue || '--' }}
           </view>
           <view class="score-label" :style="{ color: progressColor }">
-            {{ sleepQualityText }}
+            {{ t(sleepQualityText) }}
           </view>
         </view>
       </view>
@@ -137,19 +141,19 @@ const toggleFactors = () => {
 
     <!-- 睡眠评分因素 -->
     <view class="factor-row" @click="toggleFactors">
-      <text class="factor-text">睡眠评分因素</text>
+      <text class="factor-text">{{ t('睡眠评分因素') }}</text>
       <text class="factor-arrow" :class="{ 'factor-arrow-expanded': factorsExpanded }">›</text>
     </view>
 
     <!-- 评分因素详情（展开时显示） -->
     <view v-if="factorsExpanded" class="factors-detail">
       <view class="factor-item">
-        <text class="factor-item-label">深睡比例</text>
+        <text class="factor-item-label">{{ t('深睡比例') }}</text>
         <text class="factor-item-value">{{ deepSleepRatio }}%</text>
       </view>
       <view class="factor-item">
-        <text class="factor-item-label">清醒次数</text>
-        <text class="factor-item-value">{{ awakeCountText }}次</text>
+        <text class="factor-item-label">{{ t('清醒次数') }}</text>
+        <text class="factor-item-value">{{ t('{value}次', { value: awakeCountText }) }}</text>
       </view>
       <!-- <view class="factor-item">
         <text class="factor-item-label">睡眠规律性</text>
@@ -160,16 +164,16 @@ const toggleFactors = () => {
     <!-- 数据网格 -->
     <view class="stats-grid">
       <view class="stat-box">
-        <view class="stat-label">睡眠时长</view>
+        <view class="stat-label">{{ t('睡眠时长') }}</view>
         <view class="stat-value">
           <text>{{ formattedSleepDuration.hours || '00' }}</text>
-          <text class="stat-unit">小时</text>
+          <text class="stat-unit">{{ t('小时') }}</text>
           <text>{{ formattedSleepDuration.minutes.toString().padStart(2, '0') || '00' }}</text>
-          <text class="stat-unit">分钟</text>
+          <text class="stat-unit">{{ t('分钟') }}</text>
         </view>
       </view>
       <view class="stat-box">
-        <view class="stat-label">睡眠效率</view>
+        <view class="stat-label">{{ t('睡眠效率') }}</view>
         <view class="stat-value">
           <text>{{ sleepEfficiency }}</text>
           <text class="stat-unit">%</text>

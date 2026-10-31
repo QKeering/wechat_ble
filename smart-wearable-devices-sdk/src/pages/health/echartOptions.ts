@@ -1,3 +1,5 @@
+import { t } from '@/i18n';
+
 export const habitOption = {
   series: [
     {
@@ -30,7 +32,7 @@ export const habitOption = {
         fontSize: 24,
         color: '#010101'
       },
-      data: [{ value: 67, name: '睡眠评分', title: { offsetCenter: ['0%', '0%'] }, detail: { offsetCenter: ['0%', '-30%'] } }],
+      data: [{ value: 67, name: t('睡眠评分'), title: { offsetCenter: ['0%', '0%'] }, detail: { offsetCenter: ['0%', '-30%'] } }],
       radius: '100%',
       center: ['50%', '50%']
     }

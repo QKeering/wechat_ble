@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
 import homeHeartChart from '@/components/homeHeartChart.vue';
@@ -10,7 +12,9 @@ import { heartRateOption, sleepTimeOption, sleepRageOption } from '@/homeDetail/
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import echarts from '@/utils/echarts';
-const list = ref(['日', '周', '月']);
+
+const { t } = useI18n();
+const list = computed<string[]>(() => [t('日'), t('周'), t('月')]);
 const current = ref<number>(0);
 const currentName = ref('day');
 const currentList = ref<string[]>(['day', 'week', 'month']);
@@ -195,7 +199,7 @@ const nextDay = async () => {
     calculateOffsetLocal();
     await loadSleepDetailData('next-day');
   } else {
-    (uni as any).$uv.toast('不能导航到未来的日期');
+    (uni as any).$uv.toast(t('不能导航到未来的日期'));
   }
 };
 // 睡眠详情
@@ -237,7 +241,7 @@ const formatMinutesToTime = (minutesStr: string): string => {
   const minutes = parseInt(minutesStr, 10);
 
   if (isNaN(minutes) || minutes < 0) {
-    return '0小时00分钟';
+    return t('{hours}小时{minutes}分钟', { hours: 0, minutes: '00' });
   }
 
   // 计算小时和分钟
@@ -245,7 +249,7 @@ const formatMinutesToTime = (minutesStr: string): string => {
   const remainingMinutes = minutes % 60;
 
   // 格式化输出，确保分钟数为两位数
-  return `${hours}小时${remainingMinutes.toString().padStart(2, '0')}分钟`;
+  return t('{hours}小时{minutes}分钟', { hours, minutes: remainingMinutes.toString().padStart(2, '0') });
 };
 // 判断数组对象的所有value属性是否等于'0'
 const SLEEP_STAGE_LABELS = {
@@ -442,8 +446,8 @@ const getSleepRangOption = () => {
         newOption.legend.data = legendData;
         newOption.legend.top = legendTop;
         newOption.legend.formatter = function (name: string) {
-          const time = timeMap[name] || '0小时00分钟';
-          return `{nameStyle|${name}}{space|    }{timeStyle|${time}}`;
+          const time = timeMap[name] || t('{hours}小时{minutes}分钟', { hours: 0, minutes: '00' });
+          return `{nameStyle|${t(name)}}{space|    }{timeStyle|${time}}`;
         };
       }
     };
@@ -618,7 +622,7 @@ onPageScroll((e) => {
 </script>
 <template>
   <view class="relative pl-30 pr-30 pt-30">
-    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" title="睡眠" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" :title="t('睡眠')" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view class="bgcWrapper"></view>
     <view class="content">
       <uv-subsection
@@ -643,8 +647,8 @@ onPageScroll((e) => {
       </view>
       <view class="health-card p-30 bg-white r-50 mt-40">
         <view class="flex ai-center jc-between mb-20">
-          <text class="fs-36 fw-400">健康评分</text>
-          <text class="fs-28 t-979797">昨日睡眠状态</text>
+          <text class="fs-36 fw-400">{{ t('健康评分') }}</text>
+          <text class="fs-28 t-979797">{{ t('昨日睡眠状态') }}</text>
         </view>
         <view class="flex ai-center jc-between">
           <view class="flex ai-center">
@@ -654,18 +658,18 @@ onPageScroll((e) => {
             </view>
           </view>
           <!-- <view class="status-tag">优秀</view> -->
-          <view class="status-tag" :class="statusClass">{{ sleepText }}</view>
+          <view class="status-tag" :class="statusClass">{{ t(sleepText) }}</view>
         </view>
       </view>
       <view class="bg-white r-50 mt-30 p-30">
         <view class="">
           <view class="ta-c">
             <text class="fs-72">{{ sleepDurationHours || '00' }}</text>
-            <text class="fs-24">小时</text>
+            <text class="fs-24">{{ t('小时') }}</text>
             <text class="fs-72">{{ sleepDurationMinutes || '00' }}</text>
-            <text class="fs-24">分钟</text>
+            <text class="fs-24">{{ t('分钟') }}</text>
           </view>
-          <view class="ta-c">睡眠时间</view>
+          <view class="ta-c">{{ t('睡眠时间') }}</view>
         </view>
         <view class="flex ai-center jc-center">
           <l-echart ref="sleepTimeRef" @finished="initSleepTime" style="width: 100%; height: 320rpx; margin: 0"></l-echart>
@@ -673,7 +677,7 @@ onPageScroll((e) => {
       </view>
       <view class="bg-white r-50 mt-30 p-30">
         <view class="">
-          <view class="score-title fs-36">睡眠区间</view>
+          <view class="score-title fs-36">{{ t('睡眠区间') }}</view>
         </view>
         <view class="mt-20">
           <view class="ta-l fs-48">
@@ -688,9 +692,9 @@ onPageScroll((e) => {
       </view>
       <view class="mt-30">
         <homeHeartChart
-          card-title="心率"
-          :stats="heartRateList"
-          cardSmallTitle="(次/分钟)"
+          :card-title="t('心率')"
+          :stats="heartRateList.map((item) => ({ ...item, label: t(item.label) }))"
+          :cardSmallTitle="t('(次/分钟)')"
           :showCardSmallTitle="true"
           :showRigntBox="false"
           :showChartTitle="false"

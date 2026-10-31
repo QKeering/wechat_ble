@@ -1,7 +1,11 @@
 <script setup lang="ts">
+import '@/pages/family/i18n/pack';
 import { computed, ref } from 'vue';
 import { onPullDownRefresh, onShow } from '@dcloudio/uni-app';
 import { acceptFamilyInvite, getFamilyInvites, rejectFamilyInvite, type FamilyInvite } from '@/common/api/family';
+import { useI18n } from '@/i18n';
+
+const { t } = useI18n();
 
 const loading = ref(false);
 const processingId = ref<number | string | null>(null);
@@ -20,7 +24,7 @@ async function loadInvites() {
     invites.value = await getFamilyInvites();
   } catch (error) {
     console.warn('[family-share] load invites failed', error);
-    uni.showToast({ title: '邀请加载失败', icon: 'none' });
+    uni.showToast({ title: t('邀请加载失败'), icon: 'none' });
   } finally {
     loading.value = false;
   }
@@ -32,16 +36,16 @@ async function handleInvite(item: FamilyInvite, accept: boolean) {
   try {
     if (accept) {
       await acceptFamilyInvite(item.inviteCode);
-      uni.showToast({ title: '已接受邀请', icon: 'success' });
+      uni.showToast({ title: t('已接受邀请'), icon: 'success' });
       setTimeout(() => uni.redirectTo({ url: '/pages/family/family' }), 350);
     } else {
       await rejectFamilyInvite(item.inviteCode);
-      uni.showToast({ title: '已拒绝邀请', icon: 'success' });
+      uni.showToast({ title: t('已拒绝邀请'), icon: 'success' });
       await loadInvites();
     }
   } catch (error) {
     console.warn('[family-share] handle invite failed', error);
-    uni.showToast({ title: '处理失败，请稍后重试', icon: 'none' });
+    uni.showToast({ title: t('处理失败，请稍后重试'), icon: 'none' });
   } finally {
     processingId.value = null;
   }
@@ -56,12 +60,12 @@ onPullDownRefresh(async () => {
 
 <template>
   <view class="page">
-    <uv-navbar placeholder title="亲友邀请" bgColor="transparent" />
-    <view v-if="loading" class="state-card">正在加载邀请...</view>
+    <uv-navbar placeholder :title="t('亲友邀请')" bgColor="transparent" />
+    <view v-if="loading" class="state-card">{{ t('正在加载邀请...') }}</view>
     <view v-else-if="pendingInvites.length === 0" class="state-card">
       <view class="empty-icon">✓</view>
-      <view class="empty-title">暂无待处理邀请</view>
-      <view class="empty-desc">收到亲友的健康共享邀请后，会显示在这里。</view>
+      <view class="empty-title">{{ t('暂无待处理邀请') }}</view>
+      <view class="empty-desc">{{ t('收到亲友的健康共享邀请后，会显示在这里。') }}</view>
     </view>
     <view v-else>
       <view v-for="item in pendingInvites" :key="item.id" class="invite-card">
@@ -69,17 +73,17 @@ onPullDownRefresh(async () => {
           <view class="avatar">{{ inviterName(item).slice(0, 1) }}</view>
           <view>
             <view class="inviter-name">{{ inviterName(item) }}</view>
-            <view class="invite-tip">邀请你查看其健康数据</view>
+            <view class="invite-tip">{{ t('邀请你查看其健康数据') }}</view>
           </view>
         </view>
-        <view class="scope-title">共享内容</view>
+        <view class="scope-title">{{ t('共享内容') }}</view>
         <view class="scope-list">
-          <view v-for="label in scopeLabels" :key="label" class="scope-chip">{{ label }}</view>
+          <view v-for="label in scopeLabels" :key="label" class="scope-chip">{{ t(label) }}</view>
         </view>
-        <textarea v-model="remark" class="remark" maxlength="20" placeholder="备注名称（选填）" />
-        <view class="expire">邀请有效期至 {{ item.expireTime || '7 天后' }}</view>
-        <button class="accept-button" :loading="processingId === item.id" @click="handleInvite(item, true)">接受邀请</button>
-        <button class="reject-button" :disabled="processingId !== null" @click="handleInvite(item, false)">暂不接受</button>
+        <textarea v-model="remark" class="remark" maxlength="20" :placeholder="t('备注名称（选填）')" />
+        <view class="expire">{{ t('邀请有效期至 {time}', { time: item.expireTime || t('7 天后') }) }}</view>
+        <button class="accept-button" :loading="processingId === item.id" @click="handleInvite(item, true)">{{ t('接受邀请') }}</button>
+        <button class="reject-button" :disabled="processingId !== null" @click="handleInvite(item, false)">{{ t('暂不接受') }}</button>
       </view>
     </view>
   </view>

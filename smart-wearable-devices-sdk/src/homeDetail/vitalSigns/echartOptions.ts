@@ -1,3 +1,4 @@
+import { t } from '@/i18n';
 export const baseOption = {
   backgroundColor: '#fff',
   tooltip: {
@@ -261,7 +262,11 @@ export const applyVitalSignsLineStyle = (
       const rawValue = Array.isArray(item.value) ? item.value[item.value.length - 1] : item.value;
       const numeric = Number(rawValue);
       const value = Number.isFinite(numeric) ? Math.round(numeric) : rawValue;
-      return `${time}<br/>${tooltipMeta.label}：${value}${tooltipMeta.unit}`;
+      return t('{label}：{value}{unit}', {
+        label: t(tooltipMeta.label),
+        value: String(value),
+        unit: tooltipMeta.unit.trim() ? ` ${t(tooltipMeta.unit.trim())}` : ''
+      });
     }
   };
   return option;

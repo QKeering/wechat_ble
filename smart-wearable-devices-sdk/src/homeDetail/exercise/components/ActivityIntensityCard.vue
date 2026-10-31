@@ -1,9 +1,13 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, watch } from 'vue';
 import echarts from '@/utils/echarts';
 import { actIntensityOption, activePieOption } from '@/homeDetail/exercise/echartOptions';
 import type { motionIntensity, Point } from '@/types/api/homeDetail';
 import { cloneDeep } from 'lodash-es';
+
+const { t } = useI18n();
 const props = defineProps({
   motionIntensityObj: {
     type: Object as () => motionIntensity,
@@ -42,13 +46,13 @@ const resolveActivityIntensityColor = (name?: string) => {
 // 分钟数转换为小时分钟格式的函数
 const formatMinutesToTime = (minutes: number): string => {
   if (isNaN(minutes) || minutes < 0) {
-    return '0小时00分钟';
+    return t('{hours}小时{minutes}分钟', { hours: 0, minutes: '00' });
   }
   // 计算小时和分钟
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
   // 格式化输出，确保分钟数为两位数
-  return `${hours}小时${remainingMinutes.toString().padStart(2, '0')}分钟`;
+  return t('{hours}小时{minutes}分钟', { hours, minutes: remainingMinutes.toString().padStart(2, '0') });
 };
 // 判断数组对象的所有value属性是否等于'0'
 const areAllValuesZero = (dataArray: any[] = []): boolean => {
@@ -125,9 +129,9 @@ const getSecoundOption = () => {
         newOption.legend.data = legendData;
         newOption.legend.top = legendTop;
         newOption.legend.formatter = function (name: string) {
-          const time = timeMap[name] || '0小时00分钟';
+          const time = timeMap[name] || t('{hours}小时{minutes}分钟', { hours: 0, minutes: '00' });
           const percent = percentMap[name] || '0%'; // 获取比例值，默认为0%
-          return `{nameStyle|${name}}{space|    }{percentStyle|${percent}}{space|    }{timeStyle|${time}}`;
+          return `{nameStyle|${t(name)}}{space|    }{percentStyle|${percent}}{space|    }{timeStyle|${time}}`;
         };
       }
     };
@@ -285,7 +289,7 @@ const initActivePie = async () => {
   <view class="p-30 bg-white r-50 mb-30">
     <view class="">
       <text class="fs-36">
-        全天活动强度
+        {{ t('全天活动强度') }}
       </text>
       <slot></slot>
     </view>

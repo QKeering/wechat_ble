@@ -1,9 +1,14 @@
 <script setup lang="ts">
+import '@/pagesA/mines/i18n/pack';
 import { computed, ref } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
 import { getfqaGuidList } from '@/common/api/userGuide';
 import type { FqaGuidItem } from '@/types/api/userGuides';
 import { getMiniProgramVersionText } from '@/utils/miniProgramVersion';
+import { useI18n, usePageTitle } from '@/i18n';
+
+const { t } = useI18n();
+usePageTitle(() => t('常见问题'));
 
 type LocalFqaGuidItem = {
   id: string;
@@ -66,7 +71,7 @@ const handleVersionTap = () => {
     debugTapCount.value = 0;
     showCommandDebugEntry.value = true;
     uni.showToast({
-      title: '调试入口已开启',
+      title: t('调试入口已开启'),
       icon: 'none'
     });
     return;
@@ -93,32 +98,32 @@ onLoad(async () => {
 
 <template>
   <view class="mine-list-page p-30">
-    <view class="page-title">常见问题</view>
+    <view class="page-title">{{ t('常见问题') }}</view>
     <view
       v-for="item in displayList"
       :key="item.id"
       @click="openDetail(item)"
       class="bg-white p-40 r-50 flex jc-between ai-center mb-30"
     >
-      <view class="fs-36">{{ item.title }}</view>
+      <view class="fs-36">{{ t(item.title) }}</view>
       <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
     </view>
 
     <view v-if="showCommandDebugEntry" class="debug-entry" @click="openCommandDebug">
       <view>
-        <view class="debug-title">BLE 命令测试</view>
-        <view class="debug-desc">临时入口：验证血氧、心率、电量等命令回执</view>
+        <view class="debug-title">{{ t('BLE 命令测试') }}</view>
+        <view class="debug-desc">{{ t('临时入口：验证血氧、心率、电量等命令回执') }}</view>
       </view>
       <uv-icon name="arrow-right" color="#3478f6" size="14"></uv-icon>
     </view>
 
     <view class="feedback-entry" @click="openOnlineFeedback">
       <view>
-        <view class="feedback-title">没有解决你的问题？</view>
-        <view class="feedback-desc">提交问题反馈，附带设备和页面信息，便于定位。</view>
+        <view class="feedback-title">{{ t('没有解决你的问题？') }}</view>
+        <view class="feedback-desc">{{ t('提交问题反馈，附带设备和页面信息，便于定位。') }}</view>
       </view>
       <view class="feedback-action">
-        <text>在线反馈</text>
+        <text>{{ t('在线反馈') }}</text>
         <uv-icon name="arrow-right" color="#3478f6" size="14"></uv-icon>
       </view>
     </view>

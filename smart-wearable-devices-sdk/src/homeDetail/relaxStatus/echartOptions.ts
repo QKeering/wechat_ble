@@ -1,6 +1,7 @@
 // src/utils/echartOptions.ts
 // 定义 ECharts Option 的类型（若项目中已引入 ECharts 类型，可直接使用）
 // @ts-nocheck
+import { t } from '@/i18n';
 import echarts from '@/utils/echarts';
 type AnyEchartOption = any;
 // 第一个配置：baseOption
@@ -90,7 +91,7 @@ export const pressureOption: AnyEchartOption = {
       label: {
         show: true,
         position: 'center',
-        formatter: (params: any) => (params.dataIndex === 0 ? '压力\n比例' : ''),
+        formatter: (params: any) => (params.dataIndex === 0 ? t('压力\n比例') : ''),
         color: '#979797',
         fontSize: 14,
         fontWeight: 'normal',
@@ -127,7 +128,7 @@ export const pressureOption: AnyEchartOption = {
         time = '00小时40分钟';
       }
       // 修正富文本语法：用“|”分隔样式名和文本
-      return `{nameStyle|${name}}    {percentStyle|${value}}    {timeStyle|${time}}`;
+      return `{nameStyle|${t(name)}}    {percentStyle|${value}}    {timeStyle|${time}}`;
     },
     textStyle: {
       fontSize: 12,

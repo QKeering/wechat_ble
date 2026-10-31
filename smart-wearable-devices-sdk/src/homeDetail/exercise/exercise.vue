@@ -1,5 +1,7 @@
 <script setup lang="ts">
 // @ts-nocheck
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { onUnmounted, ref } from 'vue';
 import { onLoad, onPageScroll, onShow, onPullDownRefresh } from '@dcloudio/uni-app';
 import { pressureOption, calorieOption, categoryOption, actIntensityOption, activePieOption, todayOption, lastDayOption } from '@/homeDetail/exercise/echartOptions';
@@ -16,6 +18,8 @@ import DetailInfo from '@/components/DetailInfo.vue';
 import {usePopupFixer} from '@/hooks/usePopupFixer'
 import { useRingBusinessHistoryPageSync } from '@/composables/useRingBusinessHistoryPageSync';
 import { USER_GOAL_UPDATED_EVENT, type UserGoalUpdatedPayload } from '@/utils/goalSettings';
+
+const { t } = useI18n();
 
 const scrollTop = ref<number>(0);
 
@@ -241,7 +245,7 @@ onPullDownRefresh(async () => {
     ]);
   } catch (error) {
     uni.showToast({
-      title: '刷新失败，请稍后再试',
+      title: t('刷新失败，请稍后再试'),
       icon: 'none',
       duration: 2000
     });
@@ -260,7 +264,7 @@ defineExpose({
   <page-meta :page-style="fixedPageStyle"></page-meta>
 
   <view class="relative p-30" style="box-sizing: border-box">
-    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" title="活动" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" :title="t('活动')" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view class="bgcWrapper"></view>
     <view class="pt-30 pr-30 pl-30 relative mb-30" style="z-index: 1; box-sizing: border-box">
       <view class="calendar-week flex">
@@ -277,8 +281,8 @@ defineExpose({
               <view class="ta-c">{{ selectedDateInfo.monthDay }}</view>
             </template>
             <template v-else>
-              <view class="ta-c">选择</view>
-              <view class="ta-c">日期</view>
+              <view class="ta-c">{{ t('选择') }}</view>
+              <view class="ta-c">{{ t('日期') }}</view>
             </template>
           </view>
         </view>
@@ -292,7 +296,7 @@ defineExpose({
           @tap="handleDateClick(index)"
         >
           <view class="calendar-day__label" :class="index === selectedDayIndex ? 't-white' : 't-979797'">
-            {{ dateItem.info.week }}
+            {{ t(dateItem.info.week) }}
           </view>
           <view class="calendar-day__date" :class="index === selectedDayIndex ? 't-white' : ''">
             <template v-if="index === 2">
@@ -329,7 +333,7 @@ defineExpose({
     <view @tap="jumpEdit" class="bg-white r-50 flex ai-center jc-center p-30">
       <view class="flex ai-center jc-center">
         <uv-image src="/static/images/homeDetail/editCardIcon.png" width="40rpx" height="40rpx"></uv-image>
-        <text class="ml-10 fs-36">编辑卡片</text>
+        <text class="ml-10 fs-36">{{ t('编辑卡片') }}</text>
       </view>
     </view>
     <uv-safe-bottom></uv-safe-bottom>

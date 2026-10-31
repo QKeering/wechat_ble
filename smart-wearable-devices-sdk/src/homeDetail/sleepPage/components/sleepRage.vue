@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { computed, nextTick, ref, watch } from 'vue';
 import { cloneDeep } from 'lodash-es';
 import { sleepRageOption } from '@/homeDetail/sleepPage/echartOptions';
@@ -6,6 +8,8 @@ import type { sleepSegment, Point } from '@/types/api/homeDetail';
 import { SLEEP_STAGE_COLORS, SLEEP_STAGE_ORDER, type SleepStageName } from '@/homeDetail/sleepPage/sleepStageColors';
 
 import echarts from '@/utils/echarts';
+
+const { t } = useI18n();
 
 const props = defineProps({
   sleepSegmentObj: {
@@ -48,10 +52,10 @@ const normalizeMinutes = (value: unknown) => {
 };
 
 const formatMinutesToTime = (minutes: number): string => {
-  if (!Number.isFinite(minutes) || minutes <= 0) return '0小时00分';
+  if (!Number.isFinite(minutes) || minutes <= 0) return t('{hours}小时{value}分', { hours: 0, value: '00' });
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
-  return `${hours}小时${remainingMinutes.toString().padStart(2, '0')}分`;
+  return t('{hours}小时{value}分', { hours, value: remainingMinutes.toString().padStart(2, '0') });
 };
 
 const collectStageTotals = (data: Point[] = []) => {
@@ -101,7 +105,7 @@ const pieData = computed(() => {
   if (!values.length) {
     return [
       {
-        name: '暂无数据',
+        name: t('暂无数据'),
         value: 1,
         itemStyle: {
           color: '#e9e8ff',
@@ -128,7 +132,7 @@ const getProcessedOption = () => {
 
   if (option.legend) option.legend.show = false;
   if (option.title) {
-    option.title.subtext = '睡眠\n比例';
+    option.title.subtext = t('睡眠\n比例');
     option.title.left = '50%';
     option.title.top = '45%';
   }
@@ -178,7 +182,7 @@ watch(
   <view class="bg-white r-50 mb-30 p-30">
     <view>
       <view class="score-title fs-36">
-        睡眠区间
+        {{ t('睡眠区间') }}
         <slot></slot>
       </view>
     </view>
@@ -197,7 +201,7 @@ watch(
         <view v-for="item in stageStats" :key="item.name" class="sleep-stage-row">
           <view class="sleep-stage-name">
             <view class="sleep-stage-dot" :style="{ backgroundColor: item.color }"></view>
-            <text>{{ item.name }}</text>
+            <text>{{ t(item.name) }}</text>
           </view>
           <view class="sleep-stage-value">
             <text>{{ item.duration }}</text>

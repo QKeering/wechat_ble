@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { useI18n } from '@/i18n';
 import { ref, computed } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
+const { t } = useI18n();
 const props = defineProps({
   title: {
     type: String,
@@ -35,17 +37,17 @@ defineExpose({
     <!-- 标题区域 -->
     <view class="mb-20">
       <view>
-        <text class="fs-36">{{ title }}</text>
+        <text class="fs-36">{{ t(title) }}</text>
       </view>
       <view class="flex ai-center mt-20" v-if="showSecoundTopTitle">
-        <text class="fs-48">{{ subtitle }}</text>
+        <text class="fs-48">{{ t(subtitle) }}</text>
         <slot name="comparison"></slot>
       </view>
     </view>
 
     <!-- 日期标签 -->
     <view class="flex jc-center" v-if="showChartDate">
-      <view class="fs-24 mt-50 mb-20 date-tag">{{ dateRange }}</view>
+      <view class="fs-24 mt-50 mb-20 date-tag">{{ t(dateRange) }}</view>
     </view>
     <view class="flex ai-center jc-center">
       <l-echart :ref="(el: any) => (chartRef = el)" @finished="$emit('chart-finished', chartRef)" style="width: 100%; height: 424rpx; margin: 0"></l-echart>

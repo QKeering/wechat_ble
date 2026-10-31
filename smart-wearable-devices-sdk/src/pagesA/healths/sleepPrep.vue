@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import '@/pagesA/healths/i18n/pack';
 import { ref, computed } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
+import { useI18n } from '@/i18n';
 import sleepEchartItem from '@/components/sleepEchartItem.vue';
 import { defaultEchartOption, pressureOption } from '@/pagesA/echartOptions/sleepPrepOptions';
 import lineProgresss from '@/pagesA/components/lineProgress.vue';
@@ -8,6 +10,8 @@ import { getSleepPreparationDetail } from '@/common/api/heatlthSummary';
 import type { SleepPreparationResp, TrendChartItem } from '@/types/api/healthSummary';
 import { cloneDeep } from 'lodash-es';
 import echarts from '@/utils/echarts';
+
+const { t } = useI18n();
 
 const sleepPrepInfo = ref<SleepPreparationResp>();
 // 左边最大变化范围
@@ -111,15 +115,15 @@ onLoad(async () => {
 <template>
   <view class="pl-30 pr-30 pt-30">
     <sleepEchartItem
-      title="睡前准备"
-      :subtitle="sleepPrepInfo?.overview?.level || '--'"
+      :title="t('睡前准备')"
+      :subtitle="t(sleepPrepInfo?.overview?.level || '--')"
       :dateRange="sleepPrepInfo?.overview?.dateRange || '--'"
       @chart-finished="(chartRef) => initChart(chartRef)"
     >
       <template #comparison>
         <!-- <view class="tag flex ai-center ml-20 p-10"> -->
         <view class="flex ai-center ml-20 p-10" :class="[sleepPrepInfo?.overview?.trend === '保持不变' ? 'tag' : 'date-tag']">
-          <text>{{ sleepPrepInfo?.overview?.trend || '--' }}</text>
+          <text>{{ t(sleepPrepInfo?.overview?.trend || '--') }}</text>
 
           <view v-if="sleepPrepInfo?.overview?.trend !== '保持不变'">
             <uv-image
@@ -134,20 +138,20 @@ onLoad(async () => {
     </sleepEchartItem>
 
     <view class="flex ai-center jc-between mt-50 mb-30">
-      <text class="fs-36 ml-40">睡前指标变化</text>
+      <text class="fs-36 ml-40">{{ t('睡前指标变化') }}</text>
       <view class="flex ai-center">
         <view class="dot mr-10"></view>
-        <text class="fs-24">正常范围</text>
+        <text class="fs-24">{{ t('正常范围') }}</text>
       </view>
     </view>
     <view class="p-40 bg-white r-50 mb-30">
-      <view class="fs-36 mb-30">心率变化</view>
+      <view class="fs-36 mb-30">{{ t('心率变化') }}</view>
       <view class="mb-50">
-        <text class="t-979797 fs-28">一般而言，心率在入睡前有较明显下降幅度，反应入睡前身心放松较充分。</text>
+        <text class="t-979797 fs-28">{{ t('一般而言，心率在入睡前有较明显下降幅度，反应入睡前身心放松较充分。') }}</text>
       </view>
       <view class="ta-c">
         <text class="fs-24 mb-20 current-text">
-          本周睡前{{ sleepPrepInfo?.heartRateChange?.currentDirection || '上升' }}{{ sleepPrepInfo?.heartRateChange?.currentValue || 0 }}次/分钟
+          {{ t('本周睡前{direction}{value}次/分钟', { direction: t(sleepPrepInfo?.heartRateChange?.currentDirection || '上升'), value: sleepPrepInfo?.heartRateChange?.currentValue || 0 }) }}
         </text>
         <lineProgresss
           :current-value="sleepPrepInfo?.heartRateChange?.currentValue || 0"
@@ -155,23 +159,23 @@ onLoad(async () => {
           :max-left-range="maxLeftRange"
           :max-right-range="maxRightRange"
         />
-        <text class="fs-24 t-979797">近期睡前平均{{ sleepPrepInfo?.heartRateChange?.avgDirection || '上升' }}{{ sleepPrepInfo?.heartRateChange?.avgValue || 0 }}次/分钟</text>
+        <text class="fs-24 t-979797">{{ t('近期睡前平均{direction}{value}次/分钟', { direction: t(sleepPrepInfo?.heartRateChange?.avgDirection || '上升'), value: sleepPrepInfo?.heartRateChange?.avgValue || 0 }) }}</text>
       </view>
     </view>
     <view class="p-40 bg-white r-50 mb-30">
-      <view class="fs-36 mb-30">心率变异性变化</view>
+      <view class="fs-36 mb-30">{{ t('心率变异性变化') }}</view>
       <view class="mb-50">
-        <text class="t-979797 fs-28">一般而言，心率变异性在入睡前有较明显上升幅度，反应入睡前身心放松较充分。</text>
+        <text class="t-979797 fs-28">{{ t('一般而言，心率变异性在入睡前有较明显上升幅度，反应入睡前身心放松较充分。') }}</text>
       </view>
       <view class="ta-c">
-        <text class="fs-24 mb-20 current-text">本周睡前{{ sleepPrepInfo?.hrvChange?.currentDirection }}{{ sleepPrepInfo?.hrvChange?.currentValue || 0 }}毫秒</text>
+        <text class="fs-24 mb-20 current-text">{{ t('本周睡前{direction}{value}毫秒', { direction: t(sleepPrepInfo?.hrvChange?.currentDirection || '上升'), value: sleepPrepInfo?.hrvChange?.currentValue || 0 }) }}</text>
         <lineProgresss
           :current-value="sleepPrepInfo?.hrvChange?.currentValue || 0"
           :avg-value="sleepPrepInfo?.hrvChange?.avgValue || 0"
           :max-left-range="maxLeftRange"
           :max-right-range="maxRightRange"
         />
-        <text class="fs-24 t-979797">近期睡前平均{{ sleepPrepInfo?.hrvChange?.avgDirection }}{{ sleepPrepInfo?.hrvChange?.avgValue || 0 }}毫秒</text>
+        <text class="fs-24 t-979797">{{ t('近期睡前平均{direction}{value}毫秒', { direction: t(sleepPrepInfo?.hrvChange?.avgDirection || '上升'), value: sleepPrepInfo?.hrvChange?.avgValue || 0 }) }}</text>
       </view>
     </view>
     <!-- <view class="bg-white r-50 mb-30 p-30">

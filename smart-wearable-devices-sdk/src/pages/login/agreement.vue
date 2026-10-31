@@ -2,14 +2,18 @@
 import { ref } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
 import { privacyPolicy, userAgreement } from '@/common/api/login';
+import { useI18n, usePageTitle } from '@/i18n';
 
+const { t } = useI18n();
 const content = ref('');
+const pageType = ref('user');
+
+usePageTitle(() => t(pageType.value == 'privacy' ? '隐私政策' : '用户协议'));
+
 onLoad(async (e) => {
   let res;
   if (e.type == 'privacy') {
-    uni.setNavigationBarTitle({
-      title: '隐私政策'
-    });
+    pageType.value = 'privacy';
     try {
       res = await privacyPolicy(
         {},
@@ -24,9 +28,7 @@ onLoad(async (e) => {
       content.value = '';
     }
   } else if (e.type == 'user') {
-    uni.setNavigationBarTitle({
-      title: '用户协议'
-    });
+    pageType.value = 'user';
     try {
       res = await userAgreement(
         {},

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch, h } from 'vue';
 import { onLoad, onPageScroll, onShow, onPullDownRefresh, onReachBottom, onUnload } from '@dcloudio/uni-app';
 import homeHeartChart from '@/components/homeHeartChart.vue';
@@ -12,6 +14,8 @@ import { useUserStore } from '@/stores/user';
 import { cloneDeep } from 'lodash-es';
 import { pickMetricNumber, withMetricDetailFallback } from './metricFallback';
 import { buildDailyDetailTimeTicks, buildDetailTimeTicks } from './detailTimeAxis';
+
+const { t } = useI18n();
 const userStore = useUserStore();
 import echarts from '@/utils/echarts';
 const getVitalDetailSilentRequestConfig = (): HistoryPageSilentRequestConfig => ({
@@ -20,7 +24,7 @@ const getVitalDetailSilentRequestConfig = (): HistoryPageSilentRequestConfig => 
 });
 
 // 滑动日期相关
-const list = ref<string[]>(['日', '周', '月']);
+const list = computed<string[]>(() => [t('日'), t('周'), t('月')]);
 const current = ref<number>(0);
 const currentName = ref('day');
 const currentList = ref<string[]>(['day', 'week', 'month']);
@@ -171,7 +175,7 @@ const nextDay = async () => {
       initChart(chartRefT.value.chartRef);
     }
   } else {
-    (uni as any).$uv.toast('不能导航到未来的日期');
+    (uni as any).$uv.toast(t('不能导航到未来的日期'));
   }
 };
 const getProcessedOption = () => {
@@ -383,7 +387,7 @@ onUnload(() => {
 </script>
 <template>
   <view class="relative p-30">
-    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" title="心率变异性详情" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" :title="t('心率变异性详情')" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view class="bgcWrapper"></view>
     <view class="content">
       <uv-subsection
@@ -408,26 +412,26 @@ onUnload(() => {
       </view>
       <view class="health-card p-30 bg-white r-50 mt-40">
         <view class="flex ai-center jc-between mb-20">
-          <text class="fs-36 fw-400">心率变异性</text>
+          <text class="fs-36 fw-400">{{ t('心率变异性') }}</text>
           <text class="fs-28 t-979797">HRV</text>
         </view>
         <view class="flex ai-center jc-between">
           <view class="flex ai-center">
             <uv-image :src="heartRateIcon" width="68rpx" height="68rpx"></uv-image>
             <view>
-              <text :class="showHrvMetric ? 'fs-72' : 'proxy-status-value'">{{ heartRateVariabilityDisplay }}</text>
+              <text :class="showHrvMetric ? 'fs-72' : 'proxy-status-value'">{{ t(heartRateVariabilityDisplay) }}</text>
               <text v-if="showHrvMetric" class="metric-unit">ms</text>
             </view>
           </view>
-          <view class="status-tag" :class="statusClass">{{ heartRateVariabilityText }}</view>
+          <view class="status-tag" :class="statusClass">{{ t(heartRateVariabilityText) }}</view>
         </view>
-        <view v-if="!showHrvMetric" class="proxy-explanation">{{ proxyTips }}</view>
+        <view v-if="!showHrvMetric" class="proxy-explanation">{{ t(proxyTips) }}</view>
       </view>
       <view v-if="showHrvMetric" class="mt-30">
         <homeHeartChart
           ref="chartRefT"
-          card-title="指标数据"
-          :stats="heartRateList"
+          :card-title="t('指标数据')"
+          :stats="heartRateList.map((item) => ({ ...item, label: t(item.label) }))"
           :showRigntBox="false"
           :showChartTitle="false"
           :showButtomCard="false"
@@ -437,9 +441,9 @@ onUnload(() => {
         />
       </view>
       <view v-else class="proxy-detail-card">
-        <text class="proxy-detail-title">HRV 趋势参考</text>
-        <text class="proxy-detail-status">{{ proxyStatusText }}</text>
-        <text class="proxy-detail-copy">{{ proxyTips }}</text>
+        <text class="proxy-detail-title">{{ t('HRV 趋势参考') }}</text>
+        <text class="proxy-detail-status">{{ t(proxyStatusText) }}</text>
+        <text class="proxy-detail-copy">{{ t(proxyTips) }}</text>
       </view>
     </view>
   </view>

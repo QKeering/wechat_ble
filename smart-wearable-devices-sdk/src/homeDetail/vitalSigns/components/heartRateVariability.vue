@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch, nextTick } from 'vue';
 import { onLoad, onPageScroll, onShow, onUnload } from '@dcloudio/uni-app';
 import { applyVitalSignsLineStyle, baseOption } from '@/homeDetail/vitalSigns/echartOptions';
@@ -32,6 +34,8 @@ import {
   showRingWearGuidance,
   type RingWearState
 } from '@/utils/ringWearGate';
+
+const { t } = useI18n();
 const userStore = useUserStore();
 const {
   sendActiveMeasureCommand,
@@ -266,7 +270,7 @@ let measurementDeadlineAt = 0;
 let completedMeasurementReading: any = null;
 let wearGatePending = false;
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
-const showVitalMeasurementBusy = () => uni.showToast({ title: '设备正在测量，请稍候', icon: 'none' });
+const showVitalMeasurementBusy = () => uni.showToast({ title: t('设备正在测量，请稍候'), icon: 'none' });
 const settleOwnVitalMeasurementLock = (reason: string) => {
   if (!vitalMeasurementLockToken) return;
   if (!isRwDevice() && syncVitalMeasurementLockWithLegacyBusy(vitalMeasurementLockToken) > 0) return;
@@ -385,7 +389,7 @@ const cancelMeasurement = async () => {
   measurementDeadlineAt = 0;
   if (isRwDevice()) await stopActiveRwMeasurement('RW VITAL').catch(() => undefined);
   settleOwnVitalMeasurementLock('user-cancelled');
-  uni.showToast({ title: '已结束测量', icon: 'none' });
+  uni.showToast({ title: t('已结束测量'), icon: 'none' });
 };
 // 开始测量
 const handleMeasure = () => {
@@ -412,7 +416,7 @@ const startMeasure = async () => {
   }
   measurePopup.value?.close?.();
   if (!getSubmitDeviceMac(userStore, isIOS.value)) {
-    uni.showToast({ title: '请先连接设备', icon: 'none' });
+    uni.showToast({ title: t('请先连接设备'), icon: 'none' });
     (uni as any).$uv.route('/pagesA/mines/connectDevice');
     return;
   }
@@ -473,7 +477,7 @@ const startMeasure = async () => {
     measureStatus.value = 'idle';
     measureStartedAt = 0;
     measurementDeadlineAt = 0;
-    uni.showToast({ title: formatBleErrorMessage(error, '测量指令发送失败'), icon: 'none' });
+    uni.showToast({ title: t(formatBleErrorMessage(error, '测量指令发送失败')), icon: 'none' });
     return;
   }
 
@@ -518,10 +522,10 @@ watch(
 
       if (latest?.heartRateVariability) {
         heartRateVariability.value = latest.heartRateVariability;
-        uni.showToast({ title: '测量完成', icon: 'none' });
+        uni.showToast({ title: t('测量完成'), icon: 'none' });
         // 调用提交数据的接口
         try {
-          uni.showLoading({ title: '提交中...' });
+          uni.showLoading({ title: t('提交中...') });
           const recordTime = formatMetricRecordTime(latest.timestamp || Date.now());
           await submitData({
             deviceMac: getSubmitDeviceMac(userStore, isIOS.value),
@@ -533,7 +537,7 @@ watch(
             ]
           });
         } catch (error) {
-          uni.showToast({ title: '测量已完成，数据稍后同步', icon: 'none' });
+          uni.showToast({ title: t('测量已完成，数据稍后同步'), icon: 'none' });
         } finally {
           uni.hideLoading();
           jumpDetail();
@@ -546,11 +550,11 @@ watch(
 // 动态文本（计算属性）
 const measureText = computed(() => {
   if (!getSubmitDeviceMac(userStore, isIOS.value)) {
-    return '未连接';
+    return t('未连接');
   }
   // legacy 数值返回后的共享锁仅用于保护固件命令通道，不能显示为仍在测量。
-  if (measureStatus.value === 'measuring') return 'HRV测量中';
-  return '测量';
+  if (measureStatus.value === 'measuring') return t('HRV测量中');
+  return t('测量');
 });
 const jumpDetail = () => {
   (uni as any).$uv.route('/homeDetail/vitalSignsHeartDetail/heartRateVariabilityDetail', {
@@ -583,7 +587,7 @@ onUnload(() => {
   <view class="score-card mb-30">
     <view class="metric-header">
       <view class="metric-title">
-        心率变异性<slot></slot>
+        {{ t('心率变异性') }}<slot></slot>
       </view>
       <view v-if="isHeartTate" class="textBox" :class="{ 'is-measure-locked': isVitalMeasurementLocked }" @click="handleMeasure">
         <uv-image src="/static/images/homeDetail/heartLove.png" width="40rpx" height="40rpx" mode="aspectFit"></uv-image>
@@ -599,8 +603,8 @@ onUnload(() => {
         </view>
       </view>
       <view v-else class="hrv-fallback-panel">
-        <text class="hrv-fallback-status">{{ hrvFallbackStatus }}</text>
-        <text class="hrv-fallback-tips">{{ hrvFallbackTips }}</text>
+        <text class="hrv-fallback-status">{{ t(hrvFallbackStatus) }}</text>
+        <text class="hrv-fallback-tips">{{ t(hrvFallbackTips) }}</text>
       </view>
       <view v-if="showHrvMetric" class="metric-chart-wrap">
         <MetricYAxisLabels :min="0" :max="hrvYAxisMax" :split-number="hrvYAxisSplitNumber" />
@@ -620,11 +624,11 @@ onUnload(() => {
       <view v-if="showHrvMetric" class="stats">
         <view class="stat-item">
           <view class="stat-value">{{ formatIntegerStat(hrvData?.avgValue) }}</view>
-          <view class="stat-label">心率变异性</view>
+          <view class="stat-label">{{ t('心率变异性') }}</view>
         </view>
         <view class="stat-item">
           <view class="stat-value">{{ formatIntegerRangeStat(hrvData?.avgValueRange) }}</view>
-          <view class="stat-label">关键指数</view>
+          <view class="stat-label">{{ t('关键指数') }}</view>
         </view>
       </view>
     </view>
@@ -634,13 +638,13 @@ onUnload(() => {
         <view class="heartbeat-animation">
 <uv-image src="/static/images/homeDetail/heartLove.png" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
         </view>
-        <view class="ml-20 t-white">HRV测量中...</view>
-        <view class="measurement-exit" @tap.stop="cancelMeasurement">结束测量</view>
+        <view class="ml-20 t-white">{{ t('HRV测量中...') }}</view>
+        <view class="measurement-exit" @tap.stop="cancelMeasurement">{{ t('结束测量') }}</view>
       </view>
     </uv-popup>
     <uv-popup round="20" ref="measurePopup" mode="center">
       <Action
-        title="心率变异性测量提示"
+        :title="t('心率变异性测量提示')"
         :agreementChecked="agreementChecked"
         @update:agreementChecked="agreementChecked = $event"
         @confirm="startMeasure"

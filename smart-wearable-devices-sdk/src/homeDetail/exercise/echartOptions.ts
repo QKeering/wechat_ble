@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { t } from '@/i18n';
 import echarts from '@/utils/echarts';
 type AnyEchartOption = any;
 let temperatureGradient = '#rgba(255, 107, 139, 0)'; // 降级默认色
@@ -401,7 +402,7 @@ export const actIntensityOption: AnyEchartOption = {
           75: '中强度', // >=80
           100: '高强度' // >=80
         };
-        return labelMap[value] || '';
+        return labelMap[value] ? t(labelMap[value]) : '';
       }
     },
     splitLine: {
@@ -438,7 +439,7 @@ export const actIntensityOption: AnyEchartOption = {
 };
 export const activePieOption: AnyEchartOption = {
   title: {
-    subtext: '活动\n比例',
+    subtext: t('活动\n比例'),
     subtextStyle: {
       fontSize: 14,
       fontWeight: 'normal',
@@ -490,19 +491,19 @@ export const activePieOption: AnyEchartOption = {
         time = '';
       if (name === '不活跃') {
         value = '60%';
-        time = '21小时17分钟';
+        time = t('{hours}小时{minutes}分钟', { hours: 21, minutes: 17 });
       } else if (name === '低强度') {
         value = '12%';
-        time = '03小时13分钟';
+        time = t('{hours}小时{minutes}分钟', { hours: 3, minutes: 13 });
       } else if (name === '中强度') {
         value = '18%';
-        time = '00小时40分钟';
+        time = t('{hours}小时{minutes}分钟', { hours: 0, minutes: 40 });
       } else if (name === '高强度') {
         value = '10%';
-        time = '00小时40分钟';
+        time = t('{hours}小时{minutes}分钟', { hours: 0, minutes: 40 });
       }
       // 修正富文本语法：用“|”分隔样式名和文本
-      return `{nameStyle|${name}}    {percentStyle|${value}}    {timeStyle|${time}}`;
+      return `{nameStyle|${t(name)}}    {percentStyle|${value}}    {timeStyle|${time}}`;
     },
     textStyle: {
       fontSize: 12,
@@ -530,7 +531,7 @@ export const activePieOption: AnyEchartOption = {
 };
 export const todayOption: AnyEchartOption = {
   title: {
-    text: '今天（11:00）',
+    text: t('今天（{time}）', { time: '11:00' }),
     left: '3%',
     top: '5%',
     textStyle: {
@@ -593,7 +594,7 @@ export const todayOption: AnyEchartOption = {
 
 export const lastDayOption: AnyEchartOption = {
   title: {
-    text: '11月3日-11月9日(11:00)',
+    text: `${t('{month}月{day}日', { month: 11, day: 3 })}-${t('{month}月{day}日', { month: 11, day: 9 })}(11:00)`,
     left: '3%',
     top: '5%',
     textStyle: {

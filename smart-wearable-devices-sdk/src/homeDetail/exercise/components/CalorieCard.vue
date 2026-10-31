@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { computed, ref, watch } from 'vue';
 import echarts from '@/utils/echarts';
 import { calorieOption } from '@/homeDetail/exercise/echartOptions';
@@ -7,6 +9,8 @@ import { cloneDeep } from 'lodash-es';
 import { MOTION_CALORIE_DISPLAY_UNIT, formatMotionCalorieKcal, normalizeMotionCalorieKcal } from '@/utils/motionCalorie';
 import { normalizeCalorieGoalKcal } from '@/utils/calorieGoal';
 import { useUserStore } from '@/stores/user';
+
+const { t } = useI18n();
 const userStore = useUserStore();
 const props = defineProps({
   motionCalorieObj: {
@@ -172,7 +176,7 @@ const initChart = async () => {
 <template>
   <view class="p-30 bg-white r-50 mb-30">
     <view class="">
-      <text class="fs-36">全天热量</text>
+      <text class="fs-36">{{ t('全天热量') }}</text>
       <text class="fs-28">({{ calorieUnit }})</text>
       <slot></slot>
     </view>
@@ -190,21 +194,21 @@ const initChart = async () => {
         <view class="fs-48 ta-c">{{ hasBasalCalorie ? basalCalorieText : '00' }}</view>
         <view class="flex ai-center">
           <view class="dot base-dot"></view>
-          <text class="fs-24 t-979797">基础代谢</text>
+          <text class="fs-24 t-979797">{{ t('基础代谢') }}</text>
         </view>
       </view>
       <view class="fd-c jc-between ai-center">
         <view class="fs-48 ta-c">{{ hasMotionCalorie ? motionCalorieText : '00' }}</view>
         <view class="flex ai-center">
           <view class="dot active-dot"></view>
-          <text class="fs-24 t-979797">活动消耗</text>
+          <text class="fs-24 t-979797">{{ t('活动消耗') }}</text>
         </view>
       </view>
     </view>
     <view class="flex ai-center jc-center mt-20">
       <l-echart ref="chartRef" @finished="initChart" style="width: 100%; height: 324rpx; margin: 0"></l-echart>
     </view>
-    <view class="fs-28 ta-c" style="color: #ff5d7c">全天热量目标，可在功能设置中修改。</view>
+    <view class="fs-28 ta-c" style="color: #ff5d7c">{{ t('全天热量目标，可在功能设置中修改。') }}</view>
   </view>
 </template>
 

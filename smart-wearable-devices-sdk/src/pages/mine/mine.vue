@@ -14,6 +14,7 @@ import {
 } from '@/composables/useRwForegroundMeasurement';
 import { useUserStore } from '@/stores/user';
 import { useRingStore } from '@/stores';
+import { useI18n } from '@/i18n';
 import { getLegacyBleHistoryExclusiveSnapshot, resolveRingProtocol, type RingParsedData } from '@/sdk/ring-ble';
 import {
   RwHealthDataControlKey,
@@ -96,6 +97,7 @@ watch(
     mineAvatarLoadFailed.value = false;
   }
 );
+const { t } = useI18n();
 const ringStore = useRingStore();
 const unifiedBattery = useUnifiedBatteryDisplay(userStore, ringStore);
 const controller = useRingBusinessController();
@@ -222,9 +224,10 @@ type MineMenuItem = {
   path: string;
 };
 
-const menuList: MineMenuItem[] = [
+// title 存简体原文，展示时再翻译，切换语言才能实时刷新。
+const menuList = computed<MineMenuItem[]>(() => [
   {
-    iconText: '友',
+    iconText: t('友'),
     iconClass: 'menu-icon-family',
     title: '\u4eb2\u53cb\u5173\u6000',
     path: '/pages/family/family'
@@ -249,7 +252,7 @@ const menuList: MineMenuItem[] = [
     title: '\u5728\u7ebf\u53cd\u9988',
     path: '/pagesA/mines/onlineFeedback?source=mine_menu'
   }
-];// const pullDownProgress// const pullDownProgress = ref(0);
+]);// const pullDownProgress// const pullDownProgress = ref(0);
 const minePageNavigating = ref(false);
 const releaseMinePageNavigationLock = () => {
   minePageNavigating.value = false;
@@ -290,7 +293,7 @@ const navigateMinePage = (path?: string) => {
           elapsedMs: Date.now() - startedAt,
           error: String((error as any)?.errMsg || error || '')
         });
-        uni.showToast({ title: '页面加载失败，请稍后重试', icon: 'none' });
+        uni.showToast({ title: t('页面加载失败，请稍后重试'), icon: 'none' });
       },
       complete: () => {
         releaseMinePageNavigationLock();
@@ -2597,20 +2600,20 @@ const mineBluetoothStatus = computed(() => {
   if (isConnectedStatus.value) {
     return {
       iconPath: '/static/images/mine/bluetooth02.png',
-      text: '已连接',
+      text: t('已连接'),
       textColor: '#4C76F1'
     };
   }
   if (isReconnectDisplayLoading.value) {
     return {
       iconPath: '/static/images/mine/bluetooth01.png',
-      text: '连接中',
+      text: t('连接中'),
       textColor: '#010101'
     };
   }
   return {
     iconPath: '/static/images/mine/bluetooth03.png',
-    text: '未连接',
+    text: t('未连接'),
     textColor: '#010101'
   };
 });
@@ -2894,7 +2897,7 @@ const refreshMineBatteryOnPageShow = (reason: string) => {
     .catch((error) => {
       appendMineDiagnosticLog('battery-page-show-refresh-failed', {
         reason,
-        message: formatBleErrorMessage(error, '电量暂未返回')
+        message: t(formatBleErrorMessage(error, '电量暂未返回'))
       });
     })
     .finally(() => {
@@ -3087,7 +3090,7 @@ const openDirectScanConnectPage = (target: string, targetName = '') => {
 const handleScanSuccess = async (res: any) => {
   const result = res.result;
 
-  uni.showLoading({ title: '正在连接设备...' });
+  uni.showLoading({ title: t('正在连接设备...') });
   try {
     const scanRes = await scan({
       sn: result
@@ -3096,7 +3099,7 @@ const handleScanSuccess = async (res: any) => {
     const targetName = scanRes?.deviceName || scanRes?.name || '';
     if (!target) {
       uni.hideLoading();
-      uni.showToast({ title: '未识别到设备信息', icon: 'none' });
+      uni.showToast({ title: t('未识别到设备信息'), icon: 'none' });
       return;
     }
     uni.hideLoading();
@@ -3104,7 +3107,7 @@ const handleScanSuccess = async (res: any) => {
   } catch (error) {
     uni.hideLoading();
     uni.showToast({
-      title: formatBleErrorMessage(error, '连接设备失败，请重试'),
+      title: t(formatBleErrorMessage(error, '连接设备失败，请重试')),
       icon: 'none',
       duration: 2000
     });
@@ -4371,7 +4374,7 @@ const handleMineRwL19Acceptance = async () => {
 
 <template>
   <view style="position: relative">
-    <uv-navbar placeholder leftIcon="" :title="'\u6211\u7684'" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar placeholder leftIcon="" :title="t('\u6211\u7684')" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view style="position: absolute; top: 0; left: 0; width: 100%">
       <image class="mine-bg-image" src="/static/images/bg05.png" mode="widthFix" lazy-load></image>
     </view>
@@ -4388,7 +4391,7 @@ const handleMineRwL19Acceptance = async () => {
           </view>
           <view v-else class="user-card user-card--guest flex ai-center" @tap.stop="navigateMinePage('/pages/login/login')">
             <image class="user-avatar-image" src="/static/images/mine/avatar.png" mode="aspectFill"></image>
-            <view class="user-login-prompt ml-30 fs-48">{{ '\u767b\u5f55/\u6ce8\u518c' }}</view>
+            <view class="user-login-prompt ml-30 fs-48">{{ t('\u767b\u5f55/\u6ce8\u518c') }}</view>
           </view>
         </view>
 
@@ -4416,18 +4419,18 @@ const handleMineRwL19Acceptance = async () => {
                   </view>
                   <view class="battery-cap"></view>
                 </view>
-                <view class="battery-level fs-40">{{ displayBatteryValue }}</view>
-                <view v-if="shouldShowLowBatteryHint" class="low-battery-hint">请及时充电</view>
+                <view class="battery-level fs-40">{{ t(displayBatteryValue) }}</view>
+                <view v-if="shouldShowLowBatteryHint" class="low-battery-hint">{{ t('请及时充电') }}</view>
               </view>
               <view v-else class="action-buttons">
                 <template v-if="shouldShowReconnectButton">
                   <uv-button
-                    :text="isReconnectDisplayLoading ? '\u91cd\u8fde\u4e2d...' : '\u70b9\u51fb\u91cd\u8fde'"
+                    :text="isReconnectDisplayLoading ? t('\u91cd\u8fde\u4e2d...') : t('\u70b9\u51fb\u91cd\u8fde')"
                     shape="circle"
                     color="#2E70FC"
                     loadingMode="circle"
                     :loading="manualReconnectBusy"
-                    :loadingText="'\u91cd\u8fde\u4e2d...'"
+                    :loadingText="t('\u91cd\u8fde\u4e2d...')"
                     :customTextStyle="{ 'font-size': '28rpx' }"
                     :customStyle="{
                       padding: '38rpx 0',
@@ -4439,7 +4442,7 @@ const handleMineRwL19Acceptance = async () => {
                 </template>
                 <template v-else>
                   <uv-button
-                    :text="'\u626b\u4e00\u626b'"
+                    :text="t('\u626b\u4e00\u626b')"
                     shape="circle"
                     color="#FFFFFF"
                     :customTextStyle="{ color: '#010101', 'font-size': '28rpx' }"
@@ -4447,7 +4450,7 @@ const handleMineRwL19Acceptance = async () => {
                     @click="scanDevice"
                   ></uv-button>
                   <uv-button
-                    :text="'\u53bb\u914d\u5bf9'"
+                    :text="t('\u53bb\u914d\u5bf9')"
                     shape="circle"
                     color="#2E70FC"
                     :customTextStyle="{ 'font-size': '28rpx' }"
@@ -4549,7 +4552,7 @@ const handleMineRwL19Acceptance = async () => {
               <text>{{ item.iconText }}</text>
             </view>
             <image v-else class="menu-icon menu-icon-image" :src="item.icon" mode="aspectFit" lazy-load></image>
-            <view class="menu-title fs-36 ml-30">{{ item.title }}</view>
+            <view class="menu-title fs-36 ml-30">{{ t(item.title) }}</view>
           </view>
           <view class="mine-arrow"></view>
         </view>

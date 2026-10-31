@@ -27,6 +27,9 @@
 
 <script setup>
 import { ref, computed } from 'vue';
+import { useI18n } from '@/i18n';
+
+const { t } = useI18n();
 
 // 接收 props
 const props = defineProps({
@@ -36,27 +39,27 @@ const props = defineProps({
   }
 });
 
-// 定义 tabbar 列表
-const list = [
+// 定义 tabbar 列表（文案随界面语言变化）
+const list = computed(() => [
   {
     iconPath: '/static/tabbar/awareness.png',
     selectedIconPath: '/static/tabbar/awareness-active.png',
-    text: '感知',
+    text: t('感知'),
     pagePath: '/pages/awareness/awareness'
   },
   {
     iconPath: '/static/tabbar/health.png',
     selectedIconPath: '/static/tabbar/health-active.png',
-    text: '健康',
+    text: t('健康'),
     pagePath: '/pages/health/health'
   },
   {
     iconPath: '/static/tabbar/mine.png',
     selectedIconPath: '/static/tabbar/mine-active.png',
-    text: '我的',
+    text: t('我的'),
     pagePath: '/pages/mine/mine'
   }
-];
+]);
 
 // 样式计算属性
 const inspectStyle = computed(() => ({

@@ -1,12 +1,16 @@
 <script setup lang="ts">
+import '@/pagesA/healths/i18n/pack';
 import { ref, computed } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
+import { useI18n } from '@/i18n';
 import sleepEchartItem from '@/components/sleepEchartItem.vue';
 import { defaultEchartOption, lightOption } from '@/pagesA/echartOptions/wakeUpBoostOptions';
 import { getSleepActivationDetail } from '@/common/api/heatlthSummary';
 import type { getSleepActivationResp } from '@/types/api/healthSummary';
 import { cloneDeep } from 'lodash-es';
 import echarts from '@/utils/echarts';
+
+const { t } = useI18n();
 
 const sleepActivationInfo = ref<getSleepActivationResp>();
 const getProcessedOption = () => {
@@ -106,7 +110,7 @@ onLoad(async () => {
   sleepActivationInfo.value = await getSleepActivationDetail();
   if (!sleepActivationInfo.value) {
     uni.showToast({
-      title: '暂无数据',
+      title: t('暂无数据'),
       icon: 'none'
     });
   }
@@ -116,14 +120,14 @@ onLoad(async () => {
 <template>
   <view class="pl-30 pr-30 pt-30">
     <sleepEchartItem
-      title="睡醒激活"
-      :subtitle="sleepActivationInfo?.overview?.level || '状态--'"
+      :title="t('睡醒激活')"
+      :subtitle="t(sleepActivationInfo?.overview?.level || '状态--')"
       :dateRange="sleepActivationInfo?.overview?.dateRange || '--'"
       @chart-finished="(chartRef) => initChart(chartRef)"
     >
       <template #comparison>
         <view class="flex ai-center ml-20 p-10" :class="[sleepActivationInfo?.overview?.trend !== '保持不变' ? 'tag' : 'date-tag']">
-          <text>{{ sleepActivationInfo?.overview?.trend || '--' }}</text>
+          <text>{{ t(sleepActivationInfo?.overview?.trend || '--') }}</text>
           <view v-if="sleepActivationInfo?.overview?.trend !== '保持不变'">
             <uv-image
               src="/static/images/homeDetail/orArrowBottom.png"

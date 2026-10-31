@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow, onPullDownRefresh, onReachBottom, onUnload } from '@dcloudio/uni-app';
 import homeHeartChart from '@/components/homeHeartChart.vue';
@@ -12,6 +14,8 @@ import { cloneDeep } from 'lodash-es';
 import { useUserStore } from '@/stores/user';
 import { pickMetricNumber, withMetricDetailFallback } from './metricFallback';
 import { buildDailyDetailTimeTicks, buildDetailTimeTicks } from './detailTimeAxis';
+
+const { t } = useI18n();
 const userStore = useUserStore();
 import echarts from '@/utils/echarts';
 const getVitalDetailSilentRequestConfig = (): HistoryPageSilentRequestConfig => ({
@@ -20,7 +24,7 @@ const getVitalDetailSilentRequestConfig = (): HistoryPageSilentRequestConfig => 
 });
 
 // 滑动日期相关
-const list = ref<string[]>(['日', '周', '月']);
+const list = computed<string[]>(() => [t('日'), t('周'), t('月')]);
 const current = ref<number>(0);
 const currentName = ref('day');
 const currentList = ref<string[]>(['day', 'week', 'month']);
@@ -158,7 +162,7 @@ const nextDay = async () => {
       initChart(chartRefT.value.chartRef);
     }
   } else {
-    (uni as any).$uv.toast('不能导航到未来的日期');
+    (uni as any).$uv.toast(t('不能导航到未来的日期'));
   }
 };
 const getProcessedOption = () => {
@@ -334,7 +338,7 @@ onPageScroll((e) => {
 </script>
 <template>
   <view class="relative p-30">
-    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" title="血氧详情" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" :title="t('血氧详情')" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view class="bgcWrapper"></view>
     <view class="content">
       <uv-subsection
@@ -359,8 +363,8 @@ onPageScroll((e) => {
       </view>
       <view class="health-card p-30 bg-white r-50 mt-40">
         <view class="flex ai-center jc-between mb-20">
-          <text class="fs-36 fw-400">血氧值</text>
-          <text class="fs-28 t-979797">当前血氧</text>
+          <text class="fs-36 fw-400">{{ t('血氧值') }}</text>
+          <text class="fs-28 t-979797">{{ t('当前血氧') }}</text>
         </view>
         <view class="flex ai-center jc-between">
           <view class="flex ai-center">
@@ -370,14 +374,14 @@ onPageScroll((e) => {
               <text class="fs-24 ml-10">%</text>
             </view>
           </view>
-          <view class="status-tag" :class="statusClass">{{ oxyGenText }}</view>
+          <view class="status-tag" :class="statusClass">{{ t(oxyGenText) }}</view>
         </view>
       </view>
       <view class="mt-30">
         <homeHeartChart
           ref="chartRefT"
-          card-title="指标数据"
-          :stats="heartRateList"
+          :card-title="t('指标数据')"
+          :stats="heartRateList.map((item) => ({ ...item, label: t(item.label) }))"
           :showRigntBox="false"
           :showChartTitle="false"
           :showButtomCard="false"

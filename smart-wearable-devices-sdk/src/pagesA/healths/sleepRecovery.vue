@@ -1,12 +1,17 @@
 <script setup lang="ts">
+import '@/pagesA/healths/i18n/pack';
 import { ref, computed } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
+import { useI18n } from '@/i18n';
 import sleepEchartItem from '@/components/sleepEchartItem.vue';
 import { defaultEchartOption, sleepTimeOption } from '@/pagesA/echartOptions/sleepRecoveryOptions';
 import { getSleepRecoveryDetail } from '@/common/api/heatlthSummary';
 import type { SleepRecoveryResp, TrendChartItemS, durationItem } from '@/types/api/healthSummary';
 import { cloneDeep } from 'lodash-es';
 import echarts from '@/utils/echarts';
+
+const { t } = useI18n();
+
 const sleepRecoveryInfo = ref<SleepRecoveryResp>();
 const getProcessedOption = () => {
   const testTrendChartData = [
@@ -125,7 +130,7 @@ onLoad(async () => {
   sleepRecoveryInfo.value = await getSleepRecoveryDetail();
   if (!sleepRecoveryInfo.value) {
     uni.showToast({
-      title: '暂无数据',
+      title: t('暂无数据'),
       icon: 'none'
     });
   }
@@ -135,14 +140,14 @@ onLoad(async () => {
 <template>
   <view class="pl-30 pr-30 pt-30">
     <sleepEchartItem
-      title="睡眠过程恢复"
-      :subtitle="sleepRecoveryInfo?.overview?.level || '--'"
+      :title="t('睡眠过程恢复')"
+      :subtitle="t(sleepRecoveryInfo?.overview?.level || '--')"
       :dateRange="sleepRecoveryInfo?.overview?.dateRange || '--'"
       @chart-finished="(chartRef) => initChart(chartRef)"
     >
       <template #comparison>
         <view class="flex ai-center ml-20 p-10" :class="[sleepRecoveryInfo?.overview?.trend !== '保持不变' ? 'tag' : 'date-tag']">
-          <text>{{ sleepRecoveryInfo?.overview?.trend || '--' }}</text>
+          <text>{{ t(sleepRecoveryInfo?.overview?.trend || '--') }}</text>
           <view v-if="sleepRecoveryInfo?.overview?.trend !== '保持不变'">
             <uv-image
               src="/static/images/homeDetail/orArrowBottom.png"
@@ -156,25 +161,25 @@ onLoad(async () => {
     </sleepEchartItem>
     <sleepEchartItem
       :showChartDate="false"
-      title="睡眠时长"
-      :subtitle="'平均 ' + (sleepRecoveryInfo?.avgDuration || '00小时00分钟')"
+      :title="t('睡眠时长')"
+      :subtitle="t('平均 {duration}', { duration: sleepRecoveryInfo?.avgDuration || t('00小时00分钟') })"
       @chart-finished="(chartRef) => lightSleepTimeChart(chartRef)"
     >
       <template #comparison>
         <view :class="['flex ai-center ml-20 pl-20 pr-20 pt-10 pb-10', sleepRecoveryInfo?.durationLevel === '不足' ? 'tag' : 'date-tag']">
-          <text>{{ sleepRecoveryInfo?.durationLevel || '--' }}</text>
+          <text>{{ t(sleepRecoveryInfo?.durationLevel || '--') }}</text>
         </view>
       </template>
     </sleepEchartItem>
     <view class="bg-white r-50 mt-20 p-40">
       <view class="flex ai-center jc-between">
-        <text class="fs-36">睡眠时长</text>
-        <text class="fs-36">{{ sleepRecoveryInfo?.avgDuration || '00小时00分钟' }}</text>
+        <text class="fs-36">{{ t('睡眠时长') }}</text>
+        <text class="fs-36">{{ sleepRecoveryInfo?.avgDuration || t('00小时00分钟') }}</text>
       </view>
     </view>
     <view class="bg-white r-50 mt-20 p-40">
       <view class="flex ai-center jc-between">
-        <text class="fs-36">恢复性睡眠占比</text>
+        <text class="fs-36">{{ t('恢复性睡眠占比') }}</text>
         <text class="fs-36">{{ sleepRecoveryInfo?.recoveryRatio || '0' }}%</text>
       </view>
     </view>

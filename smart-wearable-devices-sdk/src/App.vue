@@ -6,6 +6,7 @@ import { useUserStore } from '@/stores/user';
 import { refreshAppForegroundSessionId } from '@/utils/appForegroundSession';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import { QKEER_BUILD_INFO } from '@/utils/buildInfo';
+import { refreshSystemLocale, syncTabBarLocale } from '@/i18n';
 
 let launchedFromFamilyEntry = false;
 
@@ -46,6 +47,9 @@ onLaunch((options: any) => {
 });
 
 onShow((options: any) => {
+  // 早于 BLE 分支：家人页也要跟随系统语言刷新，并保证 tabBar 文案正确。
+  refreshSystemLocale();
+  syncTabBarLocale();
   refreshAppForegroundSessionId();
   // Family invitation and care pages are pure network flows. They must never
   // request Bluetooth/privacy authorization just because the mini program opened.

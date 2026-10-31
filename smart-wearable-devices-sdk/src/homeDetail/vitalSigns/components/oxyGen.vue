@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch, nextTick } from 'vue';
 import { onLoad, onPageScroll, onShow, onUnload } from '@dcloudio/uni-app';
 import { applyVitalSignsLineStyle, baseOption } from '@/homeDetail/vitalSigns/echartOptions';
@@ -41,6 +43,8 @@ import {
   type RingWearState
 } from '@/utils/ringWearGate';
 import { showRingConnectionTroubleshootingPrompt } from '@/utils/ringConnectionTroubleshooting';
+
+const { t } = useI18n();
 const userStore = useUserStore();
 const ringStore = useRingStore();
 const {
@@ -295,7 +299,7 @@ const stopRwBloodOxygenMeasurement = async (reason: string) => {
   }
 };
 const showVitalMeasurementBusy = () => {
-  uni.showToast({ title: '设备正在测量，请稍候', icon: 'none' });
+  uni.showToast({ title: t('设备正在测量，请稍候'), icon: 'none' });
 };
 const settleOwnVitalMeasurementLock = (reason: string) => {
   if (!vitalMeasurementLockToken) return;
@@ -512,7 +516,7 @@ const cancelMeasurement = async () => {
   wearConfirmedForRun = false;
   if (isRwDevice()) await stopRwBloodOxygenMeasurement('user-cancelled');
   settleOwnVitalMeasurementLock('user-cancelled');
-  uni.showToast({ title: '已结束测量', icon: 'none' });
+  uni.showToast({ title: t('已结束测量'), icon: 'none' });
 };
 // 开始测量
 const handleMeasure = () => {
@@ -694,10 +698,10 @@ watch(
 
       if (latest?.bloodOxygen > 0) {
         oxyGen.value = latest.bloodOxygen;
-        uni.showToast({ title: '测量完成', icon: 'none' });
+        uni.showToast({ title: t('测量完成'), icon: 'none' });
         // 调用提交数据的接口
         try {
-          uni.showLoading({ title: '提交中...' });
+          uni.showLoading({ title: t('提交中...') });
           const recordTime = formatMetricRecordTime(latest.timestamp || Date.now());
           await submitData({
             deviceMac: getSubmitDeviceMac(userStore, isIOS.value),
@@ -714,7 +718,7 @@ watch(
             result: latest.bloodOxygen,
             fallback: Boolean(latest?.fallback)
           });
-          uni.showToast({ title: '测量已完成，数据稍后同步', icon: 'none' });
+          uni.showToast({ title: t('测量已完成，数据稍后同步'), icon: 'none' });
         } finally {
           uni.hideLoading();
           jumpDetail();
@@ -727,20 +731,20 @@ watch(
 // 动态文本（计算属性）
 const measureText = computed(() => {
   if (!getSubmitDeviceMac(userStore, isIOS.value)) {
-    return '未连接';
+    return t('未连接');
   }
   // legacy 数值返回后的共享锁仅用于保护固件命令通道，不能显示为仍在测量。
-  if (measureStatus.value === 'measuring') return '血氧测量中';
+  if (measureStatus.value === 'measuring') return t('血氧测量中');
   // if (measureStatus.value === 'completed') {
   //   const latest: any = userStore.receivedData.filter((d) => d.type === 'active_measure').sort((a, b) => b.timestamp - a.timestamp)[0];
   //   // if (latest?.bloodOxygen) {
   //   if (latest?.bloodOxygen !== null && latest?.bloodOxygen !== undefined) {
   //     oxyGen.value = latest.bloodOxygen;
-  //     uni.showToast({ title: '测量完成', icon: 'none' });
+  //     uni.showToast({ title: t('测量完成'), icon: 'none' });
   //     jumpDetail();
   //   }
   // }
-  return '测量';
+  return t('测量');
 });
 const jumpDetail = () => {
   (uni as any).$uv.route('/homeDetail/vitalSignsHeartDetail/oxyGenDetail', {
@@ -780,7 +784,7 @@ onUnload(() => {
 <template>
   <view class="score-card mb-30">
     <view class="metric-header">
-      <view class="metric-title">血氧饱和度<slot></slot></view>
+      <view class="metric-title">{{ t('血氧饱和度') }}<slot></slot></view>
       <view class="textBox" :class="{ 'is-measure-locked': isVitalMeasurementLocked }" @tap="handleMeasure" v-if="isHeartTate">
         <uv-image src="/static/images/homeDetail/oxygen.png" width="40rpx" height="40rpx" mode="aspectFit"></uv-image>
         <text>{{ measureText }}</text>
@@ -813,11 +817,11 @@ onUnload(() => {
       <view class="stats">
         <view class="stat-item">
           <view class="stat-value">{{ formatIntegerStat(oxyGenData.avgValue) }}</view>
-          <view class="stat-label">平均血氧</view>
+          <view class="stat-label">{{ t('平均血氧') }}</view>
         </view>
         <view class="stat-item">
           <view class="stat-value">{{ formatIntegerRangeStat(oxyGenData.avgValueRange) }}</view>
-          <view class="stat-label">平均范围</view>
+          <view class="stat-label">{{ t('平均范围') }}</view>
         </view>
       </view>
     </view>
@@ -827,13 +831,13 @@ onUnload(() => {
         <view class="heartbeat-animation">
 <uv-image src="/static/images/homeDetail/oxygen.png" width="45rpx" height="45rpx" mode="aspectFit"></uv-image>
         </view>
-        <view class="ml-20 t-white">血氧测量中...</view>
-        <view class="measurement-exit" @tap.stop="cancelMeasurement">结束测量</view>
+        <view class="ml-20 t-white">{{ t('血氧测量中...') }}</view>
+        <view class="measurement-exit" @tap.stop="cancelMeasurement">{{ t('结束测量') }}</view>
       </view>
     </uv-popup>
     <uv-popup round="20" ref="measurePopup" mode="center">
       <Action
-        title="血氧测量提示"
+        :title="t('血氧测量提示')"
         :agreementChecked="agreementChecked"
         @update:agreementChecked="agreementChecked = $event"
         @confirm="startMeasure"

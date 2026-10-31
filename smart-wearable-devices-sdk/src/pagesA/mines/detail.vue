@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import '@/pagesA/mines/i18n/pack';
 import { ref } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
 import { getfqaGuidDetail } from '@/common/api/userGuide';
@@ -6,6 +7,9 @@ import { getBoundRingDevice } from '@/api/ringDevice';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { getBoundRingIdentityTail, hasBoundRingIdentity } from '@/utils/ringBinding';
+import { useI18n, usePageTitle } from '@/i18n';
+
+const { t } = useI18n();
 
 const LOCAL_RING_CONNECT_FAILED_FAQ = 'ring-connect-failed';
 const LOCAL_CHARGING_CASE_INDICATOR_GUIDE = 'charging-case-indicator';
@@ -22,6 +26,9 @@ const selfCheckResult = ref<{
   detail: string;
   suggestions: string[];
 } | null>(null);
+
+// 标题来自路由参数（服务端 FAQ 标题保持原文），自检结果的标题是中文 key。
+usePageTitle(() => t(faqTitle.value || '详情'));
 
 const {
   deviceInfo,
@@ -86,7 +93,7 @@ const runRingConnectionSelfCheck = async () => {
   try {
     const targetDevice = await resolveSelfCheckTargetDevice();
     if (!hasBoundRingIdentity(targetDevice)) {
-      throw new Error('当前账号还没有绑定戒指。');
+      throw new Error(t('当前账号还没有绑定戒指。'));
     }
 
     await initBluetooth();
@@ -102,13 +109,13 @@ const runRingConnectionSelfCheck = async () => {
     if (!ready) {
       const reconnected = await autoConnectLastDevice();
       if (!reconnected) {
-        throw new Error(firstReadyError || '未发现已绑定戒指，可能距离过远、戒指电量低，或戒指正在被其他设备占用。');
+        throw new Error(firstReadyError || t('未发现已绑定戒指，可能距离过远、戒指电量低，或戒指正在被其他设备占用。'));
       }
       ready = await ensureCommunicationReady();
     }
 
     if (!ready) {
-      throw new Error('戒指已尝试连接，但通信服务未就绪。');
+      throw new Error(t('戒指已尝试连接，但通信服务未就绪。'));
     }
 
     const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
@@ -116,15 +123,19 @@ const runRingConnectionSelfCheck = async () => {
     selfCheckResult.value = {
       ok: true,
       title: '自检通过',
-      detail: `连接通道正常，已确认绑定戒指${identityTail === '-' ? '' : `（尾号 ${identityTail}）`}可以通信，用时约 ${elapsedSeconds} 秒。`,
+      detail: t('连接通道正常，已确认绑定戒指{suffix}可以通信，用时约 {seconds} 秒。', {
+        suffix: identityTail === '-' ? '' : t('（尾号 {tail}）', { tail: identityTail }),
+        seconds: elapsedSeconds
+      }),
       suggestions: ['如果仍然无法同步数据，请返回首页下拉刷新或重新进入小程序。']
     };
   } catch (error) {
+    // 兜底文案保持简体中文，交给 formatBleErrorMessage 判重后再整体翻译。
     const message = formatBleErrorMessage(error, '连接通道自检失败，请靠近戒指后重试。');
     selfCheckResult.value = {
       ok: false,
       title: '自检未通过',
-      detail: message,
+      detail: t(message),
       suggestions: buildSelfCheckSuggestions(message)
     };
   } finally {
@@ -148,9 +159,6 @@ const openOnlineFeedback = () => {
 onLoad(async (e) => {
   if (e?.title) {
     faqTitle.value = decodeTitle(String(e.title));
-    uni.setNavigationBarTitle({
-      title: faqTitle.value
-    });
   }
 
   if (e?.local) {
@@ -180,50 +188,50 @@ onLoad(async (e) => {
 <template>
   <view class="mine-detail-page p-30">
     <view v-if="localFaq === LOCAL_RING_CONNECT_FAILED_FAQ" class="faq-card">
-      <view class="faq-title">连接不上戒指</view>
+      <view class="faq-title">{{ t('连接不上戒指') }}</view>
       <view class="faq-desc">
-        如果戒指一直连接不上，通常不是单一原因。可以先按下面几个方向排查，也可以直接点击自检按钮，让小程序测试当前绑定戒指的蓝牙连接通道。
+        {{ t('如果戒指一直连接不上，通常不是单一原因。可以先按下面几个方向排查，也可以直接点击自检按钮，让小程序测试当前绑定戒指的蓝牙连接通道。') }}
       </view>
 
-      <view class="section-title">可能存在的问题</view>
+      <view class="section-title">{{ t('可能存在的问题') }}</view>
       <view class="cause-list">
         <view v-for="item in ringConnectPossibleCauses" :key="item" class="cause-item">
           <text class="cause-dot"></text>
-          <text>{{ item }}</text>
+          <text>{{ t(item) }}</text>
         </view>
       </view>
 
       <button class="self-check-button" :loading="selfCheckBusy" :disabled="selfCheckBusy" @tap="runRingConnectionSelfCheck">
-        {{ selfCheckBusy ? '自检中...' : '自检连接通道' }}
+        {{ selfCheckBusy ? t('自检中...') : t('自检连接通道') }}
       </button>
 
       <view v-if="selfCheckResult" class="self-check-result" :class="{ 'is-ok': selfCheckResult.ok, 'is-error': !selfCheckResult.ok }">
-        <view class="result-title">{{ selfCheckResult.title }}</view>
+        <view class="result-title">{{ t(selfCheckResult.title) }}</view>
         <view class="result-detail">{{ selfCheckResult.detail }}</view>
         <view v-if="selfCheckResult.suggestions.length" class="result-suggestions">
-          <view v-for="item in selfCheckResult.suggestions" :key="item" class="suggestion-item">{{ item }}</view>
+          <view v-for="item in selfCheckResult.suggestions" :key="item" class="suggestion-item">{{ t(item) }}</view>
         </view>
       </view>
     </view>
 
     <view v-else-if="localFaq === LOCAL_CHARGING_CASE_INDICATOR_GUIDE" class="faq-card">
-      <view class="faq-title">充电仓状态指示灯说明</view>
-      <view class="faq-desc">可以根据充电仓指示灯的颜色和闪烁状态判断当前工作状态。</view>
-      <view class="section-title">指示灯状态</view>
+      <view class="faq-title">{{ t('充电仓状态指示灯说明') }}</view>
+      <view class="faq-desc">{{ t('可以根据充电仓指示灯的颜色和闪烁状态判断当前工作状态。') }}</view>
+      <view class="section-title">{{ t('指示灯状态') }}</view>
       <view class="cause-list">
         <view v-for="item in chargingCaseIndicatorItems" :key="item" class="cause-item">
           <text class="cause-dot"></text>
-          <text>{{ item }}</text>
+          <text>{{ t(item) }}</text>
         </view>
       </view>
     </view>
 
     <uv-parse v-else-if="content" :content="content"></uv-parse>
-    <view v-else-if="!loading" class="empty">暂无详情内容</view>
+    <view v-else-if="!loading" class="empty">{{ t('暂无详情内容') }}</view>
 
     <view class="feedback-entry" @tap="openOnlineFeedback">
-      <text>仍未解决？</text>
-      <text class="feedback-link">提交问题反馈</text>
+      <text>{{ t('仍未解决？') }}</text>
+      <text class="feedback-link">{{ t('提交问题反馈') }}</text>
     </view>
   </view>
 </template>

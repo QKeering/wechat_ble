@@ -1,9 +1,13 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, type PropType } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
 import type { sleepNapType } from '@/types/api/homeDetail';
 import { addSleepNap, deleteSleepNap } from '@/common/api/homeDetail';
 import { formatLocalDate } from '@/utils/utils.js';
+
+const { t } = useI18n();
 const popup = ref<any>(null);
 const datetimePicker = ref<any>(null);
 const datetimePickerS = ref<any>(null);
@@ -67,7 +71,7 @@ const isValidNapRange = (startValue = startTime.value, endValue = endTime.value)
 };
 
 const showNapWindowToast = () => {
-  (uni as any).$uv.toast(`小睡时间需在 ${NAP_TIME_RANGE_TEXT} 之间`);
+  (uni as any).$uv.toast(t('小睡时间需在 {range} 之间', { range: NAP_TIME_RANGE_TEXT }));
 };
 
 const getNapDateValue = () => {
@@ -82,7 +86,7 @@ const addNapConfirm = async () => {
   const napDate = getNapDateValue();
   const isoDate = formatLocalDate(napDate);
   const sleepTime = Math.max(1, getTimeMinutes(endTime.value) - getTimeMinutes(startTime.value));
-  uni.showLoading({ title: '添加中...' });
+  uni.showLoading({ title: t('添加中...') });
   try {
     const res = await addSleepNap({
       date: isoDate,
@@ -93,13 +97,13 @@ const addNapConfirm = async () => {
       sleepTime
     });
     if (res) {
-      (uni as any).$uv.toast('添加成功');
+      (uni as any).$uv.toast(t('添加成功'));
       emit('refresh', napDate);
       return true;
     }
   } catch (error) {
     const err = error as any;
-    const message = err?.data?.msg || err?.msg || err?.message || '新增小睡失败，请稍后重试';
+    const message = err?.data?.msg || err?.msg || err?.message || t('新增小睡失败，请稍后重试');
     (uni as any).$uv.toast(message);
     return false;
   } finally {
@@ -109,10 +113,10 @@ const addNapConfirm = async () => {
 };
 const deleteSleepNapConfirm = async (id?: number) => {
   if (!id) return;
-  uni.showLoading({ title: '删除中...' });
+  uni.showLoading({ title: t('删除中...') });
   const res = await deleteSleepNap({ id });
   if (res) {
-    (uni as any).$uv.toast('删除成功');
+    (uni as any).$uv.toast(t('删除成功'));
     emit('refresh');
   }
   uni.hideLoading();
@@ -138,7 +142,7 @@ const getCurrentDate = () => {
   const now = getNapDateValue();
   const month = now.getMonth() + 1; // 月份从0开始，需要+1
   const day = now.getDate();
-  return `${month}月${day}日`;
+  return t('{month}月{day}日', { month, day });
 };
 
 // 开始时间变更时，同步限制结束时间（避免结束时间早于开始时间）
@@ -155,7 +159,7 @@ const handleStartConfirm = (time: selectDate) => {
   // 如果已经有结束时间，验证开始时间是否早于结束时间
   if (endTime.value && nextStartTime) {
     if (!isChronologicalNapRange(nextStartTime, endTime.value)) {
-      (uni as any).$uv.toast('开始时间必须早于结束时间');
+      (uni as any).$uv.toast(t('开始时间必须早于结束时间'));
       return false; // 阻止确认
     }
     if (!isNapRangeInWindow(nextStartTime, endTime.value)) {
@@ -172,7 +176,7 @@ const handleEndConfirm = (time: selectDate) => {
   const nextEndTime = getPickerTimeValue(time);
   if (startTime.value && nextEndTime) {
     if (!isChronologicalNapRange(startTime.value, nextEndTime)) {
-      (uni as any).$uv.toast('结束时间必须晚于开始时间');
+      (uni as any).$uv.toast(t('结束时间必须晚于开始时间'));
       return false; // 阻止确认
     }
     if (!isNapRangeInWindow(startTime.value, nextEndTime)) {
@@ -191,12 +195,12 @@ const cancel = () => {
 };
 const addNap = async () => {
   if (!startTime.value || !endTime.value) {
-    (uni as any).$uv.toast('请选择开始时间和结束时间');
+    (uni as any).$uv.toast(t('请选择开始时间和结束时间'));
     return;
   }
   if (!isValidNapRange()) {
     if (!isChronologicalNapRange()) {
-      (uni as any).$uv.toast('结束时间必须晚于开始时间');
+      (uni as any).$uv.toast(t('结束时间必须晚于开始时间'));
       return;
     }
     showNapWindowToast();
@@ -218,7 +222,7 @@ onLoad(() => {});
   <view class="bg-white r-50 mb-30 p-30 wrapper">
     <view class="flex jc-between ai-center">
       <view class="">
-        <text class="fs-36">小睡</text>
+        <text class="fs-36">{{ t('小睡') }}</text>
         <slot></slot>
       </view>
     </view>
@@ -227,9 +231,9 @@ onLoad(() => {});
         <view v-for="item in sleepNapList" :key="item.id" class="p-40 r-50 flex jc-between ai-center mb-10" style="background-color: #f7f7f7">
           <view>
             <text v-if="getSleepDurationHours(item.sleepTime) !== '00'" class="fs-48">{{ getSleepDurationHours(item.sleepTime) }}</text>
-            <text v-if="getSleepDurationHours(item.sleepTime) !== '00'" class="fs-24">小时</text>
+            <text v-if="getSleepDurationHours(item.sleepTime) !== '00'" class="fs-24">{{ t('小时') }}</text>
             <text class="fs-48">{{ getSleepDurationMinutes(item.sleepTime) }}</text>
-            <text class="fs-24">分钟</text>
+            <text class="fs-24">{{ t('分钟') }}</text>
             <text class="ml-20 fs-24">{{ formatTime(item.startTime) }}</text>
             <text class="fs-24" v-if="item.endTime">-</text>
             <text class="fs-24">{{ formatTime(item.endTime) }}</text>
@@ -246,30 +250,30 @@ onLoad(() => {});
     <view class="flex jc-center mt-50" @tap="openPopup">
       <view class="boxStyle flex jc-between ai-center p-20">
         <view class="nap-add">+</view>
-        <text class="fs-28" style="color: #5f57ec">新增小睡</text>
+        <text class="fs-28" style="color: #5f57ec">{{ t('新增小睡') }}</text>
       </view>
     </view>
     <uv-popup ref="popup" round="50rpx" custom-style="padding: 30rpx;">
       <view class="popupCard">
-        <view class="ta-c fs-36">新增小睡</view>
-        <view class="ta-c fs-28 t-979797 mt-20">可编辑时间区间</view>
+        <view class="ta-c fs-36">{{ t('新增小睡') }}</view>
+        <view class="ta-c fs-28 t-979797 mt-20">{{ t('可编辑时间区间') }}</view>
         <view class="ta-c fs-28 mt-10">
           <text>{{ getCurrentDate() }}</text>
           <text class="ml-10">{{ NAP_TIME_RANGE_TEXT }}</text>
         </view>
         <view class="flex jc-between mt-50">
           <view @tap="openDatetimePicker('start')" class="r-50 pt-40 pb-40 w-full mr-30 flex jc-center ai-center t-979797" style="background-color: #f7f7f7">
-            {{ startTime ? startTime : '开始时间' }}
+            {{ startTime ? startTime : t('开始时间') }}
             <uv-datetime-picker ref="datetimePicker" mode="time" v-model="startTime" :minHour="NAP_MIN_HOUR" :maxHour="NAP_MAX_HOUR" :maxMinute="startMaxMinute" @confirm="handleStartConfirm" @change="handleStartChange" />
           </view>
           <view @tap="openDatetimePicker('end')" class="r-50 pt-40 pb-40 w-full flex jc-center ai-center t-979797" style="background-color: #f7f7f7">
-            {{ endTime ? endTime : '结束时间' }}
+            {{ endTime ? endTime : t('结束时间') }}
             <uv-datetime-picker ref="datetimePickerS" mode="time" v-model="endTime" :minHour="NAP_MIN_HOUR" :maxHour="NAP_MAX_HOUR" @confirm="handleEndConfirm" />
           </view>
         </view>
         <view class="flex jc-between mt-100">
-          <view @tap="cancel" class="r-50 pt-40 pb-40 w-full mr-30 flex jc-center ai-center" style="background-color: #efeefd; color: #5f57ec">取消</view>
-          <view @tap="addNap" class="r-50 pt-40 pb-40 w-full flex jc-center ai-center t-white" style="background-color: #5f57ec">新增小睡</view>
+          <view @tap="cancel" class="r-50 pt-40 pb-40 w-full mr-30 flex jc-center ai-center" style="background-color: #efeefd; color: #5f57ec">{{ t('取消') }}</view>
+          <view @tap="addNap" class="r-50 pt-40 pb-40 w-full flex jc-center ai-center t-white" style="background-color: #5f57ec">{{ t('新增小睡') }}</view>
         </view>
       </view>
     </uv-popup>

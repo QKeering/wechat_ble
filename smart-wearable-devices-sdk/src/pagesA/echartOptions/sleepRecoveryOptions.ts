@@ -1,3 +1,4 @@
+import { t } from '@/i18n';
 // utils/echartOptions.ts
 export const defaultEchartOption = {
   grid: {
@@ -34,9 +35,9 @@ export const defaultEchartOption = {
       margin: 10, // 与图表的间距
       formatter: function (value: number) {
         // 只在特定位置显示中文标签
-        if (value === 20) return '不足';
-        if (value === 60) return '正常';
-        if (value === 80) return '充足';
+        if (value === 20) return t('不足');
+        if (value === 60) return t('正常');
+        if (value === 80) return t('充足');
         return ''; // 其他位置不显示标签
       }
     },

@@ -2,6 +2,7 @@ import { useUserStore } from '@/stores/user';
 import { getApiBase } from '@/utils/apiBase';
 import { showErrorToast } from '@/utils/errorToast';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { t } from '@/i18n';
 export const Request = () => {
   const userStore = useUserStore();
   const successCodes = [0, 200];
@@ -112,8 +113,8 @@ export const Request = () => {
           appGlobalData.showLoginModal = true;
           userStore.setShowLoginPopup?.(true);
           await uni.showModal({
-            title: '提示',
-            content: '未登录或登录失效，请重新登录!',
+            title: t('提示'),
+            content: t('未登录或登录失效，请重新登录!'),
             confirmColor: '#2e70fc',
             success: async (modalResult) => {
               if (modalResult.confirm) {

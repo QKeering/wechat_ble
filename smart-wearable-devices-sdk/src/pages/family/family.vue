@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import '@/pages/family/i18n/pack'
 import { computed, ref } from 'vue'
 import { onLoad, onPullDownRefresh, onShow } from '@dcloudio/uni-app'
 import {
@@ -11,9 +12,12 @@ import {
   updateFamilyRelation,
   type FamilyInvitePreview,
 } from '@/common/api/family'
+import { useI18n } from '@/i18n'
 import { formatBleErrorMessage } from '@/utils/bleError'
 
 type AnyRecord = Record<string, any>
+
+const { t } = useI18n()
 const home = ref<AnyRecord>({ members: [] })
 const pendingInvites = ref<AnyRecord[]>([])
 const selectedId = ref<number | string | null>(null)
@@ -70,7 +74,9 @@ const summary = computed(() => {
     metrics.sleepMinutes
   )
   return {
-    sleep: sleepMinutes === null ? '--' : `${Math.floor(sleepMinutes / 60)}小时${Math.round(sleepMinutes % 60)}分`,
+    sleep: sleepMinutes === null
+      ? '--'
+      : t('{hours}小时{minutes}分', { hours: Math.floor(sleepMinutes / 60), minutes: Math.round(sleepMinutes % 60) }),
     heartRate: pickNumber(overview.heartRate, overview.avgHeartRate, vital.heartRate, vital.avgHeartRate, metrics.heartRate),
     spo2: pickNumber(overview.spo2, overview.avgSpo2, vital.spo2, vital.avgSpo2, metrics.spo2),
     steps: pickNumber(overview.steps, motion.steps, metrics.steps),
@@ -131,7 +137,7 @@ const goCareDetail = () => {
   const params = [
     `memberId=${encodeURIComponent(String(member.id || ''))}`,
     `relationId=${encodeURIComponent(String(member.relationId || ''))}`,
-    `name=${encodeURIComponent(String(member.name || member.nickname || '亲友'))}`,
+    `name=${encodeURIComponent(String(member.name || member.nickname || t('亲友')))}`,
   ]
   uni.navigateTo({ url: `/pages/family/careDetail?${params.join('&')}` })
 }
@@ -181,13 +187,13 @@ const confirmAcceptInvite = async (code = normalizedInviteCode.value) => {
   inviteSubmitting.value = true
   try {
     await acceptFamilyInvite(normalizedCode)
-    uni.showToast({ title: '已接受邀请', icon: 'success' })
+    uni.showToast({ title: t('已接受邀请'), icon: 'success' })
     inviteCode.value = ''
     invitePreview.value = null
     inviteError.value = ''
     await loadPage()
   } catch (error: any) {
-    uni.showToast({ title: formatBleErrorMessage(error, '接受失败，请稍后重试'), icon: 'none' })
+    uni.showToast({ title: t(formatBleErrorMessage(error, '接受失败，请稍后重试')), icon: 'none' })
   } finally {
     inviteSubmitting.value = false
   }
@@ -196,7 +202,7 @@ const confirmAcceptInvite = async (code = normalizedInviteCode.value) => {
 const acceptPendingInvite = async (invite: AnyRecord) => {
   const code = parseInviteCode(invite.inviteCode || invite.code)
   if (!code) {
-    uni.showToast({ title: '邀请信息不完整', icon: 'none' })
+    uni.showToast({ title: t('邀请信息不完整'), icon: 'none' })
     return
   }
   inviteCode.value = code
@@ -207,30 +213,30 @@ const editMemberRemark = () => {
   const member = selectedMember.value
   const relationId = Number(member?.relationId || 0)
   if (!member || !relationId || remarkSubmitting.value) {
-    if (!relationId) uni.showToast({ title: '当前关系暂不支持修改备注', icon: 'none' })
+    if (!relationId) uni.showToast({ title: t('当前关系暂不支持修改备注'), icon: 'none' })
     return
   }
   const currentName = String(member.name || member.nickname || '').trim()
   uni.showModal({
-    title: '修改家人备注',
+    title: t('修改家人备注'),
     editable: true,
-    placeholderText: '请输入家人备注',
+    placeholderText: t('请输入家人备注'),
     content: currentName,
-    confirmText: '保存',
+    confirmText: t('保存'),
     success: async (result: any) => {
       if (!result.confirm) return
       const displayName = String(result.content || '').trim()
       if (!displayName) {
-        uni.showToast({ title: '备注不能为空', icon: 'none' })
+        uni.showToast({ title: t('备注不能为空'), icon: 'none' })
         return
       }
       remarkSubmitting.value = true
       try {
         await updateFamilyRelation(relationId, { displayName })
         member.name = displayName
-        uni.showToast({ title: '备注已更新', icon: 'success' })
+        uni.showToast({ title: t('备注已更新'), icon: 'success' })
       } catch (error: any) {
-        uni.showToast({ title: formatBleErrorMessage(error, '修改失败，请稍后重试'), icon: 'none' })
+        uni.showToast({ title: t(formatBleErrorMessage(error, '修改失败，请稍后重试')), icon: 'none' })
       } finally {
         remarkSubmitting.value = false
       }
@@ -245,7 +251,7 @@ const scanInviteCode = () => {
     success: (result) => {
       const code = parseInviteCode(result.result || result.path)
       if (!code) {
-        uni.showToast({ title: '未识别到有效邀请', icon: 'none' })
+        uni.showToast({ title: t('未识别到有效邀请'), icon: 'none' })
         return
       }
       inviteCode.value = code
@@ -265,84 +271,84 @@ onPullDownRefresh(loadPage)
 
 <template>
   <view class="page">
-    <view class="nav"><text class="back" @tap="goBack">‹</text><text class="nav-title">亲友关怀</text><view class="nav-space" /></view>
+    <view class="nav"><text class="back" @tap="goBack">‹</text><text class="nav-title">{{ t('亲友关怀') }}</text><view class="nav-space" /></view>
 
     <view v-if="loading && !members.length" class="state-card"><view class="skeleton wide"/><view class="skeleton"/><view class="skeleton short"/></view>
-    <view v-else-if="loadFailed" class="state-card center"><text class="state-title">加载失败</text><text class="state-desc">请检查网络后重试</text><button class="minor-button" @tap="loadPage">重新加载</button></view>
+    <view v-else-if="loadFailed" class="state-card center"><text class="state-title">{{ t('加载失败') }}</text><text class="state-desc">{{ t('请检查网络后重试') }}</text><button class="minor-button" @tap="loadPage">{{ t('重新加载') }}</button></view>
     <template v-else>
       <view class="card accept-card">
-        <text class="card-title">接受亲友邀请</text>
-        <text class="card-desc">通过邀请码或扫码接受定向分享，确认后建立共享关系</text>
+        <text class="card-title">{{ t('接受亲友邀请') }}</text>
+        <text class="card-desc">{{ t('通过邀请码或扫码接受定向分享，确认后建立共享关系') }}</text>
         <view class="invite-code-row">
           <input
             v-model="inviteCode"
             class="invite-code-input"
             maxlength="16"
-            placeholder="输入邀请码"
+            :placeholder="t('输入邀请码')"
             confirm-type="done"
             @input="invitePreview = null; inviteError = ''"
             @confirm="loadInvitePreview()"
           />
           <button class="accept-button" :disabled="acceptDisabled" :loading="inviteSubmitting" @tap="confirmAcceptInvite()">
-            接受
+            {{ t('接受') }}
           </button>
         </view>
         <view v-if="invitePreview" class="invite-preview">
-          <text class="preview-title">{{ invitePreview.inviterName }} 邀请你共享健康数据</text>
+          <text class="preview-title">{{ t('{name} 邀请你共享健康数据', { name: invitePreview.inviterName }) }}</text>
           <text class="preview-desc">{{ invitePreview.permissionSummary }}</text>
         </view>
-        <text v-if="inviteError" class="invite-error">{{ inviteError }}</text>
+        <text v-if="inviteError" class="invite-error">{{ t(inviteError) }}</text>
         <button class="scan-button" :disabled="inviteLoading || inviteSubmitting" @tap="scanInviteCode">
-          {{ inviteLoading ? '正在确认邀请' : '扫码接受邀请' }}
+          {{ inviteLoading ? t('正在确认邀请') : t('扫码接受邀请') }}
         </button>
       </view>
       <view v-if="pendingInvites.length" class="card pending-card">
-        <text class="card-title">待处理邀请</text>
+        <text class="card-title">{{ t('待处理邀请') }}</text>
         <view v-for="invite in pendingInvites" :key="invite.id || invite.inviteCode" class="pending-item">
-          <view class="pending-avatar">{{ (invite.inviterName || '亲').slice(0, 1) }}</view>
+          <view class="pending-avatar">{{ (invite.inviterName || t('亲')).slice(0, 1) }}</view>
           <view class="grow">
-            <text class="pending-name">{{ invite.inviterName || '亲友邀请' }}</text>
-            <text class="card-desc">邀请你查看共享的健康数据</text>
+            <text class="pending-name">{{ invite.inviterName || t('亲友邀请') }}</text>
+            <text class="card-desc">{{ t('邀请你查看共享的健康数据') }}</text>
           </view>
-          <button class="pending-accept" @tap="acceptPendingInvite(invite)">查看</button>
+          <button class="pending-accept" @tap="acceptPendingInvite(invite)">{{ t('查看') }}</button>
         </view>
       </view>
 
-      <view class="section-head"><text class="section-title">我的亲友</text></view>
+      <view class="section-head"><text class="section-title">{{ t('我的亲友') }}</text></view>
       <view v-if="members.length" class="member-tabs">
         <view v-for="item in members" :key="item.id" class="member-pill" :class="{ active: String(item.id) === String(selectedId) }" @tap="selectMember(item)">
-          <view class="avatar">{{ (item.name || item.nickname || '亲').slice(0, 1) }}</view><text>{{ item.name || item.nickname || '亲友' }}</text>
+          <view class="avatar">{{ (item.name || item.nickname || t('亲')).slice(0, 1) }}</view><text>{{ item.name || item.nickname || t('亲友') }}</text>
         </view>
       </view>
 
       <view v-if="selectedMember" class="card health-card">
         <view class="health-head">
           <view class="health-title">
-            <text class="card-title">{{ selectedMember.name || selectedMember.nickname || '亲友' }}的健康摘要</text>
-            <text class="card-desc">{{ summary.lastSync }}</text>
+            <text class="card-title">{{ t('{name}的健康摘要', { name: selectedMember.name || selectedMember.nickname || t('亲友') }) }}</text>
+            <text class="card-desc">{{ t(summary.lastSync) }}</text>
           </view>
           <view class="health-actions">
-            <text class="detail-anchor" @tap.stop="goCareDetail">查看明细 ›</text>
-            <text class="edit-remark" @tap.stop="editMemberRemark">修改备注</text>
-            <view class="status" :class="{ online: summary.connected }">{{ summary.connected ? '设备在线' : '最近数据' }}</view>
+            <text class="detail-anchor" @tap.stop="goCareDetail">{{ t('查看明细 ›') }}</text>
+            <text class="edit-remark" @tap.stop="editMemberRemark">{{ t('修改备注') }}</text>
+            <view class="status" :class="{ online: summary.connected }">{{ summary.connected ? t('设备在线') : t('最近数据') }}</view>
           </view>
         </view>
-        <view v-if="!readablePermission(selectedMember)" class="permission-empty"><text class="empty-icon">♡</text><text class="empty-title">对方暂未开放健康数据</text><text class="empty-desc">授权后，健康摘要会显示在这里</text></view>
+        <view v-if="!readablePermission(selectedMember)" class="permission-empty"><text class="empty-icon">♡</text><text class="empty-title">{{ t('对方暂未开放健康数据') }}</text><text class="empty-desc">{{ t('授权后，健康摘要会显示在这里') }}</text></view>
         <view v-else-if="dashboardLoading" class="metric-grid"><view v-for="i in 6" :key="i" class="metric skeleton-box"/></view>
         <view v-else class="metric-grid">
-          <view class="metric"><text class="metric-label">睡眠</text><text class="metric-value">{{ summary.sleep }}</text></view>
-          <view class="metric"><text class="metric-label">平均心率</text><text class="metric-value">{{ formatMetric(summary.heartRate, '次/分') }}</text></view>
-          <view class="metric"><text class="metric-label">平均血氧</text><text class="metric-value">{{ formatMetric(summary.spo2, '%') }}</text></view>
-          <view class="metric"><text class="metric-label">今日步数</text><text class="metric-value">{{ formatMetric(summary.steps, '步') }}</text></view>
-          <view class="metric metric-wide"><text class="metric-label">情绪状态</text><text class="metric-value blue">{{ summary.emotion }}</text></view>
+          <view class="metric"><text class="metric-label">{{ t('睡眠') }}</text><text class="metric-value">{{ summary.sleep }}</text></view>
+          <view class="metric"><text class="metric-label">{{ t('平均心率') }}</text><text class="metric-value">{{ formatMetric(summary.heartRate, t('次/分')) }}</text></view>
+          <view class="metric"><text class="metric-label">{{ t('平均血氧') }}</text><text class="metric-value">{{ formatMetric(summary.spo2, '%') }}</text></view>
+          <view class="metric"><text class="metric-label">{{ t('今日步数') }}</text><text class="metric-value">{{ formatMetric(summary.steps, t('步')) }}</text></view>
+          <view class="metric metric-wide"><text class="metric-label">{{ t('情绪状态') }}</text><text class="metric-value blue">{{ t(summary.emotion) }}</text></view>
         </view>
       </view>
-      <view v-else class="card empty-friends"><view class="empty-orbit">♡</view><text class="empty-title">还没有共享数据的亲友</text><text class="empty-desc">可在上方输入邀请码或扫描小程序码接受邀请</text></view>
+      <view v-else class="card empty-friends"><view class="empty-orbit">♡</view><text class="empty-title">{{ t('还没有共享数据的亲友') }}</text><text class="empty-desc">{{ t('可在上方输入邀请码或扫描小程序码接受邀请') }}</text></view>
 
       <view class="card share-card">
-        <text class="card-title">分享我的数据</text>
-        <text class="card-desc">生成二维码和链接，邀请亲友查看我的健康摘要</text>
-        <button class="share-button" @tap="goShare">分享我的数据</button>
+        <text class="card-title">{{ t('分享我的数据') }}</text>
+        <text class="card-desc">{{ t('生成二维码和链接，邀请亲友查看我的健康摘要') }}</text>
+        <button class="share-button" @tap="goShare">{{ t('分享我的数据') }}</button>
       </view>
     </template>
   </view>

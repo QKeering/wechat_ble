@@ -1,6 +1,8 @@
 // utils/echartOptions.ts
 // 引入 echarts （用于渐变等功能，若不需要可省略）
 // @ts-nocheck
+
+import { t } from '@/i18n';
 import echarts from '@/utils/echarts';
 type AnyEchartOption = any;
 // import * as echarts from '@/static/echarts.min.js';
@@ -46,9 +48,9 @@ export const defaultEchartOption: AnyEchartOption = {
       margin: 10, // 与图表的间距
       formatter: function (value: number) {
         // 只在特定位置显示中文标签
-        if (value === 20) return '可改善';
-        if (value === 60) return '正常';
-        if (value === 80) return '优秀';
+        if (value === 20) return t('可改善');
+        if (value === 60) return t('正常');
+        if (value === 80) return t('优秀');
         return ''; // 其他位置不显示标签
       }
     },

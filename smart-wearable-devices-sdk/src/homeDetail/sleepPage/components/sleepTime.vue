@@ -1,7 +1,11 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { computed, ref, getCurrentInstance } from 'vue';
 import type { sleepDetail, sleepSegment, Point } from '@/types/api/homeDetail';
 import { SLEEP_STAGE_COLORS, type SleepStageName } from '@/homeDetail/sleepPage/sleepStageColors';
+
+const { t } = useI18n();
 
 const props = defineProps({
   sleepDetailObj: {
@@ -644,12 +648,12 @@ const handleChartTouchMove = (e: any) => {
     <view class="p-20 r-50" style="background-color: #f8f8fe">
       <view class="ta-c">
         <text class="fs-72">{{ sleepDurationHours || '00' }}</text>
-        <text class="fs-24">小时</text>
+        <text class="fs-24">{{ t('小时') }}</text>
         <text class="fs-72">{{ formattedMinutes || '00' }}</text>
-        <text class="fs-24">分钟</text>
+        <text class="fs-24">{{ t('分钟') }}</text>
       </view>
       <view class="ta-c fs-28">
-        睡眠时间
+        {{ t('睡眠时间') }}
         <slot></slot>
       </view>
 
@@ -711,7 +715,7 @@ const handleChartTouchMove = (e: any) => {
             @tap.stop="dismissIndicator"
           >
             <view class="tooltip-dot" :style="{ backgroundColor: indicatorInfo.color }"></view>
-            <text class="tooltip-type">{{ indicatorInfo.type }}</text>
+            <text class="tooltip-type">{{ t(indicatorInfo.type) }}</text>
             <text class="tooltip-time">{{ indicatorInfo.startTime }}-{{ indicatorInfo.endTime }}</text>
           </view>
 
@@ -729,13 +733,13 @@ const handleChartTouchMove = (e: any) => {
         <view v-for="item in sleepTimeStats" :key="item.name" class="sleep-time-summary-item">
           <view class="sleep-time-summary-value">
             <text class="sleep-time-summary-hour">{{ item.hours }}</text>
-            <text class="sleep-time-summary-unit">小时</text>
+            <text class="sleep-time-summary-unit">{{ t('小时') }}</text>
             <text class="sleep-time-summary-minute">{{ item.minutes }}</text>
-            <text class="sleep-time-summary-unit">分</text>
+            <text class="sleep-time-summary-unit">{{ t('分钟') }}</text>
           </view>
           <view class="sleep-time-summary-label">
             <view class="sleep-time-summary-dot" :style="{ backgroundColor: item.color }"></view>
-            <text>{{ item.name }}</text>
+            <text>{{ t(item.name) }}</text>
           </view>
         </view>
       </view>

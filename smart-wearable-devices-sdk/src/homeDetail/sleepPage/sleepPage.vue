@@ -1,5 +1,7 @@
 <script setup lang="ts">
 // @ts-nocheck
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { computed, ref } from 'vue';
 import { onLoad, onPageScroll, onShow, onPullDownRefresh, onUnload } from '@dcloudio/uni-app';
 import sleepTime from '@/homeDetail/sleepPage/components/sleepTime.vue';
@@ -35,6 +37,8 @@ import DetailInfo from '@/components/DetailInfo.vue';
 import { usePopupFixer } from '@/hooks/usePopupFixer';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
 import { normalizeSleepScore, publishSleepOverviewUpdate } from '@/utils/sleepOverview';
+
+const { t } = useI18n();
 
 const { isPopupActive, fixedPageStyle } = usePopupFixer();
 const ringBleBridge = useRingBusinessHistoryPageSync();
@@ -1133,7 +1137,7 @@ const confirm = async (date: any) => {
   const todayEnd = new Date();
   todayEnd.setHours(23, 59, 59, 999);
   if (Number.isNaN(selectedDate.getTime()) || selectedDate.getTime() > todayEnd.getTime()) {
-    uni.showToast({ title: '不能选择未来日期', icon: 'none' });
+    uni.showToast({ title: t('不能选择未来日期'), icon: 'none' });
     return;
   }
   // 更新选择的日期信息，使用月-日格式
@@ -1229,7 +1233,7 @@ defineExpose({
   <page-meta :page-style="fixedPageStyle"></page-meta>
 
   <view class="relative p-30" style="box-sizing: border-box">
-    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" title="睡眠" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar @leftClick="leftClick" placeholder leftIcon="arrow-left" :title="t('睡眠')" :bgColor="scrollTop > 0 ? '#ffffff' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view class="bgcWrapper"></view>
     <view class="pt-30 pr-30 pl-30 relative mb-30" style="z-index: 1; box-sizing: border-box">
       <view class="calendar-week flex">
@@ -1246,8 +1250,8 @@ defineExpose({
               <view class="ta-c">{{ selectedDateInfo.monthDay }}</view>
             </template>
             <template v-else>
-              <view class="ta-c">选择</view>
-              <view class="ta-c">日期</view>
+              <view class="ta-c">{{ t('选择') }}</view>
+              <view class="ta-c">{{ t('日期') }}</view>
             </template>
           </view>
         </view>
@@ -1261,7 +1265,7 @@ defineExpose({
           @tap="handleDateClick(index)"
         >
           <view class="calendar-day__label" :class="index === selectedDayIndex ? 't-white' : 't-979797'">
-            {{ dateItem.info.week }}
+            {{ t(dateItem.info.week) }}
           </view>
           <view class="calendar-day__date" :class="index === selectedDayIndex ? 't-white' : ''">
             <template v-if="index === 2">
@@ -1284,7 +1288,7 @@ defineExpose({
     />
     <view v-if="isSleepCoreLoading" class="sleep-page-loading">
       <view class="sleep-page-loading__spinner"></view>
-      <text class="sleep-page-loading__text">正在加载睡眠数据</text>
+      <text class="sleep-page-loading__text">{{ t('正在加载睡眠数据') }}</text>
     </view>
 
     <view v-else>
@@ -1314,7 +1318,7 @@ defineExpose({
       <view @tap="jumpEdit" class="bg-white r-50 flex ai-center jc-center p-30">
         <view class="flex ai-center jc-center">
           <uv-image src="/static/images/homeDetail/editCardIcon.png" width="40rpx" height="40rpx"></uv-image>
-          <text class="ml-10 fs-36">编辑卡片</text>
+          <text class="ml-10 fs-36">{{ t('编辑卡片') }}</text>
         </view>
       </view>
     </view>

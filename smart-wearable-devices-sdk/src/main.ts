@@ -3,6 +3,7 @@ import { createSSRApp } from 'vue';
 import * as Pinia from 'pinia';
 import uvUI from '@/uni_modules/uv-ui-tools';
 import { Request } from '@/utils/request/index.js';
+import { initI18n } from '@/i18n';
 import share from './common/share.js';
 
 const NAVIGATE_TO_DEDUP_MS = 1500;
@@ -43,9 +44,7 @@ const installNavigateToDedupGuard = () => {
     const path = key.split('?')[0];
     const currentTopRoute = getCurrentTopRoute();
     const now = Date.now();
-    const duplicate =
-      (path && currentTopRoute && path === currentTopRoute) ||
-      (key && key === lastNavigateKey && now - lastNavigateAt < NAVIGATE_TO_DEDUP_MS);
+    const duplicate = (path && currentTopRoute && path === currentTopRoute) || (key && key === lastNavigateKey && now - lastNavigateAt < NAVIGATE_TO_DEDUP_MS);
 
     if (duplicate) {
       const payload = { errMsg: 'navigateTo:fail duplicate navigation ignored', url: options?.url };
@@ -79,6 +78,8 @@ const installNavigateToDedupGuard = () => {
 export function createApp() {
   const app = createSSRApp(App);
   app.use(Pinia.createPinia());
+  // 早于任何页面 setup，保证首屏就是目标语言。
+  initI18n();
   app.use(uvUI);
   app.mixin(share);
   installNavigateToDedupGuard();

@@ -3,7 +3,7 @@
     <!-- 标题栏 -->
     <view class="flex jc-between ai-center mb-20">
       <view></view>
-      <text class="fs-36 fw-600">{{ title }}</text>
+      <text class="fs-36 fw-600">{{ t(title) }}</text>
       <view @click="$emit('close')">
         <uv-icon name="close" color="#ccc" size="20"></uv-icon>
       </view>
@@ -14,17 +14,17 @@
     </view>
     <!-- 提示文字 -->
     <view class="ta-c mb-20">
-      <text class="fs-28">{{ tipText }}</text>
+      <text class="fs-28">{{ t(tipText) }}</text>
     </view>
     <!-- 说明文字 -->
     <view class="mb-15">
-      <text class="fs-28 fw-600">{{ description }}</text>
+      <text class="fs-28 fw-600">{{ t(description) }}</text>
     </view>
     <!-- 注意事项列表 -->
     <view class="mb-25 ml-10">
       <view v-for="(item, index) in instructions" :key="index" class="flex ai-start mb-10">
         <text class="fs-28 mr-10">{{ index + 1 }}.</text>
-        <text class="fs-28 flex-1">{{ item }}</text>
+        <text class="fs-28 flex-1">{{ t(item) }}</text>
       </view>
     </view>
     <!-- 不再提示复选框 -->
@@ -35,16 +35,20 @@
           <uv-icon name="checkmark-circle-fill" color="#2E70FC" size="18"></uv-icon>
         </view>
       </view>
-      <text class="fs-28 ml-10">不再提示</text>
+      <text class="fs-28 ml-10">{{ t('不再提示') }}</text>
     </view>
     <!-- 按钮 -->
     <view class="flex jc-center w-full r-10" style="overflow: hidden">
-      <uv-button @click="$emit('confirm')" :customStyle="{ width: '100%' }" :text="confirmText" :color="confirmColor"></uv-button>
+      <uv-button @click="$emit('confirm')" :customStyle="{ width: '100%' }" :text="t(confirmText)" :color="confirmColor"></uv-button>
     </view>
   </view>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n';
+
+const { t } = useI18n();
+
 interface Props {
   title?: string;
   imageSrc?: string;

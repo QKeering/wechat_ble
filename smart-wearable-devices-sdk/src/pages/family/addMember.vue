@@ -1,6 +1,10 @@
 <script setup lang="ts">
+import '@/pages/family/i18n/pack';
 import { computed, ref } from 'vue';
 import { acceptFamilyInvite, createFamilyElderProfile, createFamilyInvite, searchFamilyUser, type FamilyUserSearchResult } from '@/common/api/family';
+import { useI18n } from '@/i18n';
+
+const { t } = useI18n();
 
 const name = ref('');
 const phone = ref('');
@@ -31,15 +35,19 @@ const modeOptions = [
 ] as const;
 
 const activeModeDesc = computed(() => modeOptions.find((item) => item.value === mode.value)?.desc || '');
+const sexOptions = computed(() => [t('未知'), t('男'), t('女')]);
 const inviteShareText = computed(() => {
   if (!generatedInvite.value) return '';
-  const target = phone.value.trim() ? `，此邀请码仅限手机号 ${phone.value.trim()} 使用` : '';
-  return `我在智能穿戴小程序中邀请你确认家人健康数据共享。邀请码：${generatedInvite.value}${target}，有效期至 ${inviteExpireTime.value}。请打开小程序，进入“家人邀请/邀请码”后输入邀请码处理。`;
+  const target = phone.value.trim() ? t('，此邀请码仅限手机号 {phone} 使用', { phone: phone.value.trim() }) : '';
+  return t(
+    '我在智能穿戴小程序中邀请你确认家人健康数据共享。邀请码：{code}{target}，有效期至 {expire}。请打开小程序，进入“家人邀请/邀请码”后输入邀请码处理。',
+    { code: generatedInvite.value, target, expire: inviteExpireTime.value }
+  );
 });
 
 const submit = async () => {
   if (!name.value.trim()) {
-    uni.showToast({ title: '请输入家人姓名', icon: 'none' });
+    uni.showToast({ title: t('请输入家人姓名'), icon: 'none' });
     return;
   }
   submitting.value = true;
@@ -53,7 +61,7 @@ const submit = async () => {
       height: height.value.trim(),
       weight: weight.value.trim()
     });
-    uni.showToast({ title: '添加成功', icon: 'success' });
+    uni.showToast({ title: t('添加成功'), icon: 'success' });
     setTimeout(() => {
       uni.redirectTo({ url: `/pages/family/memberDetail?memberId=${result.memberId}` });
     }, 500);
@@ -64,24 +72,24 @@ const submit = async () => {
 
 const searchByPhone = async () => {
   if (!phone.value.trim()) {
-    uni.showToast({ title: '请输入手机号', icon: 'none' });
+    uni.showToast({ title: t('请输入手机号'), icon: 'none' });
     return;
   }
   submitting.value = true;
   try {
     searchResult.value = await searchFamilyUser({ phone: phone.value.trim() });
     if (!searchResult.value) {
-      uni.showToast({ title: '未找到账号，可先创建老人档案', icon: 'none' });
+      uni.showToast({ title: t('未找到账号，可先创建老人档案'), icon: 'none' });
       mode.value = 'profile';
       return;
     }
     name.value = searchResult.value.nickName || name.value;
     const result = await createFamilyElderProfile({
-      name: name.value || searchResult.value.nickName || '家人',
+      name: name.value || searchResult.value.nickName || t('家人'),
       phone: phone.value.trim(),
       relation: relation.value
     });
-    uni.showToast({ title: '已添加', icon: 'success' });
+    uni.showToast({ title: t('已添加'), icon: 'success' });
     setTimeout(() => {
       uni.redirectTo({ url: `/pages/family/memberDetail?memberId=${result.memberId}` });
     }, 500);
@@ -99,7 +107,7 @@ const createInvite = async () => {
     });
     generatedInvite.value = result.inviteCode;
     inviteExpireTime.value = result.expireTime;
-    uni.showToast({ title: '邀请码已生成', icon: 'success' });
+    uni.showToast({ title: t('邀请码已生成'), icon: 'success' });
   } finally {
     submitting.value = false;
   }
@@ -107,26 +115,26 @@ const createInvite = async () => {
 
 const copyGeneratedInvite = () => {
   if (!inviteShareText.value) {
-    uni.showToast({ title: '请先生成邀请码', icon: 'none' });
+    uni.showToast({ title: t('请先生成邀请码'), icon: 'none' });
     return;
   }
   uni.setClipboardData({
     data: inviteShareText.value,
     success: () => {
-      uni.showToast({ title: '邀请信息已复制', icon: 'success' });
+      uni.showToast({ title: t('邀请信息已复制'), icon: 'success' });
     }
   });
 };
 
 const acceptInvite = async () => {
   if (!inviteCode.value.trim()) {
-    uni.showToast({ title: '请输入邀请码', icon: 'none' });
+    uni.showToast({ title: t('请输入邀请码'), icon: 'none' });
     return;
   }
   submitting.value = true;
   try {
     await acceptFamilyInvite(inviteCode.value.trim());
-    uni.showToast({ title: '已接受邀请', icon: 'success' });
+    uni.showToast({ title: t('已接受邀请'), icon: 'success' });
     setTimeout(() => {
       uni.navigateBack();
     }, 500);
@@ -138,78 +146,78 @@ const acceptInvite = async () => {
 
 <template>
   <view class="page">
-    <uv-navbar placeholder title="添加家人" bgColor="#f1f3f6"></uv-navbar>
+    <uv-navbar placeholder :title="t('添加家人')" bgColor="#f1f3f6"></uv-navbar>
 
     <view class="mode-list">
       <view v-for="item in modeOptions" :key="item.value" class="mode-card" :class="{ active: mode === item.value }" @click="mode = item.value">
-        <view class="mode-title">{{ item.label }}</view>
-        <view class="mode-desc">{{ item.desc }}</view>
+        <view class="mode-title">{{ t(item.label) }}</view>
+        <view class="mode-desc">{{ t(item.desc) }}</view>
       </view>
     </view>
 
     <view class="section">
-      <view class="section-note">{{ activeModeDesc }}</view>
-      <view class="label">家人姓名</view>
-      <input v-model="name" class="input" placeholder="例如：爸爸、妈妈" />
+      <view class="section-note">{{ t(activeModeDesc) }}</view>
+      <view class="label">{{ t('家人姓名') }}</view>
+      <input v-model="name" class="input" :placeholder="t('例如：爸爸、妈妈')" />
 
-      <view class="label">关系</view>
+      <view class="label">{{ t('关系') }}</view>
       <view class="relation-grid">
         <view v-for="item in relationOptions" :key="item.value" class="relation-item" :class="{ active: relation === item.value }" @click="relation = item.value">
-          {{ item.label }}
+          {{ t(item.label) }}
         </view>
       </view>
 
-      <view class="label">手机号（选填）</view>
-      <input v-model="phone" class="input" type="number" placeholder="用于后续父母本人授权或认领" />
+      <view class="label">{{ t('手机号（选填）') }}</view>
+      <input v-model="phone" class="input" type="number" :placeholder="t('用于后续父母本人授权或认领')" />
 
       <template v-if="mode === 'profile'">
         <view class="profile-grid">
           <view>
-            <view class="label">性别（选填）</view>
-            <picker :range="['未知', '男', '女']" @change="sex = String($event.detail.value)">
-              <view class="input picker-text">{{ ['未知', '男', '女'][Number(sex || 0)] }}</view>
+            <view class="label">{{ t('性别（选填）') }}</view>
+            <picker :range="sexOptions" @change="sex = String($event.detail.value)">
+              <view class="input picker-text">{{ sexOptions[Number(sex || 0)] }}</view>
             </picker>
           </view>
           <view>
-            <view class="label">生日（选填）</view>
+            <view class="label">{{ t('生日（选填）') }}</view>
             <input v-model="birthday" class="input" placeholder="1958-01-01" />
           </view>
           <view>
-            <view class="label">身高（选填）</view>
+            <view class="label">{{ t('身高（选填）') }}</view>
             <input v-model="height" class="input" type="number" placeholder="cm" />
           </view>
           <view>
-            <view class="label">体重（选填）</view>
+            <view class="label">{{ t('体重（选填）') }}</view>
             <input v-model="weight" class="input" type="number" placeholder="kg" />
           </view>
         </view>
       </template>
 
       <template v-if="mode === 'invite'">
-        <view class="label">输入邀请码</view>
-        <input v-model="inviteCode" class="input" placeholder="例如：FAM123456" />
+        <view class="label">{{ t('输入邀请码') }}</view>
+        <input v-model="inviteCode" class="input" :placeholder="t('例如：FAM123456')" />
         <view v-if="generatedInvite" class="invite-box">
-          <view class="invite-label">已生成邀请码</view>
+          <view class="invite-label">{{ t('已生成邀请码') }}</view>
           <view class="invite-code">{{ generatedInvite }}</view>
-          <view class="invite-expire">7 天内有效，有效期至 {{ inviteExpireTime }}</view>
-          <view class="invite-desc">复制后发送给家人。对方打开小程序，在“邀请码”中输入后即可处理共享授权。</view>
-          <uv-button text="复制邀请信息" color="#2E70FC" :customStyle="{ height: '78rpx', marginTop: '18rpx' }" :customTextStyle="{ fontSize: '30rpx' }" @click="copyGeneratedInvite" />
+          <view class="invite-expire">{{ t('7 天内有效，有效期至 {time}', { time: inviteExpireTime }) }}</view>
+          <view class="invite-desc">{{ t('复制后发送给家人。对方打开小程序，在“邀请码”中输入后即可处理共享授权。') }}</view>
+          <uv-button :text="t('复制邀请信息')" color="#2E70FC" :customStyle="{ height: '78rpx', marginTop: '18rpx' }" :customTextStyle="{ fontSize: '30rpx' }" @click="copyGeneratedInvite" />
         </view>
       </template>
     </view>
 
     <view class="tips">
-      <view class="tips-title">推荐流程</view>
-      <view class="tips-line">1. 先添加父母档案</view>
-      <view class="tips-line">2. 再为父母绑定设备</view>
-      <view class="tips-line">3. 父母佩戴后，子女即可查看健康状态</view>
+      <view class="tips-title">{{ t('推荐流程') }}</view>
+      <view class="tips-line">{{ t('1. 先添加父母档案') }}</view>
+      <view class="tips-line">{{ t('2. 再为父母绑定设备') }}</view>
+      <view class="tips-line">{{ t('3. 父母佩戴后，子女即可查看健康状态') }}</view>
     </view>
 
     <view class="bottom-action">
       <uv-button
         v-if="mode === 'profile'"
         :loading="submitting"
-        text="保存并继续绑定设备"
+        :text="t('保存并继续绑定设备')"
         color="#2E70FC"
         :customStyle="{ height: '96rpx' }"
         :customTextStyle="{ fontSize: '34rpx' }"
@@ -218,16 +226,16 @@ const acceptInvite = async () => {
       <uv-button
         v-else-if="mode === 'phone'"
         :loading="submitting"
-        text="搜索并添加"
+        :text="t('搜索并添加')"
         color="#2E70FC"
         :customStyle="{ height: '96rpx' }"
         :customTextStyle="{ fontSize: '34rpx' }"
         @click="searchByPhone"
       />
       <view v-else class="invite-actions">
-        <uv-button :loading="submitting" text="接受邀请码" color="#2E70FC" :customStyle="{ height: '92rpx' }" :customTextStyle="{ fontSize: '32rpx' }" @click="acceptInvite" />
+        <uv-button :loading="submitting" :text="t('接受邀请码')" color="#2E70FC" :customStyle="{ height: '92rpx' }" :customTextStyle="{ fontSize: '32rpx' }" @click="acceptInvite" />
         <view class="button-gap"></view>
-        <uv-button :loading="submitting" text="生成邀请" color="#E8F0FF" :customStyle="{ height: '92rpx' }" :customTextStyle="{ color: '#2E70FC', fontSize: '32rpx' }" @click="createInvite" />
+        <uv-button :loading="submitting" :text="t('生成邀请')" color="#E8F0FF" :customStyle="{ height: '92rpx' }" :customTextStyle="{ color: '#2E70FC', fontSize: '32rpx' }" @click="createInvite" />
       </view>
     </view>
   </view>

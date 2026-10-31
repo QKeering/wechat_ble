@@ -1,6 +1,8 @@
 const ERROR_PROMPT_PATTERNS = [
   /失败|错误|异常|超时|请稍后|未返回|不可用|连接断开|加载失败/,
-  /request:fail|err_|timeout|failed|error|network/i
+  /失敗|錯誤|異常|逾時|請稍後|未回傳|不可用|連線中斷|載入失敗/,
+  /request:fail|err_|timeout|failed|error|network/i,
+  /fail|unavailable|not available|try again|later|disconnected|timed out/i
 ];
 
 let installed = false;

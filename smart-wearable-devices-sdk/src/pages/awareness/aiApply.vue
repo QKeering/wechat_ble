@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
+import { useI18n } from '@/i18n';
 import { applyAiLab } from '@/common/api/aiLab';
 import { formatBleErrorMessage } from '@/utils/bleError';
+
+const { t } = useI18n();
 
 const statusBarHeight = ref(0);
 const isSubmitting = ref(false);
@@ -15,7 +18,7 @@ onMounted(() => {
 const handleSuccess = () => {
   uni.hideLoading();
   uni.showToast({
-    title: '申请已提交，请等待审核',
+    title: t('申请已提交，请等待审核'),
     icon: 'success',
     duration: 2000
   });
@@ -55,10 +58,10 @@ const handleSuccess = () => {
 //   uni.$emit('refreshAiStatus');
 // };
 
-const handleFail = (msg: unknown = '申请失败') => {
+const handleFail = (msg: unknown = t('申请失败')) => {
   uni.hideLoading();
   uni.showToast({
-    title: formatBleErrorMessage(msg, '申请失败，请稍后重试'),
+    title: t(formatBleErrorMessage(msg, '申请失败，请稍后重试')),
     icon: 'none',
     duration: 2000
   });
@@ -70,7 +73,7 @@ const handleApply = async () => {
   if (isSubmitting.value) return;
   isSubmitting.value = true;
 
-  uni.showLoading({ title: '提交中...' });
+  uni.showLoading({ title: t('提交中...') });
 
   try {
     const params: any = {};
@@ -114,11 +117,11 @@ const goBack = () => {
           <!-- <text class="icon-text">🧠</text> -->
           <uv-image src="/static/images/brain.png" width="100rpx" height="100rpx"></uv-image>
         </view>
-    <view class="ai-hero-title">AI智能体实验室</view>
+    <view class="ai-hero-title">{{ t('AI智能体实验室') }}</view>
         <view class="ai-hero-desc">
-          基于QKeer轻刻Al戒指数据
+          {{ t('基于QKeer轻刻Al戒指数据') }}
           <br />
-          AI 智能体的应用
+          {{ t('AI 智能体的应用') }}
         </view>
       </view>
 
@@ -127,11 +130,11 @@ const goBack = () => {
         <view class="invite-code-card">
           <view class="input-label">
             <text class="label-icon">🎟️</text>
-            <text class="label-text">邀请码</text>
-            <text class="label-hint">（选填）</text>
+            <text class="label-text">{{ t('邀请码') }}</text>
+            <text class="label-hint">{{ t('（选填）') }}</text>
           </view>
           <view class="input-wrapper">
-            <input v-model="inviteCode" type="text" placeholder="请输入邀请码" placeholder-class="input-placeholder" class="invite-input" maxlength="20" />
+            <input v-model="inviteCode" type="text" :placeholder="t('请输入邀请码')" placeholder-class="input-placeholder" class="invite-input" maxlength="20" />
           </view>
         </view>
       </view>
@@ -141,10 +144,10 @@ const goBack = () => {
         <view class="intro-card">
           <view class="card-header">
             <text class="header-icon">💡</text>
-            <text class="header-title">抢先体验新功能</text>
+            <text class="header-title">{{ t('抢先体验新功能') }}</text>
           </view>
           <view class="card-body">
-        <text class="body-text">轻刻体验中心让您有机会在创新功能正式上线前，抢先体验并参与优化。</text>
+        <text class="body-text">{{ t('轻刻体验中心让您有机会在创新功能正式上线前，抢先体验并参与优化。') }}</text>
           </view>
         </view>
       </view>
@@ -153,7 +156,7 @@ const goBack = () => {
     <!-- 底部固定按钮 -->
     <view class="apply-bottom">
       <button class="apply-btn" :disabled="isSubmitting" @click="handleApply">
-        {{ isSubmitting ? '提交中...' : '申请体验' }}
+        {{ isSubmitting ? t('提交中...') : t('申请体验') }}
       </button>
     </view>
   </view>

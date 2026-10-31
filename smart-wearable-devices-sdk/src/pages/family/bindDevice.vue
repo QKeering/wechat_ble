@@ -1,12 +1,16 @@
 <script setup lang="ts">
+import '@/pages/family/i18n/pack';
 import { computed, ref } from 'vue';
 import { onLoad, onUnload } from '@dcloudio/uni-app';
 import { bindFamilyDevice, bindFamilyRelationDevice, type FamilyDeviceBindPayload } from '@/common/api/family';
 import { getBoundRingDevice } from '@/api';
+import { useI18n } from '@/i18n';
 import { getBoundRingIdentity } from '@/utils/ringBinding';
 import { getRingBusinessDeviceName, useRingBusinessController } from '@/composables/useRingBusinessController';
 import { getRingDeviceStableIdentity } from '@/composables/useRingBleSdk';
 import { formatBleErrorMessage } from '@/utils/bleError';
+
+const { t } = useI18n();
 
 const memberId = ref(0);
 const relationId = ref(0);
@@ -19,7 +23,8 @@ const submitting = ref(false);
 const ring = useRingBusinessController();
 const scanDevices = computed(() => (ring.businessDevices.value as Record<string, any>[]).filter((device) => !isBoundLocalDevice(device)));
 const scanning = computed(() => ring.isScanning.value);
-const scanDeviceName = (device: Record<string, any>) => getRingBusinessDeviceName(device as any) || '戒指设备';
+const scanDeviceName = (device: Record<string, any>) => getRingBusinessDeviceName(device as any) || t('戒指设备');
+const defaultDeviceName = () => t('{name}的设备', { name: memberName.value || t('家人') });
 const scanDeviceIdentity = (device: Record<string, any>) =>
   getRingDeviceStableIdentity(device as any) || device.uniMacId || device.deviceId || '-';
 
@@ -68,12 +73,12 @@ const buildPayload = (forceBind = false): FamilyDeviceBindPayload => ({
   uniMacId: localDevice.value?.uniMacId,
   protocol: localDevice.value?.protocol,
   advertis: localDevice.value?.advertis,
-  deviceName: deviceName.value.trim() || `${memberName.value || '家人'}的设备`,
+  deviceName: deviceName.value.trim() || defaultDeviceName(),
   forceBind
 });
 
 const finishBind = () => {
-  uni.showToast({ title: '绑定成功', icon: 'success' });
+  uni.showToast({ title: t('绑定成功'), icon: 'success' });
   setTimeout(() => {
     const relationQuery = relationId.value ? `&relationId=${relationId.value}` : '';
     uni.redirectTo({ url: `/pages/family/memberDetail?memberId=${memberId.value}${relationQuery}` });
@@ -92,9 +97,12 @@ const submitBind = async (forceBind = false) => {
 
 const confirmForceBind = (message: string) => {
   uni.showModal({
-    title: '设备已被绑定',
-    content: `${message}。确认后，该设备之后同步的数据会写入 ${memberName.value || '这位家人'} 的健康档案。`,
-    confirmText: '确认重绑',
+    title: t('设备已被绑定'),
+    content: t('{message}。确认后，该设备之后同步的数据会写入 {name} 的健康档案。', {
+      message,
+      name: memberName.value || t('这位家人')
+    }),
+    confirmText: t('确认重绑'),
     confirmColor: '#DC2626',
     success: async (res) => {
       if (!res.confirm) return;
@@ -122,7 +130,7 @@ const searchDevices = async () => {
   try {
     await ring.scanForBusinessDevices();
   } catch (error: any) {
-    uni.showToast({ title: formatBleErrorMessage(error, '搜索设备失败，请检查蓝牙'), icon: 'none' });
+    uni.showToast({ title: t(formatBleErrorMessage(error, '搜索设备失败，请检查蓝牙')), icon: 'none' });
   }
 };
 
@@ -135,7 +143,7 @@ const selectScanDevice = async (device: Record<string, any>) => {
     device.uniMacId ||
     device.deviceId ||
     '';
-  deviceName.value = getRingBusinessDeviceName(device as any) || `${memberName.value || '家人'}的设备`;
+  deviceName.value = getRingBusinessDeviceName(device as any) || defaultDeviceName();
   await ring.stopScan();
 };
 
@@ -144,19 +152,19 @@ const scanCode = async () => {
     const result = await uni.scanCode({});
     localDevice.value = null;
     mac.value = result.result || '';
-    if (!deviceName.value) deviceName.value = `${memberName.value || '家人'}的设备`;
+    if (!deviceName.value) deviceName.value = defaultDeviceName();
   } catch {
-    uni.showToast({ title: '扫码取消或失败', icon: 'none' });
+    uni.showToast({ title: t('扫码取消或失败'), icon: 'none' });
   }
 };
 
 const submit = async () => {
   if (!memberId.value && !relationId.value) {
-    uni.showToast({ title: '家人信息缺失', icon: 'none' });
+    uni.showToast({ title: t('家人信息缺失'), icon: 'none' });
     return;
   }
   if (!mac.value.trim()) {
-    uni.showToast({ title: '请输入或扫码获取设备 MAC', icon: 'none' });
+    uni.showToast({ title: t('请输入或扫码获取设备 MAC'), icon: 'none' });
     return;
   }
   submitting.value = true;
@@ -167,9 +175,9 @@ const submit = async () => {
     const rawMessage = String(error?.msg || error?.message || error?.data?.msg || '');
     const message = formatBleErrorMessage(error, '绑定失败，请稍后重试');
     if (rawMessage.includes('已绑定其他健康档案')) {
-      confirmForceBind(rawMessage || '该设备已绑定其他健康档案');
+      confirmForceBind(rawMessage || t('该设备已绑定其他健康档案'));
     } else {
-      uni.showToast({ title: message, icon: 'none' });
+      uni.showToast({ title: t(message), icon: 'none' });
     }
   } finally {
     submitting.value = false;
@@ -181,7 +189,7 @@ onLoad((query: any) => {
   relationId.value = Number(query?.relationId || 0);
   memberName.value = decodeURIComponent(query?.name || '');
   void loadBoundLocalDevice();
-  deviceName.value = memberName.value ? `${memberName.value}的设备` : '';
+  deviceName.value = memberName.value ? defaultDeviceName() : '';
 });
 
 onUnload(() => {
@@ -191,23 +199,23 @@ onUnload(() => {
 
 <template>
   <view class="page">
-    <uv-navbar placeholder title="绑定父母设备" bgColor="#f1f3f6"></uv-navbar>
+    <uv-navbar placeholder :title="t('绑定父母设备')" bgColor="#f1f3f6"></uv-navbar>
 
     <view class="intro">
-      <view class="intro-title">给{{ memberName || '家人' }}绑定设备</view>
-      <view class="intro-desc">绑定后，设备同步的数据会归属到这位家人的健康档案，家人端可查看健康状态。</view>
+      <view class="intro-title">{{ t('给{name}绑定设备', { name: memberName || t('家人') }) }}</view>
+      <view class="intro-desc">{{ t('绑定后，设备同步的数据会归属到这位家人的健康档案，家人端可查看健康状态。') }}</view>
     </view>
 
     <view class="form-card">
-      <view class="label">设备 MAC / SN</view>
-      <input v-model="mac" class="input" placeholder="请输入设备 MAC，或扫码获取" />
+      <view class="label">{{ t('设备 MAC / SN') }}</view>
+      <input v-model="mac" class="input" :placeholder="t('请输入设备 MAC，或扫码获取')" />
 
       <view class="row-actions">
-        <uv-button text="扫码" color="#E8F0FF" :customTextStyle="{ color: '#2E70FC', fontSize: '28rpx' }" :customStyle="{ width: '100%', height: '80rpx' }" @click="scanCode" />
+        <uv-button :text="t('扫码')" color="#E8F0FF" :customTextStyle="{ color: '#2E70FC', fontSize: '28rpx' }" :customStyle="{ width: '100%', height: '80rpx' }" @click="scanCode" />
       </view>
 
       <uv-button
-        :text="scanning ? '停止搜索' : '搜索附近设备'"
+        :text="scanning ? t('停止搜索') : t('搜索附近设备')"
         color="#E8F0FF"
         :customStyle="{ width: '100%', height: '80rpx', marginTop: '18rpx' }"
         :customTextStyle="{ color: '#2E70FC', fontSize: '28rpx' }"
@@ -230,17 +238,17 @@ onUnload(() => {
         </view>
       </view>
 
-      <view class="label">设备名称</view>
-      <input v-model="deviceName" class="input" placeholder="例如：爸爸的戒指" />
+      <view class="label">{{ t('设备名称') }}</view>
+      <input v-model="deviceName" class="input" :placeholder="t('例如：爸爸的戒指')" />
     </view>
 
     <view class="notice">
-      <view class="notice-title">数据归属说明</view>
-      <view class="notice-text">如果子女手机给父母设备同步数据，后端会根据设备绑定关系自动写入父母档案，不会混入子女自己的健康数据。</view>
+      <view class="notice-title">{{ t('数据归属说明') }}</view>
+      <view class="notice-text">{{ t('如果子女手机给父母设备同步数据，后端会根据设备绑定关系自动写入父母档案，不会混入子女自己的健康数据。') }}</view>
     </view>
 
     <view class="bottom-action">
-      <uv-button :loading="submitting" text="确认绑定" color="#2E70FC" :customStyle="{ height: '96rpx' }" :customTextStyle="{ fontSize: '34rpx' }" @click="submit" />
+      <uv-button :loading="submitting" :text="t('确认绑定')" color="#2E70FC" :customStyle="{ height: '96rpx' }" :customTextStyle="{ fontSize: '34rpx' }" @click="submit" />
     </view>
   </view>
 </template>

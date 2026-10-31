@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import '@/pages/family/i18n/pack';
 import { computed, ref } from 'vue';
 import { onLoad, onPullDownRefresh } from '@dcloudio/uni-app';
 import {
@@ -7,7 +8,10 @@ import {
   removeFamilyMember,
   type FamilyDashboard
 } from '@/common/api/family';
+import { useI18n } from '@/i18n';
 import { getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
+
+const { t } = useI18n();
 
 const memberId = ref(0);
 const relationId = ref(0);
@@ -39,9 +43,12 @@ const device = computed(() => {
 const hasDeviceBinding = computed(() => hasBoundRingIdentity(device.value));
 const deviceIdentity = computed(() => getBoundRingIdentity(device.value));
 const deviceStatusText = computed(() => {
-  if (!hasDeviceBinding.value) return '还没有给这位家人绑定设备';
+  if (!hasDeviceBinding.value) return t('还没有给这位家人绑定设备');
   const label = device.value.deviceName || deviceIdentity.value;
-  return `${label} · ${device.value.online ? '最近已同步' : '可能离线'}`;
+  return t('{label} · {status}', {
+    label,
+    status: device.value.online ? t('最近已同步') : t('可能离线')
+  });
 });
 
 const overallStatus = computed(() => {
@@ -80,7 +87,7 @@ const fetchDashboard = async () => {
 
 const openBind = () => {
   if (hasDeviceBinding.value) {
-    uni.showToast({ title: '该家人已绑定设备', icon: 'none' });
+    uni.showToast({ title: t('该家人已绑定设备'), icon: 'none' });
     return;
   }
   const relationQuery = relationId.value ? `&relationId=${relationId.value}` : '';
@@ -94,18 +101,18 @@ const openPermission = () => {
 
 const removeMember = () => {
   if (!memberId.value || removing.value) return;
-  const name = member.value?.name || '这位家人';
+  const name = member.value?.name || t('这位家人');
   uni.showModal({
-    title: '移除家人',
-    content: `移除后将取消与${name}的守护关系，不能继续查看健康数据。如需恢复，需要重新添加并申请。`,
-    confirmText: '确认移除',
+    title: t('移除家人'),
+    content: t('移除后将取消与{name}的守护关系，不能继续查看健康数据。如需恢复，需要重新添加并申请。', { name }),
+    confirmText: t('确认移除'),
     confirmColor: '#DC2626',
     success: async (result) => {
       if (!result.confirm) return;
       removing.value = true;
       try {
         await removeFamilyMember({ memberId: memberId.value });
-        uni.showToast({ title: '已移除家人', icon: 'success' });
+        uni.showToast({ title: t('已移除家人'), icon: 'success' });
         setTimeout(() => {
           uni.redirectTo({ url: '/pages/family/family' });
         }, 500);
@@ -133,34 +140,34 @@ onPullDownRefresh(async () => {
 
 <template>
   <view class="page">
-    <uv-navbar placeholder title="家人详情" bgColor="#f1f3f6"></uv-navbar>
+    <uv-navbar placeholder :title="t('家人详情')" bgColor="#f1f3f6"></uv-navbar>
 
-    <view v-if="loading && !dashboard" class="loading">正在加载健康状态...</view>
+    <view v-if="loading && !dashboard" class="loading">{{ t('正在加载健康状态...') }}</view>
 
     <template v-else>
       <view class="status-card" :class="overallClass">
         <view class="member-line">
-          <view class="avatar">{{ member?.name?.slice(0, 1) || '家' }}</view>
+          <view class="avatar">{{ member?.name?.slice(0, 1) || t('家') }}</view>
           <view>
-            <view class="name">{{ member?.name || '家人' }}</view>
-            <view class="sub">设备 {{ hasDeviceBinding ? '已绑定' : '未绑定' }}</view>
+            <view class="name">{{ member?.name || t('家人') }}</view>
+            <view class="sub">{{ t('设备 {status}', { status: hasDeviceBinding ? t('已绑定') : t('未绑定') }) }}</view>
           </view>
         </view>
-        <view class="status-text">{{ overallStatus }}</view>
+        <view class="status-text">{{ t(overallStatus) }}</view>
       </view>
 
       <view class="device-card">
         <view>
-          <view class="card-title">设备状态</view>
+          <view class="card-title">{{ t('设备状态') }}</view>
           <view class="card-desc">
             {{ deviceStatusText }}
           </view>
         </view>
         <view class="device-actions">
-          <uv-button text="共享权限" color="#E8F0FF" :customStyle="{ width: '172rpx', height: '72rpx' }" :customTextStyle="{ color: '#2E70FC', fontSize: '28rpx' }" @click="openPermission" />
+          <uv-button :text="t('共享权限')" color="#E8F0FF" :customStyle="{ width: '172rpx', height: '72rpx' }" :customTextStyle="{ color: '#2E70FC', fontSize: '28rpx' }" @click="openPermission" />
           <view class="action-gap"></view>
           <uv-button
-            :text="hasDeviceBinding ? '已绑定设备' : '绑定设备'"
+            :text="hasDeviceBinding ? t('已绑定设备') : t('绑定设备')"
             :disabled="hasDeviceBinding"
             :color="hasDeviceBinding ? '#E5E7EB' : '#2E70FC'"
             :customStyle="{ width: '172rpx', height: '72rpx' }"
@@ -172,14 +179,14 @@ onPullDownRefresh(async () => {
 
       <view class="metrics">
         <view v-for="item in metricCards" :key="item.label" class="metric-card">
-          <view class="metric-label">{{ item.label }}</view>
-          <view class="metric-value">{{ item.value }}<text class="metric-unit">{{ item.unit }}</text></view>
+          <view class="metric-label">{{ t(item.label) }}</view>
+          <view class="metric-value">{{ item.value }}<text class="metric-unit">{{ t(item.unit) }}</text></view>
         </view>
       </view>
 
       <view class="section">
-        <view class="section-title">异常提醒</view>
-        <view v-if="alerts.length === 0" class="soft-text">暂无明显异常，继续保持佩戴和同步。</view>
+        <view class="section-title">{{ t('异常提醒') }}</view>
+        <view v-if="alerts.length === 0" class="soft-text">{{ t('暂无明显异常，继续保持佩戴和同步。') }}</view>
         <view v-for="alert in alerts" :key="alert.alertType" class="alert-item" :class="alert.level">
           <view class="alert-title">{{ alert.title }}</view>
           <view class="alert-content">{{ alert.content }}</view>
@@ -189,7 +196,7 @@ onPullDownRefresh(async () => {
       <view class="remove-action">
         <uv-button
           :loading="removing"
-          text="移除家人"
+          :text="t('移除家人')"
           color="#FFF0F0"
           :customStyle="{ width: '100%', height: '92rpx' }"
           :customTextStyle="{ color: '#DC2626', fontSize: '32rpx', fontWeight: 700 }"

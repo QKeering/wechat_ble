@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import '@/pagesA/healths/i18n/pack';
 import { ref, computed } from 'vue';
 import { onLoad, onPageScroll, onShow } from '@dcloudio/uni-app';
+import { useI18n } from '@/i18n';
 import sleepEchartItem from '@/components/sleepEchartItem.vue';
 import { defaultEchartOption, sleepTimeOption } from '@/pagesA/echartOptions/sleepRhythmOptions';
 import lineProgresss from '@/pagesA/components/lineProgress.vue';
@@ -8,6 +10,8 @@ import { getSleepRhythmDetail } from '@/common/api/heatlthSummary';
 import type { SleepRhythmResp, TrendChartItemS } from '@/types/api/healthSummary';
 import { cloneDeep } from 'lodash-es';
 import echarts from '@/utils/echarts';
+
+const { t } = useI18n();
 
 const sleepRhythmInfo = ref<SleepRhythmResp>();
 const getProcessedOption = () => {
@@ -127,7 +131,7 @@ onLoad(async () => {
   sleepRhythmInfo.value = await getSleepRhythmDetail();
   if (!sleepRhythmInfo.value) {
     uni.showToast({
-      title: '暂无数据',
+      title: t('暂无数据'),
       icon: 'none'
     });
   }
@@ -137,15 +141,15 @@ onLoad(async () => {
 <template>
   <view class="pl-30 pr-30 pt-30">
     <sleepEchartItem
-      title="睡眠节律"
-      :subtitle="sleepRhythmInfo?.overview?.level || '--'"
+      :title="t('睡眠节律')"
+      :subtitle="t(sleepRhythmInfo?.overview?.level || '--')"
       :dateRange="sleepRhythmInfo?.overview?.dateRange || '--'"
       @chart-finished="(chartRef) => initChart(chartRef)"
     >
       <template #comparison>
         <!-- <view class="tag flex ai-center ml-20 p-10"> -->
         <view class="flex ai-center ml-20 p-10" :class="[sleepRhythmInfo?.overview?.trend !== '保持不变' ? 'tag' : 'date-tag']">
-          <text>{{ sleepRhythmInfo?.overview?.trend || '--' }}</text>
+          <text>{{ t(sleepRhythmInfo?.overview?.trend || '--') }}</text>
           <view v-if="sleepRhythmInfo?.overview?.trend !== '保持不变'">
             <uv-image
               src="/static/images/homeDetail/orArrowBottom.png"
@@ -157,7 +161,7 @@ onLoad(async () => {
         </view>
       </template>
     </sleepEchartItem>
-    <sleepEchartItem title="睡眠规律性" :showChartDate="false" :showSecoundTopTitle="false" @chart-finished="(chartRef) => lightSleepTimeChart(chartRef)"></sleepEchartItem>
+    <sleepEchartItem :title="t('睡眠规律性')" :showChartDate="false" :showSecoundTopTitle="false" @chart-finished="(chartRef) => lightSleepTimeChart(chartRef)"></sleepEchartItem>
     <uv-safe-bottom></uv-safe-bottom>
   </view>
 </template>

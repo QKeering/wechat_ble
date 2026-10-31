@@ -3,7 +3,7 @@
     <view class="edit-period-modal">
       <!-- 模态框头部 -->
       <view class="modal-header">
-        <text class="modal-title">修正经期信息</text>
+        <text class="modal-title">{{ t('修正经期信息') }}</text>
         <view class="modal-close" @tap="onClose">
           <uv-icon name="close" size="24" color="#909399" />
         </view>
@@ -12,7 +12,7 @@
       <!-- 经期开始日期 -->
       <view class="modal-section">
         <view class="section-label">
-          <text class="label-text">经期开始日期</text>
+          <text class="label-text">{{ t('经期开始日期') }}</text>
 		   <text class="date-value" style="float: right;">{{ displayStartDate }}</text>
         </view>
        <!-- <view class="date-display" @tap="onDatePick">
@@ -69,7 +69,7 @@
       <!-- 周期天数 -->
       <view class="modal-section">
         <view class="section-label">
-          <text class="label-text">周期天数</text>
+          <text class="label-text">{{ t('周期天数') }}</text>
         </view>
         <view class="counter-row">
           <view class="counter-btn" @tap="decreaseCycleDays">
@@ -86,7 +86,7 @@
             <uv-icon name="plus" size="20" color="#ff4081" />
           </view>
           <view class="counter-hint">
-            <text class="hint-text">正常范围：21-35 天</text>
+            <text class="hint-text">{{ t('正常范围：21-35 天') }}</text>
           </view>
         </view>
       </view>
@@ -94,7 +94,7 @@
       <!-- 经期天数 -->
       <view class="modal-section">
         <view class="section-label">
-          <text class="label-text">经期天数</text>
+          <text class="label-text">{{ t('经期天数') }}</text>
         </view>
         <view class="counter-row">
           <view class="counter-btn" @tap="decreasePeriodDays">
@@ -111,7 +111,7 @@
             <uv-icon name="plus" size="20" color="#ff4081" />
           </view>
           <view class="counter-hint">
-            <text class="hint-text">正常范围：3-7 天</text>
+            <text class="hint-text">{{ t('正常范围：3-7 天') }}</text>
           </view>
         </view>
       </view>
@@ -120,9 +120,9 @@
       <view class="modal-footer">
 		  <button class="footer-btn footer-btn--save" @tap="onSave">
 		    <uv-icon name="checkmark" size="20" color="#ffffff" />
-		    <text class="save-text">保存修改</text>
+		    <text class="save-text">{{ t('保存修改') }}</text>
 		  </button>
-        <button class="footer-btn footer-btn--cancel" @tap="onCancel">取消</button>
+        <button class="footer-btn footer-btn--cancel" @tap="onCancel">{{ t('取消') }}</button>
        
       </view>
     </view>
@@ -130,10 +130,16 @@
 </template>
 
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch } from 'vue';
 
+const { t } = useI18n();
+
 // 星期标题
-const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
+const weekDays = computed(() =>
+  ['@week.sun', '@week.mon', '@week.tue', '@week.wed', '@week.thu', '@week.fri', '@week.sat'].map((k) => t(k))
+);
 
 // 弹窗显示状态
 const visible = ref(false);
@@ -184,21 +190,21 @@ const onSave = () => {
   // 验证数据
   if (!formData.value.startDate) {
     uni.showToast({
-      title: '请选择开始日期',
+      title: t('请选择开始日期'),
       icon: 'none'
     });
     return;
   }
   if(!formData.value.cycleDays){
 	  uni.showToast({
-	    title: '请选择周期天数',
+	    title: t('请选择周期天数'),
 	    icon: 'none'
 	  });
 	  return;
   }
   if(!formData.value.periodDays){
 	  uni.showToast({
-	    title: '请选择经期天数',
+	    title: t('请选择经期天数'),
 	    icon: 'none'
 	  });
 	  return;
@@ -228,18 +234,18 @@ const onSave = () => {
 // 显示的开始日期
 const displayStartDate = computed(() => {
   if (!formData.value.startDate) {
-    return '请选择日期';
+    return t('请选择日期');
   }
   const date = new Date(formData.value.startDate);
   const year = date.getFullYear();
   const month = date.getMonth() + 1;
   const day = date.getDate();
-  return `${year}年${month}月${day}日`;
+  return t('{year}年{month}月{day}日', { year, month, day });
 });
 
 // 日历标题
 const calendarTitle = computed(() => {
-  return `${currentYear.value}年${currentMonth.value + 1}月`;
+  return t('{year}年{month}月', { year: currentYear.value, month: currentMonth.value + 1 });
 });
 
 // 生成日历数据

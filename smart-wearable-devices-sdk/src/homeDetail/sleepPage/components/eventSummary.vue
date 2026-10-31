@@ -1,9 +1,13 @@
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed } from 'vue';
 import ProgressBar from '@/components/progressBar.vue';
 import { todayOption, lastWeekOption } from '@/homeDetail/relaxStatus/echartOptions';
 import { getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';
 import echarts from '@/utils/echarts';
+
+const { t } = useI18n();
 const todayRef = ref(null);
 const lastWeekRef = ref(null);
 import type { sleepSummaryData } from '@/types/api/homeDetail';
@@ -30,7 +34,7 @@ const getCurrentWeekRange = () => {
   const formatDate = (date: Date) => {
     const month = date.getMonth() + 1; // 月份从0开始，需要+1
     const day = date.getDate();
-    return `${month}月${day}日`;
+    return t('{month}月{day}日', { month, day });
   };
 
   return `${formatDate(startDate)}-${formatDate(endDate)}`;
@@ -48,9 +52,9 @@ const growthTimeText = computed(() => {
   const hours = getSleepDurationHours(absoluteGrowthTime);
   const minutes = getSleepDurationMinutes(absoluteGrowthTime);
   if (hours === '00') {
-    return `${minutes}分钟`;
+    return t('{value}分钟', { value: minutes });
   }
-  return `${hours}小时${minutes}分钟`;
+  return t('{hours}小时{minutes}分钟', { hours, minutes });
 });
 const sleepPercentage = computed(() => {
   const sleepMinutes = props.sleepSummaryObj.sleepMinutes || 0;
@@ -88,18 +92,17 @@ const sleepAvgPercentage = computed(() => {
 <template>
   <view class="bg-white r-50 mb-30 p-30">
     <view class="flex jc-start">
-      <view class="fs-36">睡眠总结</view>
+      <view class="fs-36">{{ t('睡眠总结') }}</view>
     </view>
     <view class="fs-28 mt-30">
-      截止到此时，您的昨晚的睡眠时长{{ growthText }}
-      <text style="color: #5f57ec">{{ growthTimeText }}</text>
+      {{ t('截止到此时，您的昨晚的睡眠时长{direction}{duration}。', { direction: t(growthText), duration: growthTimeText }) }}
     </view>
     <view class="mt-50">
-      <text class="fs-28">昨晚</text>
+      <text class="fs-28">{{ t('昨晚') }}</text>
       <text class="fs-48">{{ getSleepDurationHours(sleepSummaryObj.sleepMinutes) }}</text>
-      <text class="fs-24">小时</text>
+      <text class="fs-24">{{ t('小时') }}</text>
       <text class="fs-48">{{ getSleepDurationMinutes(sleepSummaryObj.sleepMinutes) }}</text>
-      <text class="fs-24">分钟</text>
+      <text class="fs-24">{{ t('分钟') }}</text>
     </view>
     <view class="mt-20" style="border-radius: 14rpx; overflow: hidden">
       <uv-line-progress
@@ -113,11 +116,11 @@ const sleepAvgPercentage = computed(() => {
     </view>
     <view class="mt-40">
       <text class="fs-28">{{ currentWeekRange }}</text>
-      <text class="fs-24 ml-20">平均</text>
+      <text class="fs-24 ml-20">{{ t('平均') }}</text>
       <text class="fs-48">{{ getSleepDurationHours(sleepSummaryObj.avgSleepMinutes7d) }}</text>
-      <text class="fs-24">小时</text>
+      <text class="fs-24">{{ t('小时') }}</text>
       <text class="fs-48">{{ getSleepDurationMinutes(sleepSummaryObj.avgSleepMinutes7d) }}</text>
-      <text class="fs-24">分钟</text>
+      <text class="fs-24">{{ t('分钟') }}</text>
     </view>
     <view class="mt-20">
       <uv-line-progress
@@ -132,18 +135,18 @@ const sleepAvgPercentage = computed(() => {
     <view class="flex jc-between ai-center mt-50">
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start mr-30 pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">卧床时长</text>
+          <text class="fs-28">{{ t('卧床时长') }}</text>
         </view>
         <view class="">
           <text class="fs-36">{{ getSleepDurationHours(sleepSummaryObj.bedTime) }}</text>
-          <text class="fs-24">小时</text>
+          <text class="fs-24">{{ t('小时') }}</text>
           <text class="fs-36">{{ getSleepDurationMinutes(sleepSummaryObj.bedTime) }}</text>
-          <text class="fs-24">分钟</text>
+          <text class="fs-24">{{ t('分钟') }}</text>
         </view>
       </view>
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">睡眠效率</text>
+          <text class="fs-28">{{ t('睡眠效率') }}</text>
         </view>
         <view class="">
           <text class="fs-36">{{ sleepSummaryObj.sleepEfficiency || '00' }}</text>
@@ -154,20 +157,20 @@ const sleepAvgPercentage = computed(() => {
     <view class="flex jc-between ai-center mt-30">
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start mr-30 pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">睡眠心率</text>
+          <text class="fs-28">{{ t('睡眠心率') }}</text>
         </view>
         <view class="">
           <text class="fs-36">{{ sleepSummaryObj.sleepHeartRate || '00' }}</text>
-          <text class="fs-24">(次/分钟)</text>
+          <text class="fs-24">{{ t('(次/分钟)') }}</text>
         </view>
       </view>
       <view class="itemBottomBox r-50 flex fd-c jc-center ai-start pl-45">
         <view class="flex ai-center">
-          <text class="fs-28">睡眠总分</text>
+          <text class="fs-28">{{ t('睡眠总分') }}</text>
         </view>
         <view class="">
           <text class="fs-36">{{ sleepSummaryObj.sleepScore || '00' }}</text>
-          <text class="fs-24">分</text>
+          <text class="fs-24">{{ t('分') }}</text>
         </view>
       </view>
     </view>

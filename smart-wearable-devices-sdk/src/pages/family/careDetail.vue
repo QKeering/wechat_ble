@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import '@/pages/family/i18n/pack';
 import { computed, ref } from 'vue'
 import { onLoad, onPullDownRefresh } from '@dcloudio/uni-app'
+import { useI18n } from '@/i18n'
 import {
   getFamilyDashboard,
   getFamilyMotionOverview,
@@ -16,9 +18,11 @@ import {
 type AnyRecord = Record<string, any>
 type ModuleKey = 'sleep' | 'heart' | 'oxygen' | 'steps'
 
+const { t } = useI18n()
+
 const memberId = ref(0)
 const relationId = ref(0)
-const routeName = ref('亲友')
+const routeName = ref('')
 const dashboard = ref<FamilyDashboard | null>(null)
 const vital = ref<AnyRecord>({})
 const sleep = ref<AnyRecord>({})
@@ -40,7 +44,7 @@ const cacheKey = computed(() => `family-care-detail:${relationId.value || `membe
 const member = computed<AnyRecord>(() => dashboard.value?.member || {})
 const device = computed<AnyRecord>(() => dashboard.value?.device || {})
 const summary = computed<AnyRecord>(() => dashboard.value?.summary || {})
-const displayName = computed(() => member.value.name || routeName.value || '亲友')
+const displayName = computed(() => member.value.name || routeName.value || t('亲友'))
 const permissions = computed<Record<string, boolean> | null>(() => {
   const value = member.value.permissions
   return value && typeof value === 'object' ? value : null
@@ -66,9 +70,9 @@ const sharedLabels = computed(() => {
 const lastSync = computed(() => device.value.lastSyncTime || member.value.lastSyncTime || '')
 const isFresh = computed(() => String(lastSync.value).slice(0, 10) === today())
 const lastSyncText = computed(() => {
-  if (!lastSync.value) return '暂无同步记录'
+  if (!lastSync.value) return t('暂无同步记录')
   const text = String(lastSync.value).replace('T', ' ')
-  return isFresh.value ? `今天 ${text.slice(11, 16)}` : text.slice(0, 16)
+  return isFresh.value ? t('今天 {time}', { time: text.slice(11, 16) }) : text.slice(0, 16)
 })
 
 function numberOf(...values: any[]) {
@@ -86,7 +90,7 @@ function minutesLabel(value: any) {
   if (!minutes) return '--'
   const hours = Math.floor(minutes / 60)
   const rest = minutes % 60
-  return hours ? `${hours}小时${rest}分` : `${rest}分钟`
+  return hours ? t('{hours}小时{rest}分', { hours, rest }) : t('{minutes}分钟', { minutes: rest })
 }
 
 function timeLabel(value: any) {
@@ -119,14 +123,14 @@ const sleepSegments = computed(() => {
 const sleepTrend = computed(() => {
   const rows = Array.isArray(sleep.value.trend7d) ? sleep.value.trend7d : []
   const maximum = Math.max(...rows.map((item: AnyRecord) => Number(item.sleepDuration || 0)), 1)
-  const labels = ['日', '一', '二', '三', '四', '五', '六']
+  const weekdayKeys = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
   return rows.map((item: AnyRecord) => {
     const dateValue = String(item.date || '')
     const dateObject = new Date(`${dateValue}T00:00:00`)
     const duration = Number(item.sleepDuration || 0)
     return {
       date: dateValue,
-      day: dateValue === today() ? '今天' : `周${labels[dateObject.getDay()] || ''}`,
+      day: dateValue === today() ? t('今天') : t(weekdayKeys[dateObject.getDay()] || ''),
       label: duration ? `${(duration / 60).toFixed(1)}h` : '--',
       height: `${Math.max(duration ? 12 : 3, duration / maximum * 100)}%`,
       today: dateValue === today(),
@@ -231,7 +235,7 @@ async function loadDetail(showLoading = true) {
     saveCache()
   } catch {
     loadFailed.value = !dashboard.value
-    if (showLoading) uni.showToast({ title: dashboard.value ? '网络异常，已显示上次数据' : '健康明细加载失败', icon: 'none' })
+    if (showLoading) uni.showToast({ title: dashboard.value ? t('网络异常，已显示上次数据') : t('健康明细加载失败'), icon: 'none' })
   } finally {
     loading.value = false
   }
@@ -244,7 +248,7 @@ function goBack() {
 onLoad((query?: AnyRecord) => {
   memberId.value = Number(query?.memberId || 0)
   relationId.value = Number(query?.relationId || 0)
-  routeName.value = decodeURIComponent(String(query?.name || '亲友'))
+  routeName.value = decodeURIComponent(String(query?.name || ''))
   restoreCache()
   loadDetail()
 })
@@ -259,14 +263,14 @@ onPullDownRefresh(async () => {
   <view class="page">
     <view class="nav">
       <view class="back" @tap="goBack">‹</view>
-      <text class="nav-title">亲友健康明细</text>
+      <text class="nav-title">{{ t('亲友健康明细') }}</text>
       <view class="nav-space" />
     </view>
 
     <view v-if="loadFailed" class="state-card">
-      <text class="state-title">暂时无法加载健康明细</text>
-      <text class="state-desc">请检查网络后重试</text>
-      <button class="retry" @tap="loadDetail()">重新加载</button>
+      <text class="state-title">{{ t('暂时无法加载健康明细') }}</text>
+      <text class="state-desc">{{ t('请检查网络后重试') }}</text>
+      <button class="retry" @tap="loadDetail()">{{ t('重新加载') }}</button>
     </view>
 
     <template v-else>
@@ -274,65 +278,65 @@ onPullDownRefresh(async () => {
         <view class="person">
           <view class="avatar">{{ displayName.slice(0, 1) }}</view>
           <view class="person-main">
-            <text class="person-name">{{ displayName }}的健康数据</text>
-            <text class="sync-text">最近同步：{{ lastSyncText }}</text>
+            <text class="person-name">{{ t('{name}的健康数据', { name: displayName }) }}</text>
+            <text class="sync-text">{{ t('最近同步：{time}', { time: lastSyncText }) }}</text>
           </view>
-          <text class="sync-tag" :class="{ stale: !isFresh }">{{ isFresh ? '已同步' : '最近数据' }}</text>
+          <text class="sync-tag" :class="{ stale: !isFresh }">{{ isFresh ? t('已同步') : t('最近数据') }}</text>
         </view>
         <view v-if="sharedLabels.length" class="share-list">
-          <text v-for="(label, index) in sharedLabels" :key="label" class="share-dot">{{ index === 0 ? `已共享：${label}` : label }}</text>
+          <text v-for="(label, index) in sharedLabels" :key="label" class="share-dot">{{ index === 0 ? t('已共享：{label}', { label: t(label) }) : t(label) }}</text>
         </view>
         <view class="freshness" :class="{ stale: !isFresh }">
           <view>
-            <text class="fresh-title">{{ fromCache ? '当前展示上次同步数据' : (isFresh ? '今日数据已更新' : '今日暂未同步新数据') }}</text>
-            <text class="fresh-desc">亲情关怀数据和提醒仅用于日常健康关注，不属于医疗监护服务。</text>
+            <text class="fresh-title">{{ fromCache ? t('当前展示上次同步数据') : (isFresh ? t('今日数据已更新') : t('今日暂未同步新数据')) }}</text>
+            <text class="fresh-desc">{{ t('亲情关怀数据和提醒仅用于日常健康关注，不属于医疗监护服务。') }}</text>
           </view>
         </view>
       </view>
 
       <view v-if="modules.length" class="module-tabs" :style="{ gridTemplateColumns: `repeat(${modules.length}, 1fr)` }">
         <view v-for="item in modules" :key="item.key" class="module-tab" :class="{ active: activeModule === item.key }" @tap="activeModule = item.key">
-          {{ item.label }}
+          {{ t(item.label) }}
         </view>
       </view>
 
       <view v-if="!modules.length" class="card empty-card">
-        <text class="empty-title">对方暂未共享健康明细</text>
-        <text class="empty-desc">共享权限更新后即可在这里查看</text>
+        <text class="empty-title">{{ t('对方暂未共享健康明细') }}</text>
+        <text class="empty-desc">{{ t('共享权限更新后即可在这里查看') }}</text>
       </view>
 
       <view v-else-if="activeModule === 'sleep'" class="card panel">
         <view class="section-head">
-          <view><text class="section-title">昨夜睡眠</text><text class="section-subtitle">阶段分布与近 7 天睡眠时长</text></view>
-          <text v-if="sleepData.score !== null" class="tag">评分 {{ rounded(sleepData.score) }}</text>
+          <view><text class="section-title">{{ t('昨夜睡眠') }}</text><text class="section-subtitle">{{ t('阶段分布与近 7 天睡眠时长') }}</text></view>
+          <text v-if="sleepData.score !== null" class="tag">{{ t('评分 {score}', { score: rounded(sleepData.score) }) }}</text>
         </view>
         <template v-if="sleepHasData">
-          <view class="sleep-total"><text class="big-number">{{ minutesLabel(sleepData.total) }}</text><text class="big-label">总睡眠</text></view>
+          <view class="sleep-total"><text class="big-number">{{ minutesLabel(sleepData.total) }}</text><text class="big-label">{{ t('总睡眠') }}</text></view>
           <view class="kpi-grid">
-            <view v-for="item in sleepSegments.slice(0, 3)" :key="item.key" class="kpi"><text class="kpi-num">{{ minutesLabel(item.value) }}</text><text class="kpi-label">{{ item.label }}</text></view>
+            <view v-for="item in sleepSegments.slice(0, 3)" :key="item.key" class="kpi"><text class="kpi-num">{{ minutesLabel(item.value) }}</text><text class="kpi-label">{{ t(item.label) }}</text></view>
           </view>
           <view class="timeline">
             <view class="time-row"><text>{{ timeLabel(sleepData.start) }}</text><text>{{ timeLabel(sleepData.end) }}</text></view>
             <view class="sleep-bar"><view v-for="item in sleepSegments" :key="item.key" class="segment" :class="item.key" :style="{ width: item.width }" /></view>
-            <view class="legend"><view v-for="item in sleepSegments" :key="item.key" class="legend-item"><text class="legend-dot" :class="item.key" />{{ item.label }}</view></view>
+            <view class="legend"><view v-for="item in sleepSegments" :key="item.key" class="legend-item"><text class="legend-dot" :class="item.key" />{{ t(item.label) }}</view></view>
           </view>
-          <view v-if="sleepTrend.length" class="trend-head"><view><text class="trend-title">近 7 天睡眠</text><text class="trend-subtitle">单位：小时</text></view></view>
+          <view v-if="sleepTrend.length" class="trend-head"><view><text class="trend-title">{{ t('近 7 天睡眠') }}</text><text class="trend-subtitle">{{ t('单位：小时') }}</text></view></view>
           <view v-if="sleepTrend.length" class="bars">
             <view v-for="item in sleepTrend" :key="item.date" class="bar-column">
               <text class="bar-value">{{ item.label }}</text><view class="bar-track"><view class="bar-fill sleep-fill" :class="{ today: item.today }" :style="{ height: item.height }" /></view><text class="bar-day">{{ item.day }}</text>
             </view>
           </view>
         </template>
-        <view v-else class="empty"><text class="empty-title">暂无睡眠数据</text><text class="empty-desc">待对方佩戴设备并完成同步后显示</text></view>
+        <view v-else class="empty"><text class="empty-title">{{ t('暂无睡眠数据') }}</text><text class="empty-desc">{{ t('待对方佩戴设备并完成同步后显示') }}</text></view>
       </view>
 
       <view v-else-if="activeModule === 'heart'" class="card panel">
-        <view class="section-head"><view><text class="section-title">心率</text><text class="section-subtitle">今日心率趋势</text></view><text class="tag">次/分</text></view>
+        <view class="section-head"><view><text class="section-title">{{ t('心率') }}</text><text class="section-subtitle">{{ t('今日心率趋势') }}</text></view><text class="tag">{{ t('次/分') }}</text></view>
         <template v-if="heartAvg !== null || heartBars.length">
           <view class="kpi-grid">
-            <view class="kpi"><text class="kpi-num">{{ rounded(heartAvg) }}</text><text class="kpi-label">平均心率</text></view>
-            <view class="kpi"><text class="kpi-num">{{ rounded(heartMin) }}</text><text class="kpi-label">最低心率</text></view>
-            <view class="kpi"><text class="kpi-num">{{ rounded(heartMax) }}</text><text class="kpi-label">最高心率</text></view>
+            <view class="kpi"><text class="kpi-num">{{ rounded(heartAvg) }}</text><text class="kpi-label">{{ t('平均心率') }}</text></view>
+            <view class="kpi"><text class="kpi-num">{{ rounded(heartMin) }}</text><text class="kpi-label">{{ t('最低心率') }}</text></view>
+            <view class="kpi"><text class="kpi-num">{{ rounded(heartMax) }}</text><text class="kpi-label">{{ t('最高心率') }}</text></view>
           </view>
           <view class="vital-chart-wrap">
             <view class="vital-y-axis"><text>180</text><text>140</text><text>100</text><text>60</text><text>20</text></view>
@@ -342,16 +346,16 @@ onPullDownRefresh(async () => {
             </view>
           </view>
         </template>
-        <view v-else class="empty"><text class="empty-title">暂无心率数据</text><text class="empty-desc">待对方完成设备同步后显示</text></view>
+        <view v-else class="empty"><text class="empty-title">{{ t('暂无心率数据') }}</text><text class="empty-desc">{{ t('待对方完成设备同步后显示') }}</text></view>
       </view>
 
       <view v-else-if="activeModule === 'oxygen'" class="card panel">
-        <view class="section-head"><view><text class="section-title">血氧饱和度</text><text class="section-subtitle">今日血氧趋势</text></view></view>
+        <view class="section-head"><view><text class="section-title">{{ t('血氧饱和度') }}</text><text class="section-subtitle">{{ t('今日血氧趋势') }}</text></view></view>
         <template v-if="oxygenAvg !== null || oxygenBars.length">
           <view class="kpi-grid">
-            <view class="kpi"><text class="kpi-num">{{ rounded(oxygenAvg) }}<text class="kpi-unit">%</text></text><text class="kpi-label">平均血氧</text></view>
-            <view class="kpi"><text class="kpi-num">{{ rounded(oxygenMin) }}<text class="kpi-unit">%</text></text><text class="kpi-label">最低血氧</text></view>
-            <view class="kpi"><text class="kpi-num">{{ rounded(oxygenMax) }}<text class="kpi-unit">%</text></text><text class="kpi-label">最高血氧</text></view>
+            <view class="kpi"><text class="kpi-num">{{ rounded(oxygenAvg) }}<text class="kpi-unit">%</text></text><text class="kpi-label">{{ t('平均血氧') }}</text></view>
+            <view class="kpi"><text class="kpi-num">{{ rounded(oxygenMin) }}<text class="kpi-unit">%</text></text><text class="kpi-label">{{ t('最低血氧') }}</text></view>
+            <view class="kpi"><text class="kpi-num">{{ rounded(oxygenMax) }}<text class="kpi-unit">%</text></text><text class="kpi-label">{{ t('最高血氧') }}</text></view>
           </view>
           <view class="vital-chart-wrap">
             <view class="vital-y-axis"><text>100</text><text>95</text><text>90</text><text>85</text><text>80</text></view>
@@ -361,21 +365,21 @@ onPullDownRefresh(async () => {
             </view>
           </view>
         </template>
-        <view v-else class="empty"><text class="empty-title">暂无血氧数据</text><text class="empty-desc">待对方完成设备同步后显示</text></view>
+        <view v-else class="empty"><text class="empty-title">{{ t('暂无血氧数据') }}</text><text class="empty-desc">{{ t('待对方完成设备同步后显示') }}</text></view>
       </view>
 
       <view v-else class="card panel">
-        <view class="section-head"><view><text class="section-title">今日步数</text><text class="section-subtitle">活动完成情况</text></view><text class="tag green">{{ stepPercent }}%</text></view>
+        <view class="section-head"><view><text class="section-title">{{ t('今日步数') }}</text><text class="section-subtitle">{{ t('活动完成情况') }}</text></view><text class="tag green">{{ stepPercent }}%</text></view>
         <template v-if="stepValue > 0">
-          <view class="step-total"><text class="step-number">{{ stepValue }}</text><text class="step-unit">步</text></view>
-          <view class="progress-head"><text>目标 {{ stepTarget }} 步</text><text>{{ stepValue }} / {{ stepTarget }}</text></view>
+          <view class="step-total"><text class="step-number">{{ stepValue }}</text><text class="step-unit">{{ t('步') }}</text></view>
+          <view class="progress-head"><text>{{ t('目标 {target} 步', { target: stepTarget }) }}</text><text>{{ stepValue }} / {{ stepTarget }}</text></view>
           <view class="progress"><view class="progress-value" :style="{ width: `${stepPercent}%` }" /></view>
           <view class="kpi-grid two">
-            <view class="kpi"><text class="kpi-num">{{ rounded(calorie) }}</text><text class="kpi-label">消耗（千卡）</text></view>
-            <view class="kpi"><text class="kpi-num">{{ rounded(motionTime) }}</text><text class="kpi-label">活动（分钟）</text></view>
+            <view class="kpi"><text class="kpi-num">{{ rounded(calorie) }}</text><text class="kpi-label">{{ t('消耗（千卡）') }}</text></view>
+            <view class="kpi"><text class="kpi-num">{{ rounded(motionTime) }}</text><text class="kpi-label">{{ t('活动（分钟）') }}</text></view>
           </view>
         </template>
-        <view v-else class="empty"><text class="empty-title">暂无步数数据</text><text class="empty-desc">待对方完成设备同步后显示</text></view>
+        <view v-else class="empty"><text class="empty-title">{{ t('暂无步数数据') }}</text><text class="empty-desc">{{ t('待对方完成设备同步后显示') }}</text></view>
       </view>
     </template>
   </view>

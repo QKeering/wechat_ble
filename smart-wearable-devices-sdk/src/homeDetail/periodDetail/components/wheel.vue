@@ -20,11 +20,11 @@
         <view class="cycle-center">
           <view class="cycle-content">
             <template v-if="cycleDay > 0">
-              <view class="cycle-phase">{{ phaseLabel }}</view>
-              <view class="cycle-day">第{{ currentDayNow }}天</view>
+              <view class="cycle-phase">{{ t(phaseLabel) }}</view>
+              <view class="cycle-day">{{ t('第{day}天', { day: currentDayNow }) }}</view>
             </template>
             <template v-else>
-              <view class="cycle-phase">暂无数据</view>
+              <view class="cycle-phase">{{ t('暂无数据') }}</view>
             </template>
           </view>
           <view
@@ -47,15 +47,19 @@
         :class="{ active: currentPhase === p }"
       >
         <view :class="['legend-dot', p]" />
-        <text>{{ phaseLabels[p] }}</text>
+        <text>{{ t(phaseLabels[p]) }}</text>
       </view>
     </view>
   </view>
 </template>
 
 <script setup lang="ts">
+import '@/homeDetail/i18n/pack';
+import { useI18n } from '@/i18n';
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, getCurrentInstance } from 'vue';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
+
+const { t } = useI18n();
 
 const GAP = 4;
 const CAP = 4;

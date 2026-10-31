@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import '@/pagesA/healths/i18n/pack';
 import { computed, ref } from 'vue';
 import { onLoad, onPullDownRefresh } from '@dcloudio/uni-app';
+import { useI18n } from '@/i18n';
 import {
   getActivityIntensityDetail,
   getActivityRegularityDetail,
@@ -31,8 +33,10 @@ type DetailConfig = {
   chartValueKey?: string;
 };
 
+const { t } = useI18n();
+
 const detailType = ref<IndicatorType>('sleepPrep');
-const pageTitle = ref('健康详情');
+const pageTitle = ref('');
 const loading = ref(false);
 const detailData = ref<Record<string, any> | null>(null);
 
@@ -49,97 +53,101 @@ const normalizeType = (type?: string): IndicatorType => {
   return knownTypes.includes(type as IndicatorType) ? (type as IndicatorType) : 'sleepPrep';
 };
 
-const detailConfigs: Record<IndicatorType, DetailConfig> = {
-  sleepPrep: {
-    title: '睡前准备',
-    subtitle: '结合睡前心率、HRV 和放松状态评估入睡准备情况',
-    fetcher: () => getSleepPreparationDetail(),
-    chartKey: 'trendChart',
-    chartValueKey: 'value',
-    summary: (data) => [
-      {
-        label: '心率',
-        value: formatCurrentAndAverage(data.heartRateChange, '次/分钟'),
-        trend: formatCurrentAverageTrend(data.heartRateChange, '次/分钟')
-      },
-      {
-        label: 'HRV',
-        value: formatCurrentAndAverage(data.hrvChange, '毫秒'),
-        trend: formatCurrentAverageTrend(data.hrvChange, '毫秒')
-      }
-    ]
-  },
-  sleepRhythm: {
-    title: '睡眠节律',
-    subtitle: '观察近期入睡规律和睡眠节奏是否稳定',
-    fetcher: () => getSleepRhythmDetail(),
-    chartKey: 'regularityChart',
-    chartValueKey: 'avgSleepTime',
-    summary: (data) => [{ label: '趋势', value: data.overview?.trend }]
-  },
-  sleepRecovery: {
-    title: '睡眠过程恢复',
-    subtitle: '结合睡眠时长与恢复性睡眠占比评估夜间恢复',
-    fetcher: () => getSleepRecoveryDetail(),
-    chartKey: 'durationChart',
-    chartValueKey: 'hours',
-    summary: (data) => [
-      { label: '平均睡眠时长', value: data.avgDuration },
-      { label: '睡眠时长等级', value: data.durationLevel },
-      { label: '恢复性睡眠占比', value: formatPercent(data.recoveryRatio) }
-    ]
-  },
-  wakeUpBoost: {
-    title: '睡眠激活',
-    subtitle: '评估醒后状态与清晨激活情况',
-    fetcher: () => getSleepActivationDetail(),
-    chartKey: 'trendChart',
-    chartValueKey: 'score',
-    summary: (data) => [{ label: '趋势', value: data.overview?.trend }]
-  },
-  sedentaryRisk: {
-    title: '久坐风险',
-    subtitle: '结合步数和活动时长评估久坐风险',
-    fetcher: () => getSittingRiskDetail(),
-    chartKey: 'stepChart',
-    chartValueKey: 'steps',
-    summary: (data) => [
-      { label: '平均步数', value: data.avgSteps },
-      { label: '步数等级', value: data.stepsLevel },
-      { label: '活动水平', value: data.activityLevel },
-      { label: '活动时长', value: formatMinute(data.activeMinutes) }
-    ]
-  },
-  activityIntensity: {
-    title: '活动强度',
-    subtitle: '查看本周中高强度活动总量与负荷状态',
-    fetcher: () => getActivityIntensityDetail(),
-    chartKey: 'durationChart',
-    chartValueKey: 'minutes',
-    summary: (data) => [
-      { label: '中高强度总时长', value: formatMinute(data.totalMinutes) },
-      { label: '活动强度等级', value: data.intensityLevel }
-    ]
-  },
-  exerciseRegularity: {
-    title: '运动规律性',
-    subtitle: '观察运动负荷是否稳定、每周活跃天数是否达标',
-    fetcher: () => getActivityRegularityDetail(),
-    chartKey: 'balanceChart',
-    chartValueKey: 'index',
-    summary: (data) => [
-      {
-        label: '负荷平衡指数',
-        value: formatBalanceIndex(data.balanceIndex),
-        trend: formatBalanceIndexExplanation(data.balanceIndex)
-      },
-      { label: '负荷等级', value: data.balanceLevel },
-      { label: '中高强度活动天数', value: formatDay(data.midHighDays) }
-    ]
-  }
+// 配置在 computed 内随语言重建，保证切换语言后标题、说明、指标名立即刷新。
+const getDetailConfig = (type: IndicatorType): DetailConfig => {
+  const configs: Record<IndicatorType, DetailConfig> = {
+    sleepPrep: {
+      title: t('睡前准备'),
+      subtitle: t('结合睡前心率、HRV 和放松状态评估入睡准备情况'),
+      fetcher: () => getSleepPreparationDetail(),
+      chartKey: 'trendChart',
+      chartValueKey: 'value',
+      summary: (data) => [
+        {
+          label: t('心率'),
+          value: formatCurrentAndAverage(data.heartRateChange, '次/分钟'),
+          trend: formatCurrentAverageTrend(data.heartRateChange, '次/分钟')
+        },
+        {
+          label: t('HRV'),
+          value: formatCurrentAndAverage(data.hrvChange, '毫秒'),
+          trend: formatCurrentAverageTrend(data.hrvChange, '毫秒')
+        }
+      ]
+    },
+    sleepRhythm: {
+      title: t('睡眠节律'),
+      subtitle: t('观察近期入睡规律和睡眠节奏是否稳定'),
+      fetcher: () => getSleepRhythmDetail(),
+      chartKey: 'regularityChart',
+      chartValueKey: 'avgSleepTime',
+      summary: (data) => [{ label: t('趋势'), value: data.overview?.trend }]
+    },
+    sleepRecovery: {
+      title: t('睡眠过程恢复'),
+      subtitle: t('结合睡眠时长与恢复性睡眠占比评估夜间恢复'),
+      fetcher: () => getSleepRecoveryDetail(),
+      chartKey: 'durationChart',
+      chartValueKey: 'hours',
+      summary: (data) => [
+        { label: t('平均睡眠时长'), value: data.avgDuration },
+        { label: t('睡眠时长等级'), value: data.durationLevel },
+        { label: t('恢复性睡眠占比'), value: formatPercent(data.recoveryRatio) }
+      ]
+    },
+    wakeUpBoost: {
+      title: t('睡眠激活'),
+      subtitle: t('评估醒后状态与清晨激活情况'),
+      fetcher: () => getSleepActivationDetail(),
+      chartKey: 'trendChart',
+      chartValueKey: 'score',
+      summary: (data) => [{ label: t('趋势'), value: data.overview?.trend }]
+    },
+    sedentaryRisk: {
+      title: t('久坐风险'),
+      subtitle: t('结合步数和活动时长评估久坐风险'),
+      fetcher: () => getSittingRiskDetail(),
+      chartKey: 'stepChart',
+      chartValueKey: 'steps',
+      summary: (data) => [
+        { label: t('平均步数'), value: data.avgSteps },
+        { label: t('步数等级'), value: data.stepsLevel },
+        { label: t('活动水平'), value: data.activityLevel },
+        { label: t('活动时长'), value: formatMinute(data.activeMinutes) }
+      ]
+    },
+    activityIntensity: {
+      title: t('活动强度'),
+      subtitle: t('查看本周中高强度活动总量与负荷状态'),
+      fetcher: () => getActivityIntensityDetail(),
+      chartKey: 'durationChart',
+      chartValueKey: 'minutes',
+      summary: (data) => [
+        { label: t('中高强度总时长'), value: formatMinute(data.totalMinutes) },
+        { label: t('活动强度等级'), value: data.intensityLevel }
+      ]
+    },
+    exerciseRegularity: {
+      title: t('运动规律性'),
+      subtitle: t('观察运动负荷是否稳定、每周活跃天数是否达标'),
+      fetcher: () => getActivityRegularityDetail(),
+      chartKey: 'balanceChart',
+      chartValueKey: 'index',
+      summary: (data) => [
+        {
+          label: t('负荷平衡指数'),
+          value: formatBalanceIndex(data.balanceIndex),
+          trend: formatBalanceIndexExplanation(data.balanceIndex)
+        },
+        { label: t('负荷等级'), value: data.balanceLevel },
+        { label: t('中高强度活动天数'), value: formatDay(data.midHighDays) }
+      ]
+    }
+  };
+  return configs[type];
 };
 
-const currentConfig = computed(() => detailConfigs[detailType.value]);
+const currentConfig = computed(() => getDetailConfig(detailType.value));
 const overview = computed(() => detailData.value?.overview || {});
 const summaryItems = computed(() => currentConfig.value.summary(detailData.value || {}).filter((item) => hasValue(item.value)));
 const chartItems = computed(() => {
@@ -160,21 +168,21 @@ const chartItems = computed(() => {
   });
 });
 
-const displayTitle = computed(() => pageTitle.value || currentConfig.value.title);
-const overviewTrendLabel = computed(() => (detailType.value === 'activityIntensity' ? '活动评分较上期' : '趋势'));
+const displayTitle = computed(() => (pageTitle.value ? t(pageTitle.value) : currentConfig.value.title));
+const overviewTrendLabel = computed(() => (detailType.value === 'activityIntensity' ? t('活动评分较上期') : t('趋势')));
 const overviewTrendValue = computed(() => {
-  if (detailType.value !== 'activityIntensity') return formatValue(overview.value.trend);
+  if (detailType.value !== 'activityIntensity') return t(formatValue(overview.value.trend));
   return formatActivityScoreChange(overview.value.trendValue, true);
 });
-const overviewChangeLabel = computed(() => (detailType.value === 'activityIntensity' ? '评分变化' : '变化值'));
+const overviewChangeLabel = computed(() => (detailType.value === 'activityIntensity' ? t('评分变化') : t('变化值')));
 const overviewChangeValue = computed(() => {
   if (detailType.value !== 'activityIntensity') return formatValue(overview.value.trendValue);
   return formatActivityScoreChange(overview.value.trendValue, false);
 });
 const chartSectionTitle = computed(() => {
-  if (detailType.value === 'activityIntensity') return '近5周中高强度活动时长';
-  if (detailType.value === 'exerciseRegularity') return '近5周负荷平衡指数';
-  return '近期趋势';
+  if (detailType.value === 'activityIntensity') return t('近5周中高强度活动时长');
+  if (detailType.value === 'exerciseRegularity') return t('近5周负荷平衡指数');
+  return t('近期趋势');
 });
 
 const hasValue = (value: unknown) => value !== undefined && value !== null && value !== '';
@@ -190,11 +198,17 @@ const formatValueWithUnit = (value: unknown, unit: string, unitPattern: RegExp) 
 const formatPercent = (value: unknown) => {
   return formatValueWithUnit(value, '%', /%/);
 };
+const formatUnitValue = (value: unknown, unitPattern: RegExp, key: string) => {
+  if (!hasValue(value)) return '--';
+  const text = String(value).trim().replace(unitPattern, '').trim();
+  if (isNumericText(text)) return t(key, { value: text });
+  return normalizeHealthText(String(value).trim(), '--');
+};
 const formatMinute = (value: unknown) => {
-  return formatValueWithUnit(value, '分钟', /分钟/);
+  return formatUnitValue(value, /分钟/g, '{value}分钟');
 };
 const formatDay = (value: unknown) => {
-  return formatValueWithUnit(value, '天', /天/);
+  return formatUnitValue(value, /天/g, '{value}天');
 };
 const toFiniteNumber = (value: unknown) => {
   const numberValue = typeof value === 'number' ? value : Number(String(value ?? '').trim());
@@ -208,12 +222,12 @@ const formatActivityScoreChange = (value: unknown, signed: boolean) => {
   if (score === null) return '--';
   const displayScore = signed ? score : Math.abs(score);
   const prefix = signed && displayScore > 0 ? '+' : '';
-  return `${prefix}${formatMetricNumber(displayScore)}分`;
+  return t('{value}分', { value: `${prefix}${formatMetricNumber(displayScore)}` });
 };
 const formatActivityTrendMinutes = (value: unknown) => {
   const minutes = toFiniteNumber(value);
   if (minutes === null || minutes <= 0) return '--';
-  return `${formatMetricNumber(minutes)}分钟`;
+  return t('{value}分钟', { value: formatMetricNumber(minutes) });
 };
 const formatBalanceIndex = (value: unknown) => {
   const index = toFiniteNumber(value);
@@ -224,15 +238,20 @@ const formatBalanceIndexExplanation = (value: unknown) => {
   const index = toFiniteNumber(value);
   if (index === null || index <= 0) return '';
   const percent = Math.round(index * 100);
-  return `${formatMetricNumber(index)} 代表本周单个活跃日的中高强度活动量约为建议基准的 ${percent}%`;
+  return t('{index} 代表本周单个活跃日的中高强度活动量约为建议基准的 {percent}%', {
+    index: formatMetricNumber(index),
+    percent
+  });
 };
 const formatCurrentAndAverage = (value: any, unit: string) => {
   if (!value || typeof value !== 'object') return '--';
   const current = toFiniteNumber(value.currentValue);
   const average = toFiniteNumber(value.avgValue);
   if (current === null && average === null) return '--';
-  const currentText = current === null ? '本周 --' : `本周 ${formatMetricNumber(current)} ${unit}`;
-  const averageText = average === null ? '近期均值 --' : `近期均值 ${formatMetricNumber(average)} ${unit}`;
+  const localizedUnit = t(unit);
+  const currentText = current === null ? t('本周 --') : t('本周 {value} {unit}', { value: formatMetricNumber(current), unit: localizedUnit });
+  const averageText =
+    average === null ? t('近期均值 --') : t('近期均值 {value} {unit}', { value: formatMetricNumber(average), unit: localizedUnit });
   return `${currentText}｜${averageText}`;
 };
 const formatCurrentAverageTrend = (value: any, unit: string) => {
@@ -241,9 +260,13 @@ const formatCurrentAverageTrend = (value: any, unit: string) => {
   const average = toFiniteNumber(value.avgValue);
   if (current === null || average === null) return '';
   const difference = Number((current - average).toFixed(2));
-  if (difference === 0) return '较近期均值保持稳定';
-  const direction = difference > 0 ? '上升' : '下降';
-  return `较近期均值${direction} ${formatMetricNumber(Math.abs(difference))} ${unit}`;
+  if (difference === 0) return t('较近期均值保持稳定');
+  const direction = t(difference > 0 ? '上升' : '下降');
+  return t('较近期均值{direction} {value} {unit}', {
+    direction,
+    value: formatMetricNumber(Math.abs(difference)),
+    unit: t(unit)
+  });
 };
 
 const loadDetail = async () => {
@@ -253,7 +276,7 @@ const loadDetail = async () => {
   } catch (error) {
     detailData.value = null;
     uni.showToast({
-      title: formatBleErrorMessage(error, '详情加载失败，请稍后重试'),
+      title: t(formatBleErrorMessage(error, '详情加载失败，请稍后重试')),
       icon: 'none'
     });
   } finally {
@@ -268,7 +291,7 @@ const leftClick = () => {
 
 onLoad((options = {}) => {
   detailType.value = normalizeType(String(options.type || ''));
-  pageTitle.value = String(options.title || detailConfigs[detailType.value].title);
+  pageTitle.value = String(options.title || '');
   void loadDetail();
 });
 
@@ -287,12 +310,12 @@ onPullDownRefresh(() => {
           <view class="hero-title">{{ currentConfig.title }}</view>
           <view class="hero-subtitle">{{ currentConfig.subtitle }}</view>
         </view>
-        <view class="level">{{ formatValue(overview.level) }}</view>
+        <view class="level">{{ t(formatValue(overview.level)) }}</view>
       </view>
 
       <view class="overview">
         <view class="overview-item">
-          <text class="label">日期范围</text>
+          <text class="label">{{ t('日期范围') }}</text>
           <text class="value">{{ formatValue(overview.dateRange) }}</text>
         </view>
         <view class="overview-item">
@@ -306,12 +329,12 @@ onPullDownRefresh(() => {
       </view>
 
       <view class="section" v-if="summaryItems.length > 0">
-        <view class="section-title">关键指标</view>
+        <view class="section-title">{{ t('关键指标') }}</view>
         <view class="metric-list">
           <view class="metric-row" v-for="item in summaryItems" :key="item.label">
             <text class="metric-label">{{ item.label }}</text>
             <view class="metric-content">
-              <text class="metric-value">{{ formatValue(item.value) }}</text>
+              <text class="metric-value">{{ t(formatValue(item.value)) }}</text>
               <text v-if="item.trend" class="metric-trend">{{ item.trend }}</text>
             </view>
           </view>
@@ -323,14 +346,14 @@ onPullDownRefresh(() => {
         <view class="trend-list">
           <view class="trend-row" v-for="item in chartItems" :key="item.label">
             <text class="trend-label">{{ item.label }}</text>
-            <text class="trend-value">{{ formatValue(item.value) }}</text>
-            <text class="trend-level" v-if="item.level">{{ item.level }}</text>
+            <text class="trend-value">{{ t(formatValue(item.value)) }}</text>
+            <text class="trend-level" v-if="item.level">{{ t(item.level) }}</text>
           </view>
         </view>
       </view>
 
-      <view v-if="!loading && !detailData" class="empty">暂无详情数据</view>
-      <view v-if="loading" class="empty">加载中...</view>
+      <view v-if="!loading && !detailData" class="empty">{{ t('暂无详情数据') }}</view>
+      <view v-if="loading" class="empty">{{ t('加载中...') }}</view>
     </view>
   </view>
 </template>

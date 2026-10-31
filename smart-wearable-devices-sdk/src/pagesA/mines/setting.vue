@@ -1,5 +1,6 @@
 <!-- 功能设置 -->
 <script setup lang="ts">
+import '@/pagesA/mines/i18n/pack';
 import { computed, onUnmounted, ref } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
 import { getBindInfo } from '@/common/api/device';
@@ -16,8 +17,37 @@ import {
   normalizeCalorieGoalKcal
 } from '@/utils/calorieGoal';
 import { USER_GOAL_UPDATED_EVENT, type UserGoalUpdatedPayload } from '@/utils/goalSettings';
+import { useI18n, usePageTitle } from '@/i18n';
+import type { AppLocale, LocaleMode } from '@/i18n';
 
 type PickerType = 'sleep' | 'step' | 'calorie' | 'activity' | 'collect';
+
+const { t, mode: localeMode, systemLocale, setLocaleMode } = useI18n();
+usePageTitle(() => t('功能设置'));
+
+const LANGUAGE_MODES: LocaleMode[] = ['system', 'zh-Hans', 'zh-Hant', 'en'];
+// 语言名一律用各语言自身书写，不随界面语言翻译。
+const LANGUAGE_NAMES: Record<AppLocale, string> = {
+  'zh-Hans': '简体中文',
+  'zh-Hant': '繁體中文',
+  en: 'English'
+};
+
+const languageOptions = computed(() => [t('跟随系统'), ...Object.values(LANGUAGE_NAMES)]);
+const languageIndex = computed(() => Math.max(0, LANGUAGE_MODES.indexOf(localeMode.value)));
+const currentLanguageLabel = computed(() =>
+  localeMode.value === 'system'
+    ? t('跟随系统（{language}）', { language: LANGUAGE_NAMES[systemLocale.value] })
+    : LANGUAGE_NAMES[localeMode.value]
+);
+
+const onLanguageChange = (event: any) => {
+  const index = Number(event?.detail?.value);
+  const nextMode = LANGUAGE_MODES[index];
+  if (!nextMode) return;
+  setLocaleMode(nextMode);
+  uni.showToast({ title: t('语言已切换'), icon: 'none' });
+};
 
 const controller = useRingBusinessController();
 const ringBle = useRingBLE();
@@ -47,8 +77,8 @@ const collectPeriodTarget = ref(DEFAULT_GOAL_VALUES.collect);
 const collectPeriodOptions = ['20', '30'];
 
 const calorieGoalRange = computed(() => getCalorieGoalRange(userStore.userInfo?.sex));
-const calorieGoalRangeText = computed(
-  () => `建议范围 ${calorieGoalRange.value.min}–${calorieGoalRange.value.max} 千卡`
+const calorieGoalRangeText = computed(() =>
+  t('建议范围 {min}–{max} 千卡', { min: calorieGoalRange.value.min, max: calorieGoalRange.value.max })
 );
 const pickerOptions = computed<Record<PickerType, string[]>>(() => ({
   sleep: ['5', '6', '7', '8', '9', '10', '11', '12'],
@@ -156,7 +186,7 @@ const loadGoalInfo = async () => {
       collectPeriodTarget.value = toCollectPeriodText(collectSeconds);
     }
   } catch (error) {
-    lastActionText.value = formatBleErrorMessage(error, '目标配置读取失败，请稍后重试');
+    lastActionText.value = t(formatBleErrorMessage(error, '目标配置读取失败，请稍后重试'));
   }
 };
 
@@ -237,7 +267,7 @@ const applyCollectPeriodToDevice = async () => {
 const handleOk = async () => {
   if (isSaving.value || isBusy.value) return;
   isSaving.value = true;
-  busyText.value = '保存中';
+  busyText.value = t('保存中');
   lastActionText.value = '';
   let collectWarning = '';
   try {
@@ -249,16 +279,16 @@ const handleOk = async () => {
     try {
       await applyCollectPeriodToDevice();
     } catch (error) {
-      collectWarning = formatBleErrorMessage(error, '设备采集周期下发失败');
+      collectWarning = t(formatBleErrorMessage(error, '设备采集周期下发失败'));
     }
-    lastActionText.value = collectWarning ? `目标已保存，${collectWarning}` : '目标已保存';
+    lastActionText.value = collectWarning ? t('目标已保存，{warning}', { warning: collectWarning }) : t('目标已保存');
     clearStatusLater(collectWarning ? 4200 : 2600);
     uni.showToast({
-      title: collectWarning ? '目标已保存' : '保存成功',
+      title: collectWarning ? t('目标已保存') : t('保存成功'),
       icon: 'success'
     });
   } catch (error) {
-    lastActionText.value = formatBleErrorMessage(error, '保存失败，请稍后再试');
+    lastActionText.value = t(formatBleErrorMessage(error, '保存失败，请稍后再试'));
     clearStatusLater(4200);
     uni.showToast({ title: lastActionText.value, icon: 'none' });
   } finally {
@@ -300,69 +330,82 @@ onUnmounted(() => {
 
 <template>
   <view class="p-30" :style="{ paddingBottom: paddingBottomVal + 'rpx' }">
+    <view class="mb-50">
+      <view class="mb-50 fs-36 pl-40 pr-40 mb-50">{{ t('通用设置') }}</view>
+      <picker mode="selector" :header-text="t('界面语言')" :range="languageOptions" :value="languageIndex" @change="onLanguageChange">
+        <view class="bg-white p-40 r-50 flex jc-between ai-center mb-50 fs-36">
+          <text>{{ t('界面语言') }}</text>
+          <view class="flex ai-center">
+            <text class="mr-20">{{ currentLanguageLabel }}</text>
+            <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
+          </view>
+        </view>
+      </picker>
+    </view>
+
     <view>
-      <view class="mb-50 fs-36 pl-40 pr-40 mb-50">设置目标</view>
+      <view class="mb-50 fs-36 pl-40 pr-40 mb-50">{{ t('设置目标') }}</view>
       <view>
-        <picker mode="selector" header-text="睡眠时长" :range="getPickerOptionList('sleep')" :value="getPickerIndex('sleep')" @change="onPickerChange('sleep', $event)">
+        <picker mode="selector" :header-text="t('睡眠时长')" :range="getPickerOptionList('sleep')" :value="getPickerIndex('sleep')" @change="onPickerChange('sleep', $event)">
           <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
             <view style="width: 50%">
-              <text>睡眠时长</text>
-              <text class="t-979797 fs-24">（小时）</text>
+              <text>{{ t('睡眠时长') }}</text>
+              <text class="t-979797 fs-24">{{ t('（小时）') }}</text>
             </view>
             <view class="flex ai-center">
-              <text class="mr-20">{{ sleepTarget || '请选择' }}</text>
+              <text class="mr-20">{{ sleepTarget || t('请选择') }}</text>
               <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
             </view>
           </view>
         </picker>
 
-        <picker mode="selector" header-text="步数目标" :range="getPickerOptionList('step')" :value="getPickerIndex('step')" @change="onPickerChange('step', $event)">
+        <picker mode="selector" :header-text="t('步数目标')" :range="getPickerOptionList('step')" :value="getPickerIndex('step')" @change="onPickerChange('step', $event)">
           <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
             <view style="width: 50%">
-              <text>步数目标</text>
-              <text class="t-979797 fs-24">（步数）</text>
+              <text>{{ t('步数目标') }}</text>
+              <text class="t-979797 fs-24">{{ t('（步数）') }}</text>
             </view>
             <view class="flex ai-center">
-              <text class="mr-20">{{ stepTarget || '请选择' }}</text>
+              <text class="mr-20">{{ stepTarget || t('请选择') }}</text>
               <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
             </view>
           </view>
         </picker>
 
-        <picker mode="selector" header-text="热量目标" :range="getPickerOptionList('calorie')" :value="getPickerIndex('calorie')" @change="onPickerChange('calorie', $event)">
+        <picker mode="selector" :header-text="t('热量目标')" :range="getPickerOptionList('calorie')" :value="getPickerIndex('calorie')" @change="onPickerChange('calorie', $event)">
           <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
             <view style="width: 60%">
-              <view><text>热量目标</text></view>
-              <text class="t-979797 fs-24">（千卡，{{ calorieGoalRangeText }}）</text>
+              <view><text>{{ t('热量目标') }}</text></view>
+              <text class="t-979797 fs-24">{{ t('（千卡，{range}）', { range: calorieGoalRangeText }) }}</text>
             </view>
             <view class="flex ai-center">
-              <text class="mr-20">{{ calorieTarget || '请选择' }}</text>
+              <text class="mr-20">{{ calorieTarget || t('请选择') }}</text>
               <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
             </view>
           </view>
         </picker>
 
-        <picker mode="selector" header-text="活动时长目标" :range="getPickerOptionList('activity')" :value="getPickerIndex('activity')" @change="onPickerChange('activity', $event)">
+        <picker mode="selector" :header-text="t('活动时长目标')" :range="getPickerOptionList('activity')" :value="getPickerIndex('activity')" @change="onPickerChange('activity', $event)">
           <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
             <view style="width: 80%">
-              <text>活动时长目标</text>
-              <text class="t-979797 fs-24">（分钟）</text>
+              <text>{{ t('活动时长目标') }}</text>
+              <text class="t-979797 fs-24">{{ t('（分钟）') }}</text>
             </view>
             <view class="flex ai-center">
-              <text class="mr-20">{{ activityDurationTarget || '请选择' }}</text>
+              <text class="mr-20">{{ activityDurationTarget || t('请选择') }}</text>
               <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
             </view>
           </view>
         </picker>
 
-        <picker mode="selector" header-text="设备采集周期" :range="getPickerOptionList('collect')" :value="getPickerIndex('collect')" @change="onPickerChange('collect', $event)">
+        <picker mode="selector" :header-text="t('设备采集周期')" :range="getPickerOptionList('collect')" :value="getPickerIndex('collect')" @change="onPickerChange('collect', $event)">
           <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
             <view style="width: 80%">
-              <text>设备采集周期</text>
-              <text class="t-979797 fs-24">（分钟）</text>
+              <text>{{ t('设备采集周期') }}</text>
+              <text class="t-979797 fs-24">{{ t('（分钟）') }}</text>
             </view>
             <view class="flex ai-center">
-              <text class="mr-20">{{ collectPeriodTarget || '请选择' }}</text>
+              <text class="mr-20">{{ collectPeriodTarget || t('请选择') }}</text>
               <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
             </view>
           </view>
@@ -374,7 +417,7 @@ onUnmounted(() => {
       <view v-if="statusText" class="save-status fs-28 t-979797">{{ statusText }}</view>
       <uv-button
         @click="handleOk"
-        :text="isSaving ? '保存中' : '保存'"
+        :text="isSaving ? t('保存中') : t('保存')"
         :loading="isSaving"
         :disabled="isSaving || isBusy"
         shape="circle"
