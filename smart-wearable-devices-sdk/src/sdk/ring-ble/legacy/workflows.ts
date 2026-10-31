@@ -11,8 +11,11 @@ export { getLegacyBleHistoryExclusiveSnapshot, isLegacyBleHistoryExclusiveActive
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
 
+// App 端可能缺少 offBluetoothDeviceFound。transformLegacyMacToUuid 的 cleanup
+// 会在 stopBluetoothDevicesDiscovery 之后调用这里，裸调用抛错会让它既清不了
+// 定时器、也 resolve 不了 Promise，调用方永久挂起。
 const offBluetoothDeviceFound = (callback: BluetoothDeviceFoundCallback) => {
-  (uni.offBluetoothDeviceFound as unknown as (callback: BluetoothDeviceFoundCallback) => void)(callback);
+  (uni.offBluetoothDeviceFound as unknown as ((callback?: BluetoothDeviceFoundCallback) => void) | undefined)?.(callback);
 };
 
 export interface EnsureBluetoothOptions {
@@ -523,7 +526,13 @@ export const autoReconnectLegacyRing = async (adapter: LegacyRingAdapter, runtim
 
   runtime?.onReconnectStatusChange?.('failed');
   runtime?.onReconnectResultChange?.(false);
-  runtime?.onDisconnected?.(lastError);
+  // 带上 kind 标记：重连重试已耗尽，上层不要再把它当成"物理掉线"去排队恢复，
+  // 否则每次恢复失败又会触发恢复，形成无限重连。
+  runtime?.onDisconnected?.({
+    kind: 'reconnect-failed',
+    message: lastError instanceof Error ? lastError.message : String(lastError ?? ''),
+    error: lastError
+  });
   return false;
 };
 

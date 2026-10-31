@@ -35,13 +35,8 @@ const storage = new Map<string, unknown>();
 
 setActivePinia(createPinia());
 
-const {
-  getRingBusinessDeviceKey,
-  getRingBusinessDeviceName,
-  getRingBusinessDeviceTail,
-  getRingBusinessPlatformDeviceId,
-  useRingBusinessController
-} = await import('./useRingBusinessController');
+const { getRingBusinessDeviceKey, getRingBusinessDeviceName, getRingBusinessDeviceTail, getRingBusinessPlatformDeviceId, useRingBusinessController } =
+  await import('./useRingBusinessController');
 const { resolveRingProtocol } = await import('@/sdk/ring-ble');
 
 type RingBusinessControllerCompat = ReturnType<typeof useRingBusinessController>;
@@ -223,10 +218,8 @@ if (
 }
 
 if (
-  getRingBusinessDeviceTail({ protocol: 'rw', deviceId: 'rw-platform-id', uniMacId: 'B09FBA121E1C', name: 'SY03' } as any) !==
-    'tform-id' ||
-  getRingBusinessDeviceKey({ protocol: 'rw', deviceId: 'rw-platform-id', uniMacId: 'B09FBA121E1C', name: 'SY03' } as any) !==
-    'rw-platform-id'
+  getRingBusinessDeviceTail({ protocol: 'rw', deviceId: 'rw-platform-id', uniMacId: 'B09FBA121E1C', name: 'SY03' } as any) !== 'tform-id' ||
+  getRingBusinessDeviceKey({ protocol: 'rw', deviceId: 'rw-platform-id', uniMacId: 'B09FBA121E1C', name: 'SY03' } as any) !== 'rw-platform-id'
 ) {
   throw new Error('Business controller should use RW platform deviceId as the non-stable fallback identity.');
 }
@@ -321,9 +314,7 @@ if (
   !advertisOnlyBusinessIds.includes('rw-bh3-name-excluded') ||
   !advertisOnlyBusinessIds.includes('rw-bh3-dash-name-excluded')
 ) {
-  throw new Error(
-    `Business controller should include RW advertis-only and BH3 devices: ${JSON.stringify(advertisOnlyBusinessIds)}`
-  );
+  throw new Error(`Business controller should include RW advertis-only and BH3 devices: ${JSON.stringify(advertisOnlyBusinessIds)}`);
 }
 
 controller.devices.value = [
@@ -333,11 +324,7 @@ controller.devices.value = [
 ];
 controller.deviceInfo.value = { deviceId: 'stale-rw', serviceId: 'service', protocol: 'rw' } as any;
 const freshBusinessIds = controller.businessDevices.value.map((device) => device.deviceId);
-if (
-  !freshBusinessIds.includes('fresh-rw') ||
-  !freshBusinessIds.includes('stale-rw') ||
-  !freshBusinessIds.includes('legacy-no-seen')
-) {
+if (!freshBusinessIds.includes('fresh-rw') || !freshBusinessIds.includes('stale-rw') || !freshBusinessIds.includes('legacy-no-seen')) {
   throw new Error(`Business controller should keep fresh devices, current stale devices, and legacy records without seen time: ${JSON.stringify(freshBusinessIds)}`);
 }
 
@@ -372,9 +359,7 @@ const freshnessController = useRingBusinessController({
   refreshTimeoutMs: 1,
   historyTimeoutMs: 1
 });
-freshnessController.devices.value = [
-  { deviceId: 'auto-stale-rw', name: 'SY03', protocol: 'rw', lastSeenAt: Date.now() }
-];
+freshnessController.devices.value = [{ deviceId: 'auto-stale-rw', name: 'SY03', protocol: 'rw', lastSeenAt: Date.now() }];
 await freshnessController.scanForBusinessDevices();
 if (!freshnessController.businessDevices.value.some((device) => device.deviceId === 'auto-stale-rw')) {
   throw new Error('Fresh scanned business device should be visible before it expires.');
@@ -451,10 +436,9 @@ let sameReadyConnectCalled = false;
     protocol: 'rw'
   });
 };
-await sameReadyController.connectBusinessDevice(
-  { deviceId: 'same-ready-ring', name: 'SY03', ...RW_READY_FIELDS, protocol: 'rw', lastSeenAt: Date.now() - 120000 } as any,
-  { refreshAfterConnect: false }
-);
+await sameReadyController.connectBusinessDevice({ deviceId: 'same-ready-ring', name: 'SY03', ...RW_READY_FIELDS, protocol: 'rw', lastSeenAt: Date.now() - 120000 } as any, {
+  refreshAfterConnect: false
+});
 await nextTick();
 if (sameReadyConnectCalled || sameReadyController.metrics.value.heartRate !== 73) {
   throw new Error(
@@ -540,16 +524,15 @@ if (switchController.metrics.value.heartRate !== 88) {
     dataCharId: 'notify',
     protocol: 'legacy'
   });
-await switchController.connectBusinessDevice(
-  { deviceId: 'new-legacy-ring', name: 'QKeeRingL19', protocol: 'legacy' },
-  { refreshAfterConnect: false }
-);
+await switchController.connectBusinessDevice({ deviceId: 'new-legacy-ring', name: 'QKeeRingL19', protocol: 'legacy' }, { refreshAfterConnect: false });
 await nextTick();
 if (switchController.metrics.value.heartRate !== null || switchController.normalizedData.value.length !== 0) {
-  throw new Error(`Business controller should clear previous health data before connecting a new ring: ${JSON.stringify({
-    metrics: switchController.metrics.value,
-    normalizedData: switchController.normalizedData.value
-  })}`);
+  throw new Error(
+    `Business controller should clear previous health data before connecting a new ring: ${JSON.stringify({
+      metrics: switchController.metrics.value,
+      normalizedData: switchController.normalizedData.value
+    })}`
+  );
 }
 
 if (!controllerSource.includes('fromScan: true')) {
@@ -560,12 +543,26 @@ if (
   !normalizedControllerSource.includes('const RW_REFRESH_TIMEOUT_MS = 35000;') ||
   !normalizedControllerSource.includes('return options.refreshTimeoutMs ?? (isCurrentOrBoundRw() ? RW_REFRESH_TIMEOUT_MS : DEFAULT_REFRESH_TIMEOUT_MS);') ||
   !normalizedControllerSource.includes('const timeoutMs = getRefreshTimeoutMs();') ||
-  !normalizedControllerSource.includes("const includeRealtimeMetrics =\n      refreshOptions.includeRealtimeMetrics ??\n      (isCurrentOrBoundRw() ? Boolean(refreshOptions.realtimeMetricNames?.length) : true);") ||
-  !normalizedControllerSource.includes("const includeHistorySnapshot =\n      refreshOptions.includeHistorySnapshot ?? (isCurrentOrBoundRw() ? false : true);") ||
-  !normalizedControllerSource.includes('const refreshTask = ble.refreshBusinessMetrics({\n      timeoutMs,\n      includeCollectPeriod: false,\n      includeDeviceTime: false,\n      includeDeviceInfo,\n      includeRealtimeMetrics,\n      realtimeMetricNames: refreshOptions.realtimeMetricNames,\n      includeHistorySnapshot\n    });') ||
+  !normalizedControllerSource.includes(
+    'const includeRealtimeMetrics =\n      refreshOptions.includeRealtimeMetrics ??\n      (isCurrentOrBoundRw() ? Boolean(refreshOptions.realtimeMetricNames?.length) : true);'
+  ) ||
+  !normalizedControllerSource.includes('const includeHistorySnapshot =\n      refreshOptions.includeHistorySnapshot ?? (isCurrentOrBoundRw() ? false : true);') ||
+  !normalizedControllerSource.includes(
+    'return ble.refreshBusinessMetrics({\n        timeoutMs,\n        includeCollectPeriod: false,\n        includeDeviceTime: false,\n        ...deviceInfoCommandOptions,\n        includeRealtimeMetrics,\n        realtimeMetricNames: refreshOptions.realtimeMetricNames,\n        includeHistorySnapshot\n      });'
+  ) ||
   !normalizedControllerSource.includes('return ble.refreshBusinessMetrics({\n        timeoutMs,\n        includeCollectPeriod: true,\n        includeDeviceTime: false')
 ) {
   throw new Error('Business controller should pass the protocol-aware refresh timeout down to the unified SDK refresh workflow.');
+}
+
+if (
+  !normalizedControllerSource.includes("beginRingBackgroundCriticalTask('business-refresh')") ||
+  !normalizedControllerSource.includes("beginRingBackgroundCriticalTask('history-sync')") ||
+  !normalizedControllerSource.includes('void refreshTask.then(releaseBackgroundTask, releaseBackgroundTask);') ||
+  !normalizedControllerSource.includes('void historyTask.then(releaseBackgroundTask, releaseBackgroundTask);') ||
+  !normalizedControllerSource.includes('if (!historyTaskStarted) {\n          releaseBackgroundTask();\n        }')
+) {
+  throw new Error('Business refresh/history must hold the App background token only until the underlying BLE task settles.');
 }
 
 if (
@@ -600,26 +597,36 @@ if (!controllerSource.includes('clearRwEmptyRefreshRetryTimer();')) {
 if (
   !controllerSource.includes('rwBackgroundRefreshEnabled?: boolean;') ||
   !normalizedControllerSource.includes('const rwBackgroundRefreshEnabled = options.rwBackgroundRefreshEnabled ?? false;') ||
-  !normalizedControllerSource.includes("if (isCurrentOrBoundRw() && !rwBackgroundRefreshEnabled) {\n      clearRwPendingRetryTimer();\n      clearRwMaintainRefreshTimer();\n      clearRwEmptyRefreshRetryTimer();\n      return;\n    }")
+  !normalizedControllerSource.includes(
+    'if (isCurrentOrBoundRw() && !rwBackgroundRefreshEnabled) {\n      clearRwPendingRetryTimer();\n      clearRwMaintainRefreshTimer();\n      clearRwEmptyRefreshRetryTimer();\n      return;\n    }'
+  )
 ) {
   throw new Error('RW background refresh must stay opt-in and resume should not schedule hidden RW reads when disabled.');
 }
 
 if (
-  !normalizedControllerSource.includes("const includeRealtimeMetrics =\n      refreshOptions.includeRealtimeMetrics ??\n      (isCurrentOrBoundRw() ? Boolean(refreshOptions.realtimeMetricNames?.length) : true);") ||
-  !normalizedControllerSource.includes("const includeHistorySnapshot =\n      refreshOptions.includeHistorySnapshot ?? (isCurrentOrBoundRw() ? false : true);") ||
+  !normalizedControllerSource.includes(
+    'const includeRealtimeMetrics =\n      refreshOptions.includeRealtimeMetrics ??\n      (isCurrentOrBoundRw() ? Boolean(refreshOptions.realtimeMetricNames?.length) : true);'
+  ) ||
+  !normalizedControllerSource.includes('const includeHistorySnapshot =\n      refreshOptions.includeHistorySnapshot ?? (isCurrentOrBoundRw() ? false : true);') ||
   !normalizedControllerSource.includes('effectiveProtocol: getCurrentOrBoundProtocol()') ||
-  !normalizedControllerSource.includes("if (!rwPendingRetryMetricNames?.length) {\n      rwPendingRetryCount = 0;\n      return;\n    }") ||
-  !normalizedControllerSource.includes("await refreshBusinessDataSafely({\n        silent: true,\n        forceDeviceInfo: true,\n        includeRealtimeMetrics: false,\n        includeHistorySnapshot: false\n      });") ||
-  !normalizedControllerSource.includes("await refreshBusinessDataSafely({\n        silent: true,\n        includeDeviceInfo: rwPendingRetryMetricNames?.length ? false : undefined,\n        includeHistorySnapshot: false,\n        realtimeMetricNames: rwPendingRetryMetricNames\n      });") ||
-  !normalizedControllerSource.includes("includeRealtimeMetrics: false,\n          includeHistorySnapshot: false")
+  !normalizedControllerSource.includes('if (!rwPendingRetryMetricNames?.length) {\n      rwPendingRetryCount = 0;\n      return;\n    }') ||
+  !normalizedControllerSource.includes(
+    'await refreshBusinessDataSafely({\n        silent: true,\n        forceDeviceInfo: true,\n        includeRealtimeMetrics: false,\n        includeHistorySnapshot: false\n      });'
+  ) ||
+  !normalizedControllerSource.includes(
+    'await refreshBusinessDataSafely({\n        silent: true,\n        includeDeviceInfo: rwPendingRetryMetricNames?.length ? false : undefined,\n        includeHistorySnapshot: false,\n        realtimeMetricNames: rwPendingRetryMetricNames\n      });'
+  ) ||
+  !normalizedControllerSource.includes('includeRealtimeMetrics: false,\n          includeHistorySnapshot: false')
 ) {
   throw new Error('RW must not issue hidden all-metric realtime reads; realtime polling must stay opt-in by explicit metric names.');
 }
 
 if (
-  !normalizedControllerSource.includes("if (shouldRecoverRwRefresh && isRwBusinessReady()) {\n      void refreshBusinessDataSafely({\n        silent: true,\n        forceDeviceInfo: true,\n        includeRealtimeMetrics: false,\n        includeHistorySnapshot: false\n      });\n      return;\n    }") ||
-  !normalizedControllerSource.includes("if (isReady.value && shouldAutoRefresh()) {\n      void refreshBusinessDataSafely({ silent: true });\n      return;\n    }")
+  !normalizedControllerSource.includes(
+    'if (shouldRecoverRwRefresh && isRwBusinessReady()) {\n      void refreshBusinessDataSafely({\n        silent: true,\n        forceDeviceInfo: true,\n        includeRealtimeMetrics: false,\n        includeHistorySnapshot: false\n      });\n      return;\n    }'
+  ) ||
+  !normalizedControllerSource.includes('if (isReady.value && shouldAutoRefresh()) {\n      void refreshBusinessDataSafely({ silent: true });\n      return;\n    }')
 ) {
   throw new Error('RW refresh recovery should be device-info only, while the generic auto-refresh branch stays separate.');
 }
@@ -645,11 +652,7 @@ if (
   throw new Error('Business controller should treat RW cached device-info, realtime refreshes, and resolved metric snapshots as non-empty core results.');
 }
 
-if (
-  !controllerSource.includes("'software_pending'") ||
-  !controllerSource.includes("'software_command'") ||
-  !controllerSource.includes("'software_command_pending'")
-) {
+if (!controllerSource.includes("'software_pending'") || !controllerSource.includes("'software_command'") || !controllerSource.includes("'software_command_pending'")) {
   throw new Error('Business controller should keep RW software pending/command steps visible for device-info refreshes.');
 }
 
@@ -664,12 +667,12 @@ if (
 }
 
 if (
-  !normalizedControllerSource.includes(
+  (!normalizedControllerSource.includes(
     "if (!isReady.value) {\n        const restored = await restoreLastBusinessDevice({ refreshAfterRestore: false });\n        if (!restored) {\n          throw new Error('\\u8bbe\\u5907\\u901a\\u4fe1\\u672a\\u5c31\\u7eea\\uff0c\\u8bf7\\u91cd\\u65b0\\u8fde\\u63a5\\u540e\\u518d\\u540c\\u6b65\\u5386\\u53f2');\n        }\n      }\n\n      const historyTask = ble.syncHistory({ readAll, deleteAfterUpload: false });"
   ) &&
-  !normalizedControllerSource.includes(
-    "if (!isReady.value) {\n        const restored = await restoreLastBusinessDevice({ refreshAfterRestore: false });\n        if (!restored) {\n          throw new Error('\\u8bbe\\u5907\\u901a\\u4fe1\\u672a\\u5c31\\u7eea\\uff0c\\u8bf7\\u91cd\\u65b0\\u8fde\\u63a5\\u540e\\u518d\\u540c\\u6b65\\u5386\\u53f2');\n        }\n      }\n\n      await syncRwDeviceTimeBeforeHistory(requestedHistoryDetails);\n\n      if (ble.deviceInfo.value.protocol === 'rw')"
-  ) ||
+    !normalizedControllerSource.includes(
+      "if (!isReady.value) {\n        const restored = await restoreLastBusinessDevice({ refreshAfterRestore: false });\n        if (!restored) {\n          throw new Error('\\u8bbe\\u5907\\u901a\\u4fe1\\u672a\\u5c31\\u7eea\\uff0c\\u8bf7\\u91cd\\u65b0\\u8fde\\u63a5\\u540e\\u518d\\u540c\\u6b65\\u5386\\u53f2');\n        }\n      }\n\n      await syncRwDeviceTimeBeforeHistory(requestedHistoryDetails);\n\n      if (ble.deviceInfo.value.protocol === 'rw')"
+    )) ||
   !normalizedControllerSource.includes('const historyTask = ble.syncHistory({') ||
   !normalizedControllerSource.includes('deleteAfterUpload: false')
 ) {
@@ -832,11 +835,7 @@ if (
   pendingButParsedInfoResult.ok.includes('firmware_pending') ||
   pendingButParsedInfoResult.ok.includes('software_pending')
 ) {
-  throw new Error(
-    `Business controller should resolve RW device-info pending results from received data snapshots: ${JSON.stringify(
-      pendingButParsedInfoResult
-    )}`
-  );
+  throw new Error(`Business controller should resolve RW device-info pending results from received data snapshots: ${JSON.stringify(pendingButParsedInfoResult)}`);
 }
 
 const restoreDeviceInfoController = useRingBusinessController({
@@ -923,11 +922,7 @@ const staleDeviceInfoRefresh = staleDeviceInfoController.refreshDeviceInfoData()
 staleDeviceInfoController.clearBusinessData();
 await staleDeviceInfoRefresh;
 if (staleDeviceInfoController.lastRefreshResult.value !== null) {
-  throw new Error(
-    `Business controller should ignore stale device-info refresh results after clear: ${JSON.stringify(
-      staleDeviceInfoController.lastRefreshResult.value
-    )}`
-  );
+  throw new Error(`Business controller should ignore stale device-info refresh results after clear: ${JSON.stringify(staleDeviceInfoController.lastRefreshResult.value)}`);
 }
 
 const silentTimeoutController = useRingBusinessController({ refreshTimeoutMs: 1, historyTimeoutMs: 1 });
@@ -940,11 +935,7 @@ if (
   !silentTimeoutController.lastRefreshResult.value?.ok.includes('battery') ||
   silentTimeoutController.lastRefreshResult.value?.status !== 'partial'
 ) {
-  throw new Error(
-    `Silent business refresh timeouts should keep visible state non-failing: ${JSON.stringify(
-      silentTimeoutController.lastRefreshResult.value
-    )}`
-  );
+  throw new Error(`Silent business refresh timeouts should keep visible state non-failing: ${JSON.stringify(silentTimeoutController.lastRefreshResult.value)}`);
 }
 
 const staleController = useRingBusinessController({ refreshTimeoutMs: 1, historyTimeoutMs: 1 });
@@ -978,8 +969,7 @@ if (staleController.isSyncingHistory.value || staleController.lastHistoryResult.
 
 const staleHistoryRejectController = useRingBusinessController({ refreshTimeoutMs: 1, historyTimeoutMs: 20 });
 staleHistoryRejectController.deviceInfo.value = { deviceId: 'stale-history-reject-ready', ...RW_READY_FIELDS, protocol: 'rw' } as any;
-(staleHistoryRejectController.adapter as any).readLocalData = () =>
-  new Promise((_, reject) => setTimeout(() => reject(new Error('stale history boom')), 5));
+(staleHistoryRejectController.adapter as any).readLocalData = () => new Promise((_, reject) => setTimeout(() => reject(new Error('stale history boom')), 5));
 const staleHistoryReject = staleHistoryRejectController.syncBusinessHistory();
 staleHistoryRejectController.clearBusinessData();
 await staleHistoryReject;
@@ -1031,8 +1021,7 @@ try {
   await halfReadyHistoryController.syncBusinessHistory();
 } catch (error) {
   halfReadyHistoryFailed =
-    error instanceof Error &&
-    error.message === '\u8bbe\u5907\u901a\u4fe1\u672a\u5c31\u7eea\uff0c\u8bf7\u91cd\u65b0\u8fde\u63a5\u540e\u518d\u540c\u6b65\u5386\u53f2';
+    error instanceof Error && error.message === '\u8bbe\u5907\u901a\u4fe1\u672a\u5c31\u7eea\uff0c\u8bf7\u91cd\u65b0\u8fde\u63a5\u540e\u518d\u540c\u6b65\u5386\u53f2';
 }
 
 if (
@@ -1063,15 +1052,10 @@ try {
   await halfReadyMonitoringController.enableHealthMonitoring(1800);
 } catch (error) {
   halfReadyMonitoringFailed =
-    error instanceof Error &&
-    error.message === '\u8bbe\u5907\u901a\u4fe1\u672a\u5c31\u7eea\uff0c\u8bf7\u91cd\u65b0\u8fde\u63a5\u540e\u518d\u914d\u7f6e\u5065\u5eb7\u76d1\u542c';
+    error instanceof Error && error.message === '\u8bbe\u5907\u901a\u4fe1\u672a\u5c31\u7eea\uff0c\u8bf7\u91cd\u65b0\u8fde\u63a5\u540e\u518d\u914d\u7f6e\u5065\u5eb7\u76d1\u542c';
 }
 
-if (
-  !halfReadyMonitoringFailed ||
-  halfReadyMonitoringWriteCount !== 0 ||
-  halfReadyMonitoringController.isRefreshingBusinessData.value
-) {
+if (!halfReadyMonitoringFailed || halfReadyMonitoringWriteCount !== 0 || halfReadyMonitoringController.isRefreshingBusinessData.value) {
   throw new Error(
     `Business controller should not issue RW/L19 health-monitoring commands from a half-ready device: ${JSON.stringify({
       halfReadyMonitoringFailed,
@@ -1152,10 +1136,7 @@ const connectTimeoutController = useRingBusinessController({ connectTimeoutMs: 1
 (connectTimeoutController.adapter as any).connectAndDiscover = () => new Promise(() => undefined);
 let connectTimedOut = false;
 try {
-  await connectTimeoutController.connectBusinessDevice(
-    { deviceId: 'connect-timeout', name: 'QKeeRingTimeout', protocol: 'legacy' },
-    { refreshAfterConnect: false }
-  );
+  await connectTimeoutController.connectBusinessDevice({ deviceId: 'connect-timeout', name: 'QKeeRingTimeout', protocol: 'legacy' }, { refreshAfterConnect: false });
 } catch (error) {
   connectTimedOut = error instanceof Error && error.message === '连接超时，请重新连接';
 }
@@ -1191,10 +1172,7 @@ let staleConnectCalled = false;
 };
 let staleConnectRejected = false;
 try {
-  await staleConnectController.connectBusinessDevice(
-    { deviceId: 'expired-rw', name: 'SY03', protocol: 'rw', lastSeenAt: Date.now() - 120000 },
-    { refreshAfterConnect: false }
-  );
+  await staleConnectController.connectBusinessDevice({ deviceId: 'expired-rw', name: 'SY03', protocol: 'rw', lastSeenAt: Date.now() - 120000 }, { refreshAfterConnect: false });
 } catch (error) {
   staleConnectRejected = error instanceof Error && error.message === '设备信号已过期，请重新搜索';
 }
@@ -1226,10 +1204,7 @@ const lateConnectController = useRingBusinessController({ connectTimeoutMs: 1, r
     )
   );
 try {
-  await lateConnectController.connectBusinessDevice(
-    { deviceId: 'late-connect', name: 'QKeeRingLate', protocol: 'legacy' },
-    { refreshAfterConnect: false }
-  );
+  await lateConnectController.connectBusinessDevice({ deviceId: 'late-connect', name: 'QKeeRingLate', protocol: 'legacy' }, { refreshAfterConnect: false });
 } catch {
   // expected timeout
 }
@@ -1274,10 +1249,7 @@ let restoreCalls = 0;
 };
 (restoreController.adapter as any).waitForParsedData = () => new Promise(() => undefined);
 (restoreController.adapter as any).sendBatteryCommand = () => new Promise(() => undefined);
-const [firstRestore, secondRestore] = await Promise.all([
-  restoreController.restoreLastBusinessDevice(),
-  restoreController.restoreLastBusinessDevice()
-]);
+const [firstRestore, secondRestore] = await Promise.all([restoreController.restoreLastBusinessDevice(), restoreController.restoreLastBusinessDevice()]);
 
 if (!firstRestore || !secondRestore || restoreCalls !== 1 || restoreController.isRestoringDevice.value) {
   throw new Error(
@@ -1304,11 +1276,7 @@ const restoreTimeoutController = useRingBusinessController({
 });
 (restoreTimeoutController.adapter as any).connectAndDiscover = () => new Promise(() => undefined);
 const timedOutRestore = await restoreTimeoutController.restoreLastBusinessDevice();
-if (
-  timedOutRestore ||
-  restoreTimeoutController.isRestoringDevice.value ||
-  restoreTimeoutController.lastRefreshResult.value?.failed[0]?.step !== 'restore'
-) {
+if (timedOutRestore || restoreTimeoutController.isRestoringDevice.value || restoreTimeoutController.lastRefreshResult.value?.failed[0]?.step !== 'restore') {
   throw new Error(
     `Business controller should settle hanging restore attempts: ${JSON.stringify({
       timedOutRestore,
@@ -1322,11 +1290,7 @@ if (
 (timeoutController.adapter as any).sendBatteryCommand = () => new Promise(() => undefined);
 
 const timeoutRefresh = await timeoutController.refreshBusinessData();
-if (
-  timeoutRefresh.status !== 'partial' ||
-  timeoutController.isRefreshingBusinessData.value ||
-  timeoutController.lastRefreshResult.value?.failed[0]?.step !== 'refresh'
-) {
+if (timeoutRefresh.status !== 'partial' || timeoutController.isRefreshingBusinessData.value || timeoutController.lastRefreshResult.value?.failed[0]?.step !== 'refresh') {
   throw new Error(
     `Business controller should settle hanging refreshes: ${JSON.stringify({
       result: timeoutRefresh,
@@ -1352,10 +1316,7 @@ const lateRefreshController = useRingBusinessController({ refreshTimeoutMs: 1, h
   );
 await lateRefreshController.refreshBusinessData();
 await new Promise((resolve) => setTimeout(resolve, 40));
-if (
-  lateRefreshController.lastRefreshResult.value?.failed[0]?.step !== 'refresh' ||
-  lateRefreshController.isRefreshingBusinessData.value
-) {
+if (lateRefreshController.lastRefreshResult.value?.failed[0]?.step !== 'refresh' || lateRefreshController.isRefreshingBusinessData.value) {
   throw new Error(
     `Business controller should not let late refresh task overwrite timeout result: ${JSON.stringify({
       isRefreshing: lateRefreshController.isRefreshingBusinessData.value,
@@ -1437,10 +1398,7 @@ let refreshCommandCount = 0;
       10
     )
   );
-const [singleFlightFirst, singleFlightSecond] = await Promise.all([
-  singleFlightController.refreshBusinessData(),
-  singleFlightController.refreshBusinessData()
-]);
+const [singleFlightFirst, singleFlightSecond] = await Promise.all([singleFlightController.refreshBusinessData(), singleFlightController.refreshBusinessData()]);
 
 if (singleFlightFirst !== singleFlightSecond || refreshCommandCount !== 1 || singleFlightController.isRefreshingBusinessData.value) {
   throw new Error(
@@ -1459,8 +1417,7 @@ silentRefreshController.deviceInfo.value = {
   protocol: 'rw'
 } as any;
 (silentRefreshController.adapter as any).protocol = 'rw';
-(silentRefreshController.adapter as any).sendBatteryCommand = async () =>
-  new Promise((resolve) => setTimeout(resolve, 10));
+(silentRefreshController.adapter as any).sendBatteryCommand = async () => new Promise((resolve) => setTimeout(resolve, 10));
 (silentRefreshController.adapter as any).sendFirmwareVersion = async () => undefined;
 (silentRefreshController.adapter as any).readCollectPeriodCommand = async () => undefined;
 (silentRefreshController.adapter as any).sendActiveMeasureCommand = async () => undefined;
@@ -1519,9 +1476,7 @@ let boundRwFallbackRefreshCount = 0;
 boundRwProtocolFallbackController.resumeBusinessAutoRefresh();
 await new Promise((resolve) => setTimeout(resolve, 40));
 if (boundRwFallbackRefreshCount !== 0) {
-  throw new Error(
-    `RW bound-device protocol fallback should keep background refresh disabled when current protocol is temporarily missing: ${boundRwFallbackRefreshCount}`
-  );
+  throw new Error(`RW bound-device protocol fallback should keep background refresh disabled when current protocol is temporarily missing: ${boundRwFallbackRefreshCount}`);
 }
 boundRwProtocolFallbackController.clearBusinessData();
 
@@ -1863,8 +1818,12 @@ const rwTimeoutRecoveryController = useRingBusinessController({
 
 if (
   !normalizedControllerSource.includes('forceDeviceInfo?: boolean') ||
-  !normalizedControllerSource.includes('const includeDeviceInfo =\n      refreshOptions.includeDeviceInfo ??\n      (refreshOptions.forceDeviceInfo || !silent || !lastRefreshResult.value || !hasRwDeviceInfoCoreSnapshot());') ||
-  !normalizedControllerSource.includes('includeDeviceInfo,\n      includeRealtimeMetrics,\n      realtimeMetricNames: refreshOptions.realtimeMetricNames,\n      includeHistorySnapshot') ||
+  !normalizedControllerSource.includes(
+    'const includeDeviceInfo =\n      refreshOptions.includeDeviceInfo ??\n      (refreshOptions.forceDeviceInfo || !silent || !lastRefreshResult.value || !hasRwDeviceInfoCoreSnapshot());'
+  ) ||
+  !normalizedControllerSource.includes(
+    'includeDeviceInfo,\n      includeRealtimeMetrics,\n      realtimeMetricNames: refreshOptions.realtimeMetricNames,\n      includeHistorySnapshot'
+  ) ||
   !normalizedControllerSource.includes('forceDeviceInfo: true,\n        includeRealtimeMetrics: false,\n        includeHistorySnapshot: false')
 ) {
   throw new Error('RW timeout recovery refresh should force device-info commands even when cached metrics exist.');
@@ -1982,9 +1941,7 @@ let rwExpandedRetryRefreshCount = 0;
     { type: 'firmware_version', firmwareVersion: '2.2.9', softwareVersion: '303e0001', protocol: 'rw' },
     { type: 'rw_health_data', name: 'heart_rate', value: 71, data: [71], protocol: 'rw' },
     { type: 'rw_health_data', name: 'blood_oxygen', value: 98, data: [98], protocol: 'rw' },
-    ...(rwExpandedRetryRefreshCount > 1
-      ? [{ type: 'rw_health_data', name: 'hrv', value: 42, data: [42], protocol: 'rw' }]
-      : [])
+    ...(rwExpandedRetryRefreshCount > 1 ? [{ type: 'rw_health_data', name: 'hrv', value: 42, data: [42], protocol: 'rw' }] : [])
   ];
   const parsed = candidates.find(predicate);
   if (parsed) return Promise.resolve(parsed);
@@ -2265,11 +2222,7 @@ if (inFlightDisconnectController.isRefreshingBusinessData.value) {
 }
 await inFlightRefresh;
 if (inFlightDisconnectController.lastRefreshResult.value !== null) {
-  throw new Error(
-    `Business controller should ignore stale in-flight refresh result after disconnect: ${JSON.stringify(
-      inFlightDisconnectController.lastRefreshResult.value
-    )}`
-  );
+  throw new Error(`Business controller should ignore stale in-flight refresh result after disconnect: ${JSON.stringify(inFlightDisconnectController.lastRefreshResult.value)}`);
 }
 
 [

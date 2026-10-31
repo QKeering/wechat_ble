@@ -1,4 +1,4 @@
-import type { LegacyRingAdapter, LegacyConnectionStateOptions, LegacyReadLocalDataOptions, LegacyScanOptions } from '../legacy/adapter';
+import type { LegacyRingAdapter, LegacyConnectionStateOptions, LegacyReadLocalDataOptions, LegacyScanOptions, RingWriteOptions } from '../legacy/adapter';
 import { LegacyRingCommand } from '../legacy/commands';
 import { getTodayZeroTimestamp, type LegacyCommandPayload } from '../legacy/protocol';
 import { RING_PARSED_EMITTED, type RingBleRuntime, type RingBleState, type RingDeviceInfo, type RingParsedData } from '../types';
@@ -141,6 +141,20 @@ const RW_ALT_WRITE_PROBE_TIMEOUT_MS = 650;
 const RW_FALLBACK_RESPONSE_GRACE_MS = 650;
 const RW_FALLBACK_RESPONSE_TIMEOUT_CAP_MS = 6000;
 const RW_PRIMARY_RESPONSE_TIMEOUT_MS = 2500;
+// 单次 writeBLECharacteristicValue 的兜底超时：App 端偶发不回 success/fail，
+// 没有它整条串行写队列会被永久堵死，后续所有命令都排不进来。
+const RW_COMMAND_WRITE_TIMEOUT_MS = 3000;
+// 开启通知的兜底超时：部分 App/机型上 notifyBLECharacteristicValueChange
+// 的 success/fail 都不回，没有它整条连接/重连会永久挂在 notify 这一步。
+const RW_NOTIFY_ENABLE_TIMEOUT_MS = 4000;
+// MTU 协商和启动扫描同样可能静默丢回调：前者要抛错让握手走降级，
+// 后者按"已在扫描"处理（设备监听在调用前就注册了）。
+const RW_MTU_CALL_TIMEOUT_MS = 5000;
+const RW_SCAN_START_CALLBACK_TIMEOUT_MS = 3000;
+// 安静类调用（停扫描/关连接/查状态）的超时：超时按已完成处理。
+const RW_QUIET_BLE_CALL_TIMEOUT_MS = 2000;
+// 服务/特征发现单次调用的超时：超时要抛错交给 withRetry 重试。
+const RW_GATT_DISCOVERY_CALL_TIMEOUT_MS = 5000;
 const RW_ALTERNATE_NOTIFY_MAX_BACKGROUND_CANDIDATES = 2;
 const RW_CREATE_CONNECTION_TIMEOUT_MS = 20000;
 const RW_CREATE_CONNECTION_RETRY_DELAYS_MS = [0, 900, 1800];
@@ -369,8 +383,10 @@ const summarizeScanDeviceForRwBleLog = (device: RingDeviceInfo) => ({
   lastSeenAt: device.lastSeenAt
 });
 
+// App 端不一定实现全部 off* API。裸调用一旦抛 TypeError，调用点（部分在
+// Promise 之外）会让扫描/清理流程当场中断且几乎没有日志，因此统一改成可选调用。
 const offBluetoothDeviceFound = (callback: BluetoothDeviceFoundCallback) => {
-  (uni.offBluetoothDeviceFound as unknown as (callback: BluetoothDeviceFoundCallback) => void)(callback);
+  (uni.offBluetoothDeviceFound as unknown as ((callback?: BluetoothDeviceFoundCallback) => void) | undefined)?.(callback);
 };
 
 const notSupported = (method: string) => async () => {
@@ -379,17 +395,79 @@ const notSupported = (method: string) => async () => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// 部分 App/机型上 uni 的 BLE 查询类 API 偶发既不回调 success 也不回调 fail。
+// 这些调用只是"尽力而为"，超时按 fallback 结算，避免整条连接流程卡死。
+const settleBleCallWithin = <T>(task: Promise<T>, timeoutMs: number, fallback: T, label: string): Promise<T> => {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      rwBleLog('ble-call-timeout', { label, timeoutMs });
+      resolve(fallback);
+    }, timeoutMs);
+    (timer as any).unref?.();
+    const settle = (value: T) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    task.then(settle, () => settle(fallback));
+  });
+};
+
+// GATT 发现需要区分"超时"和"成功"，超时要抛错让上层重试。
+const rejectBleCallAfter = <T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      rwBleLog('ble-call-timeout', { label, timeoutMs });
+      reject(new Error(`${label} timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+    (timer as any).unref?.();
+    task.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+};
+
 const offBleConnectionStateChange = (callback: BleConnectionStateCallback) => {
-  (uni.offBLEConnectionStateChange as unknown as (callback: BleConnectionStateCallback) => void)(callback);
+  (uni.offBLEConnectionStateChange as unknown as ((callback?: BleConnectionStateCallback) => void) | undefined)?.(callback);
 };
 
 const offBleCharacteristicValueChange = (callback: BleCharacteristicValueCallback) => {
-  (uni.offBLECharacteristicValueChange as unknown as (callback: BleCharacteristicValueCallback) => void)(callback);
+  (uni.offBLECharacteristicValueChange as unknown as ((callback?: BleCharacteristicValueCallback) => void) | undefined)?.(callback);
 };
 
 const offBluetoothAdapterStateChange = (callback: BluetoothAdapterStateCallback) => {
-  (uni.offBluetoothAdapterStateChange as unknown as (callback: BluetoothAdapterStateCallback) => void)(callback);
+  (uni.offBluetoothAdapterStateChange as unknown as ((callback?: BluetoothAdapterStateCallback) => void) | undefined)?.(callback);
 };
+
+// 写超时要能和普通 fail 区分：前者不能确定帧有没有发出去，破坏性命令
+// 不能再拿同一帧重发一次。
+const RW_WRITE_TIMEOUT_FLAG = '__rwWriteTimedOut';
+const markRwWriteTimeoutError = (error: Error) => {
+  Object.defineProperty(error, RW_WRITE_TIMEOUT_FLAG, { value: true, enumerable: false });
+  return error;
+};
+const isRwWriteTimeoutError = (error: unknown) =>
+  Boolean(error && typeof error === 'object' && (error as Record<string, unknown>)[RW_WRITE_TIMEOUT_FLAG]);
+// 删除 / 格式化 / 恢复出厂：超时后绝不能拿同一帧重发。
+const RW_DESTRUCTIVE_WRITE_OPTIONS: RingWriteOptions = { allowTimeoutFallback: false };
 
 const normalizeCommandWrite = (command: RwCommandWrite) => {
   if (command instanceof Uint8Array) return { bytes: command, label: undefined };
@@ -423,6 +501,13 @@ const markParsedAsEmitted = <T extends RingParsedData>(parsed: T): T => {
 export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntime): LegacyRingAdapter => {
   let currentDevice: RingDeviceInfo = {};
   let connectionGeneration = 0;
+  // 握手期间 currentDevice.deviceId 已经指向目标设备，但代际还没前进。
+  // 这条真值让连接态回调区分"旧链路的迟到掉线"和"新链路真的掉了"：
+  // 握手期一律忽略掉线事件，真失败由建链/发现/notify 自身的失败路径收尾。
+  let connectHandshakeInFlight = false;
+  // switchAdapter 会丢弃旧实例。App 端可能没有 off*BLE*，注销不掉的原
+  // 回调必须靠这个标记失效，否则旧适配器还能把新会话拆掉。
+  let adapterDisposed = false;
   let activeL19HistorySession: { deviceId: string; generation: number } | null = null;
   let scanCallback: BluetoothDeviceFoundCallback | null = null;
   let scanTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -442,6 +527,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   let pendingCollectPeriodReadAlias: RwPendingAlias | null = null;
   let pendingCollectPeriodSetAlias: RwPendingAlias | null = null;
   let writeQueue: Promise<unknown> = Promise.resolve();
+  // 断连时递增，让排队的旧写入在真正执行前作废，避免把命令写到下一次连接上。
+  let writeQueueGeneration = 0;
   let rwAppReadyPreflightRunning: Promise<void> | null = null;
   let lastRwAppReadyPreflightAt = 0;
 
@@ -761,12 +848,17 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   };
 
   const closeBluetoothAdapterQuietly = () => {
-    return new Promise((resolve) => {
-      uni.closeBluetoothAdapter({
-        success: resolve,
-        fail: resolve
-      });
-    });
+    return settleBleCallWithin(
+      new Promise<void>((resolve) => {
+        uni.closeBluetoothAdapter({
+          success: () => resolve(),
+          fail: () => resolve()
+        });
+      }),
+      RW_QUIET_BLE_CALL_TIMEOUT_MS,
+      undefined,
+      'closeBluetoothAdapter'
+    );
   };
 
   const resetBluetoothAdapterForReconnect = async (deviceId: string, deviceName = '', lastError?: unknown) => {
@@ -777,6 +869,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       previousMessage: formatError(lastError)
     });
     await stopScan();
+    invalidateWriteQueue();
     clearDataListener();
     await closeBleConnectionQuietly(deviceId);
     await closeBluetoothAdapterQuietly();
@@ -798,50 +891,63 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   const setMTU = (deviceId: string, mtu = 247) => {
     if (uni.getSystemInfoSync().platform !== 'android') return Promise.resolve(undefined);
 
-    return new Promise<unknown>((resolve, reject) => {
-      uni.setBLEMTU({
-        deviceId,
-        mtu,
-        success: resolve,
-        fail: (error) => {
-          if (isBenignMtuError(error)) {
-            resolve(error);
-            return;
+    return rejectBleCallAfter(
+      new Promise<unknown>((resolve, reject) => {
+        uni.setBLEMTU({
+          deviceId,
+          mtu,
+          success: resolve,
+          fail: (error) => {
+            if (isBenignMtuError(error)) {
+              resolve(error);
+              return;
+            }
+            reject(error);
           }
-          reject(error);
-        }
-      });
-    });
+        });
+      }),
+      RW_MTU_CALL_TIMEOUT_MS,
+      'setBLEMTU'
+    );
   };
 
-  const checkByRSSI = (deviceId: string) => {
-    return new Promise<boolean>((resolve) => {
-      uni.getBLEDeviceRSSI({
-        deviceId,
-        success: () => resolve(true),
-        fail: () => resolve(false)
-      });
-    });
-  };
+  const checkByRSSI = (deviceId: string) =>
+    settleBleCallWithin(
+      new Promise<boolean>((resolve) => {
+        uni.getBLEDeviceRSSI({
+          deviceId,
+          success: () => resolve(true),
+          fail: () => resolve(false)
+        });
+      }),
+      RW_QUIET_BLE_CALL_TIMEOUT_MS,
+      false,
+      'getBLEDeviceRSSI'
+    );
 
   const isDeviceConnected = (deviceId: string, serviceId?: string) => {
     if (!serviceId) return checkByRSSI(deviceId);
 
-    return new Promise<boolean>((resolve) => {
-      uni.getConnectedBluetoothDevices({
-        services: [serviceId],
-        success: (result) => {
-          const connected = result.devices.some((device) => device.deviceId === deviceId);
-          if (connected) {
-            resolve(true);
-            return;
-          }
+    return settleBleCallWithin(
+      new Promise<boolean>((resolve) => {
+        uni.getConnectedBluetoothDevices({
+          services: [serviceId],
+          success: (result) => {
+            const connected = result.devices.some((device) => device.deviceId === deviceId);
+            if (connected) {
+              resolve(true);
+              return;
+            }
 
-          void checkByRSSI(deviceId).then(resolve);
-        },
-        fail: () => resolve(false)
-      });
-    });
+            void checkByRSSI(deviceId).then(resolve);
+          },
+          fail: () => resolve(false)
+        });
+      }),
+      RW_QUIET_BLE_CALL_TIMEOUT_MS,
+      false,
+      'getConnectedBluetoothDevices'
+    );
   };
 
   const startScan = async (options: LegacyScanOptions = {}) => {
@@ -925,39 +1031,47 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     };
 
     scanCallback = (res) => mergeFoundDevices(res.devices || []);
+    // 记录本次扫描的监听器身份：start 的 fail 回调可能迟到，不能拿它拆掉后来者。
+    const invocationCallback = scanCallback;
 
     uni.onBluetoothDeviceFound(scanCallback);
 
-    return new Promise((resolve, reject) => {
-      uni.startBluetoothDevicesDiscovery({
-        allowDuplicatesKey: options.allowDuplicatesKey ?? true,
-        success: (result) => {
-          scanPollTimer = setInterval(() => {
-            uni.getBluetoothDevices?.({
-              success: (devicesResult) => mergeFoundDevices(devicesResult.devices || []),
-              fail: () => undefined
-            });
-          }, 1500);
-          resolve(result);
-        },
-        fail: (error) => {
-          state.isScanning.value = false;
-          if (scanCallback) {
-            offBluetoothDeviceFound(scanCallback);
-            scanCallback = null;
-          }
-          if (scanTimeout) {
-            clearTimeout(scanTimeout);
-            scanTimeout = null;
-          }
-          if (scanPollTimer) {
-            clearInterval(scanPollTimer);
-            scanPollTimer = null;
-          }
-          reject(error);
-        }
+    // 轮询作为广播回调之外的第二条发现通道，不依赖 start 的 success 回调，
+    // 避免部分机型 start 静默丢回调后整个扫描只靠广播被动等。
+    scanPollTimer = setInterval(() => {
+      uni.getBluetoothDevices?.({
+        success: (devicesResult) => mergeFoundDevices(devicesResult.devices || []),
+        fail: () => undefined
       });
-    });
+    }, 1500);
+
+    return settleBleCallWithin(
+      new Promise<unknown>((resolve, reject) => {
+        uni.startBluetoothDevicesDiscovery({
+          allowDuplicatesKey: options.allowDuplicatesKey ?? true,
+          success: resolve,
+          fail: (error) => {
+            if (scanCallback === invocationCallback) {
+              state.isScanning.value = false;
+              offBluetoothDeviceFound(invocationCallback);
+              scanCallback = null;
+              if (scanTimeout) {
+                clearTimeout(scanTimeout);
+                scanTimeout = null;
+              }
+              if (scanPollTimer) {
+                clearInterval(scanPollTimer);
+                scanPollTimer = null;
+              }
+            }
+            reject(error);
+          }
+        });
+      }),
+      RW_SCAN_START_CALLBACK_TIMEOUT_MS,
+      undefined,
+      'startBluetoothDevicesDiscovery'
+    );
   };
 
   const stopScan = () => {
@@ -974,23 +1088,33 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       scanPollTimer = null;
     }
     state.isScanning.value = false;
-    return new Promise((resolve) => {
-      uni.stopBluetoothDevicesDiscovery({
-        success: resolve,
-        fail: resolve
-      });
-    });
+    return settleBleCallWithin(
+      new Promise<void>((resolve) => {
+        uni.stopBluetoothDevicesDiscovery({
+          success: () => resolve(),
+          fail: () => resolve()
+        });
+      }),
+      RW_QUIET_BLE_CALL_TIMEOUT_MS,
+      undefined,
+      'stopBluetoothDevicesDiscovery'
+    );
   };
 
   const closeBleConnectionQuietly = (deviceId: string) => {
     if (!deviceId) return Promise.resolve();
-    return new Promise((resolve) => {
-      uni.closeBLEConnection({
-        deviceId,
-        success: resolve,
-        fail: resolve
-      });
-    });
+    return settleBleCallWithin(
+      new Promise<void>((resolve) => {
+        uni.closeBLEConnection({
+          deviceId,
+          success: () => resolve(),
+          fail: () => resolve()
+        });
+      }),
+      RW_QUIET_BLE_CALL_TIMEOUT_MS,
+      undefined,
+      'closeBLEConnection'
+    );
   };
 
   const isTransientCreateConnectionFailure = (error: unknown) => {
@@ -1057,16 +1181,25 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
             fail: (error) => {
               const message = `${(error as any)?.errMsg || ''}`.toLowerCase();
               if (message.includes('already connect') || message.includes('already connected')) {
-                rwBleLog('connect-created', {
-                  deviceId,
-                  deviceName,
-                  alreadyConnected: true,
-                  attempt,
-                  maxAttempts,
-                  elapsedAttemptMs: Date.now() - attemptStartedAt,
-                  elapsedTotalMs: Date.now() - connectStartedAt
+                // OS 报 "已连接" 不代表链路可用（可能是残留句柄）。探一次 RSSI，
+                // 探不到就按普通失败重试，避免带着假连接继续发现服务。
+                void checkByRSSI(deviceId).then((alive) => {
+                  rwBleLog('connect-created', {
+                    deviceId,
+                    deviceName,
+                    alreadyConnected: true,
+                    probeAlive: alive,
+                    attempt,
+                    maxAttempts,
+                    elapsedAttemptMs: Date.now() - attemptStartedAt,
+                    elapsedTotalMs: Date.now() - connectStartedAt
+                  });
+                  if (alive) {
+                    resolve(error);
+                    return;
+                  }
+                  reject(error);
                 });
-                resolve(error);
                 return;
               }
               const retriable = isTransientCreateConnectionFailure(error);
@@ -1231,6 +1364,9 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
 
   const connectAndDiscover = async (deviceId: string, deviceName = '', sourceDevice?: RingDeviceInfo) => {
     const handshakeStartedAt = Date.now();
+    // 握手期间忽略掉线回调：旧链路/旧连接的迟到事件会在这里被误判成新链路断开，
+    // 把正在建立的连接清掉。真失败由各步骤自己的超时和失败路径收尾。
+    connectHandshakeInFlight = true;
     try {
       rwBleLog('handshake-start', {
         deviceId,
@@ -1332,6 +1468,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       });
       await disconnect(deviceId);
       throw error;
+    } finally {
+      connectHandshakeInFlight = false;
     }
   };
 
@@ -1371,27 +1509,32 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     const targetChar = chars.find((char) => sameUuid(char.uuid, characteristicId));
     const charSummary = targetChar ? formatCharacteristic(targetChar) : `${characteristicId}(not found in characteristic list)`;
 
-    const changeNotify = (state: boolean) =>
-      new Promise((resolve, reject) => {
-        uni.notifyBLECharacteristicValueChange({
-          state,
-          deviceId,
-          serviceId,
-          characteristicId,
-          success: resolve,
-          fail: reject
-        });
-      });
+    const changeNotify = (state: boolean, timeoutMs: number) =>
+      rejectBleCallAfter(
+        new Promise<unknown>((resolve, reject) => {
+          uni.notifyBLECharacteristicValueChange({
+            state,
+            deviceId,
+            serviceId,
+            characteristicId,
+            success: resolve,
+            fail: reject
+          });
+        }),
+        timeoutMs,
+        `notifyBLECharacteristicValueChange(${state ? 'on' : 'off'})`
+      );
 
     const errors: string[] = [];
 
     for (let attempt = 1; attempt <= 5; attempt += 1) {
       await sleep(attempt === 1 ? 500 : 800);
-      await changeNotify(false).catch(() => undefined);
+      // 关闭通知只是为了清状态，静默丢回调就按已关闭处理，不值得等满超时。
+      await changeNotify(false, RW_QUIET_BLE_CALL_TIMEOUT_MS).catch(() => undefined);
       await sleep(300);
 
       try {
-        await changeNotify(true);
+        await changeNotify(true, RW_NOTIFY_ENABLE_TIMEOUT_MS);
         return undefined;
       } catch (error) {
         errors.push(`attempt${attempt}=${formatError(error)}`);
@@ -1404,16 +1547,20 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   const enableNotifyOnce = async (deviceId: string, serviceId: string, characteristicId: string) => {
     setupDataListener();
     await sleep(250);
-    return new Promise((resolve, reject) => {
-      uni.notifyBLECharacteristicValueChange({
-        state: true,
-        deviceId,
-        serviceId,
-        characteristicId,
-        success: resolve,
-        fail: reject
-      });
-    });
+    return rejectBleCallAfter(
+      new Promise<unknown>((resolve, reject) => {
+        uni.notifyBLECharacteristicValueChange({
+          state: true,
+          deviceId,
+          serviceId,
+          characteristicId,
+          success: resolve,
+          fail: reject
+        });
+      }),
+      RW_NOTIFY_ENABLE_TIMEOUT_MS,
+      'notifyBLECharacteristicValueChange(alternate-on)'
+    );
   };
 
   const enableAlternateNotifyChannels = async (deviceId: string, candidates: RwNotifyCandidate[], primary: RwNotifyCandidate) => {
@@ -1447,8 +1594,21 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     return errors;
   };
 
+  const invalidateWriteQueue = () => {
+    // 只作废还没开始执行的写入；链本身保留，避免和旧链路里的在途写入并发。
+    writeQueueGeneration += 1;
+  };
+
   const enqueueWrite = <T>(task: () => Promise<T>) => {
-    const queued = writeQueue.catch(() => undefined).then(task);
+    const generation = writeQueueGeneration;
+    const queued = writeQueue
+      .catch(() => undefined)
+      .then(() => {
+        if (generation !== writeQueueGeneration) {
+          throw new Error('RW write queue was reset before the command ran.');
+        }
+        return task();
+      });
     writeQueue = queued
       .catch(() => undefined)
       .then(async () => {
@@ -1457,7 +1617,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     return queued;
   };
 
-  const sendBytesToWriteCandidate = (bytes: Uint8Array, candidate: RwWriteCandidate, label?: string, probeLabel?: string) => {
+  const sendBytesToWriteCandidate = (bytes: Uint8Array, candidate: RwWriteCandidate, label?: string, probeLabel?: string, options?: RingWriteOptions) => {
     const device = getRuntimeDevice();
     if (!device.deviceId || !candidate.serviceId || !candidate.characteristicId) {
       throw new Error('RW ring device is not ready for command writes.');
@@ -1474,6 +1634,24 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
 
     const writeValue = (writeType: 'write' | 'writeNoResponse') =>
       new Promise((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          rwBleLog('tx-timeout', {
+            ...frameLog,
+            writeType,
+            timeoutMs: RW_COMMAND_WRITE_TIMEOUT_MS,
+            serviceId: candidate.serviceId,
+            characteristicId: candidate.characteristicId
+          });
+          reject(markRwWriteTimeoutError(new Error(`RW write timed out after ${RW_COMMAND_WRITE_TIMEOUT_MS}ms (${writeType}).`)));
+        }, RW_COMMAND_WRITE_TIMEOUT_MS);
+        (timer as any).unref?.();
+        const finish = () => {
+          settled = true;
+          clearTimeout(timer);
+        };
         uni.writeBLECharacteristicValue({
           deviceId: device.deviceId!,
           serviceId: candidate.serviceId,
@@ -1481,6 +1659,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
           value: writeBuffer as unknown as any[],
           writeType,
           success: (result) => {
+            if (settled) return;
+            finish();
             rwBleLog('tx-ok', {
               ...frameLog,
               writeType,
@@ -1490,6 +1670,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
             resolve(result);
           },
           fail: (error) => {
+            if (settled) return;
+            finish();
             rwBleLog('tx-fail', {
               ...frameLog,
               writeType,
@@ -1503,16 +1685,22 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       });
 
     return enqueueWrite(() =>
-      writeValue('write').catch(() =>
-        writeValue('writeNoResponse').catch((error) => {
+      writeValue('write').catch((error) => {
+        // 写超时无法确认帧到底发没发出去。破坏性命令重发可能直接执行第二遍，
+        // 所以只允许对超时做失败处理，不再走 writeNoResponse 的降级重发。
+        if (options?.allowTimeoutFallback === false && isRwWriteTimeoutError(error)) {
           if (!probeLabel) runtime?.onDisconnected?.(error);
           throw error;
-        })
-      )
+        }
+        return writeValue('writeNoResponse').catch((fallbackError) => {
+          if (!probeLabel) runtime?.onDisconnected?.(fallbackError);
+          throw fallbackError;
+        });
+      })
     );
   };
 
-  const sendBytes = (bytes: Uint8Array, label?: string) => {
+  const sendBytes = (bytes: Uint8Array, label?: string, options?: RingWriteOptions) => {
     const device = getRuntimeDevice();
     if (!device.deviceId || !device.serviceId || !device.cmdCharId) {
       throw new Error('RW ring device is not ready for command writes.');
@@ -1524,7 +1712,9 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
         serviceId: device.serviceId,
         characteristicId: device.cmdCharId
       },
-      label
+      label,
+      undefined,
+      options
     );
   };
 
@@ -1552,12 +1742,34 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     return enqueueWrite(
       () =>
         new Promise((resolve, reject) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            rwBleLog('tx-timeout', {
+              ...frameLog,
+              deviceId,
+              serviceId,
+              characteristicId,
+              writeType: 'platform-default',
+              timeoutMs: RW_COMMAND_WRITE_TIMEOUT_MS,
+              historyCompatibility: 'l19'
+            });
+            reject(new Error(`RW write timed out after ${RW_COMMAND_WRITE_TIMEOUT_MS}ms (l19 history).`));
+          }, RW_COMMAND_WRITE_TIMEOUT_MS);
+          (timer as any).unref?.();
+          const finish = () => {
+            settled = true;
+            clearTimeout(timer);
+          };
           uni.writeBLECharacteristicValue({
             deviceId,
             serviceId,
             characteristicId,
             value: writeBuffer as unknown as any[],
             success: (result) => {
+              if (settled) return;
+              finish();
               rwBleLog('tx-ok', {
                 ...frameLog,
                 deviceId,
@@ -1569,6 +1781,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
               resolve(result);
             },
             fail: (error) => {
+              if (settled) return;
+              finish();
               rwBleLog('tx-fail', {
                 ...frameLog,
                 deviceId,
@@ -2015,7 +2229,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       const pendingDelete = waitForParsedData((deleteParsed) => isRwAppHistoryResponseFor(deleteParsed, command.key, RwKeyFlag.Delete), RW_APP_HISTORY_SYNC_DELETE_WAIT_MS);
       pendingDelete.catch(() => undefined);
 
-      await sendBytes(buildRwDeleteHealthDataCommand(command.key), `${command.label}/delete-current-block`);
+      await sendBytes(buildRwDeleteHealthDataCommand(command.key), `${command.label}/delete-current-block`, RW_DESTRUCTIVE_WRITE_OPTIONS);
 
       try {
         const deleteParsed = await pendingDelete;
@@ -2165,7 +2379,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       name: normalizedName,
       key: readableKey
     });
-    return sendBytes(buildRwDeleteHealthDataCommand(readableKey), `${normalizedName}/health-delete-current-block`);
+    return sendBytes(buildRwDeleteHealthDataCommand(readableKey), `${normalizedName}/health-delete-current-block`, RW_DESTRUCTIVE_WRITE_OPTIONS);
   };
 
   const controlRwHealthData = (name: RwHealthDataName, enabled = true) => {
@@ -2370,7 +2584,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
   };
 
   const sendRwFactoryResetCommand = () => {
-    return sendBytes(buildRwFrame(0x37, 0x02));
+    return sendBytes(buildRwFrame(0x37, 0x02), 'factory-reset', RW_DESTRUCTIVE_WRITE_OPTIONS);
   };
 
   const sendRwFirmwareVersionCommand = async (alias?: L19VersionAliasType) => {
@@ -2498,7 +2712,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       expiresAt: Date.now() + ACTIVE_MEASURE_ALIAS_TTL_MS
     };
     try {
-      return await sendBytes(buildRwFormatFileSystemFrame());
+      return await sendBytes(buildRwFormatFileSystemFrame(), 'format-file-system', RW_DESTRUCTIVE_WRITE_OPTIONS);
     } catch (error) {
       pendingDeleteAllLocalDataAlias = null;
       throw error;
@@ -2509,7 +2723,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     const quickDeleteWait = waitForParsedData((parsed) => parsed.type === 'delete_all_local_data', 220);
     quickDeleteWait.catch(() => undefined);
 
-    await sendBytes(buildRwFrame(0x36, 0x03));
+    await sendBytes(buildRwFrame(0x36, 0x03), 'delete-all-local-data', RW_DESTRUCTIVE_WRITE_OPTIONS);
 
     try {
       await quickDeleteWait;
@@ -2960,19 +3174,26 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     rwBleLog('disconnect-request', { deviceId });
     connectionGeneration += 1;
     activeL19HistorySession = null;
+    invalidateWriteQueue();
     clearDataListener();
     currentDevice = {};
     if (!deviceId) return Promise.resolve();
-    return new Promise((resolve) => {
-      uni.closeBLEConnection({
-        deviceId,
-        success: resolve,
-        fail: resolve
-      });
-    });
+    return settleBleCallWithin(
+      new Promise<void>((resolve) => {
+        uni.closeBLEConnection({
+          deviceId,
+          success: () => resolve(),
+          fail: () => resolve()
+        });
+      }),
+      RW_QUIET_BLE_CALL_TIMEOUT_MS,
+      undefined,
+      'closeBLEConnection-disconnect'
+    );
   };
 
   const registerConnectionStateListener = (options?: LegacyConnectionStateOptions) => {
+    adapterDisposed = false;
     if (connectionStateCallback) {
       offBleConnectionStateChange(connectionStateCallback);
       connectionStateCallback = null;
@@ -2990,6 +3211,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       }
       connectionGeneration += 1;
       activeL19HistorySession = null;
+      invalidateWriteQueue();
       clearDataListener();
       currentDevice = {};
       options?.onDisconnected?.(res.deviceId);
@@ -2997,12 +3219,21 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     };
 
     connectionStateCallback = (res) => {
+      if (adapterDisposed) return;
       rwBleLog('connection-state', {
         deviceId: res.deviceId,
         connected: res.connected
       });
       if (res.connected) {
         options?.onConnected?.(res.deviceId);
+        return;
+      }
+      if (connectHandshakeInFlight) {
+        rwBleLog('connection-state-ignored', {
+          deviceId: res.deviceId,
+          connected: res.connected,
+          reason: 'handshake-in-flight'
+        });
         return;
       }
 
@@ -3069,6 +3300,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       adapterStateCallback = null;
     }
     adapterStateCallback = (result) => {
+      if (adapterDisposed) return;
       rwBleLog('adapter-state', {
         available: result.available,
         discovering: result.discovering
@@ -3077,6 +3309,7 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
       if (result.available) return;
 
       void stopScan();
+      invalidateWriteQueue();
       clearDataListener();
       runtime?.onDisconnected?.({
         reason: 'bluetooth_adapter_unavailable',
@@ -3107,6 +3340,8 @@ export const createRwRingAdapter = (state: RingBleState, runtime?: RingBleRuntim
     getCachedServiceId,
     disconnect,
     cleanup: async () => {
+      // App 端可能没有 off*BLE*：注销不掉的旧回调必须靠这个标记失效。
+      adapterDisposed = true;
       await stopScan();
       clearDataListener();
       if (connectionStateCallback) {
@@ -3662,24 +3897,32 @@ function isAllowedBusinessScanDevice(device: RingDeviceInfo, options: LegacyScan
 }
 
 function getServices(deviceId: string): Promise<UniApp.GetBLEDeviceServicesSuccess['services']> {
-  return new Promise((resolve, reject) => {
-    uni.getBLEDeviceServices({
-      deviceId,
-      success: (res) => resolve(res.services),
-      fail: reject
-    });
-  });
+  return rejectBleCallAfter(
+    new Promise<UniApp.GetBLEDeviceServicesSuccess['services']>((resolve, reject) => {
+      uni.getBLEDeviceServices({
+        deviceId,
+        success: (res) => resolve(res.services),
+        fail: reject
+      });
+    }),
+    RW_GATT_DISCOVERY_CALL_TIMEOUT_MS,
+    'getBLEDeviceServices'
+  );
 }
 
 function getCharacteristics(deviceId: string, serviceId: string): Promise<UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics']> {
-  return new Promise((resolve, reject) => {
-    uni.getBLEDeviceCharacteristics({
-      deviceId,
-      serviceId,
-      success: (res) => resolve(res.characteristics),
-      fail: reject
-    });
-  });
+  return rejectBleCallAfter(
+    new Promise<UniApp.GetBLEDeviceCharacteristicsSuccess['characteristics']>((resolve, reject) => {
+      uni.getBLEDeviceCharacteristics({
+        deviceId,
+        serviceId,
+        success: (res) => resolve(res.characteristics),
+        fail: reject
+      });
+    }),
+    RW_GATT_DISCOVERY_CALL_TIMEOUT_MS,
+    'getBLEDeviceCharacteristics'
+  );
 }
 
 function readBleCharacteristicValue(deviceId: string, serviceId: string, characteristicId: string) {

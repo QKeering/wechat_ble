@@ -3,12 +3,9 @@ import { buildRingRawHistoryFrames, uploadRingHistoryRecords } from '@/api';
 import { bind as bindBackendRingDevice, getBindInfo as getBackendBoundDevice, unbind as unbindBackendRingDevice } from '@/common/api/device';
 import { submitRingHistoryRawFrames } from '@/common/api/homeDetail';
 import { useRingStore } from '@/stores';
-import {
-  createUploadSessionId,
-  stagePendingUploadSession,
-  uploadPendingRawFramesInBackground
-} from '@/utils/dataUploadCompensation';
+import { createUploadSessionId, stagePendingUploadSession, uploadPendingRawFramesInBackground } from '@/utils/dataUploadCompensation';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
+import { beginRingBackgroundCriticalTask } from '@/utils/ringBackgroundTasks';
 import { isSameRingDevice, useRingBleSdk, type UseRingBleSdkOptions } from './useRingBleSdk';
 import { resolveRingProtocol, type RingDeviceInfo, type RingParsedData } from '@/sdk/ring-ble';
 import { getRwHistoryDataType, parseRwFileTimestamp } from '@/sdk/ring-ble/rw';
@@ -16,21 +13,11 @@ import { getRwHistoryDataType, parseRwFileTimestamp } from '@/sdk/ring-ble/rw';
 const hasCustomOptions = (options: UseRingBleSdkOptions) => Object.keys(options).length > 0;
 let defaultStoreSdk: ReturnType<typeof createRingBleStoreSdk> | null = null;
 
-const enrichLocalDataRecord = (
-  record: Record<string, any>,
-  parsed: RingParsedData,
-  device: RingDeviceInfo,
-  extra: Record<string, any> = {}
-) => {
+const enrichLocalDataRecord = (record: Record<string, any>, parsed: RingParsedData, device: RingDeviceInfo, extra: Record<string, any> = {}) => {
   const protocol = record.protocol || parsed.protocol || resolveRingProtocol(device);
   const stableMac =
-    getStableDeviceMacFromSource(device as Record<string, any>) ||
-    getStableDeviceMacFromSource(parsed as Record<string, any>) ||
-    getStableDeviceMacFromSource(record);
-  const stableIdentity =
-    protocol === 'rw'
-      ? getRwStableRecordIdentity(record, parsed, device)
-      : stableMac || record.uniMacId || parsed.uniMacId || device.uniMacId;
+    getStableDeviceMacFromSource(device as Record<string, any>) || getStableDeviceMacFromSource(parsed as Record<string, any>) || getStableDeviceMacFromSource(record);
+  const stableIdentity = protocol === 'rw' ? getRwStableRecordIdentity(record, parsed, device) : stableMac || record.uniMacId || parsed.uniMacId || device.uniMacId;
   return {
     ...record,
     ...extra,
@@ -44,11 +31,7 @@ const enrichLocalDataRecord = (
   };
 };
 
-const getRwStableRecordIdentity = (
-  record: Record<string, any>,
-  parsed: RingParsedData,
-  device: RingDeviceInfo
-) =>
+const getRwStableRecordIdentity = (record: Record<string, any>, parsed: RingParsedData, device: RingDeviceInfo) =>
   record.mac ||
   record.advertis?.macInfo ||
   parsed.mac ||
@@ -108,15 +91,8 @@ const getTrustedStableDeviceMacFromSource = (source?: Record<string, any> | null
   return trusted ? String(trusted || '').trim() : '';
 };
 
-const getHistoryUploadStableDeviceMac = (
-  records: Array<Record<string, any>>,
-  parsed: RingParsedData,
-  device?: RingDeviceInfo
-) =>
-  getStableDeviceMacFromSource(device as Record<string, any>) ||
-  getStableDeviceMacFromSource(parsed as Record<string, any>) ||
-  getStableDeviceMacFromSource(records[0]) ||
-  '';
+const getHistoryUploadStableDeviceMac = (records: Array<Record<string, any>>, parsed: RingParsedData, device?: RingDeviceInfo) =>
+  getStableDeviceMacFromSource(device as Record<string, any>) || getStableDeviceMacFromSource(parsed as Record<string, any>) || getStableDeviceMacFromSource(records[0]) || '';
 
 const getStableRecordDeviceKey = (record: Record<string, any>) => {
   const stableIdentity = record.mac || record.advertis?.macInfo;
@@ -164,9 +140,7 @@ const parseLocalDataRecordTime = (value: unknown) => {
 };
 
 const getLocalDataRecordTime = (record: Record<string, any>) => {
-  const value =
-    getLocalDataNumber(record.unixTime, record.timestamp, record.startTimestamp, record.recordTimestamp) ||
-    parseLocalDataRecordTime(record.recordTime);
+  const value = getLocalDataNumber(record.unixTime, record.timestamp, record.startTimestamp, record.recordTimestamp) || parseLocalDataRecordTime(record.recordTime);
   if (!value || value <= 0) return 0;
   return value > 100000000000 ? Math.floor(value / 1000) : Math.floor(value);
 };
@@ -194,19 +168,12 @@ const getRawRecordDeviceIdentityValues = (record: Record<string, any>) =>
 const getStableRecordDeviceIdentityValues = (record: Record<string, any>, protocolHint = '') => {
   const protocol = record.protocol || protocolHint;
   if (protocol === 'rw') {
-    return [
-      record.mac,
-      record.advertis?.macInfo,
-      isColonSeparatedBleMac(record.uniMacId) ? record.uniMacId : ''
-    ].filter(Boolean);
+    return [record.mac, record.advertis?.macInfo, isColonSeparatedBleMac(record.uniMacId) ? record.uniMacId : ''].filter(Boolean);
   }
   return getRawRecordDeviceIdentityValues(record);
 };
 
-const isSdkDeviceInfoAllowedForBoundDevice = (
-  device: RingDeviceInfo,
-  boundDevice?: RingDeviceInfo | null
-) => {
+const isSdkDeviceInfoAllowedForBoundDevice = (device: RingDeviceInfo, boundDevice?: RingDeviceInfo | null) => {
   if (!device?.deviceId) return true;
   const boundStableMac = getStableDeviceMacFromSource(boundDevice as Record<string, any> | null);
   if (!boundStableMac) return true;
@@ -245,9 +212,7 @@ const hasMatchingStableRecordIdentity = (leftIds: unknown[], rightIds: unknown[]
 
   const leftNormalized = leftRaw.map(normalizeRecordIdentity).filter((value) => value.length >= 6);
   const rightNormalized = rightRaw.map(normalizeRecordIdentity).filter((value) => value.length >= 6);
-  return leftNormalized.some((left) =>
-    rightNormalized.some((right) => left.endsWith(right.slice(-6)) || right.endsWith(left.slice(-6)))
-  );
+  return leftNormalized.some((left) => rightNormalized.some((right) => left.endsWith(right.slice(-6)) || right.endsWith(left.slice(-6))));
 };
 
 const hasRecordDeviceIdentity = (record: Record<string, any>) => getRawRecordDeviceIdentityValues(record).length > 0;
@@ -294,20 +259,13 @@ const dedupeLocalDataRecords = (records: Array<Record<string, any>>) => {
   const unkeyed: Array<Record<string, any>> = [];
   const resolvedFileKeys = new Set(
     records
-      .filter(
-        (record) =>
-          (record.sourceType === 'local_data' || record.sourceType === 'rw_upload_file') &&
-          record.status !== 'pending_upload_payload'
-      )
+      .filter((record) => (record.sourceType === 'local_data' || record.sourceType === 'rw_upload_file') && record.status !== 'pending_upload_payload')
       .map(getLocalDataFileKey)
       .filter(Boolean)
   );
 
   for (const record of records) {
-    if (
-      resolvedFileKeys.has(getLocalDataFileKey(record)) &&
-      (record.sourceType === 'rw_file_list' || record.status === 'pending_upload_payload')
-    ) {
+    if (resolvedFileKeys.has(getLocalDataFileKey(record)) && (record.sourceType === 'rw_file_list' || record.status === 'pending_upload_payload')) {
       continue;
     }
 
@@ -373,22 +331,15 @@ const getLocalDataResetTypes = (items: RingParsedData[], currentDevice: RingDevi
     }
   });
 
-  return new Set(
-    [...latestResetIndex.entries()]
-      .filter(([type, resetIndex]) => resetIndex > (latestRecordIndex.get(type) ?? -1))
-      .map(([type]) => type)
-  );
+  return new Set([...latestResetIndex.entries()].filter(([type, resetIndex]) => resetIndex > (latestRecordIndex.get(type) ?? -1)).map(([type]) => type));
 };
 
-const getLocalDataRecordNormalizedType = (record: Record<string, any>) =>
-  normalizeHistoryDataType(record.dataType || record.rawDataType || record.fileType || record.metricType);
+const getLocalDataRecordNormalizedType = (record: Record<string, any>) => normalizeHistoryDataType(record.dataType || record.rawDataType || record.fileType || record.metricType);
 
 const getLocalDataRecordTypesForItem = (item: Record<string, any>) => {
   if (item.type === 'local_data' && Array.isArray(item.records)) {
     return item.records
-      .map((record: Record<string, any>) =>
-        normalizeHistoryDataType(record.dataType || record.rawDataType || record.fileType || record.metricType || item.dataType)
-      )
+      .map((record: Record<string, any>) => normalizeHistoryDataType(record.dataType || record.rawDataType || record.fileType || record.metricType || item.dataType))
       .filter(Boolean);
   }
   if (item.type === 'qkeer_v2_health_list') return ['vital'];
@@ -396,9 +347,7 @@ const getLocalDataRecordTypesForItem = (item: Record<string, any>) => {
   if (item.type === 'qkeer_v2_sleep_list') return ['sleep'];
   if (item.type === 'rw_file_list' && (Array.isArray(item.selectedFiles) || Array.isArray(item.files))) {
     const files = Array.isArray(item.selectedFiles) ? item.selectedFiles : item.files;
-    return files
-      .map((record: Record<string, any>) => normalizeHistoryDataType(getRwHistoryDataType(record.fileType, record.fileName)))
-      .filter(Boolean);
+    return files.map((record: Record<string, any>) => normalizeHistoryDataType(getRwHistoryDataType(record.fileType, record.fileName))).filter(Boolean);
   }
   if (item.type === 'rw_upload_file') {
     return [normalizeHistoryDataType(getRwHistoryDataType(item.fileType, item.fileName))].filter(Boolean);
@@ -449,11 +398,7 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
     };
   };
 
-  const isUploadPayloadForAuthoritativeDevice = (
-    records: Array<Record<string, any>>,
-    parsed: RingParsedData,
-    device: RingDeviceInfo
-  ) => {
+  const isUploadPayloadForAuthoritativeDevice = (records: Array<Record<string, any>>, parsed: RingParsedData, device: RingDeviceInfo) => {
     if (!isRecordForCurrentDevice(parsed as Record<string, any>, device)) return false;
     return !records.some((record) => hasRecordDeviceIdentity(record) && !isRecordForCurrentDevice(record, device));
   };
@@ -509,9 +454,7 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
       }
       let result: unknown;
       try {
-        result = await (options.uploadHistoricalRecords
-          ? options.uploadHistoricalRecords(records, parsed)
-          : uploadRingHistoryRecords(records, parsed));
+        result = await (options.uploadHistoricalRecords ? options.uploadHistoricalRecords(records, parsed) : uploadRingHistoryRecords(records, parsed));
         appendRingDiagnosticLog('RW SDK', 'upload-result', {
           stage: 'sdk-history-record-upload',
           protocol,
@@ -594,51 +537,48 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
 
   const storeSyncScope = effectScope(true);
   storeSyncScope.run(() => {
-  watch(sdk.devices, (value) => ringStore.setDevices(value), { immediate: true });
-  watch(
-    sdk.deviceInfo,
-    (value) => {
-      const boundDevice = ringStore.boundDevice as RingDeviceInfo | null;
-      if (!isSdkDeviceInfoAllowedForBoundDevice(value, boundDevice)) {
-        appendRingDiagnosticLog('RW SDK', 'device-info-skipped', {
-          stage: 'sdk-device-info-sync',
-          reason: 'bound-mac-mismatch',
-          boundDeviceMac: getStableDeviceMacFromSource(boundDevice as Record<string, any> | null),
-          sdkDeviceMac: getStableDeviceMacFromSource(value as Record<string, any>),
-          sdkDeviceId: value.deviceId,
-          sdkUniMacId: value.uniMacId,
-          sdkName: value.name || value.deviceName,
-          sdkProtocol: value.protocol
-        });
-        ringStore.setDeviceInfo(boundDevice ? ({ ...(boundDevice as RingDeviceInfo) } as RingDeviceInfo) : {});
-        return;
-      }
-      ringStore.setDeviceInfo(value);
-      const stableMac = getStableDeviceMacFromSource(value as Record<string, any>);
-      const shouldSyncStoredIdentity = (storedIdentity?: string) =>
-        Boolean(
-          stableMac &&
-            (!storedIdentity || !isSameRingDevice({ mac: storedIdentity, protocol: resolveRingProtocol(value) }, { ...value, mac: stableMac }))
-        );
+    watch(sdk.devices, (value) => ringStore.setDevices(value), { immediate: true });
+    watch(
+      sdk.deviceInfo,
+      (value) => {
+        const boundDevice = ringStore.boundDevice as RingDeviceInfo | null;
+        if (!isSdkDeviceInfoAllowedForBoundDevice(value, boundDevice)) {
+          appendRingDiagnosticLog('RW SDK', 'device-info-skipped', {
+            stage: 'sdk-device-info-sync',
+            reason: 'bound-mac-mismatch',
+            boundDeviceMac: getStableDeviceMacFromSource(boundDevice as Record<string, any> | null),
+            sdkDeviceMac: getStableDeviceMacFromSource(value as Record<string, any>),
+            sdkDeviceId: value.deviceId,
+            sdkUniMacId: value.uniMacId,
+            sdkName: value.name || value.deviceName,
+            sdkProtocol: value.protocol
+          });
+          ringStore.setDeviceInfo(boundDevice ? ({ ...(boundDevice as RingDeviceInfo) } as RingDeviceInfo) : {});
+          return;
+        }
+        ringStore.setDeviceInfo(value);
+        const stableMac = getStableDeviceMacFromSource(value as Record<string, any>);
+        const shouldSyncStoredIdentity = (storedIdentity?: string) =>
+          Boolean(stableMac && (!storedIdentity || !isSameRingDevice({ mac: storedIdentity, protocol: resolveRingProtocol(value) }, { ...value, mac: stableMac })));
 
-      if (shouldSyncStoredIdentity(ringStore.normalMac)) {
-        ringStore.setNormalMac(stableMac);
-      }
-      if (resolveRingProtocol(value) === 'rw' && shouldSyncStoredIdentity(ringStore.iosMacId)) {
-        ringStore.setIosMacId(stableMac);
-      }
-    },
-    { immediate: true }
-  );
-  watch(sdk.receivedData, (value) => ringStore.setReceivedData(value), { immediate: true });
-  let localDataStoreSyncTimer: ReturnType<typeof setTimeout> | null = null;
-  let pendingLocalDataStoreSyncValue: RingParsedData[] = [];
-  const flushLocalDataStoreSync = () => {
-    localDataStoreSyncTimer = null;
-    const value = pendingLocalDataStoreSyncValue;
-    const currentDevice = sdk.deviceInfo.value;
-    const localDataSource = getLocalDataSourceAfterLastReset(value, currentDevice);
-    const localDataRecords: Array<Record<string, any>> = localDataSource.flatMap((item) => {
+        if (shouldSyncStoredIdentity(ringStore.normalMac)) {
+          ringStore.setNormalMac(stableMac);
+        }
+        if (resolveRingProtocol(value) === 'rw' && shouldSyncStoredIdentity(ringStore.iosMacId)) {
+          ringStore.setIosMacId(stableMac);
+        }
+      },
+      { immediate: true }
+    );
+    watch(sdk.receivedData, (value) => ringStore.setReceivedData(value), { immediate: true });
+    let localDataStoreSyncTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingLocalDataStoreSyncValue: RingParsedData[] = [];
+    const flushLocalDataStoreSync = () => {
+      localDataStoreSyncTimer = null;
+      const value = pendingLocalDataStoreSyncValue;
+      const currentDevice = sdk.deviceInfo.value;
+      const localDataSource = getLocalDataSourceAfterLastReset(value, currentDevice);
+      const localDataRecords: Array<Record<string, any>> = localDataSource.flatMap((item) => {
         if (!isRecordForCurrentDevice(item, currentDevice)) return [];
 
         if (item.type === 'local_data' && Array.isArray(item.records)) {
@@ -689,40 +629,38 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
           ];
         }
         return [];
-    });
-    const resetTypes = getLocalDataResetTypes(localDataSource, currentDevice);
-    const dedupedLocalDataRecords = dedupeLocalDataRecords(localDataRecords).filter(
-      (record) => !resetTypes.has(getLocalDataRecordNormalizedType(record))
+      });
+      const resetTypes = getLocalDataResetTypes(localDataSource, currentDevice);
+      const dedupedLocalDataRecords = dedupeLocalDataRecords(localDataRecords).filter((record) => !resetTypes.has(getLocalDataRecordNormalizedType(record)));
+      ringStore.setLocalData(dedupedLocalDataRecords);
+
+      const latestUnixTime = dedupedLocalDataRecords.reduce((latest, record) => {
+        const unixTime = getLocalDataRecordTime(record);
+        return unixTime > latest ? unixTime : latest;
+      }, 0);
+
+      if (latestUnixTime > 0) {
+        ringStore.setLastReadTimestamp(latestUnixTime);
+      }
+    };
+    watch(
+      sdk.receivedData,
+      (value) => {
+        pendingLocalDataStoreSyncValue = value;
+        if (localDataStoreSyncTimer) return;
+        // Let navigation/touch callbacks run before rebuilding and deduplicating
+        // the complete history snapshot. Multiple BLE flushes share the latest
+        // value, so no received record is discarded.
+        localDataStoreSyncTimer = setTimeout(flushLocalDataStoreSync, 80);
+      },
+      { immediate: true }
     );
-    ringStore.setLocalData(dedupedLocalDataRecords);
-
-    const latestUnixTime = dedupedLocalDataRecords.reduce((latest, record) => {
-      const unixTime = getLocalDataRecordTime(record);
-      return unixTime > latest ? unixTime : latest;
-    }, 0);
-
-    if (latestUnixTime > 0) {
-      ringStore.setLastReadTimestamp(latestUnixTime);
-    }
-  };
-  watch(
-    sdk.receivedData,
-    (value) => {
-      pendingLocalDataStoreSyncValue = value;
-      if (localDataStoreSyncTimer) return;
-      // Let navigation/touch callbacks run before rebuilding and deduplicating
-      // the complete history snapshot. Multiple BLE flushes share the latest
-      // value, so no received record is discarded.
-      localDataStoreSyncTimer = setTimeout(flushLocalDataStoreSync, 80);
-    },
-    { immediate: true }
-  );
-  watch(sdk.normalizedData, (value) => ringStore.setNormalizedData(value), { immediate: true });
-  watch(sdk.isScanning, (value) => ringStore.setScanning(value), { immediate: true });
-  watch(sdk.isBluetoothReady, (value) => ringStore.setBluetoothReady(value), { immediate: true });
-  watch(sdk.reconnectStatus, (value) => ringStore.setReconnectStatus(value), { immediate: true });
-  watch(sdk.reconnectResult, (value) => ringStore.setReconnectResult(value), { immediate: true });
-  watch(sdk.uploadingStatus, (value) => ringStore.setUploadingStatus(value), { immediate: true });
+    watch(sdk.normalizedData, (value) => ringStore.setNormalizedData(value), { immediate: true });
+    watch(sdk.isScanning, (value) => ringStore.setScanning(value), { immediate: true });
+    watch(sdk.isBluetoothReady, (value) => ringStore.setBluetoothReady(value), { immediate: true });
+    watch(sdk.reconnectStatus, (value) => ringStore.setReconnectStatus(value), { immediate: true });
+    watch(sdk.reconnectResult, (value) => ringStore.setReconnectResult(value), { immediate: true });
+    watch(sdk.uploadingStatus, (value) => ringStore.setUploadingStatus(value), { immediate: true });
   });
 
   const clearData = () => {
@@ -758,6 +696,16 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
     return sdk.refreshBusinessMetrics(...args);
   };
 
+  // 页面级历史读取（readLocalData / 详情页同步）会拉起数十秒的 BLE + 上传流程。
+  // 在 SDK 层统一持有后台 token，App 切后台时等流程跑完再断连。
+  // 超时只影响调用方返回，token 绑定到真正的 syncHistory 结束。
+  const syncHistory: typeof sdk.syncHistory = (...args) => {
+    const releaseBackgroundTask = beginRingBackgroundCriticalTask('history-sync');
+    const task = sdk.syncHistory(...args);
+    void task.then(releaseBackgroundTask, releaseBackgroundTask);
+    return task;
+  };
+
   const disconnect = async () => {
     const result = await sdk.disconnect();
     ringStore.clearRuntime();
@@ -785,6 +733,7 @@ const createRingBleStoreSdk = (options: UseRingBleSdkOptions = {}) => {
     ringStore,
     clearData,
     refreshBusinessMetrics,
+    syncHistory,
     disconnect,
     unbind,
     cleanup

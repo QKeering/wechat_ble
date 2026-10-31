@@ -5,10 +5,7 @@ import bleManager from './vendor/common/ble_manager.js';
 import bleCmd from './vendor/common/ble_cmd.js';
 import bleConfig from './vendor/common/ble_config.js';
 import { parseQkeerV2AdvertisInfo, resolveRingProtocol } from '../protocolRegistry';
-import {
-  ensureWechatBluetoothPrivacyAuthorization,
-  normalizeBluetoothPrivacyError
-} from '@/utils/wechatBluetoothPrivacy';
+import { ensureWechatBluetoothPrivacyAuthorization, normalizeBluetoothPrivacyError } from '@/utils/wechatBluetoothPrivacy';
 
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
 type BleConnectionStateCallback = Parameters<typeof uni.onBLEConnectionStateChange>[0];
@@ -25,12 +22,13 @@ type QkeerV2ScanItem = {
   advertis: Record<string, any>;
 };
 
+// App 端可能缺少 off* API，裸调用会抛 TypeError 并中断扫描/清理流程。
 const offBluetoothDeviceFound = (callback: BluetoothDeviceFoundCallback) => {
-  (uni.offBluetoothDeviceFound as unknown as (callback: BluetoothDeviceFoundCallback) => void)(callback);
+  (uni.offBluetoothDeviceFound as unknown as ((callback?: BluetoothDeviceFoundCallback) => void) | undefined)?.(callback);
 };
 
 const offBleConnectionStateChange = (callback: BleConnectionStateCallback) => {
-  (uni.offBLEConnectionStateChange as unknown as (callback?: BleConnectionStateCallback) => void)(callback);
+  (uni.offBLEConnectionStateChange as unknown as ((callback?: BleConnectionStateCallback) => void) | undefined)?.(callback);
 };
 
 export const createQkeerV2RingAdapter = (state: RingBleState, runtime?: RingBleRuntime): LegacyRingAdapter => {
@@ -467,11 +465,7 @@ const mapSleepRecord = (record: Record<string, any>) => ({
   durationMinutes: record.timeLen
 });
 
-const toHistoryParsed = (
-  type: string,
-  data: Record<string, any> | Record<string, any>[],
-  mapper: (record: Record<string, any>) => Record<string, any>
-): RingParsedData => {
+const toHistoryParsed = (type: string, data: Record<string, any> | Record<string, any>[], mapper: (record: Record<string, any>) => Record<string, any>): RingParsedData => {
   const records = toArray(data).map(mapper);
   return {
     type,
@@ -574,13 +568,7 @@ function toDailySummaryParsed(data: Record<string, any>, type: string): RingPars
 }
 
 function toSleepSummaryParsed(data: Record<string, any>, type: string): RingParsedData | null {
-  if (
-    data?.sleepTotalMinutes == null &&
-    data?.sleepDeepMinutes == null &&
-    data?.sleepLightMinutes == null &&
-    data?.sleepRemMinutes == null &&
-    data?.sleepAwakeMinutes == null
-  ) {
+  if (data?.sleepTotalMinutes == null && data?.sleepDeepMinutes == null && data?.sleepLightMinutes == null && data?.sleepRemMinutes == null && data?.sleepAwakeMinutes == null) {
     return null;
   }
 

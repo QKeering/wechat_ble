@@ -825,7 +825,8 @@ const sendRwAbHealthHistorySdkAck = async (
   );
   pendingAck.catch(() => undefined);
 
-  await adapter.sendBytes(buildRwDeleteHealthDataCommand(command.key), commandLabel);
+  // 删除非幂等：写超时后不能降级重发同一帧，否则可能删两次/删错块。
+  await adapter.sendBytes(buildRwDeleteHealthDataCommand(command.key), commandLabel, { allowTimeoutFallback: false });
 
   try {
     const parsed = await pendingAck;

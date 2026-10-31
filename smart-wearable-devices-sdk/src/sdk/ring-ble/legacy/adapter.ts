@@ -20,6 +20,15 @@ import {
   numberToUint64LE
 } from './protocol';
 
+export interface RingWriteOptions {
+  /**
+   * 写超时后是否允许降级重发（如改 writeNoResponse 再发一次）。
+   * 删除/格式化/恢复出厂这类非幂等命令必须传 `false`：超时意味着无法确认
+   * 帧有没有发出去，再发一次可能被执行两遍。
+   */
+  allowTimeoutFallback?: boolean;
+}
+
 export interface LegacyRingAdapter extends RingBleAdapter {
   initBluetooth: () => Promise<unknown>;
   openBluetoothAdapter: () => Promise<unknown>;
@@ -38,7 +47,7 @@ export interface LegacyRingAdapter extends RingBleAdapter {
   getCachedServiceId: (mac: string) => string;
   disconnect: (deviceId?: string) => Promise<unknown>;
   cleanup: () => Promise<void>;
-  sendBytes: (bytes: Uint8Array, label?: string) => Promise<unknown>;
+  sendBytes: (bytes: Uint8Array, label?: string, options?: RingWriteOptions) => Promise<unknown>;
   /** Whether the active device should use the QKeeRingL19/QKL19 history compatibility path. */
   isL19HistoryDevice?: () => boolean;
   /** Start/end a history session bound to the current platform BLE device and connection generation. */
@@ -117,6 +126,9 @@ export interface LegacyDataListenerClearOptions {
 type PendingLegacyDataListenerClear = LegacyDataListenerClearOptions & {
   listenerGeneration: number;
   listenerIdentityKey: string;
+  // 历史会话期间收到的 disconnect 只是被延后：会话结束后必须真的关闭链路，
+  // 否则戒指会一直保持连接（后台断连形同虚设）。
+  closeConnection?: boolean;
 };
 
 export type RwHealthDataName =
@@ -472,6 +484,14 @@ const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, message: string)
 };
 
 const LEGACY_COMMAND_WRITE_TIMEOUT_MS = 2500;
+const LEGACY_SCAN_STOP_TIMEOUT_MS = 3000;
+// App 端 closeBLEConnection / MTU 查询等调用可能既不回 success 也不回 fail。
+// 这类调用只需"尽力而为"，超时按失败/无结果结算，避免连接流程永久挂起。
+const LEGACY_QUIET_BLE_CALL_TIMEOUT_MS = 2000;
+// createBLEConnection 的平台 timeout 参数在部分 Android 基座上不生效，
+// JS 侧必须再兜一层，否则握手会一直停在建链这一步。
+const LEGACY_CONNECT_CALL_TIMEOUT_MS = 15000;
+const LEGACY_GATT_CELL_TIMEOUT_MS = 10000;
 const BLUETOOTH_ADAPTER_STATE_CHECK_TIMEOUT_MS = 800;
 const BLUETOOTH_ADAPTER_OPEN_FOREGROUND_TIMEOUT_MS = 3000;
 const BLUETOOTH_ADAPTER_OPEN_CALLBACK_EXPIRY_MS = 12000;
@@ -579,6 +599,9 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   // 淘汰，队头的 `legacy-scan-armed` / `legacy-scan-discovery-*` 会被挤掉。所以这个信号
   // 必须搭在队尾的 `legacy-scan-stop` 上，才能活着传到后端。
   let scanStartCallbackState: 'none' | 'success' | 'fail' = 'none';
+  // 每次 startScan 的调用代际。start 的 success/fail 可能迟到（甚至 20s 后），
+  // 迟到的旧回调不能去拆新一轮扫描的监听器和定时器。
+  let scanInvocationGeneration = 0;
   let scanPrefixes = DEFAULT_SCAN_PREFIXES;
   let includeUnknownScanDevices = false;
   let rawScanDiagnostic: RawScanDiagnosticContext | null = null;
@@ -626,6 +649,8 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   let dataListenerNormalizedIdentityLogged = false;
   let dataListenerGeneration = 0;
   let pendingDataListenerClear: PendingLegacyDataListenerClear | null = null;
+  // cleanup 撞上历史会话时，连接状态监听器要等会话结束再注销，不能无限期留着。
+  let cancelCleanupIdleWait: (() => void) | null = null;
   let historyWireTrace: {
     startedAt: number;
     sinceTimestamp: number;
@@ -976,6 +1001,20 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         });
         return;
       }
+      if (!currentDeviceId && !result.connected) {
+        // 刚断开/正在重连时 runtime 还没有"当前设备"，事件无法按设备归属。
+        // 只有它确实对应本适配器跟踪的监听器时才处理，避免一条延迟的旧断开
+        // 事件把新建的监听器、历史会话和写队列全部清掉。
+        const trackedDeviceId = dataListenerDeviceId;
+        if (!trackedDeviceId || (eventDeviceId && eventDeviceId !== trackedDeviceId)) {
+          appendRingDiagnosticLog('L19 BLE', 'connection-state-ignore-unowned-disconnect', {
+            eventDeviceId,
+            trackedDeviceId,
+            connected: false
+          });
+          return;
+        }
+      }
 
       if (result.connected) {
         legacyPhysicalConnectedAt = Date.now();
@@ -1300,6 +1339,9 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   };
 
   const stopScan = () => {
+    // 停扫描要让在途的那一轮 startScan 变成 stale：否则它迟到的 success
+    // 会在停机之后重新拉起整表轮询，留下一个没人回收的定时器。
+    scanInvocationGeneration += 1;
     return new Promise<unknown>((resolve) => {
       if (scanTimeout) {
         clearTimeout(scanTimeout);
@@ -1336,15 +1378,24 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       // startScan 都被开头的短路静默吃掉（症状就是「扫描毫无反应、日志一片空白」）。
       // rw adapter 的 stopScan 早就是先置位再调用，这里与之对齐。
       state.isScanning.value = false;
+      // 同上：两个回调都可能不触发。扫描标志已经先置位了，但 Promise 本身还有调用方
+      // 在 await（连接流程 / 切后台清理），不能让它一直挂着——超时按「已停止」收尾。
+      let settled = false;
+      let stopTimeout: ReturnType<typeof setTimeout> | null = null;
+      const settleScanStop = (result: unknown, reason: string) => {
+        if (settled) return;
+        settled = true;
+        if (stopTimeout) clearTimeout(stopTimeout);
+        finishRawScanDiagnostic(reason);
+        resolve(result);
+      };
+      stopTimeout = setTimeout(() => {
+        appendRingDiagnosticLog('L19 BLE', 'legacy-scan-stop-timeout', { timeoutMs: LEGACY_SCAN_STOP_TIMEOUT_MS });
+        settleScanStop(undefined, 'stop-timeout');
+      }, LEGACY_SCAN_STOP_TIMEOUT_MS);
       uni.stopBluetoothDevicesDiscovery({
-        success: (result) => {
-          finishRawScanDiagnostic('stop-success');
-          resolve(result);
-        },
-        fail: (error) => {
-          finishRawScanDiagnostic('stop-fail');
-          resolve(error);
-        }
+        success: (result) => settleScanStop(result, 'stop-success'),
+        fail: (error) => settleScanStop(error, 'stop-fail')
       });
     });
   };
@@ -1424,6 +1475,36 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       return Promise.reject(error);
     }
 
+    const invocationGeneration = ++scanInvocationGeneration;
+    const isStaleInvocation = () => invocationGeneration !== scanInvocationGeneration;
+
+    const startScanPolling = () => {
+      if (scanPollTimer) return;
+      scanPollDueAt = Date.now() + SCAN_POLL_INTERVAL_MS;
+      scanPollTimer = setInterval(() => {
+        const now = Date.now();
+        // 上一次轮询到这一次之间多等了多少毫秒。定时器不会早触发，所以负数只可能是
+        // 计时器精度抖动；>= 阈值就说明这段窗口里逻辑层被占住了。
+        const lateMs = now - scanPollDueAt;
+        scanPollDueAt = now + SCAN_POLL_INTERVAL_MS;
+        if (lateMs >= SCAN_POLL_LATE_LOG_MS) {
+          appendRingDiagnosticLog('L19 BLE', 'legacy-scan-poll-late', {
+            lateMs,
+            events: scanDeviceEventCount,
+            sinceLastEventMs: lastScanDeviceEventAt ? now - lastScanDeviceEventAt : -1,
+            listed: state.devices.value.length
+          });
+        }
+        scanDeviceEventCount = 0;
+        // 事件上报是活的：整表重合并纯属重复劳动，跳过（见 SCAN_POLL_EVENT_FLOW_WINDOW_MS）。
+        if (lastScanDeviceEventAt && now - lastScanDeviceEventAt < SCAN_POLL_EVENT_FLOW_WINDOW_MS) return;
+        uni.getBluetoothDevices({
+          success: (devicesResult) => mergeScannedDevices(devicesResult.devices, 'getBluetoothDevices'),
+          fail: () => undefined
+        });
+      }, SCAN_POLL_INTERVAL_MS);
+    };
+
     return new Promise<unknown>((resolve, reject) => {
       // 这条紧挨着平台调用：有它才能区分「调用真的发出去了」和「调用之前就抛了」——
       // 这两种故障在日志里原本都只剩一片空白。
@@ -1437,6 +1518,11 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         appendRingDiagnosticLog('L19 BLE', 'legacy-scan-discovery-no-callback', {
           waitedMs: SCAN_CALLBACK_WATCHDOG_MS
         });
+        if (isStaleInvocation()) return;
+        // 平台静默失败时调用方不能永远挂着：按「已在扫描」结算，
+        // 广播监听早已注册，同时把整表轮询这条兜底通道开起来。
+        startScanPolling();
+        resolve(undefined);
       }, SCAN_CALLBACK_WATCHDOG_MS);
       // 必须先注册再调用（rw/adapter 就是这么做的）。Android 上 startBluetoothDevicesDiscovery
       // 存在「不报错、success/fail 一个都不回」的静默失败，此时 native 扫描其实已经在跑；
@@ -1446,6 +1532,11 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
       uni.startBluetoothDevicesDiscovery({
         allowDuplicatesKey: options.allowDuplicatesKey ?? true,
         success: (result) => {
+          if (isStaleInvocation()) {
+            // 迟到的成功属于上一轮：不能动当前扫描的状态和定时器，只结算旧 Promise。
+            resolve(result);
+            return;
+          }
           scanStartCallbackState = 'success';
           if (scanCallbackWatchdog) {
             clearTimeout(scanCallbackWatchdog);
@@ -1454,29 +1545,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
           appendRingDiagnosticLog('L19 BLE', 'legacy-scan-discovery-success', {
             allowDuplicatesKey: options.allowDuplicatesKey ?? true
           });
-          scanPollDueAt = Date.now() + SCAN_POLL_INTERVAL_MS;
-          scanPollTimer = setInterval(() => {
-            const now = Date.now();
-            // 上一次轮询到这一次之间多等了多少毫秒。定时器不会早触发，所以负数只可能是
-            // 计时器精度抖动；>= 阈值就说明这段窗口里逻辑层被占住了。
-            const lateMs = now - scanPollDueAt;
-            scanPollDueAt = now + SCAN_POLL_INTERVAL_MS;
-            if (lateMs >= SCAN_POLL_LATE_LOG_MS) {
-              appendRingDiagnosticLog('L19 BLE', 'legacy-scan-poll-late', {
-                lateMs,
-                events: scanDeviceEventCount,
-                sinceLastEventMs: lastScanDeviceEventAt ? now - lastScanDeviceEventAt : -1,
-                listed: state.devices.value.length
-              });
-            }
-            scanDeviceEventCount = 0;
-            // 事件上报是活的：整表重合并纯属重复劳动，跳过（见 SCAN_POLL_EVENT_FLOW_WINDOW_MS）。
-            if (lastScanDeviceEventAt && now - lastScanDeviceEventAt < SCAN_POLL_EVENT_FLOW_WINDOW_MS) return;
-            uni.getBluetoothDevices({
-              success: (devicesResult) => mergeScannedDevices(devicesResult.devices, 'getBluetoothDevices'),
-              fail: () => undefined
-            });
-          }, SCAN_POLL_INTERVAL_MS);
+          startScanPolling();
           resolve(result);
         },
         fail: (error) => {
@@ -1487,6 +1556,10 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
           }
           // 这条以前也只 reject、不记日志，于是「扫描起不来」在日志里完全不可见。
           appendRingDiagnosticLog('L19 BLE', 'legacy-scan-discovery-fail', describeScanError(error));
+          if (isStaleInvocation()) {
+            reject(error);
+            return;
+          }
           state.isScanning.value = false;
           finishRawScanDiagnostic('start-fail');
           offBluetoothDeviceFound(handleDeviceFound);
@@ -1510,7 +1583,7 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   };
 
   const readBleMtu = (deviceId: string) =>
-    new Promise<{
+    withTimeout(new Promise<{
       supported: boolean;
       ok: boolean;
       mtu: number | null;
@@ -1536,10 +1609,11 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         },
         fail: (error: unknown) => resolve({ supported: true, ok: false, mtu: null, error })
       });
-    });
+    }), LEGACY_QUIET_BLE_CALL_TIMEOUT_MS, 'Get BLE MTU timeout.')
+      .catch(() => ({ supported: true, ok: false, mtu: null, error: new Error('getBLEMTU timed out') }));
 
   const requestBleMtu = (deviceId: string, mtu: number) =>
-    new Promise<{ ok: boolean; result?: unknown; error?: unknown }>((resolve) => {
+    withTimeout(new Promise<{ ok: boolean; result?: unknown; error?: unknown }>((resolve) => {
       const setBLEMTU = (uni as any).setBLEMTU;
       if (typeof setBLEMTU !== 'function') {
         resolve({ ok: false, error: new Error('setBLEMTU API unavailable') });
@@ -1551,7 +1625,8 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         success: (result: unknown) => resolve({ ok: true, result }),
         fail: (error: unknown) => resolve({ ok: false, error })
       });
-    });
+    }), LEGACY_QUIET_BLE_CALL_TIMEOUT_MS, 'Set BLE MTU timeout.')
+      .catch(() => ({ ok: false, error: new Error('setBLEMTU timed out') }));
 
   const setMTU = async (deviceId: string, mtu = LEGACY_TARGET_MTU) => {
     const systemInfo = uni.getSystemInfoSync();
@@ -1618,43 +1693,56 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     return result;
   };
 
-  const getConnectedLegacyDeviceIds = () => {
-    return new Promise<string[]>((resolve) => {
-      uni.getConnectedBluetoothDevices({
-        services: [LEGACY_PRIMARY_SERVICE_UUID],
-        success: (result) => {
-          resolve((result.devices || []).map((device) => device.deviceId).filter(Boolean));
-        },
-        fail: () => resolve([])
-      });
-    });
+  const getConnectedLegacyDeviceIds = (): Promise<string[]> => {
+    return withTimeout<string[]>(
+      new Promise<string[]>((resolve) => {
+        uni.getConnectedBluetoothDevices({
+          services: [LEGACY_PRIMARY_SERVICE_UUID],
+          success: (result) => {
+            const deviceIds = (result.devices || []).map((device: { deviceId?: string }) => String(device?.deviceId || ''));
+            resolve(deviceIds.filter((deviceId) => deviceId.length > 0));
+          },
+          fail: () => resolve([])
+        });
+      }),
+      LEGACY_QUIET_BLE_CALL_TIMEOUT_MS,
+      'Get connected BLE devices timeout.'
+    ).catch((): string[] => []);
   };
 
   const closeBleConnectionQuietly = (deviceId: string) => {
     if (!deviceId) return Promise.resolve(undefined);
-    return new Promise<unknown>((resolve) => {
-      uni.closeBLEConnection({
-        deviceId,
-        success: resolve,
-        fail: resolve
-      });
-    });
+    return withTimeout(
+      new Promise<unknown>((resolve) => {
+        uni.closeBLEConnection({
+          deviceId,
+          success: resolve,
+          fail: resolve
+        });
+      }),
+      LEGACY_QUIET_BLE_CALL_TIMEOUT_MS,
+      'Close BLE connection timeout.'
+    ).catch(() => undefined);
   };
 
   const createBleConnectionOnce = (deviceId: string, deviceName = '') => {
-    return new Promise<RingDeviceInfo>((resolve, reject) => {
-      uni.createBLEConnection({
-        deviceId,
-        timeout: 10000,
-        success: () => {
-          legacyPhysicalConnectedAt = Date.now();
-          lastAppConnectAt = 0;
-          const delay = /ios/i.test(uni.getSystemInfoSync().system || '') ? 1000 : 1500;
-          setTimeout(() => resolve({ deviceId, name: deviceName, protocol: 'legacy' }), delay);
-        },
-        fail: reject
-      });
-    });
+    return withTimeout(
+      new Promise<RingDeviceInfo>((resolve, reject) => {
+        uni.createBLEConnection({
+          deviceId,
+          timeout: 10000,
+          success: () => {
+            legacyPhysicalConnectedAt = Date.now();
+            lastAppConnectAt = 0;
+            const delay = /ios/i.test(uni.getSystemInfoSync().system || '') ? 1000 : 1500;
+            setTimeout(() => resolve({ deviceId, name: deviceName, protocol: 'legacy' }), delay);
+          },
+          fail: reject
+        });
+      }),
+      LEGACY_CONNECT_CALL_TIMEOUT_MS,
+      'Create BLE connection timeout.'
+    );
   };
 
   const connectDevice = async (deviceId: string, deviceName = '', sourceDevice?: RingDeviceInfo) => {
@@ -1834,14 +1922,18 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
     }
 
     const serviceId = service.uuid;
-    const characteristicResult: any = await new Promise((resolve, reject) => {
-      uni.getBLEDeviceCharacteristics({
-        deviceId,
-        serviceId,
-        success: resolve,
-        fail: reject
-      });
-    });
+    const characteristicResult: any = await withTimeout(
+      new Promise((resolve, reject) => {
+        uni.getBLEDeviceCharacteristics({
+          deviceId,
+          serviceId,
+          success: resolve,
+          fail: reject
+        });
+      }),
+      LEGACY_GATT_CELL_TIMEOUT_MS,
+      'Get BLE characteristics timeout.'
+    );
 
     if (!Array.isArray(characteristicResult.characteristics)) {
       throw new Error('BLE characteristics are unavailable.');
@@ -1956,7 +2048,8 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         sessionId: session.sessionId,
         deviceId,
         listenerGeneration: dataListenerGeneration,
-        listenerIdentityKey: dataListenerIdentityKey
+        listenerIdentityKey: dataListenerIdentityKey,
+        closeConnection: true
       };
       appendRingDiagnosticLog('L19 BLE', 'legacy-disconnect-deferred-history-active', {
         deviceId,
@@ -1971,13 +2064,18 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
 
     if (!deviceId) return Promise.resolve(undefined);
 
-    return new Promise<unknown>((resolve) => {
-      uni.closeBLEConnection({
-        deviceId,
-        success: resolve,
-        fail: resolve
-      });
-    });
+    // closeBLEConnection 在部分机型上不回调；断开不能因此永远挂住。
+    return withTimeout(
+      new Promise<unknown>((resolve) => {
+        uni.closeBLEConnection({
+          deviceId,
+          success: resolve,
+          fail: resolve
+        });
+      }),
+      3000,
+      'Legacy close BLE connection timeout.'
+    ).catch(() => undefined);
   };
 
   const cleanup = async () => {
@@ -1997,8 +2095,18 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         wireActive: session.wireActive,
         wireElapsedMs: session.wireElapsedMs
       });
+      // 会话结束后再注销监听器，避免 cleanup 被历史同步挡住后它们一直注册着。
+      cancelCleanupIdleWait?.();
+      cancelCleanupIdleWait = onLegacyBleCommandSessionIdle(() => {
+        cancelCleanupIdleWait?.();
+        cancelCleanupIdleWait = null;
+        clearConnectionStateListener();
+        clearBluetoothAdapterStateListener();
+      }, runtime?.getDeviceInfo?.());
       return;
     }
+    cancelCleanupIdleWait?.();
+    cancelCleanupIdleWait = null;
     clearConnectionStateListener();
     clearBluetoothAdapterStateListener();
   };
@@ -2624,6 +2732,25 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
         return;
       }
       clearDataListener({ ...pending, reason: pending.reason || 'deferred-session-idle', caller: pending.caller || 'session-idle' });
+      if (!pending.closeConnection) return;
+      // 历史会话已结束，把当初被延后的 disconnect 补上。
+      const closeDeviceId = pending.deviceId || runtime?.getDeviceInfo?.().deviceId;
+      if (!closeDeviceId) return;
+      appendRingDiagnosticLog('L19 BLE', 'legacy-deferred-disconnect-closing', {
+        deviceId: closeDeviceId,
+        sessionId: pending.sessionId,
+        reason: pending.reason
+      });
+      uni.closeBLEConnection({
+        deviceId: closeDeviceId,
+        success: () => undefined,
+        fail: (error) => {
+          appendRingDiagnosticLog('L19 BLE', 'legacy-deferred-disconnect-close-failed', {
+            deviceId: closeDeviceId,
+            error: formatLegacyBleError(error)
+          });
+        }
+      });
     },
     () => runtime?.getDeviceInfo?.() || dataListenerDeviceId
   );

@@ -25,10 +25,7 @@ import {
   type RingUploadingStatus
 } from '@/sdk/ring-ble';
 import type { RwHealthDataName, RwHistoryDataName, RwMonitoringName } from '@/sdk/ring-ble/legacy/adapter';
-import {
-  getLegacyBleHistoryExclusiveSnapshot,
-  onLegacyBleCommandSessionIdle
-} from '@/sdk/ring-ble/legacy/commandSession';
+import { getLegacyBleHistoryExclusiveSnapshot, onLegacyBleCommandSessionIdle } from '@/sdk/ring-ble/legacy/commandSession';
 import type { RwHealthMonitoringConfig, RwUserProfile } from '@/sdk/ring-ble/rw/protocol';
 import {
   applyDeviceIdentityCacheToDevice,
@@ -37,11 +34,9 @@ import {
   markDeviceIdentityCacheConnected,
   markDeviceIdentityCacheFailed
 } from '@/utils/deviceIdentityCache';
-import {
-  isBluetoothPrivacyError,
-  isWechatBluetoothPrivacyScopeBlocked
-} from '@/utils/wechatBluetoothPrivacy';
+import { isBluetoothPrivacyError, isWechatBluetoothPrivacyScopeBlocked } from '@/utils/wechatBluetoothPrivacy';
 import { hasRingCommunicationReady } from '@/utils/ringConnectionStatus';
+import { getRingBackgroundCriticalTasks, RING_BACKGROUND_TASK_OTA } from '@/utils/ringBackgroundTasks';
 
 type CompatRwHealthDataName =
   | RwHealthDataName
@@ -78,6 +73,7 @@ const RW_RECONNECT_BOUND_CANDIDATE_TIMEOUT_MS = 30000;
 const RW_RECONNECT_SCAN_ROUND_GAP_MS = 300;
 const RW_DIRECT_RECONNECT_MAX_DEVICE_AGE_MS = 30000;
 const RW_UPLOAD_DISCONNECT_RECOVERY_DELAY_MS = 250;
+const RW_UPLOAD_DISCONNECT_RECOVERY_MAX_ATTEMPTS = 3;
 const RW_UPLOAD_SUCCESS_DISCONNECT_GRACE_MS = 5000;
 const BOUND_SCAN_RAW_DIAGNOSTIC_PAUSE = false;
 const BOUND_SCAN_RAW_DIAGNOSTIC_TIMEOUT_MS = 8000;
@@ -176,7 +172,9 @@ const normalizeFullBleMacKey = (value?: unknown) => {
 
 const normalizeFullBleMacText = (value?: unknown) => {
   if (!isFullColonBleMac(value)) return '';
-  return String(value || '').trim().toUpperCase();
+  return String(value || '')
+    .trim()
+    .toUpperCase();
 };
 
 const SCAN_MATCH_CONTEXT_TTL_MS = 2 * 60 * 1000;
@@ -339,13 +337,7 @@ const getExplicitMacFromDevice = (device?: RingDeviceInfo | null, fallback?: unk
 const getBoundReconnectMac = (device?: RingDeviceInfo | null) => getExplicitMacFromDevice(device);
 
 const hasRawScanAdvertisEvidence = (device?: RingDeviceInfo | null) =>
-  Boolean(
-    device?.advertisData ||
-      device?.advertisHex ||
-      device?.advertisServiceUUIDs ||
-      device?.advertisServiceUUIDsList ||
-      device?.serviceData
-  );
+  Boolean(device?.advertisData || device?.advertisHex || device?.advertisServiceUUIDs || device?.advertisServiceUUIDsList || device?.serviceData);
 
 const hasScanDeviceEvidence = (device?: RingDeviceInfo | null) =>
   Boolean(hasRawScanAdvertisEvidence(device) || (device as Record<string, unknown> | undefined)?.fromScan || device?.lastSeenAt);
@@ -649,12 +641,7 @@ const buildReconnectTargetFromBoundDevice = (boundDevice: RingDeviceInfo, curren
   };
 };
 
-const buildRuntimeDeviceFromScanCandidate = (
-  candidate: RingDeviceInfo,
-  target: RingDeviceInfo,
-  protocol: RingProtocolKind,
-  stableMac?: string
-): RingDeviceInfo => {
+const buildRuntimeDeviceFromScanCandidate = (candidate: RingDeviceInfo, target: RingDeviceInfo, protocol: RingProtocolKind, stableMac?: string): RingDeviceInfo => {
   const resolvedMac = stableMac || getScannedAdvertisedMac(candidate) || target.mac || target.advertis?.macInfo || candidate.mac || candidate.uniMacId || '';
   const resolvedName = candidate.deviceName || candidate.name || candidate.localName || candidate.displayName || target.deviceName || target.name || '';
 
@@ -705,11 +692,7 @@ const getRawParsedRingIdentityIds = (device: RingDeviceInfo) => getRingDeviceMat
 const getStableParsedRingIdentityIds = (device: RingDeviceInfo, protocolHint?: RingProtocolKind) => {
   const protocol = protocolHint || resolveRingProtocol(device);
   if (protocol === 'rw') {
-    return [
-      device.mac,
-      device.advertis?.macInfo,
-      isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : ''
-    ].filter(Boolean);
+    return [device.mac, device.advertis?.macInfo, isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : ''].filter(Boolean);
   }
   return getRawParsedRingIdentityIds(device);
 };
@@ -919,6 +902,9 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   let scheduleLegacyDisconnectRecovery: (target: RingDeviceInfo, reason: unknown) => void = () => undefined;
   let autoReconnectFailureCount = 0;
   let autoReconnectRetryAfter = 0;
+  // App 切后台后主动暂停所有自动恢复：后台没有必须保活的 BLE 业务，
+  // 继续重连只会耗电，并和另一个客户端（小程序/App）互相抢戒指。
+  let runtimeRecoverySuspended = false;
   const AUTO_RECONNECT_BACKOFF_BASE_MS = 1000;
   const AUTO_RECONNECT_BACKOFF_MAX_MS = 30000;
   let rwUploadDisconnectRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -980,16 +966,21 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     rwUploadDisconnectRecoveryTimer = null;
   };
 
-  const expirePendingConnectionAttempt = () => {
+  const expirePendingConnectionAttempt = (options: { resetBackoff?: boolean; keepRecovery?: boolean } = {}) => {
     connectionLifecycleToken += 1;
     connectionAttemptToken += 1;
     expectedConnectionDevice = { deviceId: '__cancelled_connection__' };
     connectInFlight = null;
     connectInFlightKey = '';
     reconnectInFlight = null;
-    autoReconnectFailureCount = 0;
-    autoReconnectRetryAfter = 0;
-    clearRwUploadDisconnectRecovery();
+    // 掉线/重连失败路径必须保留退避计数，否则每次失败都把延迟清零，
+    // 无法形成指数退避。只有用户主动取消/断开等干净路径才重置。
+    if (options.resetBackoff !== false) {
+      autoReconnectFailureCount = 0;
+      autoReconnectRetryAfter = 0;
+    }
+    // 恢复流程自己触发的"重连失败"事件不能取消它自己的重试定时器。
+    if (!options.keepRecovery) clearRwUploadDisconnectRecovery();
     lastCommunicationReadyAt = 0;
   };
 
@@ -997,8 +988,13 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
   const clearExpiredConnectionLifecycle = () => {
     lastCommunicationReadyAt = 0;
-    reconnectStatus.value = 'idle';
-    reconnectResult.value = null;
+    // 生命周期已被更新的一轮流程接管。但若断连流程刚刚把状态落到 failed，
+    // 要保留它：把"失败"改写成 idle/null 会让上层误以为压根没在重连，
+    // 既丢掉失败原因，也可能再排一轮重连。
+    if (reconnectStatus.value !== 'failed') {
+      reconnectStatus.value = 'idle';
+      reconnectResult.value = null;
+    }
   };
 
   const state = {
@@ -1081,6 +1077,9 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       deviceInfo.value = applyCachedCommunicationDeviceId(payload, 'runtime-device-ready');
     },
     onDisconnected: (reason) => {
+      // autoReconnectLegacyRing 重试耗尽时会带 kind 标记。它本身就是恢复流程的
+      // 最后一环，不能再排一次恢复，否则失败→恢复→失败会无限循环。
+      const reconnectFailedAfterRetries = (reason as Record<string, any> | undefined)?.kind === 'reconnect-failed';
       const disconnectedDeviceId = (reason as Record<string, any> | undefined)?.deviceId;
       if (disconnectedDeviceId && deviceInfo.value.deviceId && disconnectedDeviceId !== deviceInfo.value.deviceId) {
         if (resolveRingProtocol(deviceInfo.value) === 'rw' || resolveRingProtocol(expectedConnectionDevice || {}) === 'rw') {
@@ -1122,17 +1121,14 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           reconnectResult.value === true ||
           isCommunicationReadyDevice(deviceInfo.value) ||
           Boolean(lastCommunicationReadyAt && Date.now() - lastCommunicationReadyAt <= 30000);
-        const shouldRecoverRwDisconnect = !isManualDisconnect && hasRecoverableTarget && (isDuringOrJustAfterUpload || isConnectedRuntime);
+        const shouldRecoverRwDisconnect =
+          !reconnectFailedAfterRetries && !runtimeRecoverySuspended && !isManualDisconnect && hasRecoverableTarget && (isDuringOrJustAfterUpload || isConnectedRuntime);
         if (shouldRecoverRwDisconnect) {
           const expectedBoundMac = getBoundReconnectMac(expectedConnectionDevice || deviceInfo.value);
           const runtimeDeviceConflictsBoundMac = hasConflictingMacLikeCommunicationId(deviceInfo.value, expectedBoundMac);
           const targetDevice: RingDeviceInfo =
             expectedBoundMac && runtimeDeviceConflictsBoundMac
-              ? buildBoundMacReconnectTarget(
-                  (expectedConnectionDevice || deviceInfo.value) as RingDeviceInfo,
-                  expectedBoundMac,
-                  'rw'
-                )
+              ? buildBoundMacReconnectTarget((expectedConnectionDevice || deviceInfo.value) as RingDeviceInfo, expectedBoundMac, 'rw')
               : {
                   ...expectedConnectionDevice,
                   ...deviceInfo.value,
@@ -1159,31 +1155,59 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           if (rwUploadDisconnectRecoveryTimer) {
             clearTimeout(rwUploadDisconnectRecoveryTimer);
           }
-          rwUploadDisconnectRecoveryTimer = setTimeout(() => {
+          const recoveryReason = isDuringOrJustAfterUpload ? 'uploading' : 'connected-runtime';
+          const attemptRwUploadRecovery = (attempt: number) => {
             rwUploadDisconnectRecoveryTimer = null;
+            if (recoveryToken !== rwUploadDisconnectRecoveryToken) return;
+            if (runtimeRecoverySuspended) {
+              writeRwStoreLog('upload-disconnect-recovery-suspended-skip', {
+                recoveryReason,
+                target: summarizeRingDeviceForStoreLog(targetDevice)
+              });
+              return;
+            }
+            const retryOrFail = (error?: unknown) => {
+              if (recoveryToken !== rwUploadDisconnectRecoveryToken) return;
+              if (attempt >= RW_UPLOAD_DISCONNECT_RECOVERY_MAX_ATTEMPTS) {
+                clearDisconnectedRuntimeState();
+                return;
+              }
+              // 失败后按退避重新武装，而不是一次失败就彻底放弃。
+              const retryDelayMs = Math.max(500, autoReconnectRetryAfter - Date.now());
+              writeRwStoreLog('upload-disconnect-recovery-retry', {
+                recoveryReason,
+                attempt,
+                maxAttempts: RW_UPLOAD_DISCONNECT_RECOVERY_MAX_ATTEMPTS,
+                retryDelayMs,
+                target: summarizeRingDeviceForStoreLog(targetDevice),
+                message: error === undefined ? '' : error instanceof Error ? error.message : String(error)
+              });
+              rwUploadDisconnectRecoveryTimer = setTimeout(() => attemptRwUploadRecovery(attempt + 1), retryDelayMs);
+            };
             void reconnect()
               .then((success) => {
                 if (recoveryToken !== rwUploadDisconnectRecoveryToken) return;
                 writeRwStoreLog('upload-disconnect-recovery-result', {
                   success,
-                  recoveryReason: isDuringOrJustAfterUpload ? 'uploading' : 'connected-runtime',
+                  recoveryReason,
+                  attempt,
                   target: summarizeRingDeviceForStoreLog(targetDevice),
                   current: summarizeRingDeviceForStoreLog(deviceInfo.value)
                 });
-                if (!success) {
-                  clearDisconnectedRuntimeState();
-                }
+                if (!success) retryOrFail();
               })
               .catch((error) => {
                 if (recoveryToken !== rwUploadDisconnectRecoveryToken) return;
                 writeRwStoreLog('upload-disconnect-recovery-failed', {
-                  recoveryReason: isDuringOrJustAfterUpload ? 'uploading' : 'connected-runtime',
+                  recoveryReason,
+                  attempt,
                   target: summarizeRingDeviceForStoreLog(targetDevice),
                   message: error instanceof Error ? error.message : String(error)
                 });
-                clearDisconnectedRuntimeState();
+                retryOrFail(error);
               });
-          }, RW_UPLOAD_DISCONNECT_RECOVERY_DELAY_MS);
+          };
+          rwUploadDisconnectRecoveryTimer = setTimeout(() => attemptRwUploadRecovery(1), RW_UPLOAD_DISCONNECT_RECOVERY_DELAY_MS);
           return;
         }
         writeRwStoreLog('disconnected-runtime-reset', {
@@ -1211,7 +1235,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           notifyEnabled: false
         } as RingDeviceInfo;
         const hasRecoverableTarget = Boolean(targetDevice.deviceId || targetDevice.mac || targetDevice.uniMacId);
-        if (!isManualDisconnect && hasRecoverableTarget) {
+        if (!reconnectFailedAfterRetries && !runtimeRecoverySuspended && !isManualDisconnect && hasRecoverableTarget) {
           const exclusive = getLegacyBleHistoryExclusiveSnapshot(targetDevice);
           legacySilentDisconnectRecoveryActive = wasConnectedRuntime;
           expectedConnectionDevice = targetDevice;
@@ -1232,7 +1256,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           return;
         }
       }
-      expirePendingConnectionAttempt();
+      expirePendingConnectionAttempt({ resetBackoff: false, keepRecovery: reconnectFailedAfterRetries });
       resetRingRuntimeState(bridgeTarget);
       expectedConnectionDevice = null;
       uploadingStatus.value = 'idle';
@@ -1366,13 +1390,10 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
             return true;
           }
 
-          return isSameRingDevice(
-            device,
-            {
-              deviceId: id,
-              ...(isColonSeparatedBleMac(id) ? { mac: id, uniMacId: id } : {})
-            } as RingDeviceInfo
-          );
+          return isSameRingDevice(device, {
+            deviceId: id,
+            ...(isColonSeparatedBleMac(id) ? { mac: id, uniMacId: id } : {})
+          } as RingDeviceInfo);
         });
       }) || null
     );
@@ -1408,9 +1429,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         protocol
       } as RingDeviceInfo;
       const sourceScanMac = getScannedAdvertisedMac(sourceDevice);
-      const sourceIsStrictScanMatch = payload.fromScan
-        ? isStrictBoundScanCandidate(strictTarget, sourceDevice)
-        : isFreshStrictBoundRuntimeScanDevice(strictTarget, sourceDevice);
+      const sourceIsStrictScanMatch = payload.fromScan ? isStrictBoundScanCandidate(strictTarget, sourceDevice) : isFreshStrictBoundRuntimeScanDevice(strictTarget, sourceDevice);
       if (!sourceIsStrictScanMatch) {
         writeRwStoreLog('connect-block-no-scan-mac-match', {
           targetMac: strictTargetMac,
@@ -1453,9 +1472,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       platformDeviceId: communicationDeviceId || sourceDevice?.platformDeviceId || sourceDevice?.deviceId,
       uniMacId:
         stableBusinessMac ||
-        (protocol === 'rw'
-          ? sourceDevice?.uniMacId || sourceStableIdentity || payload.uniMacId
-          : payload.uniMacId || sourceDevice?.uniMacId || sourceStableIdentity),
+        (protocol === 'rw' ? sourceDevice?.uniMacId || sourceStableIdentity || payload.uniMacId : payload.uniMacId || sourceDevice?.uniMacId || sourceStableIdentity),
       mac: stableBusinessMac || sourceStableIdentity || sourceDevice?.mac,
       advertis: stableBusinessMac
         ? {
@@ -1578,6 +1595,10 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         throw new Error('Ring BLE connection attempt was cancelled.');
       }
       lastCommunicationReadyAt = Date.now();
+      // 连接成功即清零退避，下一次掉线从最小延迟重新开始，不被旧失败拖慢。
+      autoReconnectFailureCount = 0;
+      autoReconnectRetryAfter = 0;
+      legacySilentDisconnectRecoveryActive = false;
       if (isCommunicationReadyDevice(connected)) {
         reconnectStatus.value = 'success';
         reconnectResult.value = true;
@@ -1625,20 +1646,23 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         current: summarizeRingDeviceForStoreLog(currentDevice)
       });
     }
-    connectInFlight = runConnect();
+    const currentConnect = runConnect();
+    connectInFlight = currentConnect;
     try {
-      return await connectInFlight;
+      return await currentConnect;
     } catch (error) {
+      // connectInFlightKey 相同的两次尝试可能是不同 Promise。只有仍是"当前"
+      // 尝试时才能清理状态/关闭半连接，否则会把后来的连接误杀。
+      const isCurrentAttempt = connectInFlight === currentConnect;
       const runtimeDevice = deviceInfo.value;
       const hasRuntimeDevice = Boolean(runtimeDevice.deviceId);
       const runtimeIsTarget = hasRuntimeDevice && isSameRingDevice(runtimeDevice, targetDevice);
-      const cleanupDeviceId = runtimeIsTarget
-        ? runtimeDevice.deviceId
-        : targetDevice.deviceId || payload.deviceId || '';
-      const shouldCleanupPartialConnection = Boolean(cleanupDeviceId) && (!hasRuntimeDevice || runtimeIsTarget);
+      const cleanupDeviceId = runtimeIsTarget ? runtimeDevice.deviceId : targetDevice.deviceId || payload.deviceId || '';
+      const shouldCleanupPartialConnection = isCurrentAttempt && Boolean(cleanupDeviceId) && (!hasRuntimeDevice || runtimeIsTarget);
       if (protocol === 'rw') {
         writeRwStoreLog('connect-attempt-error', {
           connectKey,
+          isCurrentAttempt,
           elapsedMs: connectInFlightStartedAt ? Date.now() - connectInFlightStartedAt : 0,
           cleanupDeviceId,
           cleanupPartialConnection: shouldCleanupPartialConnection,
@@ -1657,7 +1681,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       }
       throw error;
     } finally {
-      if (connectInFlightKey === connectKey) {
+      if (connectInFlight === currentConnect) {
         connectInFlight = null;
         connectInFlightKey = '';
         connectInFlightStartedAt = 0;
@@ -1698,6 +1722,9 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
   const disconnect = async () => {
     const currentDeviceId = deviceInfo.value.deviceId;
     legacyDisconnectRecoveryToken += 1;
+    // 手动断开后不能再保留"静默恢复中"标记，否则后续状态渲染会误以为
+    // 仍在后台自动重连。
+    legacySilentDisconnectRecoveryActive = false;
     if (legacyDisconnectRecoveryTimer) {
       clearTimeout(legacyDisconnectRecoveryTimer);
       legacyDisconnectRecoveryTimer = null;
@@ -1727,9 +1754,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       Date.now() - lastCommunicationReadyAt < COMMUNICATION_READY_REUSE_LEASE_MS;
     if (canProbeRecentReadyLink) {
       const recentAdapter = await switchAdapter(protocol);
-      const physicalLinkAlive = Boolean(
-        currentDevice.deviceId && await recentAdapter.checkByRSSI?.(currentDevice.deviceId)
-      );
+      const physicalLinkAlive = Boolean(currentDevice.deviceId && (await recentAdapter.checkByRSSI?.(currentDevice.deviceId)));
       writeRwStoreLog('ensure-ready-recent-link-probe', {
         protocol,
         physicalLinkAlive,
@@ -1772,10 +1797,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     // physical connection, rediscover on that same link. A destructive
     // reconnect here clears the legacy data listener and can interrupt an
     // active history read.
-    if (
-      readyDevice.deviceId &&
-      (!readyDevice.serviceId || !readyDevice.cmdCharId || !readyDevice.dataCharId)
-    ) {
+    if (readyDevice.deviceId && (!readyDevice.serviceId || !readyDevice.cmdCharId || !readyDevice.dataCharId)) {
       const physicalLinkAlive = Boolean(await targetAdapter.checkByRSSI?.(readyDevice.deviceId));
       if (physicalLinkAlive) {
         writeRwStoreLog('ensure-ready-in-place-discovery-start', {
@@ -1783,11 +1805,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
           device: summarizeRingDeviceForStoreLog(readyDevice)
         });
         try {
-          const discovered = await targetAdapter.discoverServicesAndChars(
-            readyDevice.deviceId,
-            readyDevice.deviceName || readyDevice.name || '',
-            readyDevice
-          );
+          const discovered = await targetAdapter.discoverServicesAndChars(readyDevice.deviceId, readyDevice.deviceName || readyDevice.name || '', readyDevice);
           if (!isConnectionLifecycleCurrent(lifecycleToken)) {
             clearExpiredConnectionLifecycle();
             return false;
@@ -1908,11 +1926,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         // Re-enabling an already enabled notification can fail even while the
         // physical BLE link is healthy. Verify the OS connection before doing a
         // destructive reconnect; history commands must reuse a healthy link.
-        const stillConnected = Boolean(
-          readyDevice.deviceId &&
-          notifyServiceId &&
-          await targetAdapter.isDeviceConnected?.(readyDevice.deviceId, notifyServiceId)
-        );
+        const stillConnected = Boolean(readyDevice.deviceId && notifyServiceId && (await targetAdapter.isDeviceConnected?.(readyDevice.deviceId, notifyServiceId)));
         if (stillConnected) {
           runtime?.onDeviceReady?.({
             ...readyDevice,
@@ -1943,11 +1957,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         const notifyRestoreStartedAt = Date.now();
         try {
           targetAdapter.setupDataListener();
-          await targetAdapter.enableNotify(
-            reconnectedDevice.deviceId,
-            notifyServiceIdAfterReconnect,
-            reconnectedDevice.dataCharId
-          );
+          await targetAdapter.enableNotify(reconnectedDevice.deviceId, notifyServiceIdAfterReconnect, reconnectedDevice.dataCharId);
           runtime?.onDeviceReady?.({
             ...reconnectedDevice,
             notifyEnabled: true,
@@ -1992,6 +2002,11 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
   const cancelPendingConnection = (deviceId = '') => {
     const pendingDeviceId = deviceId || expectedConnectionDevice?.deviceId || '';
+    // 取消连接尝试也要终止可能已排队的 legacy 静默恢复，避免它稍后
+    // 又把用户刚放弃的连接重新拉起来。
+    legacyDisconnectRecoveryToken += 1;
+    clearLegacyDisconnectRecoveryWait();
+    legacySilentDisconnectRecoveryActive = false;
     writeRwStoreLog('cancel-pending-connection', {
       requestedDeviceId: deviceId,
       pendingDeviceId,
@@ -2009,6 +2024,9 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     resetRingRuntimeState(bridgeTarget);
     expectedConnectionDevice = null;
     uploadingStatus.value = 'idle';
+    // 恢复失败后状态必须落到 failed，否则 UI 会一直停在重新连接中。
+    reconnectStatus.value = 'failed';
+    reconnectResult.value = false;
     lastCommunicationReadyAt = 0;
     clearRwUploadDisconnectRecovery();
   };
@@ -2083,10 +2101,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       });
       if (BOUND_SCAN_RAW_DIAGNOSTIC_PAUSE) {
         const diagnosticBoundMac =
-          target.advertis?.macInfo ||
-          (isColonSeparatedBleMac(target.uniMacId) ? target.uniMacId : '') ||
-          target.mac ||
-          getRingDeviceStableIdentity(target);
+          target.advertis?.macInfo || (isColonSeparatedBleMac(target.uniMacId) ? target.uniMacId : '') || target.mac || getRingDeviceStableIdentity(target);
         const diagnosticSessionId = `bound-scan-${Date.now()}`;
         const diagnosticTimeoutMs = Math.min(BOUND_SCAN_RAW_DIAGNOSTIC_TIMEOUT_MS, Math.max(3000, scanTimeoutMs));
 
@@ -2225,6 +2240,12 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
       await stopScan();
       scanStarted = false;
+      // 停扫描是异步的，期间可能已被"切后台断开/用户手动取消"接管。
+      // 旧 token 的流程不能再往下连接。
+      if (!isConnectionLifecycleCurrent(lifecycleToken)) {
+        clearExpiredConnectionLifecycle();
+        return false;
+      }
       const protocol = resolveRingProtocol(candidate);
       const candidateStableMac = getScannedAdvertisedMac(candidate) || strictBoundMac;
       let candidateSourceDevice = buildRuntimeDeviceFromScanCandidate(candidate, target, protocol, candidateStableMac);
@@ -2272,12 +2293,18 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         sourceDevice: candidateSourceDevice
       });
       if (!isConnectionLifecycleCurrent(lifecycleToken)) {
+        // 连接已经建立但生命周期已过期（切后台/手动取消）：关掉这条没人认领的
+        // 链路，否则戒指会保持连接，后续流程也无从管理它。
+        await disconnect().catch(() => undefined);
         clearExpiredConnectionLifecycle();
         return false;
       }
       const connectedIsExpected = strictBoundMac
         ? isStrictBoundScanCandidate({ ...target, protocol }, candidateSourceDevice)
-        : isSameRingDevice({ ...target, protocol }, { ...candidate, ...deviceInfo.value, protocol: resolveRingProtocol({ ...candidate, ...deviceInfo.value } as RingDeviceInfo) || protocol });
+        : isSameRingDevice(
+            { ...target, protocol },
+            { ...candidate, ...deviceInfo.value, protocol: resolveRingProtocol({ ...candidate, ...deviceInfo.value } as RingDeviceInfo) || protocol }
+          );
       if (!connectedIsExpected) {
         writeRwStoreLog('reconnect-connect-result', {
           success: false,
@@ -2422,6 +2449,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     if (shouldReconnectByScanningFirst(targetWithProtocol)) {
       const scannedConnected = await reconnectByScanning(targetWithProtocol);
       if (!isConnectionLifecycleCurrent(lifecycleToken)) {
+        if (scannedConnected) await disconnect().catch(() => undefined);
         clearExpiredConnectionLifecycle();
         return false;
       }
@@ -2440,6 +2468,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     });
     const directlyConnected = await autoReconnectLegacyRing(targetAdapter, runtime, { maxAttempts: 1, delayMs: 0 });
     if (!isConnectionLifecycleCurrent(lifecycleToken)) {
+      if (directlyConnected) await disconnect().catch(() => undefined);
       clearExpiredConnectionLifecycle();
       return false;
     }
@@ -2481,6 +2510,20 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     return reconnectByScanning(targetWithProtocol);
   };
   const reconnect = async () => {
+    // 切后台只暂停"定时器/事件驱动"的自动恢复；用户已发起且仍持有后台
+    // 关键任务 token 的操作（全面测量、历史同步等）必须能继续重连，
+    // 否则 token 还没释放就会先被自己的挂起逻辑判失败。
+    const activeBackgroundTasks = getRingBackgroundCriticalTasks();
+    // OTA 拥有链路时任何自动重连都不能插入：它会关闭 APP 连接、连到 BOOT 设备，
+    // 与 OTA 自己的扫描/连接直接抢同一个物理设备。
+    const otaOwnsBle = activeBackgroundTasks.includes(RING_BACKGROUND_TASK_OTA);
+    if (otaOwnsBle || (runtimeRecoverySuspended && activeBackgroundTasks.length === 0)) {
+      writeRwStoreLog(otaOwnsBle ? 'reconnect-ota-owned-skip' : 'reconnect-suspended-skip', {
+        current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+        expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+      });
+      return false;
+    }
     if (isWechatBluetoothPrivacyScopeBlocked()) {
       reconnectStatus.value = 'failed';
       reconnectResult.value = false;
@@ -2528,10 +2571,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         });
       } else {
         autoReconnectFailureCount += 1;
-        const retryDelayMs = Math.min(
-          AUTO_RECONNECT_BACKOFF_MAX_MS,
-          AUTO_RECONNECT_BACKOFF_BASE_MS * 2 ** Math.max(0, autoReconnectFailureCount - 1)
-        );
+        const retryDelayMs = Math.min(AUTO_RECONNECT_BACKOFF_MAX_MS, AUTO_RECONNECT_BACKOFF_BASE_MS * 2 ** Math.max(0, autoReconnectFailureCount - 1));
         autoReconnectRetryAfter = Date.now() + retryDelayMs;
         writeRwStoreLog('reconnect-backoff-scheduled', {
           retryDelayMs,
@@ -2556,10 +2596,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         return false;
       }
       autoReconnectFailureCount += 1;
-      const retryDelayMs = Math.min(
-        AUTO_RECONNECT_BACKOFF_MAX_MS,
-        AUTO_RECONNECT_BACKOFF_BASE_MS * 2 ** Math.max(0, autoReconnectFailureCount - 1)
-      );
+      const retryDelayMs = Math.min(AUTO_RECONNECT_BACKOFF_MAX_MS, AUTO_RECONNECT_BACKOFF_BASE_MS * 2 ** Math.max(0, autoReconnectFailureCount - 1));
       autoReconnectRetryAfter = Date.now() + retryDelayMs;
       writeRwStoreLog('reconnect-backoff-scheduled', {
         retryDelayMs,
@@ -2600,12 +2637,19 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
     const attemptRecovery = () => {
       if (recoveryToken !== legacyDisconnectRecoveryToken) return;
+      if (runtimeRecoverySuspended) {
+        legacySilentDisconnectRecoveryActive = false;
+        clearLegacyDisconnectRecoveryWait();
+        writeRwStoreLog('legacy-physical-disconnect-recovery-suspended', {
+          recoveryAttempt,
+          target: summarizeRingDeviceForStoreLog(target)
+        });
+        return;
+      }
       if (isWechatBluetoothPrivacyScopeBlocked()) {
         legacySilentDisconnectRecoveryActive = false;
-        if (!legacySilentDisconnectRecoveryActive) {
-          reconnectStatus.value = 'failed';
-          reconnectResult.value = false;
-        }
+        reconnectStatus.value = 'failed';
+        reconnectResult.value = false;
         clearLegacyDisconnectRecoveryWait();
         writeRwStoreLog('legacy-physical-disconnect-recovery-privacy-blocked', {
           retryable: false,
@@ -2654,10 +2698,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
 
       if (recoveryAttempt >= maxRecoveryAttempts) {
         legacySilentDisconnectRecoveryActive = false;
-        if (!legacySilentDisconnectRecoveryActive) {
-          reconnectStatus.value = 'failed';
-          reconnectResult.value = false;
-        }
+        reconnectStatus.value = 'failed';
+        reconnectResult.value = false;
         clearLegacyDisconnectRecoveryWait();
         writeRwStoreLog('legacy-physical-disconnect-recovery-exhausted', {
           recoveryAttempt,
@@ -2715,10 +2757,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
             return;
           }
           if (!legacySilentDisconnectRecoveryActive) {
-      if (!legacySilentDisconnectRecoveryActive) {
-        reconnectStatus.value = 'failed';
-        reconnectResult.value = false;
-      }
+            reconnectStatus.value = 'failed';
+            reconnectResult.value = false;
           }
           if (!success) {
             if (isWechatBluetoothPrivacyScopeBlocked()) {
@@ -2773,8 +2813,40 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     autoReconnectRetryAfter = 0;
     return runReconnect(explicitTarget);
   };
+  const suspendRuntimeRecovery = () => {
+    if (runtimeRecoverySuspended) return;
+    runtimeRecoverySuspended = true;
+    legacyDisconnectRecoveryToken += 1;
+    clearLegacyDisconnectRecoveryWait();
+    legacySilentDisconnectRecoveryActive = false;
+    rwUploadDisconnectRecoveryToken += 1;
+    if (rwUploadDisconnectRecoveryTimer) {
+      clearTimeout(rwUploadDisconnectRecoveryTimer);
+      rwUploadDisconnectRecoveryTimer = null;
+    }
+    writeRwStoreLog('runtime-recovery-suspended', {
+      current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+      expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+    });
+  };
+  const resumeRuntimeRecovery = () => {
+    if (!runtimeRecoverySuspended) return;
+    runtimeRecoverySuspended = false;
+    autoReconnectFailureCount = 0;
+    autoReconnectRetryAfter = 0;
+    writeRwStoreLog('runtime-recovery-resumed', {
+      current: summarizeRingDeviceForStoreLog(deviceInfo.value),
+      expected: summarizeRingDeviceForStoreLog(expectedConnectionDevice)
+    });
+  };
   const autoConnectLastDevice = reconnect;
   scheduleBluetoothAvailabilityRecovery = () => {
+    if (runtimeRecoverySuspended) {
+      writeRwStoreLog('bluetooth-available-recovery-suspended-skip', {
+        current: summarizeRingDeviceForStoreLog(deviceInfo.value)
+      });
+      return;
+    }
     if (bluetoothAvailabilityRecoveryPromise) {
       writeRwStoreLog('bluetooth-available-recovery-reuse-inflight', {
         current: summarizeRingDeviceForStoreLog(deviceInfo.value),
@@ -2796,6 +2868,13 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
       autoReconnectFailureCount = 0;
       autoReconnectRetryAfter = 0;
       await initBluetooth();
+      if (runtimeRecoverySuspended) {
+        writeRwStoreLog('bluetooth-available-recovery-aborted-suspended', {
+          stage: 'after-init-bluetooth',
+          current: summarizeRingDeviceForStoreLog(deviceInfo.value)
+        });
+        return;
+      }
 
       const connected = await reconnect().catch((error) => {
         writeRwStoreLog('bluetooth-available-reconnect-failed', {
@@ -2818,6 +2897,13 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
         writeRwStoreLog('bluetooth-available-recovery-result', {
           success: false,
           action: 'privacy-blocked'
+        });
+        return;
+      }
+      if (runtimeRecoverySuspended) {
+        writeRwStoreLog('bluetooth-available-recovery-aborted-suspended', {
+          stage: 'before-restart-scan',
+          current: summarizeRingDeviceForStoreLog(deviceInfo.value)
         });
         return;
       }
@@ -3059,6 +3145,8 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     discoverServicesAndChars,
     enableNotify,
     disconnect,
+    suspendRuntimeRecovery,
+    resumeRuntimeRecovery,
     ensureCommunicationReady,
     recoverCommunicationForDevice,
     reScan,
@@ -3089,9 +3177,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     // ensureCommunicationReady，否则链路异常时会把历史读取阻塞约 30 秒。
     // RW 保留原有恢复流程，避免改变供应商协议的握手前置条件。
     updateDeviceTime: (...args: Parameters<LegacyRingAdapter['updateDeviceTime']>) =>
-      adapter.protocol === 'rw'
-        ? runWithReady(() => adapter.updateDeviceTime(...args))
-        : adapter.updateDeviceTime(...args),
+      adapter.protocol === 'rw' ? runWithReady(() => adapter.updateDeviceTime(...args)) : adapter.updateDeviceTime(...args),
     sendCollectPeriodSettingCommand: (...args: Parameters<LegacyRingAdapter['sendCollectPeriodSettingCommand']>) =>
       runWithReady(() => adapter.sendCollectPeriodSettingCommand(...args)),
     readCollectPeriodCommand: () => runWithReady(() => adapter.readCollectPeriodCommand()),

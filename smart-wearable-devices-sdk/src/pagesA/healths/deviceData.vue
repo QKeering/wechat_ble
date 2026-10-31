@@ -19,6 +19,7 @@ import {
 import { isRwForegroundMetric, useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
 import { formatBleErrorMessage, isExpectedBleRuntimeError } from '@/utils/bleError';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
+import { beginRingBackgroundCriticalTask } from '@/utils/ringBackgroundTasks';
 import { submitData } from '@/common/api/homeDetail';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
 import type { submitDataType } from '@/types/api/homeDetail';
@@ -258,6 +259,19 @@ const clearFlowTimeout = () => {
   flowTimeout = null;
 };
 
+// 全面测量可能持续数十秒，App 切后台时需要等它跑完再断开戒指。
+let releaseMeasurementBackgroundTask: (() => void) | null = null;
+
+const markMeasurementBackgroundTask = () => {
+  releaseMeasurementBackgroundTask?.();
+  releaseMeasurementBackgroundTask = beginRingBackgroundCriticalTask('full-measurement');
+};
+
+const releaseMeasurementBackgroundTaskIfAny = () => {
+  releaseMeasurementBackgroundTask?.();
+  releaseMeasurementBackgroundTask = null;
+};
+
 const clearMeasurementTimers = () => {
   clearMeasureTimeout();
   clearRwAdvanceTimer();
@@ -279,6 +293,7 @@ const stopMeasurementFlow = () => {
   clearPendingLegacyWearMeasurement();
   wearCheckStatus.value = 'idle';
   measureStatus.value = 'idle';
+  releaseMeasurementBackgroundTaskIfAny();
 };
 
 const resetMeasurementFlowForNewRun = async () => {
@@ -338,6 +353,7 @@ const setMeasurementFailure = (title: string, message: string) => {
   measurementFailureTitle.value = title;
   measurementFailureMessage.value = message;
   preflightStage.value = 'failed';
+  releaseMeasurementBackgroundTaskIfAny();
 };
 
 const armFullMeasurementTimeout = (runToken: number) => {
@@ -688,6 +704,7 @@ const completeMeasurement = async () => {
   measureStatus.value = 'completed';
   preflightStage.value = 'completed';
   isCompletingMeasurement = false;
+  releaseMeasurementBackgroundTaskIfAny();
 };
 
 watch(
@@ -913,6 +930,7 @@ const handleMeasure = async (forceRestart = false) => {
   if (isStartingMeasurement.value) return;
   isStartingMeasurement.value = true;
   isRetryQueued.value = false;
+  markMeasurementBackgroundTask();
   const { deviceId, serviceId } = userStore.deviceInfo;
   let runToken = measurementRunToken;
   try {

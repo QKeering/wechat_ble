@@ -33,11 +33,12 @@
 <script setup>
 import '@/pagesA/mines/i18n/pack';
 import { ref, onUnmounted, computed } from 'vue';
-import { onLoad } from '@dcloudio/uni-app';
+import { onBackPress, onLoad } from '@dcloudio/uni-app';
 import { useUserStore } from '@/stores/user';
 import RingOTAManager from '@/composables/ring-ota-manager';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { getOtaInfo, getBindInfo, reportOtaUpdate } from '@/common/api/device';
+import { beginRingBackgroundCriticalTask, RING_BACKGROUND_TASK_OTA } from '@/utils/ringBackgroundTasks';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { getApiBase } from '@/utils/apiBase';
@@ -76,7 +77,10 @@ let otaScanDeviceFoundHandler = null;
 
 const clearOtaScanDeviceFoundHandler = () => {
   if (!otaScanDeviceFoundHandler) return;
-  uni.offBluetoothDeviceFound(otaScanDeviceFoundHandler);
+  // App 端可能没有 offBluetoothDeviceFound，裸调用会让 cleanup 后半段（停扫描）不执行。
+  if (typeof uni.offBluetoothDeviceFound === 'function') {
+    uni.offBluetoothDeviceFound(otaScanDeviceFoundHandler);
+  }
   otaScanDeviceFoundHandler = null;
 };
 
@@ -260,9 +264,66 @@ const buildFirmwareDownloadUrl = (url) => {
 
 // --- 工具方法 ---
 
+// App 端的 BLE 回调可能既不回 success 也不回 fail；OTA 是长流程，
+// 任何一个环节静默丢回调都会让进度条永远停在那里，所以每个调用都兜一层 JS 超时。
+const OTA_CONNECT_CALL_TIMEOUT_MS = 15000;
+const OTA_BLE_CALL_TIMEOUT_MS = 5000;
+const OTA_CLOSE_CALL_TIMEOUT_MS = 2000;
+
+const withOtaTimeout = (task, timeoutMs, message) =>
+  new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(message));
+    }, timeoutMs);
+    task.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+
 /** 清理蓝牙监听器 */
+// OTA 期间：App 切后台不立刻断连，并保持屏幕常亮。
+let releaseOtaBackgroundTask = null;
+
 const cleanup = () => {
+  if (otaState.value.isUpgrading) {
+    // 升级中离开页面（返回/卸载）时不能清监听器、停扫描或归还后台 token：
+    // 闪写还在进行，清掉会直接打断升级。流程结束的 finally 会再清理。
+    appendRingDiagnosticLog('RING OTA', 'ota-cleanup-skipped-upgrading', {
+      progress: otaState.value.progress,
+      statusText: otaState.value.statusText
+    });
+    return;
+  }
+  // OTA 独占链路结束，把自动恢复交还给 SDK（resume 只解除挂起，不会主动重连）。
+  // 先 resume 再归还 token：反过来的话，token 释放到 resume 之间任何迟到的
+  // 掉线事件都可能插进来触发一次自动重连。
+  try {
+    useRingBLE().resumeRuntimeRecovery();
+  } catch (error) {
+    void error;
+  }
   // uni.offBLECharacteristicValueChange();
+  releaseOtaBackgroundTask?.();
+  releaseOtaBackgroundTask = null;
+  try {
+    uni.setKeepScreenOn({ keepScreenOn: false });
+  } catch (error) {
+    void error;
+  }
   clearOtaScanDeviceFoundHandler();
   uni.stopBluetoothDevicesDiscovery();
 };
@@ -307,19 +368,23 @@ const downloadFirmware = (url) => {
 
 /** 发送蓝牙命令 */
 const sendCommand = (deviceId, data) => {
-  return new Promise((resolve, reject) => {
-    uni.writeBLECharacteristicValue({
-      deviceId,
-      serviceId: SERVICE_UUID,
-      characteristicId: UUID_CMD,
-      value: new Uint8Array(data).buffer,
-      success: () => resolve(),
-      fail: (err) => {
-        console.warn('[BLE] 发送命令失败:', err);
-        reject(new Error(t('进入升级模式命令发送失败：{reason}', { reason: err.errMsg || err.errCode || 'unknown' })));
-      }
-    });
-  });
+  return withOtaTimeout(
+    new Promise((resolve, reject) => {
+      uni.writeBLECharacteristicValue({
+        deviceId,
+        serviceId: SERVICE_UUID,
+        characteristicId: UUID_CMD,
+        value: new Uint8Array(data).buffer,
+        success: () => resolve(),
+        fail: (err) => {
+          console.warn('[BLE] 发送命令失败:', err);
+          reject(new Error(t('进入升级模式命令发送失败：{reason}', { reason: err.errMsg || err.errCode || 'unknown' })));
+        }
+      });
+    }),
+    OTA_BLE_CALL_TIMEOUT_MS,
+    t('进入升级模式命令发送超时')
+  );
 };
 
 /**
@@ -349,43 +414,55 @@ const extractMacFromAdv = (advertisData) => {
 
 /** 断开蓝牙连接 */
 const disconnectDevice = (deviceId) => {
-  return new Promise((resolve) => {
-    if (!deviceId) return resolve();
-    uni.closeBLEConnection({
-      deviceId,
-      complete: () => resolve()
-    });
-  });
+  if (!deviceId) return Promise.resolve();
+  return withOtaTimeout(
+    new Promise((resolve) => {
+      uni.closeBLEConnection({
+        deviceId,
+        complete: () => resolve()
+      });
+    }),
+    OTA_CLOSE_CALL_TIMEOUT_MS,
+    t('断开设备超时')
+  ).catch(() => undefined);
 };
 
 /** 连接蓝牙设备 */
 const connectDevice = (deviceId) => {
-  return new Promise((resolve, reject) => {
-    uni.createBLEConnection({
-      deviceId,
-      timeout: 10000,
-      success: () => {
-        setTimeout(async () => {
-          try {
-            await new Promise((res, rej) => {
-              uni.getBLEDeviceServices({ deviceId, success: res, fail: rej });
-            });
+  return withOtaTimeout(
+    new Promise((resolve, reject) => {
+      uni.createBLEConnection({
+        deviceId,
+        timeout: 10000,
+        success: () => {
+          setTimeout(async () => {
+            try {
+              await withOtaTimeout(
+                new Promise((res, rej) => {
+                  uni.getBLEDeviceServices({ deviceId, success: res, fail: rej });
+                }),
+                OTA_BLE_CALL_TIMEOUT_MS,
+                t('获取服务超时')
+              );
+              resolve();
+            } catch (e) {
+              reject(new Error(t('获取服务失败')));
+            }
+          }, 1500);
+        },
+        fail: (err) => {
+          // 已连接也视为成功
+          if (err.errCode === 10006 || err.errMsg?.includes('already')) {
             resolve();
-          } catch (e) {
-            reject(new Error(t('获取服务失败')));
+          } else {
+            reject(new Error(t('连接失败：{reason}', { reason: err.errMsg || err.errCode })));
           }
-        }, 1500);
-      },
-      fail: (err) => {
-        // 已连接也视为成功
-        if (err.errCode === 10006 || err.errMsg?.includes('already')) {
-          resolve();
-        } else {
-          reject(new Error(t('连接失败：{reason}', { reason: err.errMsg || err.errCode })));
         }
-      }
-    });
-  });
+      });
+    }),
+    OTA_CONNECT_CALL_TIMEOUT_MS,
+    t('连接设备超时')
+  );
 };
 
 /**
@@ -462,86 +539,97 @@ const scanAndConnect = ({ targetMac = null, mode = 'BOOT', rejectOnFail = true }
       return isBootMode && nameUpper === 'PPLUSOTA';
     };
 
+    // 每次重试都用新的扫描超时；旧的定时器只会由它自己触发或被 fail 清掉。
+    let scanTimeout = null;
+
+    const handleOtaDeviceFound = (res) => {
+      if (found) return;
+
+      for (const device of res.devices) {
+        const name = (device.name || device.localName || '').trim();
+        if (name) console.log('[BLE] 发现:', name, device.deviceId);
+
+        if (isTargetDevice(device)) {
+          found = true;
+          if (scanTimeout) clearTimeout(scanTimeout);
+          scanTimeout = null;
+          clearOtaScanDeviceFoundHandler();
+          uni.stopBluetoothDevicesDiscovery();
+
+          console.log(`[BLE] ✅ 匹配 ${mode}:`, name, device.deviceId, JSON.stringify(device));
+          appendRingDiagnosticLog('RING OTA', 'ota-scan-target-matched', {
+            mode,
+            targetMac,
+            platformDeviceId: device.deviceId,
+            name,
+            advertisMac: extractMacFromAdv(device.advertisData)
+          });
+          const adv = device.advertisData;
+          console.log('[BOOT] adv byteLength =', adv ? adv.byteLength : null);
+          if (adv && adv.byteLength) {
+            const u8 = new Uint8Array(adv);
+            console.log(
+              '[BOOT] adv hex =',
+              Array.from(u8)
+                .map((b) => b.toString(16).padStart(2, '0'))
+                .join('')
+            );
+          }
+          otaState.value.statusText = t('正在连接设备...');
+
+          connectDevice(device.deviceId)
+            .then(() => resolve(isBootMode ? device.deviceId : { deviceId: device.deviceId, name }))
+            .catch((e) => (rejectOnFail ? reject(e) : resolve(null)));
+          return;
+        }
+      }
+    };
+
     const startScan = () => {
       clearOtaScanDeviceFoundHandler();
       uni.stopBluetoothDevicesDiscovery();
+
+      // 监听必须在 start 之前注册：App 端 startBluetoothDevicesDiscovery 存在
+      // 「success/fail 都不回」的静默情况，此时 native 其实已经在扫描，
+      // 把注册放进 success 会让整轮扫描永远收不到设备广播。
+      otaScanDeviceFoundHandler = handleOtaDeviceFound;
+      uni.onBluetoothDeviceFound(handleOtaDeviceFound);
+
+      scanTimeout = setTimeout(() => {
+        if (found) return;
+        clearOtaScanDeviceFoundHandler();
+        uni.stopBluetoothDevicesDiscovery();
+
+        if (++retryCount < SCAN_CONFIG.maxRetries) {
+          otaState.value.statusText = t('搜索重试（{retry}/{max}）...', {
+            retry: retryCount,
+            max: SCAN_CONFIG.maxRetries
+          });
+          setTimeout(startScan, SCAN_CONFIG.retryDelay);
+        } else if (rejectOnFail) {
+          appendRingDiagnosticLog('RING OTA', 'ota-scan-target-not-found', {
+            mode,
+            targetMac,
+            retries: retryCount,
+            timeoutMs: SCAN_CONFIG.timeout
+          });
+          reject(new Error(t('未找到设备，请确保设备处于正确模式')));
+        } else {
+          resolve(null);
+        }
+      }, SCAN_CONFIG.timeout);
 
       uni.startBluetoothDevicesDiscovery({
         allowDuplicatesKey: true,
         powerLevel: 'high',
         success: () => {
           console.log(`[BLE] 扫描 ${mode} 设备...`, targetMac ? `目标: ${targetMac}` : '');
-
-          const scanTimeout = setTimeout(() => {
-            if (!found) {
-              clearOtaScanDeviceFoundHandler();
-              uni.stopBluetoothDevicesDiscovery();
-
-              if (++retryCount < SCAN_CONFIG.maxRetries) {
-                otaState.value.statusText = t('搜索重试（{retry}/{max}）...', {
-                  retry: retryCount,
-                  max: SCAN_CONFIG.maxRetries
-                });
-                setTimeout(startScan, SCAN_CONFIG.retryDelay);
-              } else if (rejectOnFail) {
-                appendRingDiagnosticLog('RING OTA', 'ota-scan-target-not-found', {
-                  mode,
-                  targetMac,
-                  retries: retryCount,
-                  timeoutMs: SCAN_CONFIG.timeout
-                });
-                reject(new Error(t('未找到设备，请确保设备处于正确模式')));
-              } else {
-                resolve(null);
-              }
-            }
-          }, SCAN_CONFIG.timeout);
-
-          otaScanDeviceFoundHandler = (res) => {
-            if (found) return;
-
-            for (const device of res.devices) {
-              const name = (device.name || device.localName || '').trim();
-              if (name) console.log('[BLE] 发现:', name, device.deviceId);
-
-              if (isTargetDevice(device)) {
-                found = true;
-                clearTimeout(scanTimeout);
-                clearOtaScanDeviceFoundHandler();
-                uni.stopBluetoothDevicesDiscovery();
-
-                console.log(`[BLE] ✅ 匹配 ${mode}:`, name, device.deviceId, JSON.stringify(device));
-                appendRingDiagnosticLog('RING OTA', 'ota-scan-target-matched', {
-                  mode,
-                  targetMac,
-                  platformDeviceId: device.deviceId,
-                  name,
-                  advertisMac: extractMacFromAdv(device.advertisData)
-                });
-                const adv = device.advertisData;
-                console.log('[BOOT] adv byteLength =', adv ? adv.byteLength : null);
-                if (adv && adv.byteLength) {
-                  const u8 = new Uint8Array(adv);
-                  console.log(
-                    '[BOOT] adv hex =',
-                    Array.from(u8)
-                      .map((b) => b.toString(16).padStart(2, '0'))
-                      .join('')
-                  );
-                }
-                otaState.value.statusText = t('正在连接设备...');
-
-                connectDevice(device.deviceId)
-                  .then(() => resolve(isBootMode ? device.deviceId : { deviceId: device.deviceId, name }))
-                  .catch((e) => (rejectOnFail ? reject(e) : resolve(null)));
-                return;
-              }
-            }
-          };
-          uni.onBluetoothDeviceFound(otaScanDeviceFoundHandler);
         },
         fail: (err) => {
           console.error('[BLE] 扫描失败:', err);
+          if (scanTimeout) clearTimeout(scanTimeout);
+          scanTimeout = null;
+          clearOtaScanDeviceFoundHandler();
           rejectOnFail ? reject(new Error(t('蓝牙扫描失败'))) : resolve(null);
         }
       });
@@ -621,6 +709,22 @@ const startOtaProcess = async () => {
   console.log('[OTA] 设备:', currentDeviceName, currentDeviceId, '| 模式:', isAlreadyInBootMode ? 'BOOT' : 'APP');
 
   // 重置状态
+  releaseOtaBackgroundTask?.();
+  releaseOtaBackgroundTask = beginRingBackgroundCriticalTask(RING_BACKGROUND_TASK_OTA);
+  // OTA 全程独占链路（还会切到 BOOT 设备）：暂停 SDK 的自动恢复，
+  // 否则 APP 链路一断，自动重连就会和 BOOT 扫描/连接抢同一个戒指。
+  try {
+    useRingBLE().suspendRuntimeRecovery();
+  } catch (error) {
+    appendRingDiagnosticLog('RING OTA', 'ota-suspend-recovery-failed', {
+      error: error?.message || String(error)
+    });
+  }
+  try {
+    uni.setKeepScreenOn({ keepScreenOn: true });
+  } catch (error) {
+    void error;
+  }
   Object.assign(otaState.value, { isUpgrading: true, error: false, success: false, progress: 0 });
   appendRingDiagnosticLog('RING OTA', 'ota-process-start', {
     platformDeviceId: currentDeviceId,
@@ -630,6 +734,11 @@ const startOtaProcess = async () => {
     firmwareUrl: firmwareUrl.value
   });
 
+  // 断开 APP 链路时 SDK 会把运行时 deviceInfo 清空；OTA 结束要写回设备身份，
+  // 所以先把开始时的身份快照留下来，避免只剩一个 deviceId。
+  const originalDeviceSnapshot = { ...currentDevice };
+  let bootDeviceId = '';
+
   try {
     // 1. 下载固件
     otaState.value.statusText = t('正在下载固件...');
@@ -638,8 +747,6 @@ const startOtaProcess = async () => {
     otaState.value.progress = 5;
 
     // 2. 连接 BOOT 设备
-    let bootDeviceId;
-
     if (isAlreadyInBootMode && currentDeviceId) {
       console.log('[OTA] 已在 BOOT 模式');
       bootDeviceId = currentDeviceId;
@@ -725,7 +832,7 @@ const startOtaProcess = async () => {
       if (deviceInfo?.deviceId) {
         console.log('[OTA] ✅ 已重连:', deviceInfo.name, deviceInfo.deviceId);
 
-        userStore.updateDeviceInfo({ ...userStore.deviceInfo, deviceId: deviceInfo.deviceId, name: deviceInfo.name });
+        userStore.updateDeviceInfo({ ...originalDeviceSnapshot, deviceId: deviceInfo.deviceId, name: deviceInfo.name });
         // userStore.updateIsConnected(true);
 
         try {
@@ -735,7 +842,7 @@ const startOtaProcess = async () => {
           reconnected = true;
         } catch (err) {
           console.warn('[OTA] discover 服务/特征失败:', err);
-          userStore.updateDeviceInfo({ ...userStore.deviceInfo, deviceId: deviceInfo.deviceId }); // 可回滚 name 或清理
+          userStore.updateDeviceInfo({ ...originalDeviceSnapshot, deviceId: deviceInfo.deviceId }); // 可回滚 name 或清理
           userStore.updateIsConnected(false);
         }
       }
@@ -744,7 +851,7 @@ const startOtaProcess = async () => {
     }
 
     if (!reconnected) {
-      userStore.updateDeviceInfo({ ...userStore.deviceInfo, deviceId: appMac });
+      userStore.updateDeviceInfo({ ...originalDeviceSnapshot, deviceId: appMac });
       userStore.updateIsConnected(false);
     }
 
@@ -778,6 +885,15 @@ const startOtaProcess = async () => {
     });
   } finally {
     otaState.value.isUpgrading = false;
+    // 失败/中断时 BOOT 链路可能还连着：不关掉的话戒指会停在升级模式，
+    // 后续业务连接也连不上。close 自身有超时，不会把 finally 挂住。
+    if (bootDeviceId) {
+      try {
+        await disconnectDevice(bootDeviceId);
+      } catch (error) {
+        void error;
+      }
+    }
     cleanup();
   }
 };
@@ -854,6 +970,15 @@ onLoad(async () => {
       duration: 3000
     });
   }
+});
+// 升级中禁止返回，避免用户以为退出即中止、或把页面留在无 UI 的闪写状态。
+onBackPress(() => {
+  if (!otaState.value.isUpgrading) return false;
+  uni.showToast({
+    title: t('升级进行中，请勿退出页面'),
+    icon: 'none'
+  });
+  return true;
 });
 onUnmounted(() => cleanup());
 </script>

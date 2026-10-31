@@ -10,6 +10,7 @@ import {
 } from '@/sdk/ring-ble';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { enqueueRwDiagnosticUpload } from '@/utils/rwDiagnosticUpload';
+import { beginRingBackgroundCriticalTask, getRingBackgroundCriticalTasks } from '@/utils/ringBackgroundTasks';
 import { useRingBleStoreSdk } from './useRingBleStoreSdk';
 import { getRingDeviceStableIdentity, isSameRingDevice } from './useRingBleSdk';
 import type { UseRingBleSdkOptions } from './useRingBleSdk';
@@ -84,15 +85,7 @@ const RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH = 4000;
 
 type RwRealtimeMetricStep = 'heart_rate' | 'blood_oxygen' | 'temperature' | 'hrv' | 'stress' | 'blood_sugar' | 'blood_pressure';
 
-const RW_REALTIME_METRIC_STEPS: RwRealtimeMetricStep[] = [
-  'heart_rate',
-  'blood_oxygen',
-  'temperature',
-  'hrv',
-  'stress',
-  'blood_sugar',
-  'blood_pressure'
-];
+const RW_REALTIME_METRIC_STEPS: RwRealtimeMetricStep[] = ['heart_rate', 'blood_oxygen', 'temperature', 'hrv', 'stress', 'blood_sugar', 'blood_pressure'];
 
 let defaultBusinessController: ReturnType<typeof createRingBusinessController> | null = null;
 
@@ -115,9 +108,7 @@ const normalizeDiagnosticDetails = (details: unknown) => {
       text = String(details);
     }
   }
-  return text.length > RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH
-    ? `${text.slice(0, RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH)}...<truncated>`
-    : text;
+  return text.length > RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH ? `${text.slice(0, RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH)}...<truncated>` : text;
 };
 
 const appendRingDiagnosticLog = (source: string, event: string, details?: unknown) => {
@@ -221,14 +212,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         device.hardwareVersion,
         device.hardware_version
       ),
-      softwareVersion: pickVersionText(
-        metricValues.softwareVersion,
-        metricValues.uiVersion,
-        device.softwareVersion,
-        device.software_version,
-        device.uiVersion,
-        device.ui_version
-      )
+      softwareVersion: pickVersionText(metricValues.softwareVersion, metricValues.uiVersion, device.softwareVersion, device.software_version, device.uiVersion, device.ui_version)
     };
   };
 
@@ -275,12 +259,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
   };
 
   const isBusinessRequestInFlight = () =>
-    Boolean(refreshPromise) ||
-    Boolean(historyPromise) ||
-    Boolean(restorePromise) ||
-    isRefreshingBusinessData.value ||
-    isSyncingHistory.value ||
-    isRestoringDevice.value;
+    Boolean(refreshPromise) || Boolean(historyPromise) || Boolean(restorePromise) || isRefreshingBusinessData.value || isSyncingHistory.value || isRestoringDevice.value;
 
   const clearRefreshStateTimer = () => {
     if (refreshStateTimer) {
@@ -345,9 +324,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
   };
 
   const hasActiveFreshnessTrackedDevices = (now = Date.now()) =>
-    ble.devices.value.some(
-      (device) => typeof device.lastSeenAt === 'number' && now - device.lastSeenAt <= scanDeviceStaleMs + 5000
-    );
+    ble.devices.value.some((device) => typeof device.lastSeenAt === 'number' && now - device.lastSeenAt <= scanDeviceStaleMs + 5000);
 
   const ensureScanFreshnessTimer = () => {
     if (scanFreshnessTimer) return;
@@ -430,14 +407,14 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     const currentDevice = ble.deviceInfo.value;
     return Boolean(
       currentDevice.deviceId ||
-        currentDevice.uniMacId ||
-        currentDevice.mac ||
-        currentDevice.advertis?.macInfo ||
-        currentDevice.name ||
-        currentDevice.deviceName ||
-        currentDevice.localName ||
-        currentDevice.displayName ||
-        currentDevice.protocol
+      currentDevice.uniMacId ||
+      currentDevice.mac ||
+      currentDevice.advertis?.macInfo ||
+      currentDevice.name ||
+      currentDevice.deviceName ||
+      currentDevice.localName ||
+      currentDevice.displayName ||
+      currentDevice.protocol
     );
   };
 
@@ -478,9 +455,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
   const hasRwPendingRealtimeMetrics = (metricNames = rwPendingRetryMetricNames || RW_REALTIME_METRIC_STEPS) => {
     if (!isRwBusinessReady()) return false;
     const retrySteps = metricNames.filter(
-      (step) =>
-        (getRwRealtimeMetricValue(metrics.value, step) == null || isPendingMetricStatus(getRwRealtimeMetricStatus(metrics.value, step))) &&
-        !hasLastRwRefreshStep(step)
+      (step) => (getRwRealtimeMetricValue(metrics.value, step) == null || isPendingMetricStatus(getRwRealtimeMetricStatus(metrics.value, step))) && !hasLastRwRefreshStep(step)
     );
     if (retrySteps.length === 0) return false;
 
@@ -511,8 +486,9 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       const status = `${itemMetrics?.status || item?.status || ''}`.trim().toLowerCase();
       if (status === 'pending' || status === 'requested') return false;
       if (['battery', 'firmware_version', 'hardwareVersion', 'softwareVersion'].includes(sourceType)) {
-        return [itemMetrics?.value, itemMetrics?.battery, itemMetrics?.firmwareVersion, itemMetrics?.hardwareVersion, itemMetrics?.softwareVersion]
-          .some(isResolvedDeviceInfoMetricValue);
+        return [itemMetrics?.value, itemMetrics?.battery, itemMetrics?.firmwareVersion, itemMetrics?.hardwareVersion, itemMetrics?.softwareVersion].some(
+          isResolvedDeviceInfoMetricValue
+        );
       }
       if (sourceType !== 'rw_health_data') return false;
       const metricName = `${itemMetrics?.name || item.name || ''}`;
@@ -555,10 +531,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     return steps;
   };
 
-  const resolveRwDeviceInfoRefreshResult = (
-    result: RefreshLegacyBusinessMetricsResult,
-    minNormalizedDataLength = -1
-  ): RefreshLegacyBusinessMetricsResult => {
+  const resolveRwDeviceInfoRefreshResult = (result: RefreshLegacyBusinessMetricsResult, minNormalizedDataLength = -1): RefreshLegacyBusinessMetricsResult => {
     if (!isRwBusinessReady()) return result;
 
     const resolvedSteps = getResolvedRwDeviceInfoSteps(minNormalizedDataLength);
@@ -570,10 +543,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       software: ['software_pending', 'software_command_pending']
     };
     const pendingStepsToRemove = new Set(Array.from(resolvedSteps).flatMap((step) => pendingByStep[step] || []));
-    const ok = Array.from(new Set([
-      ...result.ok.filter((step) => !pendingStepsToRemove.has(step)),
-      ...resolvedSteps
-    ]));
+    const ok = Array.from(new Set([...result.ok.filter((step) => !pendingStepsToRemove.has(step)), ...resolvedSteps]));
     const failed = result.failed.filter((item) => !resolvedSteps.has(item.step));
     const resolvedResult: RefreshLegacyBusinessMetricsResult = {
       status: failed.length === 0 ? 'success' : ok.length > 0 ? 'partial' : 'failed',
@@ -591,33 +561,17 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
   };
 
   const hasRwFreshCoreMetricSnapshot = (minMetricUpdateAt = 0, minNormalizedDataLength = -1) => {
-    return (
-      hasRwCoreMetricSnapshot() &&
-      (!minMetricUpdateAt || getLastMetricUpdateAt() >= minMetricUpdateAt) &&
-      hasRwCoreNormalizedDataSince(minNormalizedDataLength)
-    );
+    return hasRwCoreMetricSnapshot() && (!minMetricUpdateAt || getLastMetricUpdateAt() >= minMetricUpdateAt) && hasRwCoreNormalizedDataSince(minNormalizedDataLength);
   };
 
   const hasRwDeviceInfoCoreSnapshot = () => {
-    return [
-      metrics.value.battery,
-      metrics.value.firmwareVersion,
-      metrics.value.hardwareVersion,
-      metrics.value.softwareVersion,
-      metrics.value.uiVersion
-    ].some(isResolvedDeviceInfoMetricValue);
+    return [metrics.value.battery, metrics.value.firmwareVersion, metrics.value.hardwareVersion, metrics.value.softwareVersion, metrics.value.uiVersion].some(
+      isResolvedDeviceInfoMetricValue
+    );
   };
 
   const hasRwDeviceInfoCoreRefreshStep = (result: RefreshLegacyBusinessMetricsResult) => {
-    const nonEmptySteps = new Set([
-      'battery',
-      'battery_cached',
-      'firmware',
-      'firmware_cached',
-      'software',
-      'software_cached',
-      ...RW_REALTIME_METRIC_STEPS
-    ]);
+    const nonEmptySteps = new Set(['battery', 'battery_cached', 'firmware', 'firmware_cached', 'software', 'software_cached', ...RW_REALTIME_METRIC_STEPS]);
     return result.ok.some((step) => nonEmptySteps.has(step));
   };
 
@@ -648,11 +602,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     };
   };
 
-  const scheduleRwEmptyRefreshRetry = (
-    result: RefreshLegacyBusinessMetricsResult,
-    minMetricUpdateAt = 0,
-    minNormalizedDataLength = -1
-  ) => {
+  const scheduleRwEmptyRefreshRetry = (result: RefreshLegacyBusinessMetricsResult, minMetricUpdateAt = 0, minNormalizedDataLength = -1) => {
     clearRwEmptyRefreshRetryTimer();
 
     if (!rwBackgroundRefreshEnabled) return;
@@ -683,10 +633,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         scheduleRwEmptyRefreshRetry(lastRefreshResult.value || result, minMetricUpdateAt, minNormalizedDataLength);
         return;
       }
-      if (
-        hasRwDeviceInfoCoreRefreshStep(lastRefreshResult.value || result) ||
-        hasRwFreshCoreMetricSnapshot(minMetricUpdateAt, minNormalizedDataLength)
-      ) {
+      if (hasRwDeviceInfoCoreRefreshStep(lastRefreshResult.value || result) || hasRwFreshCoreMetricSnapshot(minMetricUpdateAt, minNormalizedDataLength)) {
         rwEmptyRefreshRetryCount = 0;
         return;
       }
@@ -798,12 +745,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     const device = ble.deviceInfo.value;
     const protocol = getResolvedCurrentProtocol();
     if (protocol !== 'rw') return;
-    const stableIdentity =
-      getRingDeviceStableIdentity(device) ||
-      device.uniMacId ||
-      device.deviceId ||
-      protocol ||
-      'unknown-device';
+    const stableIdentity = getRingDeviceStableIdentity(device) || device.uniMacId || device.deviceId || protocol || 'unknown-device';
     const diagnosticLock = getRwDiagnosticCommandLock();
     if (diagnosticLock || isAutoRefreshPaused) {
       appendRingDiagnosticLog('RW FLOW', 'post-connect-device-info-refresh-skip', {
@@ -878,6 +820,16 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
   const restoreLastBusinessDevice = async (restoreOptions: RestoreLastBusinessDeviceOptions = {}) => {
     if (restorePromise) return restorePromise;
     const refreshAfterRestore = restoreOptions.refreshAfterRestore ?? false;
+    // OTA / 历史同步 / 全面测量等关键任务独占 BLE 链路。此时恢复"上次业务设备"
+    // 会和正在进行的事件抢连接（OTA 甚至换了 BOOT 设备），必须让路。
+    const activeBackgroundTasks = getRingBackgroundCriticalTasks();
+    if (activeBackgroundTasks.length > 0) {
+      appendRingDiagnosticLog('RW FLOW', 'restore-skip-critical-task-active', {
+        activeBackgroundTasks,
+        refreshAfterRestore
+      });
+      return false;
+    }
 
     if (isReady.value) {
       const readyMatchesBound = await ensureReadyDeviceMatchesBusinessIdentity('restore-already-ready');
@@ -942,10 +894,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
         return false;
       }
       if (isReady.value) {
-        const readyMatchesBound = await ensureReadyDeviceMatchesBusinessIdentity(
-          'restore-ready-before-autoconnect',
-          boundDevice || null
-        );
+        const readyMatchesBound = await ensureReadyDeviceMatchesBusinessIdentity('restore-ready-before-autoconnect', boundDevice || null);
         if (readyMatchesBound) {
           appendRingDiagnosticLog('RW FLOW', 'restore-skip-already-ready-before-autoconnect', {
             timeoutMs,
@@ -1069,9 +1018,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 
   const refreshBusinessData = async (refreshOptions: RefreshBusinessDataOptions = {}) => {
     const silent = refreshOptions.silent ?? false;
-    rwPendingRetryMetricNames = refreshOptions.realtimeMetricNames?.length
-      ? [...refreshOptions.realtimeMetricNames]
-      : undefined;
+    rwPendingRetryMetricNames = refreshOptions.realtimeMetricNames?.length ? [...refreshOptions.realtimeMetricNames] : undefined;
     if (refreshPromise) {
       if (!silent && !isRefreshingBusinessData.value) {
         const joinedRequestId = refreshRequestId;
@@ -1100,9 +1047,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(ble.deviceInfo.value);
     if (historyExclusive.active) {
       const skippedResult = createHistoryExclusiveRefreshResult(lastRefreshResult.value);
-      lastRefreshResult.value = silent
-        ? createSilentVisibleRefreshResult(skippedResult, lastRefreshResult.value)
-        : skippedResult;
+      lastRefreshResult.value = silent ? createSilentVisibleRefreshResult(skippedResult, lastRefreshResult.value) : skippedResult;
       appendRingDiagnosticLog('RW FLOW', 'refresh-skip-history-exclusive', {
         silent,
         protocol: getResolvedCurrentProtocol(),
@@ -1118,38 +1063,52 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     if (!silent) {
       isRefreshingBusinessData.value = true;
     }
+    // App 切后台时，未完成的刷新需要跑完再断开戒指。
+    const releaseBackgroundTask = beginRingBackgroundCriticalTask('business-refresh');
     const timeoutMs = getRefreshTimeoutMs();
     const normalizedDataLengthAtStart = getNormalizedDataLength();
-    const includeDeviceInfo =
-      refreshOptions.includeDeviceInfo ??
-      (refreshOptions.forceDeviceInfo || !silent || !lastRefreshResult.value || !hasRwDeviceInfoCoreSnapshot());
-    const includeRealtimeMetrics =
-      refreshOptions.includeRealtimeMetrics ??
-      (isCurrentOrBoundRw() ? Boolean(refreshOptions.realtimeMetricNames?.length) : true);
+    const includeDeviceInfo = refreshOptions.includeDeviceInfo ?? (refreshOptions.forceDeviceInfo || !silent || !lastRefreshResult.value || !hasRwDeviceInfoCoreSnapshot());
+    const includeRealtimeMetrics = refreshOptions.includeRealtimeMetrics ?? (isCurrentOrBoundRw() ? Boolean(refreshOptions.realtimeMetricNames?.length) : true);
     // 历史数据读取/上传只能由首页全局同步 session 负责。
     // 业务页调用 refreshHealthData 时默认只刷新设备信息/实时指标，避免 page-show、详情页、我的页重复抢 BLE 通道。
     const includeHistorySnapshot = refreshOptions.includeHistorySnapshot ?? false;
-    appendRingDiagnosticLog('RW FLOW', 'refresh-start', {
-      silent,
-      timeoutMs,
-      protocol: getResolvedCurrentProtocol(),
-      effectiveProtocol: getCurrentOrBoundProtocol(),
-      includeDeviceInfo,
-      includeRealtimeMetrics,
-      realtimeMetricNames: refreshOptions.realtimeMetricNames,
-      includeHistorySnapshot,
-      forceDeviceInfo: refreshOptions.forceDeviceInfo
-    });
     const deviceInfoCommandOptions = getCachedDeviceInfoCommandOptions(includeDeviceInfo);
-    const refreshTask = ble.refreshBusinessMetrics({
-      timeoutMs,
-      includeCollectPeriod: false,
-      includeDeviceTime: false,
-      ...deviceInfoCommandOptions,
-      includeRealtimeMetrics,
-      realtimeMetricNames: refreshOptions.realtimeMetricNames,
-      includeHistorySnapshot
-    });
+    const startRefreshTask = () => {
+      appendRingDiagnosticLog('RW FLOW', 'refresh-start', {
+        silent,
+        timeoutMs,
+        protocol: getResolvedCurrentProtocol(),
+        effectiveProtocol: getCurrentOrBoundProtocol(),
+        includeDeviceInfo,
+        includeRealtimeMetrics,
+        realtimeMetricNames: refreshOptions.realtimeMetricNames,
+        includeHistorySnapshot,
+        forceDeviceInfo: refreshOptions.forceDeviceInfo
+      });
+      return ble.refreshBusinessMetrics({
+        timeoutMs,
+        includeCollectPeriod: false,
+        includeDeviceTime: false,
+        ...deviceInfoCommandOptions,
+        includeRealtimeMetrics,
+        realtimeMetricNames: refreshOptions.realtimeMetricNames,
+        includeHistorySnapshot
+      });
+    };
+    let refreshTask: ReturnType<typeof startRefreshTask>;
+    try {
+      refreshTask = startRefreshTask();
+    } catch (error) {
+      // 同步抛错时任务并未真正发出，必须立刻归还后台 token，否则它会被永久占住。
+      releaseBackgroundTask();
+      if (requestId === refreshRequestId && !silent) {
+        isRefreshingBusinessData.value = false;
+      }
+      throw error;
+    }
+    // withTimeout 只负责让上层尽早返回，底层 BLE 命令仍可能继续跑。
+    // 后台断连必须等真正的 refreshTask settle 之后再执行，避免切在命令中途。
+    void refreshTask.then(releaseBackgroundTask, releaseBackgroundTask);
 
     clearRefreshStateTimer();
     if (!silent) {
@@ -1164,11 +1123,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     }
 
     const currentPromise = (async () => {
-      const rawResult = await withTimeout(
-        refreshTask,
-        timeoutMs,
-        createRefreshTimeoutResult
-      );
+      const rawResult = await withTimeout(refreshTask, timeoutMs, createRefreshTimeoutResult);
       const result = resolveRwDeviceInfoRefreshResult(rawResult, normalizedDataLengthAtStart);
       if (deviceInfoCommandOptions.includeFirmwareVersion || deviceInfoCommandOptions.includeSoftwareVersion) {
         void reportCurrentDeviceVersions();
@@ -1199,6 +1154,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
       });
       throw error;
     } finally {
+      // token 已在 refreshTask settle 时释放（见上），这里不再提前归还。
       if (refreshPromise === currentPromise) {
         refreshPromise = null;
       }
@@ -1230,9 +1186,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
           }
         ]
       };
-      lastRefreshResult.value = refreshOptions.silent
-        ? createSilentVisibleRefreshResult(failedResult, lastRefreshResult.value)
-        : failedResult;
+      lastRefreshResult.value = refreshOptions.silent ? createSilentVisibleRefreshResult(failedResult, lastRefreshResult.value) : failedResult;
       scheduleRwMaintainRefresh();
     }
   };
@@ -1244,10 +1198,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     });
     const historyExclusive = getLegacyBleHistoryExclusiveSnapshot(ble.deviceInfo.value);
     if (historyExclusive.active) {
-      const skippedResult = createDeviceInfoVisibleRefreshResult(
-        createHistoryExclusiveRefreshResult(lastRefreshResult.value),
-        lastRefreshResult.value
-      );
+      const skippedResult = createDeviceInfoVisibleRefreshResult(createHistoryExclusiveRefreshResult(lastRefreshResult.value), lastRefreshResult.value);
       lastRefreshResult.value = skippedResult;
       appendRingDiagnosticLog('RW FLOW', 'device-info-refresh-skip-history-exclusive', {
         ready: isReady.value,
@@ -1284,12 +1235,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     if (refreshPromise) {
       const device = ble.deviceInfo.value;
       const protocol = getResolvedCurrentProtocol();
-      const stableIdentity =
-        getRingDeviceStableIdentity(device) ||
-        device.uniMacId ||
-        device.deviceId ||
-        protocol ||
-        'unknown-device';
+      const stableIdentity = getRingDeviceStableIdentity(device) || device.uniMacId || device.deviceId || protocol || 'unknown-device';
       appendRingDiagnosticLog('RW FLOW', 'device-info-wait-active-refresh', {
         protocol,
         stableIdentity,
@@ -1365,12 +1311,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 
     const device = ble.deviceInfo.value;
     const protocol = getResolvedCurrentProtocol();
-    const stableIdentity =
-      getRingDeviceStableIdentity(device) ||
-      device.uniMacId ||
-      device.deviceId ||
-      protocol ||
-      'unknown-device';
+    const stableIdentity = getRingDeviceStableIdentity(device) || device.uniMacId || device.deviceId || protocol || 'unknown-device';
 
     const diagnosticLock = getRwDiagnosticCommandLock();
     if (diagnosticLock) {
@@ -1430,8 +1371,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     }
   };
 
-  const syncRwDeviceTimeBeforeHistory = (details: Record<string, unknown>) =>
-    syncRwDeviceTimeAfterReady('history', details);
+  const syncRwDeviceTimeBeforeHistory = (details: Record<string, unknown>) => syncRwDeviceTimeAfterReady('history', details);
 
   const syncBusinessHistory = async (readAll = false, historyOptions: SyncBusinessHistoryOptions = {}) => {
     const requestedDataTypes = Array.isArray(historyOptions.dataTypes) ? historyOptions.dataTypes.filter(Boolean) : [];
@@ -1465,69 +1405,76 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
 
     const requestId = (historyRequestId += 1);
     isSyncingHistory.value = true;
+    // 历史读取 + 上传可能持续数十秒，App 切后台时不能把它断掉。
+    const releaseBackgroundTask = beginRingBackgroundCriticalTask('history-sync');
+    // 超时只让上层尽早返回，底层 syncHistory 仍可能在跑；只有真的发出读取后
+    // 才交给 historyTask 的 settle 来释放 token。
+    let historyTaskStarted = false;
 
     const currentHistoryPromise = (async () => {
       try {
-      if (!isReady.value) {
-        const restored = await restoreLastBusinessDevice({ refreshAfterRestore: false });
-        if (!restored) {
-          throw new Error('\u8bbe\u5907\u901a\u4fe1\u672a\u5c31\u7eea\uff0c\u8bf7\u91cd\u65b0\u8fde\u63a5\u540e\u518d\u540c\u6b65\u5386\u53f2');
+        if (!isReady.value) {
+          const restored = await restoreLastBusinessDevice({ refreshAfterRestore: false });
+          if (!restored) {
+            throw new Error('\u8bbe\u5907\u901a\u4fe1\u672a\u5c31\u7eea\uff0c\u8bf7\u91cd\u65b0\u8fde\u63a5\u540e\u518d\u540c\u6b65\u5386\u53f2');
+          }
         }
-      }
 
-      await syncRwDeviceTimeBeforeHistory(requestedHistoryDetails);
+        await syncRwDeviceTimeBeforeHistory(requestedHistoryDetails);
 
-      if (getResolvedCurrentProtocol() === 'rw') {
-        appendRingDiagnosticLog('RW FLOW', 'history-sync-start', {
-          ...requestedHistoryDetails,
-          lastReadTimestamp: ble.ringStore.lastReadTimestamp,
-          deviceId: ble.deviceInfo.value.deviceId,
-          stableIdentity: getRingDeviceStableIdentity(ble.deviceInfo.value)
+        if (getResolvedCurrentProtocol() === 'rw') {
+          appendRingDiagnosticLog('RW FLOW', 'history-sync-start', {
+            ...requestedHistoryDetails,
+            lastReadTimestamp: ble.ringStore.lastReadTimestamp,
+            deviceId: ble.deviceInfo.value.deviceId,
+            stableIdentity: getRingDeviceStableIdentity(ble.deviceInfo.value)
+          });
+        }
+
+        const historyTask = ble.syncHistory({
+          readAll,
+          ...(historyOptions.sinceTimestamp === undefined ? {} : { sinceTimestamp: historyOptions.sinceTimestamp }),
+          ...(historyOptions.dataType ? { dataType: historyOptions.dataType } : {}),
+          ...(requestedDataTypes.length > 0 ? { dataTypes: requestedDataTypes } : {}),
+          deleteAfterUpload: false
         });
-      }
-
-      const historyTask = ble.syncHistory({
-        readAll,
-        ...(historyOptions.sinceTimestamp === undefined ? {} : { sinceTimestamp: historyOptions.sinceTimestamp }),
-        ...(historyOptions.dataType ? { dataType: historyOptions.dataType } : {}),
-        ...(requestedDataTypes.length > 0 ? { dataTypes: requestedDataTypes } : {}),
-        deleteAfterUpload: false
-      });
-      const result = await withTimeout(
-        historyTask,
-        options.historyTimeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS,
-        createHistoryTimeoutResult
-      );
-      if (requestId === historyRequestId) {
-        lastHistoryResult.value = result;
-        if (getResolvedCurrentProtocol() === 'rw') {
-          const summary = summarizeHistorySyncResult(result);
-          appendRingDiagnosticLog('RW FLOW', 'history-sync-result', {
-            ...summary,
-            ...requestedHistoryDetails,
-            dataTypes: Array.from(new Set([...(summary.dataTypes || []), ...requestedDataTypes]))
-          });
+        historyTaskStarted = true;
+        void historyTask.then(releaseBackgroundTask, releaseBackgroundTask);
+        const result = await withTimeout(historyTask, options.historyTimeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS, createHistoryTimeoutResult);
+        if (requestId === historyRequestId) {
+          lastHistoryResult.value = result;
+          if (getResolvedCurrentProtocol() === 'rw') {
+            const summary = summarizeHistorySyncResult(result);
+            appendRingDiagnosticLog('RW FLOW', 'history-sync-result', {
+              ...summary,
+              ...requestedHistoryDetails,
+              dataTypes: Array.from(new Set([...(summary.dataTypes || []), ...requestedDataTypes]))
+            });
+          }
+        }
+        return result;
+      } catch (error) {
+        if (requestId === historyRequestId) {
+          lastHistoryResult.value = createHistoryFailureResult(error);
+          if (getResolvedCurrentProtocol() === 'rw') {
+            appendRingDiagnosticLog('RW FLOW', 'history-sync-failed', {
+              ...requestedHistoryDetails,
+              error: formatBleErrorMessage(error, '\u5386\u53f2\u540c\u6b65\u5931\u8d25')
+            });
+          }
+        } else {
+          return lastHistoryResult.value || createHistoryTimeoutResult();
+        }
+        throw error;
+      } finally {
+        // 读取已发出时 token 由 historyTask 的 settle 释放，避免超时提前归还。
+        if (!historyTaskStarted) {
+          releaseBackgroundTask();
+        }
+        if (requestId === historyRequestId) {
+          isSyncingHistory.value = false;
         }
       }
-      return result;
-    } catch (error) {
-      if (requestId === historyRequestId) {
-        lastHistoryResult.value = createHistoryFailureResult(error);
-        if (getResolvedCurrentProtocol() === 'rw') {
-          appendRingDiagnosticLog('RW FLOW', 'history-sync-failed', {
-            ...requestedHistoryDetails,
-            error: formatBleErrorMessage(error, '\u5386\u53f2\u540c\u6b65\u5931\u8d25')
-          });
-        }
-      } else {
-        return lastHistoryResult.value || createHistoryTimeoutResult();
-      }
-      throw error;
-    } finally {
-      if (requestId === historyRequestId) {
-        isSyncingHistory.value = false;
-      }
-    }
     })();
 
     historyPromise = currentHistoryPromise;
@@ -1606,16 +1553,18 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     await ble.stopScan();
 
     const connectResult = await withTimeout(
-      ble.connectDevice({
-        deviceId: platformDeviceId,
-        deviceName,
-        uniMacId: device.mac || device.advertis?.macInfo || device.uniMacId || stableIdentity,
-        fromScan: true,
-        bindAfterConnected: true,
-        replaceBinding: connectOptions.replaceBinding === true,
-        protocol,
-        sourceDevice: device
-      }).then(() => ({ success: true })),
+      ble
+        .connectDevice({
+          deviceId: platformDeviceId,
+          deviceName,
+          uniMacId: device.mac || device.advertis?.macInfo || device.uniMacId || stableIdentity,
+          fromScan: true,
+          bindAfterConnected: true,
+          replaceBinding: connectOptions.replaceBinding === true,
+          protocol,
+          sourceDevice: device
+        })
+        .then(() => ({ success: true })),
       connectTimeoutMs,
       () => ({ success: false })
     );
@@ -1689,10 +1638,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     refreshPromise = null;
     isRefreshingBusinessData.value = true;
     const baseTimeoutMs = getRefreshTimeoutMs();
-    const timeoutMs =
-      getResolvedCurrentProtocol() === 'rw'
-        ? Math.max(baseTimeoutMs, Math.min(35000, Math.max(1000, seconds * 1000) + 5000))
-        : baseTimeoutMs;
+    const timeoutMs = getResolvedCurrentProtocol() === 'rw' ? Math.max(baseTimeoutMs, Math.min(35000, Math.max(1000, seconds * 1000) + 5000)) : baseTimeoutMs;
     const monitoringTask = (async () => {
       if (!isReady.value) {
         const restored = await restoreLastBusinessDevice({ refreshAfterRestore: false });
@@ -1720,11 +1666,7 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     }, timeoutMs + 1000);
 
     try {
-      const result = await withTimeout(
-        monitoringTask,
-        timeoutMs,
-        createRefreshTimeoutResult
-      );
+      const result = await withTimeout(monitoringTask, timeoutMs, createRefreshTimeoutResult);
       if (requestId === refreshRequestId) {
         lastRefreshResult.value = result;
         lastRefreshAt = Date.now();
@@ -1800,16 +1742,13 @@ const createRingBusinessController = (options: UseRingBusinessControllerOptions 
     { immediate: true }
   );
 
-  watch(
-    currentBusinessDeviceKey,
-    (deviceKey, previousDeviceKey) => {
-      if (!previousDeviceKey || deviceKey === previousDeviceKey) return;
-      cancelBusinessRequests();
-      lastRefreshResult.value = null;
-      lastHistoryResult.value = null;
-      lastRefreshAt = 0;
-    }
-  );
+  watch(currentBusinessDeviceKey, (deviceKey, previousDeviceKey) => {
+    if (!previousDeviceKey || deviceKey === previousDeviceKey) return;
+    cancelBusinessRequests();
+    lastRefreshResult.value = null;
+    lastHistoryResult.value = null;
+    lastRefreshAt = 0;
+  });
 
   return {
     ...ble,
@@ -1865,9 +1804,7 @@ export function getRingBusinessDeviceTail(device: RingDeviceInfo | Record<string
 
 export function getRingBusinessDeviceKey(device: RingDeviceInfo | Record<string, any>) {
   return (
-    getRingDeviceStableIdentity(device as RingDeviceInfo) ||
-    getRingBusinessFallbackIdentity(device) ||
-    `${getRingBusinessDeviceName(device)}-${device.RSSI ?? device.rssi ?? ''}`
+    getRingDeviceStableIdentity(device as RingDeviceInfo) || getRingBusinessFallbackIdentity(device) || `${getRingBusinessDeviceName(device)}-${device.RSSI ?? device.rssi ?? ''}`
   );
 }
 
@@ -1892,16 +1829,7 @@ export function isBusinessRingDevice(device: RingDeviceInfo) {
   // Device recognition must use the raw BLE/model identity. The user-facing
   // name is intentionally normalized to "轻刻智能戒指", which is unsuitable
   // for protocol filtering and previously hid HR18/QKeeRing scan results.
-  const rawIdentityNames = [
-    device.bleName,
-    device.localName,
-    device.name,
-    device.displayName,
-    device.deviceName,
-    device.modelKey,
-    device.productModel,
-    device.productId
-  ]
+  const rawIdentityNames = [device.bleName, device.localName, device.name, device.displayName, device.deviceName, device.modelKey, device.productModel, device.productId]
     .map((value) => stripDeviceWrappingQuotes(value).toUpperCase())
     .filter(Boolean);
   return rawIdentityNames.some((name) => legacyPrefixes.some((prefix) => name.startsWith(prefix)));
@@ -1993,9 +1921,7 @@ function hasMatchingBusinessRingIdentity(leftIds: unknown[], rightIds: unknown[]
 
   const leftNormalized = leftRaw.map(normalizeBusinessRingIdentity).filter((value) => value.length >= 6);
   const rightNormalized = rightRaw.map(normalizeBusinessRingIdentity).filter((value) => value.length >= 6);
-  return leftNormalized.some((left) =>
-    rightNormalized.some((right) => left.endsWith(right.slice(-6)) || right.endsWith(left.slice(-6)))
-  );
+  return leftNormalized.some((left) => rightNormalized.some((right) => left.endsWith(right.slice(-6)) || right.endsWith(left.slice(-6))));
 }
 
 function normalizeBusinessRingIdentity(value: unknown) {
@@ -2012,10 +1938,7 @@ function normalizeBusinessFullBleMacKey(value?: unknown) {
 function reverseBusinessHexMacBytes(hex: string) {
   const cleanHex = normalizeBusinessRingIdentity(hex);
   if (cleanHex.length !== 12) return '';
-  return cleanHex
-    .match(/.{2}/g)!
-    .reverse()
-    .join(':');
+  return cleanHex.match(/.{2}/g)!.reverse().join(':');
 }
 
 function hexFromBusinessBinaryLike(value?: unknown) {
@@ -2055,14 +1978,7 @@ function parseBusinessMacFromAdvertisHex(value?: unknown) {
 }
 
 function getBusinessRawScannedAdvertisedMac(device?: RingDeviceInfo | Record<string, any> | null) {
-  const rawCandidates = [
-    device?.advertisHex,
-    device?.advertisData,
-    device?.advertis_data,
-    device?.advertisServiceData,
-    device?.manufacturerData,
-    device?.serviceData
-  ];
+  const rawCandidates = [device?.advertisHex, device?.advertisData, device?.advertis_data, device?.advertisServiceData, device?.manufacturerData, device?.serviceData];
 
   for (const candidate of rawCandidates) {
     const mac = normalizeBusinessFullBleMacKey(parseBusinessMacFromAdvertisHex(candidate));
@@ -2127,13 +2043,7 @@ function getTrustedBusinessStableMac(device?: RingDeviceInfo | Record<string, an
 }
 
 function hasBusinessRawScanAdvertisEvidence(device?: RingDeviceInfo | Record<string, any> | null) {
-  return Boolean(
-    device?.advertisData ||
-      device?.advertisHex ||
-      device?.advertisServiceUUIDs ||
-      device?.advertisServiceUUIDsList ||
-      device?.serviceData
-  );
+  return Boolean(device?.advertisData || device?.advertisHex || device?.advertisServiceUUIDs || device?.advertisServiceUUIDsList || device?.serviceData);
 }
 
 function hasBusinessScanEvidence(device?: RingDeviceInfo | Record<string, any> | null) {
@@ -2145,10 +2055,7 @@ function getScannedBusinessMac(device?: RingDeviceInfo | Record<string, any> | n
   return getExplicitBusinessMac(device);
 }
 
-function isReadyBusinessDeviceMatchedBoundMac(
-  currentDevice: RingDeviceInfo,
-  expectedDevice?: RingDeviceInfo | Record<string, any> | null
-) {
+function isReadyBusinessDeviceMatchedBoundMac(currentDevice: RingDeviceInfo, expectedDevice?: RingDeviceInfo | Record<string, any> | null) {
   const expectedMacKey = normalizeBusinessFullBleMacKey(getExplicitBusinessMac(expectedDevice));
   if (!expectedMacKey) return true;
 
@@ -2292,10 +2199,7 @@ function createHistoryExclusiveRefreshResult(previous: RefreshLegacyBusinessMetr
   };
 }
 
-function createSilentVisibleRefreshResult(
-  result: RefreshLegacyBusinessMetricsResult,
-  previous: RefreshLegacyBusinessMetricsResult | null
-): RefreshLegacyBusinessMetricsResult {
+function createSilentVisibleRefreshResult(result: RefreshLegacyBusinessMetricsResult, previous: RefreshLegacyBusinessMetricsResult | null): RefreshLegacyBusinessMetricsResult {
   if (result.failed.length === 0) return result;
 
   const ok = Array.from(new Set([...(previous?.ok || []), ...result.ok]));
@@ -2306,10 +2210,7 @@ function createSilentVisibleRefreshResult(
   };
 }
 
-function createDeviceInfoVisibleRefreshResult(
-  result: RefreshLegacyBusinessMetricsResult,
-  previous: RefreshLegacyBusinessMetricsResult | null
-): RefreshLegacyBusinessMetricsResult {
+function createDeviceInfoVisibleRefreshResult(result: RefreshLegacyBusinessMetricsResult, previous: RefreshLegacyBusinessMetricsResult | null): RefreshLegacyBusinessMetricsResult {
   const deviceInfoSteps = new Set([
     'battery',
     'battery_pending',

@@ -7,6 +7,11 @@ import { refreshAppForegroundSessionId } from '@/utils/appForegroundSession';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
 import { QKEER_BUILD_INFO } from '@/utils/buildInfo';
 import { refreshSystemLocale, syncTabBarLocale } from '@/i18n';
+import {
+  cancelDeferredRingBackgroundDisconnect,
+  getRingBackgroundCriticalTasks,
+  runOrDeferRingBackgroundDisconnect
+} from '@/utils/ringBackgroundTasks';
 
 let launchedFromFamilyEntry = false;
 
@@ -47,6 +52,28 @@ onLaunch((options: any) => {
 });
 
 onShow((options: any) => {
+  // 回到前台：取消后台挂起的断连，并恢复被暂停的自动重连。
+  cancelDeferredRingBackgroundDisconnect();
+  const activeBackgroundTasks = getRingBackgroundCriticalTasks();
+  appendRingDiagnosticLog('APP', 'app-show', {
+    familyEntry: launchedFromFamilyEntry || isFamilyEntry(options),
+    pendingBackgroundTasks: activeBackgroundTasks
+  });
+  // 关键任务（OTA/历史同步/全面测量）还持有 BLE 链路时不能恢复自动重连：
+  // 尤其是 OTA，回来后 resume 会立刻去连业务设备，跟 BOOT 升级抢链路。
+  if (activeBackgroundTasks.length === 0) {
+    try {
+      useRingBLE().resumeRuntimeRecovery();
+    } catch (error) {
+      appendRingDiagnosticLog('APP', 'app-show-resume-error', {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  } else {
+    appendRingDiagnosticLog('APP', 'app-show-resume-skipped', {
+      activeBackgroundTasks
+    });
+  }
   // 早于 BLE 分支：家人页也要跟随系统语言刷新，并保证 tabBar 文案正确。
   refreshSystemLocale();
   syncTabBarLocale();
@@ -54,6 +81,13 @@ onShow((options: any) => {
   // Family invitation and care pages are pure network flows. They must never
   // request Bluetooth/privacy authorization just because the mini program opened.
   if (launchedFromFamilyEntry || isFamilyEntry(options)) return;
+  if (activeBackgroundTasks.length > 0) {
+    // 任务自己负责连接/重连；前台恢复回连上次设备只会和它抢链路。
+    appendRingDiagnosticLog('APP', 'app-show-restore-skipped', {
+      activeBackgroundTasks
+    });
+    return;
+  }
   setTimeout(() => {
     try {
       const { initBluetooth, registerGlobalListeners } = useRingBLE();
@@ -77,8 +111,39 @@ onHide(() => {
     pauseBusinessAutoRefresh();
     const userStore = useUserStore();
     userStore.updateIsBluetoothReady(false);
+
+    // 先停掉自动重连，避免后台继续扫描/重连。
+    const ring = useRingBLE();
+    ring.suspendRuntimeRecovery();
+    const activeBackgroundTasks = getRingBackgroundCriticalTasks();
+    appendRingDiagnosticLog('APP', 'app-hide', {
+      activeBackgroundTasks,
+      pendingDeviceId: ring.deviceInfo.value?.deviceId || '',
+      connected: ring.isConnected.value
+    });
+    // 不等定时器：微信小程序和 iOS 切后台后 JS 定时器会被冻结，
+    // 延迟断连永远不会执行。没有关键任务就立刻释放；有关键任务则等
+    // token 全部释放后再执行（由 ringBackgroundTasks 负责）。
+    runOrDeferRingBackgroundDisconnect(() => {
+      const currentRing = useRingBLE();
+      appendRingDiagnosticLog('APP', 'background-ring-release', {
+        pendingDeviceId: currentRing.deviceInfo.value?.deviceId || '',
+        connected: currentRing.isConnected.value,
+        scanning: currentRing.isScanning.value
+      });
+      // 后台不保留扫描，也不允许未完成的连接尝试在后台连上。
+      // disconnect() 会让在途尝试失效，其完成回调会自行关闭物理链路。
+      void currentRing.stopScan().catch(() => undefined);
+      void currentRing.disconnect().catch((error) => {
+        appendRingDiagnosticLog('APP', 'background-ring-release-error', {
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+    });
   } catch (error) {
-    void error;
+    appendRingDiagnosticLog('APP', 'app-hide-error', {
+      message: error instanceof Error ? error.message : String(error)
+    });
   }
 });
 </script>

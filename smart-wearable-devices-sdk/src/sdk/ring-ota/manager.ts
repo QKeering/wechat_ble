@@ -1,10 +1,4 @@
-import type {
-  RingOtaOptions,
-  RingOtaPartition,
-  RingOtaProgressCallback,
-  RingOtaResponseCodes,
-  RingOtaUuids
-} from './types';
+import type { RingOtaOptions, RingOtaPartition, RingOtaProgressCallback, RingOtaResponseCodes, RingOtaUuids } from './types';
 
 export const RING_OTA_UUIDS: RingOtaUuids = {
   service: '5833FF01-9B8B-5191-6142-22A4536EF123',
@@ -31,14 +25,43 @@ const DEFAULT_OPTIONS: Required<RingOtaOptions> = {
 
 type BleCharacteristicValueCallback = Parameters<typeof uni.onBLECharacteristicValueChange>[0];
 
+// App 端可能没有该 off* API，裸调用会抛错并打断 OTA 的清理流程。
 const offBleCharacteristicValueChange = (callback: BleCharacteristicValueCallback) => {
-  (uni.offBLECharacteristicValueChange as unknown as (callback: BleCharacteristicValueCallback) => void)(callback);
+  (uni.offBLECharacteristicValueChange as unknown as ((callback?: BleCharacteristicValueCallback) => void) | undefined)?.(callback);
 };
 
-const CRC16_TABLE = [
-  0x0000, 0xcc01, 0xd801, 0x1400, 0xf001, 0x3c00, 0x2800, 0xe401,
-  0xa001, 0x6c00, 0x7800, 0xb401, 0x5000, 0x9c01, 0x8801, 0x4400
-];
+// 平台 BLE 回调可能静默丢失。OTA 每一步都必须有 JS 侧超时，
+// 否则整条升级会永久卡住且不给用户任何反馈。
+const OTA_MTU_CALL_TIMEOUT_MS = 5000;
+const OTA_NOTIFY_CALL_TIMEOUT_MS = 5000;
+const OTA_WRITE_CALL_TIMEOUT_MS = 8000;
+
+const withOtaTimeout = <T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    task.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+};
+
+const CRC16_TABLE = [0x0000, 0xcc01, 0xd801, 0x1400, 0xf001, 0x3c00, 0x2800, 0xe401, 0xa001, 0x6c00, 0x7800, 0xb401, 0x5000, 0x9c01, 0x8801, 0x4400];
 
 export default class RingOTAManager {
   private deviceId = '';
@@ -54,11 +77,7 @@ export default class RingOTAManager {
     this.options = { ...DEFAULT_OPTIONS, ...options };
   }
 
-  public async start(
-    deviceId: string,
-    hexString: string,
-    onProgress: RingOtaProgressCallback = () => {}
-  ): Promise<void> {
+  public async start(deviceId: string, hexString: string, onProgress: RingOtaProgressCallback = () => {}): Promise<void> {
     try {
       this.deviceId = deviceId;
       onProgress(0, 'parsing firmware');
@@ -69,7 +88,11 @@ export default class RingOTAManager {
       }
 
       try {
-        await uni.setBLEMTU({ deviceId: this.deviceId, mtu: this.options.mtu });
+        await withOtaTimeout(
+          Promise.resolve(uni.setBLEMTU({ deviceId: this.deviceId, mtu: this.options.mtu })),
+          OTA_MTU_CALL_TIMEOUT_MS,
+          'OTA set MTU'
+        );
       } catch (error) {
         console.warn('[RingOTA] set MTU failed, continue with default MTU.', error);
       }
@@ -222,42 +245,46 @@ export default class RingOTAManager {
   }
 
   private enableNotify(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      uni.notifyBLECharacteristicValueChange({
-        state: true,
-        deviceId: this.deviceId,
-        serviceId: RING_OTA_UUIDS.service,
-        characteristicId: RING_OTA_UUIDS.notify,
-        success: () => {
-          this.clearNotifyListener();
-          this.notifyHandler = (res) => {
-            if (res.deviceId !== this.deviceId) return;
+    return withOtaTimeout(
+      new Promise<void>((resolve, reject) => {
+        uni.notifyBLECharacteristicValueChange({
+          state: true,
+          deviceId: this.deviceId,
+          serviceId: RING_OTA_UUIDS.service,
+          characteristicId: RING_OTA_UUIDS.notify,
+          success: () => {
+            this.clearNotifyListener();
+            this.notifyHandler = (res) => {
+              if (res.deviceId !== this.deviceId) return;
 
-            const cleanHex = arrayBufferToHex(res.value as unknown as ArrayBuffer).toUpperCase();
-            if (cleanHex.length >= 2 && !cleanHex.startsWith('00')) {
-              const descriptions: Record<string, string> = {
-                '66': 'CRC check failed',
-                '67': 'invalid data length',
-                '68': 'flash write failed',
-                '6887': 'data write too fast'
-              };
-              const message = `OTA device error ${cleanHex}: ${descriptions[cleanHex] || 'unknown error'}`;
-              this.notifyRejecter?.(new Error(message));
-              this.cleanNotifyPromise();
-              return;
-            }
+              const cleanHex = arrayBufferToHex(res.value as unknown as ArrayBuffer).toUpperCase();
+              if (cleanHex.length >= 2 && !cleanHex.startsWith('00')) {
+                const descriptions: Record<string, string> = {
+                  '66': 'CRC check failed',
+                  '67': 'invalid data length',
+                  '68': 'flash write failed',
+                  '6887': 'data write too fast'
+                };
+                const message = `OTA device error ${cleanHex}: ${descriptions[cleanHex] || 'unknown error'}`;
+                this.notifyRejecter?.(new Error(message));
+                this.cleanNotifyPromise();
+                return;
+              }
 
-            if (this.notifyResolver && this.expectedResponse && cleanHex.includes(this.expectedResponse)) {
-              this.notifyResolver();
-              this.cleanNotifyPromise();
-            }
-          };
-          uni.onBLECharacteristicValueChange(this.notifyHandler);
-          resolve();
-        },
-        fail: (err) => reject(new Error(`Enable OTA notify failed: ${err.errMsg}`))
-      });
-    });
+              if (this.notifyResolver && this.expectedResponse && cleanHex.includes(this.expectedResponse)) {
+                this.notifyResolver();
+                this.cleanNotifyPromise();
+              }
+            };
+            uni.onBLECharacteristicValueChange(this.notifyHandler);
+            resolve();
+          },
+          fail: (err) => reject(new Error(`Enable OTA notify failed: ${err.errMsg}`))
+        });
+      }),
+      OTA_NOTIFY_CALL_TIMEOUT_MS,
+      'Enable OTA notify'
+    );
   }
 
   private clearNotifyListener(): void {
@@ -294,17 +321,21 @@ export default class RingOTAManager {
   }
 
   private writeCharacteristic(characteristicId: string, buffer: ArrayBuffer, noResponse = false): Promise<void> {
-    return new Promise((resolve, reject) => {
-      uni.writeBLECharacteristicValue({
-        deviceId: this.deviceId,
-        serviceId: RING_OTA_UUIDS.service,
-        characteristicId,
-        value: buffer as unknown as any[],
-        writeType: noResponse ? 'writeNoResponse' : 'write',
-        success: () => resolve(),
-        fail: (err) => reject(new Error(`OTA write failed: ${err.errMsg}`))
-      });
-    });
+    return withOtaTimeout(
+      new Promise<void>((resolve, reject) => {
+        uni.writeBLECharacteristicValue({
+          deviceId: this.deviceId,
+          serviceId: RING_OTA_UUIDS.service,
+          characteristicId,
+          value: buffer as unknown as any[],
+          writeType: noResponse ? 'writeNoResponse' : 'write',
+          success: () => resolve(),
+          fail: (err) => reject(new Error(`OTA write failed: ${err.errMsg}`))
+        });
+      }),
+      OTA_WRITE_CALL_TIMEOUT_MS,
+      'OTA characteristic write'
+    );
   }
 
   private crc16TableLookup(data: Uint8Array, seed: number): number {
