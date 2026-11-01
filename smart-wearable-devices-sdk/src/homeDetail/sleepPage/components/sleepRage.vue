@@ -9,7 +9,7 @@ import { SLEEP_STAGE_COLORS, SLEEP_STAGE_ORDER, type SleepStageName } from '@/ho
 
 import echarts from '@/utils/echarts';
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 
 const props = defineProps({
   sleepSegmentObj: {
@@ -129,13 +129,37 @@ const pieData = computed(() => {
 
 const getProcessedOption = () => {
   const option = cloneDeep(sleepRageOption);
+  const titleText = t('睡眠\n比例');
 
   if (option.legend) option.legend.show = false;
+  // #ifdef MP-WEIXIN
+  // 小程序兼容层只认 title：它把 title.top 当作整块文字的中心，50% 正好落在圆心。
   if (option.title) {
-    option.title.subtext = t('睡眠\n比例');
+    option.title.subtext = titleText;
     option.title.left = '50%';
-    option.title.top = '45%';
+    option.title.top = '50%';
   }
+  // #endif
+  // #ifndef MP-WEIXIN
+  // 完整版 ECharts 的 title.top 是文字块的顶边，多行文字会整体下沉半行；
+  // 改用 graphic 的 center/middle，由 ECharts 按文字块高度居中到圆心。
+  if (option.title) option.title.show = false;
+  option.graphic = [
+    {
+      type: 'text',
+      left: 'center',
+      top: 'middle',
+      silent: true,
+      style: {
+        text: titleText,
+        fontSize: 14,
+        lineHeight: 20,
+        fill: '#979797',
+        textAlign: 'center'
+      }
+    }
+  ];
+  // #endif
   if (option.series?.[0]) {
     option.series[0].radius = ['46%', '66%'];
     option.series[0].center = ['50%', '50%'];
@@ -176,6 +200,11 @@ watch(
   },
   { deep: true, immediate: true }
 );
+
+// 圆心文字是命令式写进图表的，模板重新渲染不会带回语言变化，需要显式重绘。
+watch(locale, () => {
+  void refreshChart();
+});
 </script>
 
 <template>
