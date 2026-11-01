@@ -1,24 +1,24 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted, computed, watch } from 'vue';
 import { onLoad, onPageScroll, onShow, onPullDownRefresh } from '@dcloudio/uni-app';
 import { getHealthSummary } from '@/common/api/heatlthSummary';
 import type { HabitAnalysisData } from '@/types/api/healthSummary';
-import { habitOption } from '@/pages/health/echartOptions';
+import { createHabitOption } from '@/pages/health/echartOptions';
 import ScoreProgressBar from '@/components/scoreProgressBar.vue';
-import { cloneDeep } from 'lodash-es';
 import { useUserStore } from '@/stores/user';
 import { useRingStore } from '@/stores';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { getBindInfo } from '@/common/api/device';
 import AiLab from '../awareness/aiLab.vue';
 import { formatBleErrorMessage } from '@/utils/bleError';
-import { normalizeHealthLevel, normalizeHealthText } from '@/utils/healthText';
+import { normalizeHealthLevel } from '@/utils/healthText';
+import { formatHealthDateRangeText, formatHealthTrendText } from '@/utils/healthOverviewText';
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { isAnyDeviceSyncSessionRunning } from '@/utils/deviceSyncSession';
 import { useI18n } from '@/i18n';
 
 import echarts from '@/utils/echarts';
-const { t, tt } = useI18n();
+const { t, tt, locale } = useI18n();
 const userStore = useUserStore();
 const ringStore = useRingStore();
 const {
@@ -55,9 +55,9 @@ type itemType = {
 };
 const pullDownRefresh = ref(false);
 const pullDownProgress = ref(0);
-const habitTrendText = computed(() => normalizeHealthText(healthSummary.value?.habitScore?.trend, '--'));
-// normalizeHealthText 返回简体中文（parity 断言依赖），只在展示时翻译。
-const habitTrendDisplay = computed(() => tt(habitTrendText.value));
+// 趋势文案由后端拼成中文，这里按 trendValue + 当前语言重新拼。
+const habitTrendDisplay = computed(() => formatHealthTrendText(healthSummary.value?.habitScore));
+const healthDateRangeDisplay = computed(() => formatHealthDateRangeText(healthSummary.value?.dateRange));
 const normalizeIndicatorScore = (value: unknown): number | null => {
   if (value === null || value === undefined || value === '') return null;
   const score = Number(value);
@@ -138,17 +138,23 @@ const activityIndicators = computed<itemType[]>(() => [
 ]);
 
 // 初始化图表
+let habitChartInstance: any = null;
 const initHabitChart = async () => {
   if (!chartRef1.value) return;
 
   try {
-    const chart = await chartRef1.value.init(echarts);
-    const option = cloneDeep(habitOption);
+    // 切换语言只需要重绘，重复 init 会在同一画布上再建一个实例。
+    if (!habitChartInstance) habitChartInstance = await chartRef1.value.init(echarts);
+    const option = createHabitOption();
     option.series[0].data[0].value = healthSummary.value?.habitScore?.score || 0;
-    chart.setOption(option);
+    habitChartInstance.setOption(option, true);
   } catch (error) {
   }
 };
+// 图表文案是命令式写入 canvas 的，模板重新渲染不会带回语言变化，需要显式重绘。
+watch(locale, () => {
+  void initHabitChart();
+});
 // 跳转详情页
 const jumpDetail = (item: itemType) => {
   const params = item.type ? { type: item.type, title: item.name } : undefined;
@@ -321,7 +327,7 @@ onPullDownRefresh(async () => {
     <view class="pt-30 pr-30 pb-100 pl-30 relative" style="z-index: 1; box-sizing: border-box">
       <view class="flex fd-c ai-center">
         <view class="report-period flex fd-c ai-center jc-center">
-          <view class="period-date">{{ healthSummary?.dateRange || '--' }}</view>
+          <view class="period-date">{{ healthDateRangeDisplay }}</view>
           <view class="period-label fs-24">{{ t('本周') }}</view>
         </view>
       </view>

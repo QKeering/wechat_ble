@@ -14,6 +14,7 @@ import {
 } from '@/common/api/heatlthSummary';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { normalizeHealthText } from '@/utils/healthText';
+import { formatHealthDateRangeText, formatHealthTrendText } from '@/utils/healthOverviewText';
 
 type IndicatorType =
   | 'sleepPrep'
@@ -24,11 +25,19 @@ type IndicatorType =
   | 'activityIntensity'
   | 'exerciseRegularity';
 
+type SummaryItem = {
+  label: string;
+  value?: unknown;
+  trend?: string;
+  // 已在 config 内按当前语言拼好的文案（趋势类），不再走中文文案归一化。
+  localizedValue?: string;
+};
+
 type DetailConfig = {
   title: string;
   subtitle: string;
   fetcher: () => Promise<Record<string, any>>;
-  summary: (data: Record<string, any>) => Array<{ label: string; value: unknown; trend?: string }>;
+  summary: (data: Record<string, any>) => SummaryItem[];
   chartKey?: string;
   chartValueKey?: string;
 };
@@ -81,7 +90,7 @@ const getDetailConfig = (type: IndicatorType): DetailConfig => {
       fetcher: () => getSleepRhythmDetail(),
       chartKey: 'regularityChart',
       chartValueKey: 'avgSleepTime',
-      summary: (data) => [{ label: t('趋势'), value: data.overview?.trend }]
+      summary: (data) => [{ label: t('趋势'), localizedValue: formatHealthTrendText(data.overview) }]
     },
     sleepRecovery: {
       title: t('睡眠过程恢复'),
@@ -101,7 +110,7 @@ const getDetailConfig = (type: IndicatorType): DetailConfig => {
       fetcher: () => getSleepActivationDetail(),
       chartKey: 'trendChart',
       chartValueKey: 'score',
-      summary: (data) => [{ label: t('趋势'), value: data.overview?.trend }]
+      summary: (data) => [{ label: t('趋势'), localizedValue: formatHealthTrendText(data.overview) }]
     },
     sedentaryRisk: {
       title: t('久坐风险'),
@@ -149,7 +158,9 @@ const getDetailConfig = (type: IndicatorType): DetailConfig => {
 
 const currentConfig = computed(() => getDetailConfig(detailType.value));
 const overview = computed(() => detailData.value?.overview || {});
-const summaryItems = computed(() => currentConfig.value.summary(detailData.value || {}).filter((item) => hasValue(item.value)));
+const summaryItems = computed(() =>
+  currentConfig.value.summary(detailData.value || {}).filter((item) => hasValue(item.localizedValue) || hasValue(item.value))
+);
 const chartItems = computed(() => {
   const key = currentConfig.value.chartKey;
   if (!key || !Array.isArray(detailData.value?.[key])) return [];
@@ -171,7 +182,7 @@ const chartItems = computed(() => {
 const displayTitle = computed(() => (pageTitle.value ? t(pageTitle.value) : currentConfig.value.title));
 const overviewTrendLabel = computed(() => (detailType.value === 'activityIntensity' ? t('活动评分较上期') : t('趋势')));
 const overviewTrendValue = computed(() => {
-  if (detailType.value !== 'activityIntensity') return t(formatValue(overview.value.trend));
+  if (detailType.value !== 'activityIntensity') return formatHealthTrendText(overview.value);
   return formatActivityScoreChange(overview.value.trendValue, true);
 });
 const overviewChangeLabel = computed(() => (detailType.value === 'activityIntensity' ? t('评分变化') : t('变化值')));
@@ -187,6 +198,7 @@ const chartSectionTitle = computed(() => {
 
 const hasValue = (value: unknown) => value !== undefined && value !== null && value !== '';
 const formatValue = (value: unknown) => normalizeHealthText(value, '--');
+const formatSummaryValue = (item: SummaryItem) => item.localizedValue ?? t(formatValue(item.value));
 const isNumericText = (value: unknown) => /^[-+]?\d+(?:\.\d+)?$/.test(String(value).trim());
 const formatValueWithUnit = (value: unknown, unit: string, unitPattern: RegExp) => {
   if (!hasValue(value)) return '--';
@@ -316,7 +328,7 @@ onPullDownRefresh(() => {
       <view class="overview">
         <view class="overview-item">
           <text class="label">{{ t('日期范围') }}</text>
-          <text class="value">{{ formatValue(overview.dateRange) }}</text>
+          <text class="value">{{ formatHealthDateRangeText(overview.dateRange) }}</text>
         </view>
         <view class="overview-item">
           <text class="label">{{ overviewTrendLabel }}</text>
@@ -334,7 +346,7 @@ onPullDownRefresh(() => {
           <view class="metric-row" v-for="item in summaryItems" :key="item.label">
             <text class="metric-label">{{ item.label }}</text>
             <view class="metric-content">
-              <text class="metric-value">{{ t(formatValue(item.value)) }}</text>
+              <text class="metric-value">{{ formatSummaryValue(item) }}</text>
               <text v-if="item.trend" class="metric-trend">{{ item.trend }}</text>
             </view>
           </view>

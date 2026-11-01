@@ -1,6 +1,8 @@
 import { t } from '@/i18n';
 
-export const habitOption = {
+// 图内文案（gauge 名称）必须在每次渲染时取当前语言：模块级常量会让切换语言后
+// 图表仍停留在启动时的语言。
+export const createHabitOption = () => ({
   series: [
     {
       type: 'gauge',
@@ -37,4 +39,4 @@ export const habitOption = {
       center: ['50%', '50%']
     }
   ]
-};
+});
