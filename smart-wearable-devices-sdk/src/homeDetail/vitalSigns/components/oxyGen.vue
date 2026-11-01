@@ -43,6 +43,7 @@ import {
   type RingWearState
 } from '@/utils/ringWearGate';
 import { showRingConnectionTroubleshootingPrompt } from '@/utils/ringConnectionTroubleshooting';
+import { notifyMeasurementSubmitted } from '@/utils/healthMetricsRefresh';
 
 const { t } = useI18n();
 const userStore = useUserStore();
@@ -703,14 +704,20 @@ watch(
         try {
           uni.showLoading({ title: t('提交中...') });
           const recordTime = formatMetricRecordTime(latest.timestamp || Date.now());
+          const submitDeviceMac = getSubmitDeviceMac(userStore, isIOS.value);
           await submitData({
-            deviceMac: getSubmitDeviceMac(userStore, isIOS.value),
+            deviceMac: submitDeviceMac,
             dataList: [
               {
                 recordTime: recordTime,
                 spo2: latest.bloodOxygen
               }
             ]
+          });
+          notifyMeasurementSubmitted({
+            deviceMac: submitDeviceMac,
+            recordTime,
+            metric: 'bloodOxygen'
           });
         } catch (error) {
           logBloodOxygenAnomaly('blood-oxygen-submit-error', {
@@ -753,6 +760,8 @@ const jumpDetail = () => {
 };
 onLoad(() => {});
 onShow(async () => {
+  // 测量中切到后台再回来时不能作废本轮测量：后台那轮还在等设备回帧。
+  if (measureStatus.value === 'measuring') return;
   measurementRunToken += 1;
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;

@@ -14,6 +14,7 @@ import { useUserStore } from '@/stores/user';
 import { cloneDeep } from 'lodash-es';
 import { pickMetricNumber, withMetricDetailFallback } from './metricFallback';
 import { buildDailyDetailTimeTicks, buildDetailTimeTicks } from './detailTimeAxis';
+import { useVitalDetailSummaryRefresh } from './useVitalDetailSummaryRefresh';
 
 const { t } = useI18n();
 const userStore = useUserStore();
@@ -324,16 +325,29 @@ const getRatDetail = async () => {
 const leftClick = () => {
   uni.navigateBack();
 };
+const {
+  register: registerSummaryRefresh,
+  unregister: unregisterSummaryRefresh,
+  refreshIfSummaryBecameReady
+} = useVitalDetailSummaryRefresh({
+  currentDate,
+  currentName,
+  reload: getRatDetail
+});
 onLoad(async (options) => {
+  const loadStartedAt = Date.now();
+  registerSummaryRefresh();
   currentName.value = currentList.value[current.value];
   heartRate.value = normalizeIntegerDisplayMetric(options?.heartRate, 25, 240);
 
   await getRatDetail();
+  refreshIfSummaryBecameReady(loadStartedAt);
 });
 onPageScroll((e) => {
   scrollTop.value = e.scrollTop;
 });
 onUnload(() => {
+  unregisterSummaryRefresh();
   if (chartRefT.value && chartRefT.value.chartRef) {
     chartRefT.value.chartRef.dispose();
   }

@@ -40,6 +40,7 @@ import {
   showRingWearGuidance,
   type RingWearState
 } from '@/utils/ringWearGate';
+import { notifyMeasurementSubmitted } from '@/utils/healthMetricsRefresh';
 
 const { t } = useI18n();
 const {
@@ -295,9 +296,15 @@ watch(
           if (stress !== undefined && stress !== null) {
             measurementRecord.stress = stress;
           }
+          const submitDeviceMac = getSubmitDeviceMac(userStore, isIOS.value);
           await submitData({
-            deviceMac: getSubmitDeviceMac(userStore, isIOS.value),
+            deviceMac: submitDeviceMac,
             dataList: [measurementRecord]
+          });
+          notifyMeasurementSubmitted({
+            deviceMac: submitDeviceMac,
+            recordTime,
+            metric: 'heartRate'
           });
           uni.hideLoading();
           jumpDetail();
@@ -621,6 +628,9 @@ const startMeasure = async () => {
 };
 onLoad(async () => {});
 onShow(async () => {
+  // 测量中切到后台再回来时不能把状态重置成 idle：后台那轮测量还在跑，
+  // 重置会让页面显示“已停止”，结果也无法回填。
+  if (measureStatus.value === 'measuring') return;
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
   isMeasurementFinalizing = false;

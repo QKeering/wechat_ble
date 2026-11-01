@@ -10,6 +10,7 @@ import type { heartRateDetail, Point } from '@/types/api/homeDetail';
 import { submitData } from '@/common/api/homeDetail';
 import Action from '@/components/action.vue';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { notifyMeasurementSubmitted } from '@/utils/healthMetricsRefresh';
 import { formatMetricRecordTime, getLatestTemperatureReading, getSubmitDeviceMac, requestMetricRefresh } from '@/composables/useRingMetricReadings';
 import { useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
@@ -355,14 +356,20 @@ watch(
         try {
           uni.showLoading({ title: t('提交中...') });
           const recordTime = formatMetricRecordTime(latest.timestamp || Date.now());
+          const submitDeviceMac = getSubmitDeviceMac(userStore, isIOS.value);
           await submitData({
-            deviceMac: getSubmitDeviceMac(userStore, isIOS.value),
+            deviceMac: submitDeviceMac,
             dataList: [
               {
                 recordTime: recordTime,
                 temperature: latest.temperature
               }
             ]
+          });
+          notifyMeasurementSubmitted({
+            deviceMac: submitDeviceMac,
+            recordTime,
+            metric: 'temperature'
           });
           uni.hideLoading();
           jumpDetail();
@@ -394,6 +401,8 @@ const measureText = computed(() => {
 });
 onLoad(() => {});
 onShow(async () => {
+  // 测量中切到后台再回来时不能把状态重置成 idle：后台那轮测量还在跑。
+  if (measureStatus.value === 'measuring') return;
   // 防止测量完成后返回到该页时，measureText重复跳转
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;

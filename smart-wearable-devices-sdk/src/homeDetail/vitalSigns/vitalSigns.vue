@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import '@/homeDetail/i18n/pack';
 import { ref, computed, watch } from 'vue';
-import { onLoad, onPageScroll, onShow, onReachBottom, onPullDownRefresh } from '@dcloudio/uni-app';
+import { onLoad, onPageScroll, onShow, onReachBottom, onPullDownRefresh, onUnload } from '@dcloudio/uni-app';
 import homeHeartChart from '@/components/homeHeartChart.vue';
 import HeartRate from '@/homeDetail/vitalSigns/components/heartRate.vue';
 import oxyGen from '@/homeDetail/vitalSigns/components/oxyGen.vue';
@@ -19,6 +19,11 @@ import { formatBleErrorMessage } from '@/utils/bleError';
 import { appendRingDiagnosticLog, RW_DIAGNOSTIC_BUILD_TAG } from '@/composables/useRwForegroundMeasurement';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
 import { withMetricDetailFallback } from '@/homeDetail/vitalSignsHeartDetail/metricFallback';
+import {
+  HEALTH_METRICS_RECORDED_EVENT,
+  readHealthMetricsRecordedAt,
+  type HealthMetricsRecordedPayload
+} from '@/utils/healthMetricsRefresh';
 
 import DetailInfo from '@/components/DetailInfo.vue';
 import {usePopupFixer} from '@/hooks/usePopupFixer'
@@ -586,13 +591,18 @@ const visibleListData = computed(() =>
 const visibleCards = ref<string[]>([]);
 const cardForm = ref();
 
-const getExtendedVitalSignData = async () => {
+// 同一页面可能在测量标记与汇总就绪时连续发起两轮加载，先发出的旧响应
+// 不能覆盖后发出的新结果。loadId 缺省时（同步/重连等旁路调用）不做丢弃。
+const isCurrentVitalSignsLoad = (loadId?: number) => loadId === undefined || loadId === vitalSignsLoadSerial;
+
+const getExtendedVitalSignData = async (loadId?: number) => {
   const result = await queryVitalPage('vital-sign', (requestConfig) => getVitalSign({ date: selectedHistoryDate.value }, requestConfig));
+  if (!isCurrentVitalSignsLoad(loadId)) return;
   extendedVitalObj.value = result || {};
 };
 
 // 获取心率详情
-const getRatDetail = async (currentDate = new Date()) => {
+const getRatDetail = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   let offset = 0;
   if (selectedDayIndex.value === 3) {
@@ -609,7 +619,7 @@ const getRatDetail = async (currentDate = new Date()) => {
     type: 'day',
     offset
   }, requestConfig));
-  if (res) {
+  if (res && isCurrentVitalSignsLoad(loadId)) {
     const normalized = applyVitalMetricTimeWindow(
       normalizeVitalMetricDetail(res, ['heartRate', 'heart_rate', 'heartRateValue', 'heart_rate_value', 'bpm']),
       isoDate
@@ -625,7 +635,7 @@ const getRatDetail = async (currentDate = new Date()) => {
   }
 };
 // 获取心率变异性详情
-const getHrvData = async (currentDate = new Date()) => {
+const getHrvData = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   // const index = selectedDayIndex.value - 2;
   let offset = 0;
@@ -643,7 +653,7 @@ const getHrvData = async (currentDate = new Date()) => {
     type: 'day',
     offset
   }, requestConfig));
-  if (res) {
+  if (res && isCurrentVitalSignsLoad(loadId)) {
     const normalized = applyVitalMetricTimeWindow(
       normalizeVitalMetricDetail(res, ['hrv', 'hrvValue', 'hrv_value', 'heartRateVariability', 'heart_rate_variability']),
       isoDate
@@ -659,7 +669,7 @@ const getHrvData = async (currentDate = new Date()) => {
   }
 };
 // 获取血氧详情
-const getOxyGenDetail = async (currentDate = new Date()) => {
+const getOxyGenDetail = async (currentDate = new Date(), loadId?: number) => {
   const isoDate = formatLocalDate(currentDate);
   // const index = selectedDayIndex.value - 2;
   let offset = 0;
@@ -677,7 +687,7 @@ const getOxyGenDetail = async (currentDate = new Date()) => {
     type: 'day',
     offset
   }, requestConfig));
-  if (res) {
+  if (res && isCurrentVitalSignsLoad(loadId)) {
     const normalized = applyVitalMetricTimeWindow(
       normalizeVitalMetricDetail(res, ['bloodOxygen', 'blood_oxygen', 'bloodOxygenValue', 'blood_oxygen_value', 'oxygen', 'spo2', 'SpO2']),
       isoDate
@@ -694,9 +704,11 @@ const getOxyGenDetail = async (currentDate = new Date()) => {
 };
 
 // 获取温度详情
-const getTemperatureDetail = async (currentDate = new Date()) => {
+const getTemperatureDetail = async (currentDate = new Date(), loadId?: number) => {
   if (isCurrentRwRing()) {
-    temperatureObj.value = {};
+    if (isCurrentVitalSignsLoad(loadId)) {
+      temperatureObj.value = {};
+    }
     appendVitalSignsPageLog('vital-signs-temperature-skip', {
       reason: 'rw-device-no-temperature',
       date: formatLocalDate(currentDate)
@@ -720,7 +732,7 @@ const getTemperatureDetail = async (currentDate = new Date()) => {
     type: 'day',
     offset
   }, requestConfig));
-  if (res) {
+  if (res && isCurrentVitalSignsLoad(loadId)) {
     const normalized = applyVitalMetricTimeWindow(
       normalizeVitalMetricDetail(res, ['temperature', 'skinTemperature', 'bodyTemperature', 'temperatureValue', 'skin_temperature']),
       isoDate
@@ -748,13 +760,13 @@ const loadVitalSignsData = async (currentDate = new Date(), trigger = 'manual') 
     loadId
   });
   const tasks = [
-    runVitalSignsEndpointTask('vital-sign', date, loadId, () => getExtendedVitalSignData()),
-    runVitalSignsEndpointTask('heart-rate-detail', date, loadId, () => getRatDetail(currentDate)),
-    runVitalSignsEndpointTask('blood-oxygen-detail', date, loadId, () => getOxyGenDetail(currentDate)),
-    runVitalSignsEndpointTask('hrv-detail', date, loadId, () => getHrvData(currentDate))
+    runVitalSignsEndpointTask('vital-sign', date, loadId, () => getExtendedVitalSignData(loadId)),
+    runVitalSignsEndpointTask('heart-rate-detail', date, loadId, () => getRatDetail(currentDate, loadId)),
+    runVitalSignsEndpointTask('blood-oxygen-detail', date, loadId, () => getOxyGenDetail(currentDate, loadId)),
+    runVitalSignsEndpointTask('hrv-detail', date, loadId, () => getHrvData(currentDate, loadId))
   ];
   if (!isCurrentRwRing()) {
-    tasks.push(runVitalSignsEndpointTask('temperature-detail', date, loadId, () => getTemperatureDetail(currentDate)));
+    tasks.push(runVitalSignsEndpointTask('temperature-detail', date, loadId, () => getTemperatureDetail(currentDate, loadId)));
   } else {
     temperatureObj.value = {};
   }
@@ -808,7 +820,32 @@ const jumpEdit = () => {
 const leftClick = (): void => {
   uni.navigateBack();
 };
+// 测量页提交成功后广播该事件：卡片就地测量时页面不会触发 onShow，
+// 必须靠事件把本轮的新读数与汇总补拉回来。
+let lastVitalSignsMetricsRecordedAt = 0;
+let vitalSignsHasShown = false;
+const reloadVitalSignsAfterMeasurement = async (trigger: string) => {
+  if (selectedHistoryDate.value !== formatLocalDate(new Date())) return;
+  await loadVitalSignsData(new Date(), trigger);
+};
+const handleHealthMetricsRecorded = (payload?: HealthMetricsRecordedPayload) => {
+  const markedAt = Number(payload?.at || 0);
+  if (!markedAt || markedAt <= lastVitalSignsMetricsRecordedAt) return;
+  lastVitalSignsMetricsRecordedAt = markedAt;
+  appendVitalSignsPageLog('vital-signs-metrics-recorded-refresh', {
+    metric: payload?.metric,
+    recordTime: payload?.recordTime,
+    summaryReady: payload?.summaryReady === true,
+    selectedDate: selectedHistoryDate.value
+  });
+  void reloadVitalSignsAfterMeasurement('metrics-recorded-event').catch(() => undefined);
+};
+onUnload(() => {
+  uni.$off(HEALTH_METRICS_RECORDED_EVENT, handleHealthMetricsRecorded);
+});
 onLoad((options) => {
+  uni.$off(HEALTH_METRICS_RECORDED_EVENT, handleHealthMetricsRecorded);
+  uni.$on(HEALTH_METRICS_RECORDED_EVENT, handleHealthMetricsRecorded);
   const dayIndex = normalizeSelectedDayIndex(options?.selectedDayIndex);
   selectedDayIndex.value = dayIndex;
   const loadTask = (() => {
@@ -832,7 +869,16 @@ onShow(async () => {
   if (!isCurrentRwRing()) {
     void refreshBleMetricsAfterRestore();
   }
-  // await new Promise((resolve) => setTimeout(resolve, 1000));
+  // 首次进入由 onLoad 完成首屏加载，标记只用于"进入后又发生了测量"的场景。
+  if (!vitalSignsHasShown) {
+    vitalSignsHasShown = true;
+    lastVitalSignsMetricsRecordedAt = readHealthMetricsRecordedAt();
+    return;
+  }
+  const markedAt = readHealthMetricsRecordedAt();
+  if (!markedAt || markedAt <= lastVitalSignsMetricsRecordedAt) return;
+  lastVitalSignsMetricsRecordedAt = markedAt;
+  await reloadVitalSignsAfterMeasurement('metrics-recorded-page-show').catch(() => undefined);
 });
 // 下拉刷新事件处理器
 onPullDownRefresh(async () => {

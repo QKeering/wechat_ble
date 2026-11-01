@@ -14,6 +14,7 @@ import { cloneDeep } from 'lodash-es';
 import { useUserStore } from '@/stores/user';
 import { pickMetricNumber, withMetricDetailFallback } from './metricFallback';
 import { buildDailyDetailTimeTicks, buildDetailTimeTicks } from './detailTimeAxis';
+import { useVitalDetailSummaryRefresh } from './useVitalDetailSummaryRefresh';
 
 const { t } = useI18n();
 const userStore = useUserStore();
@@ -322,12 +323,25 @@ const getOxyGenDetail = async () => {
 const leftClick = () => {
   uni.navigateBack();
 };
+const {
+  register: registerSummaryRefresh,
+  unregister: unregisterSummaryRefresh,
+  refreshIfSummaryBecameReady
+} = useVitalDetailSummaryRefresh({
+  currentDate,
+  currentName,
+  reload: getOxyGenDetail
+});
 onLoad(async (options) => {
+  const loadStartedAt = Date.now();
+  registerSummaryRefresh();
   currentName.value = currentList.value[current.value];
   oxyGen.value = normalizeIntegerDisplayMetric(options?.oxyGen, 70, 100);
   await getOxyGenDetail();
+  refreshIfSummaryBecameReady(loadStartedAt);
 });
 onUnload(() => {
+  unregisterSummaryRefresh();
   if (chartRefT.value && chartRefT.value.chartRef) {
     chartRefT.value.chartRef.dispose();
   }

@@ -19,6 +19,7 @@ import type { heartRateDetail, Point, sleepSegment } from '@/types/api/homeDetai
 import { cloneDeep } from 'lodash-es';
 import Action from '@/components/action.vue';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { notifyMeasurementSubmitted } from '@/utils/healthMetricsRefresh';
 import { formatMetricRecordTime, getLatestHrvReading, getSubmitDeviceMac, requestMetricRefresh } from '@/composables/useRingMetricReadings';
 import { useRwForegroundMeasurement } from '@/composables/useRwForegroundMeasurement';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
@@ -527,14 +528,20 @@ watch(
         try {
           uni.showLoading({ title: t('提交中...') });
           const recordTime = formatMetricRecordTime(latest.timestamp || Date.now());
+          const submitDeviceMac = getSubmitDeviceMac(userStore, isIOS.value);
           await submitData({
-            deviceMac: getSubmitDeviceMac(userStore, isIOS.value),
+            deviceMac: submitDeviceMac,
             dataList: [
               {
                 recordTime: recordTime,
                 hrv: latest.heartRateVariability
               }
             ]
+          });
+          notifyMeasurementSubmitted({
+            deviceMac: submitDeviceMac,
+            recordTime,
+            metric: 'hrv'
           });
         } catch (error) {
           uni.showToast({ title: t('测量已完成，数据稍后同步'), icon: 'none' });
@@ -564,6 +571,8 @@ const jumpDetail = () => {
 
 onLoad(() => {});
 onShow(async () => {
+  // 测量中切到后台再回来时不能把状态重置成 idle：后台那轮测量还在跑。
+  if (measureStatus.value === 'measuring') return;
   clearMeasureCompleteTimer();
   isMeasureCompletePending = false;
   isMeasurementFinalizing = false;

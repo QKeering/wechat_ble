@@ -49,6 +49,11 @@ import {
   SLEEP_OVERVIEW_UPDATED_EVENT,
   type SleepOverviewUpdatedPayload
 } from '@/utils/sleepOverview';
+import {
+  HEALTH_METRICS_RECORDED_EVENT,
+  readHealthMetricsRecordedAt,
+  type HealthMetricsRecordedPayload
+} from '@/utils/healthMetricsRefresh';
 import { getStressLevelNumber, getStressScoreNumber, resolveStressDisplayStatus } from '@/utils/stressDisplay';
 import { clearFrontendRingBindingState, getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { hasAnyRingCommunicationReady, hasRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
@@ -261,7 +266,7 @@ let legacyLocalDataHttpRetryWindow: {
 } | null = null;
 let legacyLocalDataActiveHistoryFlushKey = '';
 let legacyLocalDataActiveHistoryFlushRequestedAt = 0;
-let awarenessBusinessRefreshPromise: Promise<void> | null = null;
+let awarenessBusinessRefreshPromise: Promise<boolean> | null = null;
 let awarenessBusinessChartRefreshPromise: Promise<void> | null = null;
 let runningAwarenessBusinessChartRefreshKey = '';
 let pendingAwarenessBusinessChartRefresh:
@@ -306,6 +311,9 @@ let legacyHomeDeviceInfoRetryDeferredTimer: ReturnType<typeof setTimeout> | null
 let pendingAwarenessBusinessRefreshDate = '';
 let pendingAwarenessBusinessRefreshTrigger = '';
 let pendingAwarenessBusinessRefreshKey = '';
+// 刚测完触发的刷新必须真正执行：同日 5s 去重会把"汇总 finalize 之后"的
+// 第二次刷新丢掉，导致首页继续显示旧汇总。
+let pendingAwarenessBusinessRefreshBypassDedup = false;
 let runningAwarenessBusinessRefreshKey = '';
 const legacyHomeHistoryReadInFlight = ref(false);
 const legacyHomeHistoryReadCompletedTick = ref(0);
@@ -334,6 +342,7 @@ let lastAwarenessBusinessRefreshDate = '';
 let lastAwarenessBusinessRefreshAt = 0;
 let lastAwarenessPageShowRefreshKey = '';
 let lastAwarenessPageShowRefreshAt = 0;
+let lastAwarenessMetricsRecordedAt = 0;
 const awarenessAuxiliaryRefreshAt = new Map<string, number>();
 const awarenessStressInfoRefreshAt = new Map<string, number>();
 const awarenessHomeSyncCompletedAt = new Map<string, number>();
@@ -7673,9 +7682,13 @@ const getVitalSigns = async (currentDate = new Date()) => {
   const res = await requestAwarenessOverview('vitalSign', currentDate, () =>
     getVitalSign({ date }, getAwarenessOverviewRequestConfig('vitalSign'))
   );
-  if (res) {
+  // requestAwarenessOverview 会把超时/网络失败吞成 null，这里必须把“有没有拿到数据”
+  // 显式返回，测量后的刷新才能判断是否需要保留重试标记。
+  const hasUsableResponse = res != null;
+  if (hasUsableResponse) {
     vitalSignObj.value = res;
   }
+  return hasUsableResponse;
 };
 
 type AwarenessBusinessRefreshOptions = {
@@ -7683,6 +7696,7 @@ type AwarenessBusinessRefreshOptions = {
   trigger?: string;
   sourceTrigger?: string;
   forceStressRefresh?: boolean;
+  bypassQueueDedup?: boolean;
 };
 const consumePostBindingRefreshFlag = () => {
   try {
@@ -7836,14 +7850,37 @@ const claimAwarenessPageShowRefresh = (date: string, trigger: string, force = fa
   return true;
 };
 
-const queueAwarenessBusinessRefresh = (date: string, trigger: string, reason: string) => {
+const queueAwarenessBusinessRefresh = (date: string, trigger: string, reason: string, bypassDedup = false) => {
   const queueKey = getAwarenessBusinessRefreshQueueKey(date, trigger);
-  if (queueKey && (queueKey === pendingAwarenessBusinessRefreshKey || queueKey === runningAwarenessBusinessRefreshKey)) {
+  const matchesPending = Boolean(queueKey) && queueKey === pendingAwarenessBusinessRefreshKey;
+  const matchesRunning = Boolean(queueKey) && queueKey === runningAwarenessBusinessRefreshKey;
+  // 已有同 key 在排队：只需把「绕过队列去重」的要求升级到这条 pending 上。
+  if (matchesPending) {
+    if (bypassDedup) {
+      pendingAwarenessBusinessRefreshBypassDedup = true;
+    }
     appendAwarenessDiagnosticLog('business-overview-refresh-queue-skip', {
       trigger,
       date,
       reason,
       queueKey,
+      bypassDedup,
+      pendingAwarenessBusinessRefreshDate,
+      pendingAwarenessBusinessRefreshTrigger,
+      runningAwarenessBusinessRefreshKey,
+      snapshot: getAwarenessConnectionSnapshot()
+    });
+    return false;
+  }
+  // 与正在执行的任务同 key：普通请求视为重复直接丢弃；测量标记触发的绕过请求
+  // 必须再排一轮，否则这次测量的数据要等下一次页面刷新才出现。
+  if (matchesRunning && !bypassDedup) {
+    appendAwarenessDiagnosticLog('business-overview-refresh-queue-skip', {
+      trigger,
+      date,
+      reason,
+      queueKey,
+      bypassDedup,
       pendingAwarenessBusinessRefreshDate,
       pendingAwarenessBusinessRefreshTrigger,
       runningAwarenessBusinessRefreshKey,
@@ -7854,6 +7891,9 @@ const queueAwarenessBusinessRefresh = (date: string, trigger: string, reason: st
   pendingAwarenessBusinessRefreshDate = date;
   pendingAwarenessBusinessRefreshTrigger = trigger;
   pendingAwarenessBusinessRefreshKey = queueKey;
+  // 标记属于具体的这条 pending 请求：覆盖时一并覆盖，避免把上一次绕过请求的
+  // 特权带给一条普通刷新（那会让普通刷新跳过同步门禁和同日去重）。
+  pendingAwarenessBusinessRefreshBypassDedup = bypassDedup;
   return true;
 };
 
@@ -7873,7 +7913,9 @@ const runAwarenessBusinessRefreshStage = async (
     snapshot: getAwarenessConnectionSnapshot()
   });
   try {
-    await withAwarenessSoftTimeout(
+    // 大多数阶段只关心请求是否抛错；个别阶段（如 vitalSign）会用 false 显式表达
+    // “请求没报错但没有拿到可用数据”，需要让上层看到。
+    const result = await withAwarenessSoftTimeout(
       `stage:${stage}`,
       timeoutMs,
       task,
@@ -7886,9 +7928,10 @@ const runAwarenessBusinessRefreshStage = async (
       sourceTrigger: options.sourceTrigger,
       date,
       elapsedMs: Date.now() - startedAt,
+      stageOk: result !== false,
       snapshot: getAwarenessConnectionSnapshot()
     });
-    return true;
+    return result !== false;
   } catch (error) {
     appendAwarenessDiagnosticLog('business-overview-refresh-stage-failed', {
       stage,
@@ -8042,7 +8085,7 @@ const runAwarenessBusinessOverviewRefresh = async (date: string, options: Awaren
   } else {
     void stressRefreshTask;
   }
-  await Promise.all([
+  const [goalOk, balanceOk, sleepOk, motionOk, vitalOk] = await Promise.all([
     runAwarenessBusinessRefreshStage('goalInfo', date, options, () => getHomeGoalInfoData(currentDate)),
     runAwarenessBusinessRefreshStage('balanceScore', date, options, () => getBalanceScoreData(currentDate)),
     runAwarenessBusinessRefreshStage('sleepOverview', date, options, () => getSleepOverviewData(currentDate)),
@@ -8056,6 +8099,7 @@ const runAwarenessBusinessOverviewRefresh = async (date: string, options: Awaren
     date,
     queueKey: runningAwarenessBusinessRefreshKey,
     elapsedMs: Date.now() - startedAt,
+    stageOk: { goalOk, balanceOk, sleepOk, motionOk, vitalOk },
     balanceScore: summarizeAwarenessResponse(balanceScoreObj.value),
     sleepOverview: summarizeAwarenessResponse(sleepOverviewObj.value),
     motionOverview: summarizeAwarenessResponse(motionOverviewObj.value),
@@ -8063,13 +8107,24 @@ const runAwarenessBusinessOverviewRefresh = async (date: string, options: Awaren
     vitalSign: summarizeAwarenessResponse(vitalSignObj.value),
     snapshot: getAwarenessConnectionSnapshot()
   });
+  // 测量完后的刷新是否成功，以体征接口为准：失败时调用方需要保留「有新的测量数据」
+  // 标记，等下一次 onShow 再重试。
+  return vitalOk === true;
 };
 
-const refreshAwarenessBusinessOverview = async (date: string, options: AwarenessBusinessRefreshOptions = {}) => {
+/**
+ * 返回这次是否真正把概览数据刷新成功：
+ * - true / false：本轮已执行，体征接口是否成功；
+ * - undefined：本轮没有执行（在排队/已被更新的任务取代），结果未知，调用方不应据此丢弃重试标记。
+ */
+const refreshAwarenessBusinessOverview = async (
+  date: string,
+  options: AwarenessBusinessRefreshOptions = {}
+): Promise<boolean | undefined> => {
   const trigger = options.trigger || 'unknown';
   const syncGate = getAwarenessSyncGateSnapshot();
   if (!options.allowDuringSync && syncGate.deferBusinessRefresh) {
-    const queued = queueAwarenessBusinessRefresh(date, trigger, 'sync-in-progress');
+    const queued = queueAwarenessBusinessRefresh(date, trigger, 'sync-in-progress', options.bypassQueueDedup === true);
     appendAwarenessDiagnosticLog('business-overview-refresh-deferred', {
       trigger,
       date,
@@ -8085,11 +8140,11 @@ const refreshAwarenessBusinessOverview = async (date: string, options: Awareness
       gate: syncGate,
       snapshot: getAwarenessConnectionSnapshot()
     });
-    return;
+    return false;
   }
 
   if (awarenessBusinessRefreshPromise) {
-    const queued = queueAwarenessBusinessRefresh(date, trigger, 'dedup-running');
+    const queued = queueAwarenessBusinessRefresh(date, trigger, 'dedup-running', options.bypassQueueDedup === true);
     appendAwarenessDiagnosticLog('business-overview-refresh-skip', {
       trigger,
       date,
@@ -8107,8 +8162,9 @@ const refreshAwarenessBusinessOverview = async (date: string, options: Awareness
   runningAwarenessBusinessRefreshKey = taskRefreshKey;
   const businessRefreshTask = runAwarenessBusinessOverviewRefresh(date, options);
   awarenessBusinessRefreshPromise = businessRefreshTask;
+  let refreshOk: boolean | undefined;
   try {
-    await businessRefreshTask;
+    refreshOk = await businessRefreshTask;
     if (taskGeneration !== awarenessPageGeneration) {
       appendAwarenessDiagnosticLog('business-overview-refresh-stale-result-ignored', {
         trigger,
@@ -8135,6 +8191,7 @@ const refreshAwarenessBusinessOverview = async (date: string, options: Awareness
       pendingAwarenessBusinessRefreshDate = '';
       pendingAwarenessBusinessRefreshTrigger = '';
       pendingAwarenessBusinessRefreshKey = '';
+      pendingAwarenessBusinessRefreshBypassDedup = false;
       appendAwarenessDiagnosticLog('business-overview-refresh-stale-task-released', {
         trigger,
         date,
@@ -8148,11 +8205,13 @@ const refreshAwarenessBusinessOverview = async (date: string, options: Awareness
     const queuedDate = pendingAwarenessBusinessRefreshDate;
     const queuedTrigger = pendingAwarenessBusinessRefreshTrigger;
     const queuedKey = pendingAwarenessBusinessRefreshKey;
+    const queuedBypassDedup = pendingAwarenessBusinessRefreshBypassDedup;
     const finishedRefreshKey = taskRefreshKey;
     const shouldDropQueuedRefreshAfterFinal =
-      Boolean(queuedDate) && isAwarenessFinalBusinessRefreshKey(finishedRefreshKey);
+      Boolean(queuedDate) && !queuedBypassDedup && isAwarenessFinalBusinessRefreshKey(finishedRefreshKey);
     const shouldDropQueuedRefreshAsDuplicate =
       Boolean(queuedDate) &&
+      !queuedBypassDedup &&
       queuedDate === lastAwarenessBusinessRefreshDate &&
       lastAwarenessBusinessRefreshAt > 0 &&
       Date.now() - lastAwarenessBusinessRefreshAt < AWARENESS_BUSINESS_REFRESH_QUEUE_DEDUP_MS;
@@ -8160,12 +8219,13 @@ const refreshAwarenessBusinessOverview = async (date: string, options: Awareness
       Boolean(queuedDate) &&
       !shouldDropQueuedRefreshAfterFinal &&
       !shouldDropQueuedRefreshAsDuplicate &&
-      !isAwarenessBusinessRefreshDeferredBySync();
+      (queuedBypassDedup || !isAwarenessBusinessRefreshDeferredBySync());
     runningAwarenessBusinessRefreshKey = '';
     if (shouldRunQueuedRefresh || shouldDropQueuedRefreshAfterFinal || shouldDropQueuedRefreshAsDuplicate) {
       pendingAwarenessBusinessRefreshDate = '';
       pendingAwarenessBusinessRefreshTrigger = '';
       pendingAwarenessBusinessRefreshKey = '';
+      pendingAwarenessBusinessRefreshBypassDedup = false;
     }
     if (shouldDropQueuedRefreshAfterFinal || shouldDropQueuedRefreshAsDuplicate) {
       appendAwarenessDiagnosticLog('business-overview-refresh-queue-drop', {
@@ -8188,17 +8248,22 @@ const refreshAwarenessBusinessOverview = async (date: string, options: Awareness
         sourceTrigger: queuedTrigger,
         date: queuedDate,
         queueKey: queuedKey,
+        bypassQueueDedup: queuedBypassDedup,
         snapshot: getAwarenessConnectionSnapshot()
       });
       setTimeout(() => {
         void refreshAwarenessBusinessOverview(queuedDate, {
-          allowDuringSync: false,
+          // 测量标记触发的排队刷新如果被同步门禁再次推迟，就永远等不到执行；
+          // 这类请求本来就允许在同步期间刷新，这里保持一致。
+          allowDuringSync: queuedBypassDedup,
           trigger: 'queued-after-running',
-          sourceTrigger: queuedTrigger
+          sourceTrigger: queuedTrigger,
+          bypassQueueDedup: queuedBypassDedup
         });
       }, 0);
     }
   }
+  return refreshOk;
 };
 
 let awarenessIdentityOverviewRefreshPromise: Promise<void> | null = null;
@@ -8279,6 +8344,7 @@ const refreshAwarenessAfterDataProcessed = async (reason: string, date = getSele
   pendingAwarenessBusinessRefreshDate = '';
   pendingAwarenessBusinessRefreshTrigger = '';
   pendingAwarenessBusinessRefreshKey = '';
+  pendingAwarenessBusinessRefreshBypassDedup = false;
   const shouldForceProcessedRefresh = hadPendingBusinessRefresh || isAwarenessFinalBusinessRefreshTrigger(reason);
   const finalRefreshTrigger = isAwarenessFinalBusinessRefreshTrigger(reason)
     ? reason
@@ -8692,9 +8758,10 @@ const handleDateClick = async (index: number, options: AwarenessBusinessRefreshO
   selectedDayIndex.value = index;
   const currentDate = dateList.value[index].date;
   selectData.value = currentDate;
-  await refreshAwarenessBusinessOverview(formatLocalDate(currentDate), {
+  return refreshAwarenessBusinessOverview(formatLocalDate(currentDate), {
     trigger: options.trigger || 'date-click',
-    allowDuringSync: options.allowDuringSync
+    allowDuringSync: options.allowDuringSync,
+    bypassQueueDedup: options.bypassQueueDedup
   });
 };
 
@@ -8722,11 +8789,11 @@ const confirm = async (date: any, options: AwarenessBusinessRefreshOptions = {})
   );
   if (recentDateIndex >= 0) {
     hasSelectedDate.value = false;
-    await handleDateClick(recentDateIndex, {
+    return handleDateClick(recentDateIndex, {
       trigger: options.trigger || 'date-confirm-recent',
-      allowDuringSync: options.allowDuringSync
+      allowDuringSync: options.allowDuringSync,
+      bypassQueueDedup: options.bypassQueueDedup
     });
-    return;
   }
 
 
@@ -8742,9 +8809,10 @@ const confirm = async (date: any, options: AwarenessBusinessRefreshOptions = {})
   hasSelectedDate.value = true;
   selectedDayIndex.value = 3;
   selectData.value = selectedDate;
-  await refreshAwarenessBusinessOverview(selectedDateKey, {
+  return refreshAwarenessBusinessOverview(selectedDateKey, {
     trigger: options.trigger || 'date-confirm',
-    allowDuringSync: options.allowDuringSync
+    allowDuringSync: options.allowDuringSync,
+    bypassQueueDedup: options.bypassQueueDedup
   });
 };
 
@@ -11518,32 +11586,37 @@ const clearTimer = () => {
 };
 const showStartGirlCard = ref(false);
 // 后台异步加载页面数据，不阻塞页面首次渲染
-const refreshPageDataAndCharts = async (options: { trigger?: string; force?: boolean; allowDuringSync?: boolean } = {}) => {
+const refreshPageDataAndCharts = async (
+  options: { trigger?: string; force?: boolean; allowDuringSync?: boolean; bypassQueueDedup?: boolean } = {}
+): Promise<boolean | undefined> => {
   const trigger = options.trigger || 'page-show-data-load';
   const refreshDate = getAwarenessSelectedDateString();
   if (!claimAwarenessPageShowRefresh(refreshDate, trigger, options.force === true)) {
     pullDownRefresh.value = false;
     pullDownProgress.value = 0;
-    return;
+    return undefined;
   }
 
+  let overviewOk: boolean | undefined;
   try {
     if (selectedDayIndex.value) {
       const dayIndex = Number(selectedDayIndex.value) ?? 2;
       selectedDayIndex.value = dayIndex;
       if (dayIndex !== 3) {
-        await handleDateClick(selectedDayIndex.value, {
+        overviewOk = await handleDateClick(selectedDayIndex.value, {
           allowDuringSync: options.allowDuringSync === true,
+          bypassQueueDedup: options.bypassQueueDedup === true,
           trigger
         });
       } else {
         if (selectData.value) {
           const formattedDate = uni.$uv.timeFormat(selectData.value, 'yyyy-mm-dd');
           if (formattedDate && formattedDate !== 'NaN-NaN-NaN') {
-            await confirm(
+            overviewOk = await confirm(
               { fulldate: formattedDate },
               {
                 allowDuringSync: options.allowDuringSync === true,
+                bypassQueueDedup: options.bypassQueueDedup === true,
                 trigger
               }
             );
@@ -11556,6 +11629,65 @@ const refreshPageDataAndCharts = async (options: { trigger?: string; force?: boo
     pullDownRefresh.value = false;
     pullDownProgress.value = 0;
   }
+  return overviewOk;
+};
+
+/**
+ * 测量页提交成功（以及后端汇总 finalize 完成）后会广播这个事件。
+ * 首页此刻可能已经在前台（用户从详情页返回），onShow 不会再触发，
+ * 因此这里直接绕过 5 分钟 page-show 去重做一次强制刷新。
+ */
+const handleHealthMetricsRecorded = (payload?: HealthMetricsRecordedPayload) => {
+  const markedAt = Number(payload?.at || 0);
+  if (!markedAt || markedAt <= lastAwarenessMetricsRecordedAt) return;
+  if (!awarenessPageActive.value || !userStore.token) return;
+  const previousMarkedAt = lastAwarenessMetricsRecordedAt;
+  lastAwarenessMetricsRecordedAt = markedAt;
+  appendAwarenessDiagnosticLog('health-metrics-recorded-refresh', {
+    metric: payload?.metric,
+    recordTime: payload?.recordTime,
+    summaryReady: payload?.summaryReady === true,
+    selectedDate: getAwarenessSelectedDateString(),
+    snapshot: getAwarenessConnectionSnapshot()
+  });
+  void nextTick()
+    .then(() =>
+      refreshPageDataAndCharts({
+        trigger: 'metrics-recorded-event',
+        force: true,
+        allowDuringSync: true,
+        bypassQueueDedup: true
+      })
+    )
+    .then((overviewOk) => {
+      // 只有确认刷新成功才认为标记已被消费；失败或“没真正执行”（undefined）
+      // 都把标记退回（存储里的标记 10 分钟内有效），下一次 onShow 还能补一次，
+      // 不至于永远显示旧数据。
+      if (overviewOk !== true) {
+        if (lastAwarenessMetricsRecordedAt === markedAt) {
+          lastAwarenessMetricsRecordedAt = previousMarkedAt;
+        }
+        appendAwarenessDiagnosticLog('health-metrics-recorded-refresh-incomplete', {
+          metric: payload?.metric,
+          recordTime: payload?.recordTime,
+          overviewOk: overviewOk === false ? false : 'not-run',
+          selectedDate: getAwarenessSelectedDateString(),
+          snapshot: getAwarenessConnectionSnapshot()
+        });
+      }
+    })
+    .catch((error) => {
+      if (lastAwarenessMetricsRecordedAt === markedAt) {
+        lastAwarenessMetricsRecordedAt = previousMarkedAt;
+      }
+      appendAwarenessDiagnosticLog('health-metrics-recorded-refresh-failed', {
+        metric: payload?.metric,
+        recordTime: payload?.recordTime,
+        error: error instanceof Error ? error.message : String(error || ''),
+        selectedDate: getAwarenessSelectedDateString(),
+        snapshot: getAwarenessConnectionSnapshot()
+      });
+    });
 };
 
 const getLegacyHomeSyncPreflightDecision = (
@@ -11718,6 +11850,8 @@ watch(
 onLoad(async () => {
   uni.$off(SLEEP_OVERVIEW_UPDATED_EVENT, handleSleepOverviewUpdated);
   uni.$on(SLEEP_OVERVIEW_UPDATED_EVENT, handleSleepOverviewUpdated);
+  uni.$off(HEALTH_METRICS_RECORDED_EVENT, handleHealthMetricsRecorded);
+  uni.$on(HEALTH_METRICS_RECORDED_EVENT, handleHealthMetricsRecorded);
   if (!userStore.token) {
     return;
   }
@@ -11736,10 +11870,31 @@ onShow(async () => {
       return;
     }
     const postBindingRefresh = consumePostBindingRefreshFlag();
-    const pageShowTrigger = postBindingRefresh ? 'post-binding-page-show' : 'page-show';
+    // 刚测完（心率/血氧/体温/HRV）返回首页：标记比 5 分钟 page-show 去重新，
+    // 必须绕过去重并重拉概览，否则新数据要等下一次自然刷新才可见。
+    const previousMetricsRecordedAt = lastAwarenessMetricsRecordedAt;
+    const metricsRecordedAt = readHealthMetricsRecordedAt();
+    const metricsRecordedRefresh = metricsRecordedAt > lastAwarenessMetricsRecordedAt;
+    if (metricsRecordedRefresh) {
+      lastAwarenessMetricsRecordedAt = metricsRecordedAt;
+    }
+    // 本轮概览刷新明确失败时把消费掉的测量标记退回去，下一次 onShow 还会重试。
+    const revertMetricsRecordedConsumption = () => {
+      if (metricsRecordedRefresh && lastAwarenessMetricsRecordedAt === metricsRecordedAt) {
+        lastAwarenessMetricsRecordedAt = previousMetricsRecordedAt;
+      }
+    };
+    const forceOverviewRefresh = postBindingRefresh || metricsRecordedRefresh;
+    const pageShowTrigger = postBindingRefresh
+      ? 'post-binding-page-show'
+      : metricsRecordedRefresh
+        ? 'metrics-recorded-page-show'
+        : 'page-show';
     schedulePendingParsedUploadRetry(pageShowTrigger);
     appendAwarenessDiagnosticLog('page-show', {
       postBindingRefresh,
+      metricsRecordedRefresh,
+      metricsRecordedAt,
       snapshot: getAwarenessConnectionSnapshot()
     });
     pullDownProgress.value = 0;
@@ -11877,7 +12032,7 @@ onShow(async () => {
     // allowed to progress in parallel, while the history stage waits on the
     // explicit gate above.
     const keepPreviousCompleteSnapshot = Boolean(
-      activeAwarenessHomeSyncClaim || isAwarenessDataSyncInProgress()
+      !forceOverviewRefresh && (activeAwarenessHomeSyncClaim || isAwarenessDataSyncInProgress())
     );
     if (keepPreviousCompleteSnapshot) {
       appendAwarenessDiagnosticLog('business-overview-page-show-stable-snapshot-kept', {
@@ -11888,16 +12043,43 @@ onShow(async () => {
     } else {
       const initialOverviewGate = beginAwarenessInitialOverviewGate(pageShowTrigger);
       const initialOverviewTask = refreshPageDataAndCharts({
-        trigger: postBindingRefresh ? 'post-binding-page-show-data-load' : 'page-show-data-load',
-        force: postBindingRefresh,
-        allowDuringSync: false
+        trigger: postBindingRefresh
+          ? 'post-binding-page-show-data-load'
+          : metricsRecordedRefresh
+            ? 'metrics-recorded-page-show-data-load'
+            : 'page-show-data-load',
+        force: forceOverviewRefresh,
+        allowDuringSync: metricsRecordedRefresh,
+        bypassQueueDedup: metricsRecordedRefresh
       });
       const releaseInitialOverviewGate = () => {
         if (initialOverviewGate.seq === awarenessInitialOverviewGateSeq) {
           releaseAwarenessInitialOverviewGate?.();
         }
       };
-      void initialOverviewTask.then(releaseInitialOverviewGate, releaseInitialOverviewGate);
+      void initialOverviewTask.then(
+        (overviewOk) => {
+          // undefined 表示这次请求被排队/没真正执行，同样不能算作已消费标记。
+          if (overviewOk !== true) {
+            revertMetricsRecordedConsumption();
+            appendAwarenessDiagnosticLog('health-metrics-recorded-page-show-refresh-incomplete', {
+              trigger: pageShowTrigger,
+              overviewOk: overviewOk === false ? false : 'not-run',
+              snapshot: getAwarenessConnectionSnapshot()
+            });
+          }
+          releaseInitialOverviewGate();
+        },
+        (error) => {
+          revertMetricsRecordedConsumption();
+          appendAwarenessDiagnosticLog('health-metrics-recorded-page-show-refresh-failed', {
+            trigger: pageShowTrigger,
+            error: error instanceof Error ? error.message : String(error || ''),
+            snapshot: getAwarenessConnectionSnapshot()
+          });
+          releaseInitialOverviewGate();
+        }
+      );
     }
     if (userStore.isBluetoothReady && !hasAwarenessRuntimeCommunicationReady()) {
       void restoreAwarenessDeviceSnapshot();
@@ -11934,6 +12116,7 @@ onPageScroll((e) => {
 });
 onUnload(() => {
   uni.$off(SLEEP_OVERVIEW_UPDATED_EVENT, handleSleepOverviewUpdated);
+  uni.$off(HEALTH_METRICS_RECORDED_EVENT, handleHealthMetricsRecorded);
   awarenessPageActive.value = false;
   awarenessPageGeneration += 1;
   reconcileAwarenessSoftTimeouts('page-unload', true);

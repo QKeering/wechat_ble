@@ -37,6 +37,7 @@ import DetailInfo from '@/components/DetailInfo.vue';
 import { usePopupFixer } from '@/hooks/usePopupFixer';
 import { resolveRingProtocol } from '@/sdk/ring-ble';
 import { normalizeSleepScore, publishSleepOverviewUpdate } from '@/utils/sleepOverview';
+import { HEALTH_METRICS_RECORDED_EVENT, type HealthMetricsRecordedPayload } from '@/utils/healthMetricsRefresh';
 
 const { t } = useI18n();
 
@@ -1169,7 +1170,17 @@ const jumpEdit = () => {
 const leftClick = (): void => {
   uni.navigateBack();
 };
+// 睡眠页内嵌了心率/血氧/HRV/体温测量卡片；测完返回当天页面时
+// 需要把当日汇总（健康分、等级描述）重新拉一遍。
+const handleHealthMetricsRecorded = (payload?: HealthMetricsRecordedPayload) => {
+  if (payload?.summaryReady !== true) return;
+  const selected = getSelectedSleepPageDate();
+  if (formatLocalDate(selected) !== formatLocalDate(new Date())) return;
+  void loadSleepPageDataWithDiagnostics(new Date(), { trigger: 'metrics-recorded-event' });
+};
 onLoad((options) => {
+  uni.$off(HEALTH_METRICS_RECORDED_EVENT, handleHealthMetricsRecorded);
+  uni.$on(HEALTH_METRICS_RECORDED_EVENT, handleHealthMetricsRecorded);
   // 统一转换为数字并设置默认值，普通入口无参数时默认加载今天。
   const rawDayIndex = options?.selectedDayIndex;
   const parsedDayIndex = rawDayIndex !== undefined && rawDayIndex !== '' ? Number(rawDayIndex) : 2;
@@ -1203,6 +1214,7 @@ onLoad((options) => {
 });
 onShow(async () => {});
 onUnload(() => {
+  uni.$off(HEALTH_METRICS_RECORDED_EVENT, handleHealthMetricsRecorded);
   if (sleepPageDeferredLoadTimer) {
     clearTimeout(sleepPageDeferredLoadTimer);
     sleepPageDeferredLoadTimer = null;

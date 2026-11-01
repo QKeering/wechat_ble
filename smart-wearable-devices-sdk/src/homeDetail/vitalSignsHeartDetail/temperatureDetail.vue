@@ -12,6 +12,7 @@ import type { HistoryPageSilentRequestConfig } from '@/composables/useRingBusine
 import { cloneDeep } from 'lodash-es';
 import { useUserStore } from '@/stores/user';
 import { buildDailyDetailTimeTicks, buildDetailTimeTicks } from './detailTimeAxis';
+import { useVitalDetailSummaryRefresh } from './useVitalDetailSummaryRefresh';
 
 const { t } = useI18n();
 const userStore = useUserStore();
@@ -315,15 +316,28 @@ const getTemperatureDetail = async () => {
 const leftClick = () => {
   uni.navigateBack();
 };
+const {
+  register: registerSummaryRefresh,
+  unregister: unregisterSummaryRefresh,
+  refreshIfSummaryBecameReady
+} = useVitalDetailSummaryRefresh({
+  currentDate,
+  currentName,
+  reload: getTemperatureDetail
+});
 onLoad(async (options) => {
+  const loadStartedAt = Date.now();
+  registerSummaryRefresh();
   currentName.value = currentList.value[current.value];
   temperature.value = normalizeTemperatureDisplay(options?.temperature);
   await getTemperatureDetail();
+  refreshIfSummaryBecameReady(loadStartedAt);
 });
 onPageScroll((e) => {
   scrollTop.value = e.scrollTop;
 });
 onUnload(() => {
+  unregisterSummaryRefresh();
   if (chartRefT.value && chartRefT.value.chartRef) {
     chartRefT.value.chartRef.dispose();
   }
