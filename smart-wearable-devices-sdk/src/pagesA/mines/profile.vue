@@ -159,8 +159,15 @@ const onChooseAvatarTap = () => {
       uploadAvatar(path);
     },
     fail: (error) => {
-      // 权限被拒时 uni.chooseImage 只走 fail，不加这个分支会表现为「点了没反应」。
       const message = String(error?.errMsg || '');
+      // 用户在相册/相机界面直接返回只是取消选择，不是打开失败。
+      if (/cancel/i.test(message)) return;
+      // 安装包没勾选 Camera 模块时 runtime 直接报"没有相机模块"，给用户可执行提示。
+      if (/没有相机模块|未添加.*camera|camera.*模块|Camera&Gallery/i.test(message)) {
+        uni.showToast({ title: t('当前版本缺少相机模块，请从相册选择图片'), icon: 'none' });
+        return;
+      }
+      // 权限被拒时 uni.chooseImage 只走 fail，不加这个分支会表现为「点了没反应」。
       const denied = /deny|denied|auth|permission/i.test(message);
       uni.showToast({ title: denied ? t('请先允许访问相册和相机权限') : t('打开相册失败，请重试'), icon: 'none' });
     }

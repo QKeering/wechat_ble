@@ -33,7 +33,8 @@
         "compilerVersion" : 3,
         "usingComponents" : true,
         "modules" : {
-            "Bluetooth" : {}
+            "Bluetooth" : {},
+            "Camera" : {}
         },
         "distribute" : {
             "android" : {
