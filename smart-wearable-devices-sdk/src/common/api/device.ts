@@ -1,19 +1,8 @@
-import {
-  bindRingDevice,
-  clearBoundRingDevice,
-  getBoundRingDevice,
-  normalizeRingBoundDevice,
-  stripDeviceWrappingQuotes,
-  unbindRingDevice
-} from '@/api/ringDevice';
+import { bindRingDevice, clearBoundRingDevice, getBoundRingDevice, normalizeRingBoundDevice, stripDeviceWrappingQuotes, unbindRingDevice } from '@/api/ringDevice';
 import type { RingBindPayload } from '@/sdk/ring-ble';
 import type { DeviceInfo, DeviceModel } from '@/types/api/device';
 import { getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
-import {
-  markDeviceIdentityCacheConnected,
-  normalizeDeviceIdentityMac,
-  readDeviceIdentityCache
-} from '@/utils/deviceIdentityCache';
+import { markDeviceIdentityCacheConnected, normalizeDeviceIdentityMac, readDeviceIdentityCache } from '@/utils/deviceIdentityCache';
 
 export interface HttpRequestConfigCompat {
   [key: string]: any;
@@ -44,16 +33,7 @@ const hasConfigOverrides = (config: HttpRequestConfigCompat = {}) => Object.keys
 
 const getBindInfoFingerprint = (device: DeviceInfo | null | undefined) => {
   const source = device as any;
-  return [
-    source?.protocol,
-    source?.mac,
-    source?.deviceId,
-    source?.uniMacId,
-    source?.advertis?.macInfo,
-    source?.cmdCharId,
-    source?.dataCharId,
-    source?.dataServiceId
-  ]
+  return [source?.protocol, source?.mac, source?.deviceId, source?.uniMacId, source?.advertis?.macInfo, source?.cmdCharId, source?.dataCharId, source?.dataServiceId]
     .filter((value) => value !== undefined && value !== null && value !== '')
     .join('|');
 };
@@ -70,7 +50,10 @@ const normalizeBindInfoResponse = (payload: unknown): DeviceInfo | null => {
   return null;
 };
 
-const normalizeBindIdentity = (value: unknown) => stripDeviceWrappingQuotes(value).replace(/[^0-9a-fA-F]/g, '').toLowerCase();
+const normalizeBindIdentity = (value: unknown) =>
+  stripDeviceWrappingQuotes(value)
+    .replace(/[^0-9a-fA-F]/g, '')
+    .toLowerCase();
 
 const isSameBindIdentity = (left: DeviceInfo | null | undefined, right: DeviceInfo | null | undefined) => {
   const leftIdentity = getBoundRingIdentity(left as any);
@@ -93,11 +76,7 @@ const normalizeBindMacText = (value: unknown) => {
 const getDeviceBindMac = (device: unknown) => {
   const normalized = normalizeRingBoundDevice(device as any) as DeviceInfo | null;
   if (!normalized) return '';
-  return (
-    normalizeBindMacText(normalized.mac) ||
-    normalizeBindMacText(normalized.advertis?.macInfo) ||
-    normalizeBindMacText(normalized.uniMacId)
-  );
+  return normalizeBindMacText(normalized.mac) || normalizeBindMacText(normalized.advertis?.macInfo) || normalizeBindMacText(normalized.uniMacId);
 };
 
 const getDeviceCommunicationId = (device: DeviceInfo | null | undefined) =>
@@ -122,12 +101,7 @@ const isSameMacLikeCommunicationId = (communicationId: unknown, stableMac: strin
   return Boolean(macKey && communicationMacKey && communicationMacKey === macKey);
 };
 
-const pickBoundCommunicationDeviceId = (
-  stableMac: string,
-  payload?: DeviceInfo | null,
-  local?: DeviceInfo | null,
-  remote?: DeviceInfo | null
-) => {
+const pickBoundCommunicationDeviceId = (stableMac: string, payload?: DeviceInfo | null, local?: DeviceInfo | null, remote?: DeviceInfo | null) => {
   const macKey = normalizeDeviceIdentityMac(stableMac);
   if (!macKey) return getDeviceCommunicationId(payload) || '';
 
@@ -152,11 +126,7 @@ const pickBoundCommunicationDeviceId = (
   return '';
 };
 
-const mergeBoundRingDevice = (
-  remote: DeviceInfo | null | undefined,
-  local?: DeviceInfo | null,
-  payload?: RingBindPayload | null
-): DeviceInfo | null => {
+const mergeBoundRingDevice = (remote: DeviceInfo | null | undefined, local?: DeviceInfo | null, payload?: RingBindPayload | null): DeviceInfo | null => {
   const normalizedRemote = normalizeRingBoundDevice(remote as any) as DeviceInfo | null;
   const normalizedLocal = normalizeRingBoundDevice(local as any) as DeviceInfo | null;
   const normalizedPayload = normalizeRingBoundDevice(payload as any) as DeviceInfo | null;
@@ -182,12 +152,7 @@ const mergeBoundRingDevice = (
     ...(normalizedRemote?.advertis || {}),
     ...(stableMac ? { macInfo: stableMac } : {})
   };
-  const communicationDeviceId = pickBoundCommunicationDeviceId(
-    stableMac,
-    compatiblePayload,
-    compatibleLocal,
-    normalizedRemote
-  );
+  const communicationDeviceId = pickBoundCommunicationDeviceId(stableMac, compatiblePayload, compatibleLocal, normalizedRemote);
 
   return normalizeRingBoundDevice({
     ...(compatibleLocal || {}),
@@ -202,12 +167,7 @@ const mergeBoundRingDevice = (
     bluetoothDeviceId: communicationDeviceId,
     modelName: normalizedRemote?.modelName || normalizedRemote?.productName || compatiblePayload?.modelName || compatibleLocal?.modelName,
     productName: normalizedRemote?.productName || normalizedRemote?.modelName || compatiblePayload?.productName || compatibleLocal?.productName,
-    bleName:
-      normalizedRemote?.bleName ||
-      compatiblePayload?.bleName ||
-      compatiblePayload?.localName ||
-      compatibleLocal?.bleName ||
-      compatibleLocal?.localName,
+    bleName: normalizedRemote?.bleName || compatiblePayload?.bleName || compatiblePayload?.localName || compatibleLocal?.bleName || compatibleLocal?.localName,
     deviceName:
       normalizedRemote?.deviceName ||
       normalizedRemote?.name ||
@@ -242,8 +202,11 @@ const assertBackendSuccess = (payload: unknown) => {
   if (!source || !Object.prototype.hasOwnProperty.call(source, 'code')) return;
   const code = Number(source.code);
   if (!Number.isFinite(code) || code === 200 || code === 0) return;
-  const reason = source.data?.reasonCode || source.msg || source.message || 'DEVICE_BIND_FAILED';
-  throw new Error(String(reason));
+  // msg 是后端面向用户的文案（如"该设备已被其他用户绑定"），reasonCode 供客户端
+  // 做精确分支提示。两者都要保留：只抛 reasonCode 会让 UI 最终只剩一句兜底提示。
+  const reasonCode = String(source.data?.reasonCode || '').trim();
+  const message = String(source.msg || source.message || reasonCode || 'DEVICE_BIND_FAILED');
+  throw Object.assign(new Error(message), { reasonCode: reasonCode || message });
 };
 
 const postAppApi = async (url: string, data: Record<string, any>, config: HttpRequestConfigCompat = {}) => {
@@ -269,11 +232,7 @@ const postAppApi = async (url: string, data: Record<string, any>, config: HttpRe
   throw new Error('HTTP client not initialized');
 };
 
-const putAppApi = async (
-  url: string,
-  data: Record<string, any> = {},
-  config: HttpRequestConfigCompat = {}
-) => {
+const putAppApi = async (url: string, data: Record<string, any> = {}, config: HttpRequestConfigCompat = {}) => {
   const http = (uni as any)?.$uv?.http;
   const requestConfig = {
     ...config,
@@ -296,18 +255,9 @@ const putAppApi = async (
   throw new Error('HTTP client not initialized');
 };
 
-const getRemoteBindInfo = async (
-  config: HttpRequestConfigCompat,
-  useCache: boolean,
-  localFingerprint: string
-): Promise<RemoteBindInfoResult> => {
+const getRemoteBindInfo = async (config: HttpRequestConfigCompat, useCache: boolean, localFingerprint: string): Promise<RemoteBindInfoResult> => {
   const now = Date.now();
-  if (
-    useCache &&
-    remoteBindInfoCache &&
-    remoteBindInfoCache.expiresAt > now &&
-    remoteBindInfoCache.localFingerprint === localFingerprint
-  ) {
+  if (useCache && remoteBindInfoCache && remoteBindInfoCache.expiresAt > now && remoteBindInfoCache.localFingerprint === localFingerprint) {
     return remoteBindInfoCache.value;
   }
   if (useCache && remoteBindInfoPending) {
@@ -364,12 +314,7 @@ export const bind = async (params: RingBindPayload, _config: HttpRequestConfigCo
     markDeviceIdentityCacheConnected({
       mac: bindMac,
       deviceId: bindDeviceId,
-      name:
-        authoritative?.bleName ||
-        (normalizedParams as any).bleName ||
-        (normalizedParams as any).localName ||
-        (params as any).name ||
-        (params as any).deviceName,
+      name: authoritative?.bleName || (normalizedParams as any).bleName || (normalizedParams as any).localName || (params as any).name || (params as any).deviceName,
       source: 'first-bind'
     });
   }
@@ -428,16 +373,9 @@ export const reportOtaUpdate = async (
   return putAppApi(`/app/ota/package/updateCallback?${query}`, {}, config);
 };
 
-export const getBindInfo = async (
-  params: GetBindInfoParams = {},
-  _config: HttpRequestConfigCompat = {}
-): Promise<DeviceInfo | null> => {
+export const getBindInfo = async (params: GetBindInfoParams = {}, _config: HttpRequestConfigCompat = {}): Promise<DeviceInfo | null> => {
   const localBeforeRemote = await getBoundRingDevice();
-  const remote = await getRemoteBindInfo(
-    _config,
-    !params.refresh && !hasConfigOverrides(_config),
-    getBindInfoFingerprint(localBeforeRemote as DeviceInfo | null)
-  );
+  const remote = await getRemoteBindInfo(_config, !params.refresh && !hasConfigOverrides(_config), getBindInfoFingerprint(localBeforeRemote as DeviceInfo | null));
   if (remote.ok) {
     if (remote.value) {
       const device = mergeBoundRingDevice(remote.value, localBeforeRemote as DeviceInfo | null);
@@ -465,6 +403,30 @@ export const getBindInfo = async (
     bindingVerified: false,
     remoteBindingUnavailable: true
   } as any) as DeviceInfo | null;
+};
+
+export interface DeviceBindingStatus {
+  boundByOther: boolean;
+  boundToCurrentUser: boolean;
+}
+
+/**
+ * 连接前只读探测设备归属，避免把"已被其他账号绑定"的戒指先连上蓝牙、再被后端拒绝。
+ * 只返回布尔状态，不包含归属人信息；网络失败由调用方决定是否继续正常连接流程。
+ */
+export const getDeviceBindingStatus = async (mac: string, config: HttpRequestConfigCompat = {}): Promise<DeviceBindingStatus> => {
+  const response = await (uni as any).$uv.http.get('/app/device/bindStatus', {
+    params: { mac },
+    timeout: 4000,
+    custom: { toast: false, catch: true },
+    ...config
+  });
+  assertBackendSuccess(response);
+  const data = ((response as any)?.data || {}) as Record<string, unknown>;
+  return {
+    boundByOther: data.boundByOther === true,
+    boundToCurrentUser: data.boundToCurrentUser === true
+  };
 };
 
 const normalizeMacLikeText = (value: unknown) => {
@@ -551,10 +513,7 @@ const normalizeDeviceModelListResponse = (payload: unknown): DeviceModel[] => {
   return [];
 };
 
-export const deviceModelList = async (
-  params: Record<string, any> = {},
-  config: HttpRequestConfigCompat = {}
-): Promise<DeviceModel[]> => {
+export const deviceModelList = async (params: Record<string, any> = {}, config: HttpRequestConfigCompat = {}): Promise<DeviceModel[]> => {
   const response = await (uni as any).$uv.http.get('/app/device/model/list', {
     ...config,
     params,
@@ -615,13 +574,7 @@ const normalizeOtaPackageInfo = (payload: unknown, params: OtaInfoParams): OtaPa
 
   const source = payload as Record<string, any>;
   const fileUrl = pickOtaString(source.fileUrl, source.file_url, source.firmwareUrl, source.firmware_url, source.url);
-  const versionCode = pickOtaString(
-    source.versionCode,
-    source.version_code,
-    source.version,
-    source.firmwareVersion,
-    source.firmware_version
-  );
+  const versionCode = pickOtaString(source.versionCode, source.version_code, source.version, source.firmwareVersion, source.firmware_version);
 
   return {
     ...source,
@@ -637,10 +590,7 @@ const normalizeOtaPackageInfo = (payload: unknown, params: OtaInfoParams): OtaPa
   };
 };
 
-export const getOtaInfo = async (
-  params: OtaInfoParams,
-  config: HttpRequestConfigCompat = {}
-): Promise<OtaPackageInfo | OtaInfoResponse> => {
+export const getOtaInfo = async (params: OtaInfoParams, config: HttpRequestConfigCompat = {}): Promise<OtaPackageInfo | OtaInfoResponse> => {
   const fallbackPackageInfo: OtaPackageInfo = {
     currentVersion: params.currentVersion,
     deviceModel: params.deviceModel,

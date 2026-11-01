@@ -6,26 +6,48 @@ const BLE_UNAVAILABLE_RE =
 const EXPECTED_BLE_RUNTIME_RE =
   /timeout|timed out|wait .*timeout|parsed data wait|not ready|not available|unavailable|already connect|internal error|setBLEMTU.*internal|fail:internal|property not support|fail to write descriptor|Cannot read properties of (null|undefined)|reading ['"]?[^'"]+['"]?|超时/i;
 const BLE_ALREADY_CONNECTED_RE = /already connect|already connected/i;
+const BLE_CREATE_CONNECTION_RE = /create\s*ble\s*connection|createbleconnection/i;
 const BLE_TIMEOUT_RE = /timeout|timed out|wait .*timeout|超时/i;
 const BLE_INTERNAL_RE = /internal error|setBLEMTU.*internal|fail:internal/i;
 const NETWORK_ERROR_RE = /request:fail|net::|err_connection|network|网络请求|网络连接/i;
 const NETWORK_TIMEOUT_RE = /err_connection_timed_out|timeout|time\s*out|超时/i;
-const BLUETOOTH_PRIVACY_RE =
-  /api\s+scope\s+is\s+not\s+declared\s+in\s+the\s+privacy\s+agreement|scope\.bluetooth.*privacy|privacy.*scope\.bluetooth/i;
+const BLUETOOTH_PRIVACY_RE = /api\s+scope\s+is\s+not\s+declared\s+in\s+the\s+privacy\s+agreement|scope\.bluetooth.*privacy|privacy.*scope\.bluetooth/i;
 const PERMISSION_DENIED_RE = /permission\s+denied|auth\s+deny|access\s+denied|not\s+authorized|unauthorized/i;
 const DEVICE_NOT_FOUND_RE = /device.*not\s+found|no\s+device|not\s+found.*device/i;
 const CONNECTION_FAILED_RE = /connect(?:ion)?.*(?:fail|failed|closed|disconnect)|disconnected/i;
 const SERVICE_NOT_READY_RE = /service.*not\s+found|characteristic.*not\s+found|no\s+service|no\s+characteristic/i;
 const INVALID_PARAMETER_RE = /invalid\s+(?:param|parameter|argument)|parameter\s+error/i;
-const USER_FACING_ALLOWED_ENGLISH_RE =
-  /\b(?:AI|BLE|MAC|HRV|OTA|SDK|ID|URL|JSON|iOS|QKeer|L19|RW|SN|bpm|cm|kg|MB)\b/gi;
+const USER_FACING_ALLOWED_ENGLISH_RE = /\b(?:AI|BLE|MAC|HRV|OTA|SDK|ID|URL|JSON|iOS|QKeer|L19|RW|SN|bpm|cm|kg|MB)\b/gi;
 
 export const BLUETOOTH_PRIVACY_ERROR_HINT = '请先同意小程序隐私保护指引后使用蓝牙';
+
+// 后端绑定冲突的错误码。设备归属是单账号的，用户要么换原账号登录，
+// 要么先在原账号解绑；把 reasonCode 映射成可执行提示，而不是"请重试"。
+const BIND_REASON_CODE_MESSAGES: Record<string, string> = {
+  DEVICE_BOUND_BY_OTHER: '戒指已被其他账号绑定，请用原账号登录，或先在原账号解绑后再试',
+  BOUND_TO_OTHER_USER: '戒指已被其他用户绑定，请先解除原绑定后再试',
+  USER_HAS_ACTIVE_DEVICE: '当前账号已绑定其他戒指，请先解绑原戒指或确认替换设备',
+  NO_ACTIVE_BINDING: '当前没有有效的绑定设备，请重新连接后再试',
+  DEVICE_BIND_FAILED: '绑定失败，请稍后重试'
+};
+
+const getBleReasonCode = (error: unknown) => {
+  if (!error || typeof error !== 'object') return '';
+  const record = error as Record<string, any>;
+  const candidate = record.reasonCode ?? record.data?.reasonCode ?? record.response?.data?.data?.reasonCode;
+  return String(candidate || '')
+    .trim()
+    .toUpperCase();
+};
 
 export const formatBleErrorMessage = (error: unknown, fallback = '设备暂时无响应，请重试') => {
   const message = pickErrorMessage(error);
   const localizedFallback = localizeFallback(fallback);
   if (!message) return localizedFallback;
+
+  const reasonCode = getBleReasonCode(error) || message.toUpperCase();
+  const reasonMessage = BIND_REASON_CODE_MESSAGES[reasonCode];
+  if (reasonMessage) return reasonMessage;
 
   const errorCode = getBleErrorCode(error);
   if (errorCode === '112' || BLUETOOTH_PRIVACY_RE.test(message)) {
@@ -50,6 +72,14 @@ export const formatBleErrorMessage = (error: unknown, fallback = '设备暂时�
     return '蓝牙未打开或不可用，请打开手机蓝牙后重试';
   }
 
+  // 建链阶段的超时/拒绝与"命令发出后无回包"是两回事。建链失败最常见的真实
+  // 原因是戒指正被另一台手机上的 App/小程序连着（BLE 同一时刻只接受一个中心）。
+  if (BLE_CREATE_CONNECTION_RE.test(message) || /连接超时/.test(message)) {
+    return BLE_TIMEOUT_RE.test(message)
+      ? '连接超时，戒指可能正被其他设备连接或距离过远，请先断开其他设备的连接后重试'
+      : '戒指连接失败，可能正被其他设备连接，请先断开其他设备后重试';
+  }
+
   if (BLE_TIMEOUT_RE.test(message)) {
     return '设备命令已发出但未收到回包，请靠近戒指后重试';
   }
@@ -67,7 +97,7 @@ export const formatBleErrorMessage = (error: unknown, fallback = '设备暂时�
   }
 
   if (SERVICE_NOT_READY_RE.test(message)) {
-    return '设备服务未就绪，请重新连接后重试';
+    return '设备服务未就绪，戒指可能正被其他设备占用，请断开其他连接后重试';
   }
 
   if (CONNECTION_FAILED_RE.test(message)) {
@@ -102,6 +132,7 @@ const pickErrorMessage = (error: unknown): string => {
     record.rawMsg,
     record.rawError,
     record.errMsg,
+    record.errmsg,
     record.errorMessage,
     record.data?.message,
     record.data?.msg,

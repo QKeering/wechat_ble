@@ -4633,6 +4633,52 @@ def current_device(user: dict = Depends(app_user), db: Session = Depends(get_db)
     return bind_info(user, db, redis)
 
 
+@router.get("/device/bindStatus")
+def device_bind_status(mac: str = "", user: dict = Depends(app_user), db: Session = Depends(get_db)):
+    """只读查询设备归属，供客户端在建立蓝牙连接前提示"已被其他账号绑定"。
+
+    只返回布尔状态，不返回归属人信息。判断逻辑与 bind_device_authoritatively
+    的冲突检查保持一致（个人绑定 + 家庭绑定），避免提示结果与实际绑定结果不一致。
+    """
+    mac_norm = normalize_device_mac_norm(clean_device_text(mac))
+    if len(mac_norm) < 6:
+        return error("设备 MAC 不合法", code=400)
+    current_user_id = int(user["id"])
+    device_row = db.execute(
+        text(
+            f"""
+            select id, user_id from device
+            where {DEVICE_MAC_NORM_SQL}=:mac_norm and del_flag=0
+            order by id desc limit 1
+            """
+        ),
+        {"mac_norm": mac_norm},
+    ).first()
+    owner_user_id = parse_positive_int(device_row._mapping.get("user_id")) if device_row else None
+    bound_to_current_user = bool(owner_user_id and owner_user_id == current_user_id)
+    bound_by_other = bool(owner_user_id and owner_user_id != current_user_id)
+    if not bound_by_other:
+        family_binding = db.execute(
+            text(
+                f"""
+                select data_user_id
+                from family_member_device
+                where {FAMILY_DEVICE_MAC_NORM_SQL}=:mac_norm and del_flag=0 and status='active'
+                order by update_time desc limit 1
+                """
+            ),
+            {"mac_norm": mac_norm},
+        ).first()
+        if family_binding:
+            family_data_user_id = parse_positive_int(family_binding._mapping.get("data_user_id"))
+            bound_by_other = bool(family_data_user_id and family_data_user_id != current_user_id)
+    return success({
+        "mac": clean_device_text(mac),
+        "boundByOther": bound_by_other,
+        "boundToCurrentUser": bound_to_current_user,
+    })
+
+
 def bind_device_authoritatively(payload: dict, user: dict, db: Session, redis: Redis | None):
     mac = clean_device_text(payload.get("mac") or payload.get("deviceMac"))
     mac_norm = normalize_device_mac_norm(mac)

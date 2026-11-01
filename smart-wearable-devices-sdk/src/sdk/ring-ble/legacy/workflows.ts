@@ -75,14 +75,6 @@ export interface RefreshLegacyBusinessMetricsResult {
   failed: Array<{ step: string; message: string }>;
 }
 
-const recoverableBindConflictPattern = /已被其他用户绑定|其他用户绑定|解除原绑定|already\s*bound|bound\s*by\s*other|device[_-]?already[_-]?bound|occupied/i;
-
-const isRecoverableBindConflictAfterBleConnect = (error: unknown, options: ConnectLegacyRingOptions) => {
-  if (options.replaceBinding !== true) return false;
-  const message = error instanceof Error ? error.message : String(error || '');
-  return recoverableBindConflictPattern.test(message);
-};
-
 const getPlatform = () => {
   return `${uni.getSystemInfoSync().platform || ''}`.toLowerCase();
 };
@@ -377,31 +369,18 @@ export const connectLegacyRing = async (adapter: LegacyRingAdapter, runtime: Rin
       });
     }
   } catch (error) {
-    if (isRecoverableBindConflictAfterBleConnect(error, options)) {
-      appendRingDiagnosticLog('RW SDK', 'bind-conflict-suppressed-after-connect', {
-        protocol: connectedProtocol,
-        deviceId,
-        bindMac,
-        deviceName: options.deviceName,
-        replaceBinding: options.replaceBinding === true,
-        message: error instanceof Error ? error.message : String(error || ''),
-        sourceDevice: {
-          deviceId: options.sourceDevice?.deviceId,
-          mac: options.sourceDevice?.mac || options.sourceDevice?.advertis?.macInfo,
-          uniMacId: options.sourceDevice?.uniMacId,
-          name: options.sourceDevice?.name || options.sourceDevice?.deviceName
-        },
-        connectedDevice: {
-          deviceId: deviceInfo.deviceId,
-          mac: boundDevice.mac || boundDevice.advertis?.macInfo,
-          uniMacId: boundDevice.uniMacId,
-          name: boundDevice.name
-        }
-      });
-    } else {
-      await adapter.disconnect(deviceId).catch(() => undefined);
-      throw error;
-    }
+    // 绑定冲突（例如设备已被其他账号绑定）必须显式失败：吞掉冲突会保留链路并
+    // 让 UI 误报绑定成功，用户下次打开又发现没绑上。
+    appendRingDiagnosticLog('RW SDK', 'bind-failed-after-connect', {
+      protocol: connectedProtocol,
+      deviceId,
+      bindMac,
+      deviceName: options.deviceName,
+      replaceBinding: options.replaceBinding === true,
+      message: error instanceof Error ? error.message : String(error || '')
+    });
+    await adapter.disconnect(deviceId).catch(() => undefined);
+    throw error;
   }
 
   runtime?.onDeviceReady?.(boundDevice);

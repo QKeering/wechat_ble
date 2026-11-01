@@ -10,7 +10,7 @@ import {
   useRingBusinessController
 } from '@/composables/useRingBusinessController';
 import { getRingDeviceStableIdentity, isSameRingDevice } from '@/composables/useRingBleSdk';
-import { deviceModelList, getBindInfo } from '@/common/api/device';
+import { deviceModelList, getBindInfo, getDeviceBindingStatus } from '@/common/api/device';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { showRingConnectionTroubleshootingPrompt } from '@/utils/ringConnectionTroubleshooting';
 import {
@@ -268,7 +268,7 @@ const showScanFailurePrompt = (targetMissing: boolean) => {
     ? '未找到二维码对应的戒指，请靠近戒指后重试。'
     : '未找到附近可用戒指，请确认戒指已激活并靠近手机。';
   setTimeout(() => {
-    void showRingConnectionTroubleshootingPrompt();
+    void showRingConnectionTroubleshootingPrompt(autoReconnectMessage.value);
   }, 120);
 };
 
@@ -372,7 +372,7 @@ const retryBoundReconnect = async () => {
     }
     autoReconnectStatus.value = 'failed';
     autoReconnectMessage.value = '未找到已绑定设备，或连接握手未完成。请靠近戒指后重试。';
-    void showRingConnectionTroubleshootingPrompt();
+    void showRingConnectionTroubleshootingPrompt(autoReconnectMessage.value);
     appendConnectPageDiagnosticLog('connect-page-bound-reconnect-failed', {
       restored,
       snapshot: getConnectPageSnapshot()
@@ -384,7 +384,7 @@ const retryBoundReconnect = async () => {
       autoReconnectMessage.value = BLUETOOTH_PRIVACY_REQUIRED_HINT;
       showBluetoothPrivacyPrompt();
     } else {
-      void showRingConnectionTroubleshootingPrompt();
+      void showRingConnectionTroubleshootingPrompt(autoReconnectMessage.value);
     }
     appendConnectPageDiagnosticLog('connect-page-bound-reconnect-error', {
       message: autoReconnectMessage.value,
@@ -457,6 +457,48 @@ const refreshDeviceInfoAfterConnect = () => {
       });
     });
 };
+const getOwnershipProbeMac = (device: ScanDeviceInfo | null) => {
+  const stableIdentity = String(getRingDeviceStableIdentity((device || {}) as any) || '').trim();
+  return stableIdentity.replace(/[^0-9a-fA-F]/g, '').length >= 6 ? stableIdentity : '';
+};
+/**
+ * 跨账号使用一枚戒指时，BLE 能连上但绑定会被后端拒绝；如果在连接超时后才暴露，
+ * 用户只会看到"设备连接失败"，误以为是蓝牙问题。这里在建立链路前先只读查询归属，
+ * 命中他人绑定时直接给出明确原因，不再发起连接。
+ */
+const ensureRingNotBoundToOtherAccount = async (device: ScanDeviceInfo | null) => {
+  const mac = getOwnershipProbeMac(device);
+  if (!mac) return true;
+  try {
+    const status = await getDeviceBindingStatus(mac);
+    appendConnectPageDiagnosticLog('connect-page-ownership-probe', {
+      mac,
+      boundByOther: status.boundByOther,
+      boundToCurrentUser: status.boundToCurrentUser,
+      target: summarizeConnectPageDevice(device)
+    });
+    if (!status.boundByOther) return true;
+  } catch (error) {
+    // 归属查询只是提前提示手段，失败不能阻断正常连接流程；真冲突仍由绑定接口兜底。
+    appendConnectPageDiagnosticLog('connect-page-ownership-probe-failed', {
+      mac,
+      message: formatBleErrorMessage(error, '设备归属查询失败')
+    });
+    return true;
+  }
+  uni.hideLoading();
+  uni.showModal({
+    title: t('戒指已被其他账号绑定'),
+    content: t('这枚戒指当前绑定在另一个账号上。请用原账号（同一手机号）登录，或先在原账号中解绑后，再在当前账号绑定。'),
+    showCancel: false,
+    confirmText: t('我知道了')
+  });
+  appendConnectPageDiagnosticLog('connect-page-blocked-bound-by-other', {
+    mac,
+    target: summarizeConnectPageDevice(device)
+  });
+  return false;
+};
 const findLatestSelectableDevice = () => {
   if (isDirectScanMode.value && isMacLikeScanTarget(scanTarget.value)) {
     return findScanTargetDevice() || null;
@@ -488,6 +530,7 @@ const confirmConnect = async () => {
       snapshot: getConnectPageSnapshot()
     });
     if (targetDevice) {
+      if (!(await ensureRingNotBoundToOtherAccount(targetDevice))) return;
       await ring.connectBusinessDevice(targetDevice as any, {
         refreshAfterConnect: false,
         replaceBinding: isDirectScanMode.value
@@ -533,7 +576,7 @@ const confirmConnect = async () => {
       message: errorMessage,
       snapshot: getConnectPageSnapshot()
     });
-    void showRingConnectionTroubleshootingPrompt();
+    void showRingConnectionTroubleshootingPrompt(errorMessage);
   } finally {
     connecting.value = false;
   }
