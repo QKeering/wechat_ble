@@ -464,8 +464,7 @@ const markRwWriteTimeoutError = (error: Error) => {
   Object.defineProperty(error, RW_WRITE_TIMEOUT_FLAG, { value: true, enumerable: false });
   return error;
 };
-const isRwWriteTimeoutError = (error: unknown) =>
-  Boolean(error && typeof error === 'object' && (error as Record<string, unknown>)[RW_WRITE_TIMEOUT_FLAG]);
+const isRwWriteTimeoutError = (error: unknown) => Boolean(error && typeof error === 'object' && (error as Record<string, unknown>)[RW_WRITE_TIMEOUT_FLAG]);
 // 删除 / 格式化 / 恢复出厂：超时后绝不能拿同一帧重发。
 const RW_DESTRUCTIVE_WRITE_OPTIONS: RingWriteOptions = { allowTimeoutFallback: false };
 

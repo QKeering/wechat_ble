@@ -3,19 +3,11 @@ import { useRingBleStoreSdk } from './useRingBleStoreSdk';
 import type { UseRingBleSdkOptions } from './useRingBleSdk';
 import { resolveRingProtocol, type RefreshLegacyBusinessMetricsResult, type RingDeviceInfo, type RwHealthDataName, type RwHistoryDataName } from '@/sdk/ring-ble';
 import { buildRwQkeerV2LastDataCommand, type RwHealthMonitoringConfig, type RwUserProfile } from '@/sdk/ring-ble/rw/protocol';
-import {
-  buildLegacyBloodOxygenMeasurementPayload,
-  buildLegacyCommandBytes,
-  buildLegacyHeartRateMeasurementPayload,
-  createLegacyFrameId
-} from '@/sdk/ring-ble/legacy/protocol';
+import { buildLegacyBloodOxygenMeasurementPayload, buildLegacyCommandBytes, buildLegacyHeartRateMeasurementPayload, createLegacyFrameId } from '@/sdk/ring-ble/legacy/protocol';
 import { getRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
+import { beginRingBackgroundCriticalTask } from '@/utils/ringBackgroundTasks';
 import { appendRingDiagnosticLog } from '@/utils/ringDiagnosticLog';
-import {
-  getLegacyBleHistoryExclusiveSnapshot,
-  resolveLegacyBleCommandSessionDeviceKey,
-  waitForLegacyBleCommandSessionIdle
-} from '@/sdk/ring-ble/legacy/commandSession';
+import { getLegacyBleHistoryExclusiveSnapshot, resolveLegacyBleCommandSessionDeviceKey, waitForLegacyBleCommandSessionIdle } from '@/sdk/ring-ble/legacy/commandSession';
 
 export interface UseRingBLEOptions extends UseRingBleSdkOptions {
   rwCompatScanTimeoutMs?: number;
@@ -72,6 +64,8 @@ type VitalMeasurementLockState = {
   protocol: ReturnType<typeof resolveRingProtocol>;
   startedAt: number;
   expiresAt: number;
+  // 测量事务期间 App 切后台不能立刻断连，否则本轮测量直接作废。
+  releaseBackgroundTask?: () => void;
 };
 type PendingLegacyWearMeasurement = {
   kind: LegacyWearMeasurementKind;
@@ -112,16 +106,15 @@ const clearActiveVitalMeasurementLockTimer = () => {
   activeVitalMeasurementLockTimer = null;
 };
 
-const releaseActiveVitalMeasurementLock = (
-  reason: string,
-  options: { token?: string; deviceKey?: string } = {}
-) => {
+const releaseActiveVitalMeasurementLock = (reason: string, options: { token?: string; deviceKey?: string } = {}) => {
   const current = activeVitalMeasurementLock.value;
   if (!current) return false;
   if (options.token && current.token !== options.token) return false;
   if (options.deviceKey && current.deviceKey !== options.deviceKey) return false;
   clearActiveVitalMeasurementLockTimer();
   activeVitalMeasurementLock.value = null;
+  // 锁释放意味着测量事务结束：此时才允许 App 在后台执行延迟断连。
+  current.releaseBackgroundTask?.();
   appendRingDiagnosticLog('VITAL LOCK', 'measurement-lock-released', {
     reason,
     deviceKey: current.deviceKey,
@@ -133,9 +126,12 @@ const releaseActiveVitalMeasurementLock = (
 
 const scheduleActiveVitalMeasurementLockRelease = (lock: VitalMeasurementLockState) => {
   clearActiveVitalMeasurementLockTimer();
-  activeVitalMeasurementLockTimer = setTimeout(() => {
-    releaseActiveVitalMeasurementLock('fallback-timeout', { token: lock.token });
-  }, Math.max(0, lock.expiresAt - Date.now()) + 20);
+  activeVitalMeasurementLockTimer = setTimeout(
+    () => {
+      releaseActiveVitalMeasurementLock('fallback-timeout', { token: lock.token });
+    },
+    Math.max(0, lock.expiresAt - Date.now()) + 20
+  );
 };
 
 const isNodeRuntime = () => Boolean((globalThis as any).process?.versions?.node);
@@ -166,8 +162,7 @@ const appendRwCompatHistoryDiagnosticLog = (event: string, details?: unknown) =>
   }
 };
 
-const formatCompatHistoryQueueError = (error: unknown) =>
-  error instanceof Error ? error.message : `${(error as any)?.errMsg || error}`;
+const formatCompatHistoryQueueError = (error: unknown) => (error instanceof Error ? error.message : `${(error as any)?.errMsg || error}`);
 
 export const waitForRwCompatHistoryQueueIdle = async (timeoutMs = 5000, quietMs = 600) => {
   const startedAt = Date.now();
@@ -199,10 +194,7 @@ const createRwCompatHistorySkippedResult = (message: string, details: Record<str
   deleted: false
 });
 
-const runRwCompatHistoryExclusive = async <T>(
-  task: () => Promise<T>,
-  details: Record<string, unknown>
-) => {
+const runRwCompatHistoryExclusive = async <T>(task: () => Promise<T>, details: Record<string, unknown>) => {
   const queuedBehind = rwCompatHistoryQueueDepth;
   const queueDepth = queuedBehind + 1;
   rwCompatHistoryQueueDepth = queueDepth;
@@ -238,9 +230,11 @@ const runRwCompatHistoryExclusive = async <T>(
     }
   });
 
-  rwCompatHistoryQueue = queuedTask.catch(() => undefined).finally(() => {
-    rwCompatHistoryQueueDepth = Math.max(0, rwCompatHistoryQueueDepth - 1);
-  });
+  rwCompatHistoryQueue = queuedTask
+    .catch(() => undefined)
+    .finally(() => {
+      rwCompatHistoryQueueDepth = Math.max(0, rwCompatHistoryQueueDepth - 1);
+    });
 
   return queuedTask;
 };
@@ -271,9 +265,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   let pendingLegacyWearMeasurement: PendingLegacyWearMeasurement | null = null;
   const getLegacyWearMeasurementDeviceKey = () => {
     const currentDevice = sdk.deviceInfo.value;
-    return String(
-      currentDevice.deviceId || currentDevice.mac || currentDevice.advertis?.macInfo || 'legacy-ring'
-    ).toUpperCase();
+    return String(currentDevice.deviceId || currentDevice.mac || currentDevice.advertis?.macInfo || 'legacy-ring').toUpperCase();
   };
   const getActiveVitalMeasurementLock = () => {
     const current = activeVitalMeasurementLock.value;
@@ -287,10 +279,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const vitalMeasurementLock = computed(() => getActiveVitalMeasurementLock());
   const isVitalMeasurementLocked = computed(() => Boolean(vitalMeasurementLock.value));
   const vitalMeasurementLockKind = computed(() => vitalMeasurementLock.value?.kind || null);
-  const acquireVitalMeasurementLock = (
-    kind: VitalMeasurementLockKind,
-    fallbackMs?: number
-  ) => {
+  const acquireVitalMeasurementLock = (kind: VitalMeasurementLockKind, fallbackMs?: number) => {
     const deviceKey = getLegacyWearMeasurementDeviceKey();
     const current = getActiveVitalMeasurementLock();
     if (current) {
@@ -307,10 +296,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       releaseActiveVitalMeasurementLock('device-changed');
     }
     const protocol = resolveRingProtocol(sdk.deviceInfo.value);
-    const durationMs = Math.max(
-      1000,
-      Number(fallbackMs) || VITAL_MEASUREMENT_LOCK_FALLBACK_MS
-    );
+    const durationMs = Math.max(1000, Number(fallbackMs) || VITAL_MEASUREMENT_LOCK_FALLBACK_MS);
     const now = Date.now();
     const lock: VitalMeasurementLockState = {
       token: `${now}-${Math.random().toString(36).slice(2, 10)}`,
@@ -318,7 +304,8 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       kind,
       protocol,
       startedAt: now,
-      expiresAt: now + durationMs
+      expiresAt: now + durationMs,
+      releaseBackgroundTask: beginRingBackgroundCriticalTask(`vital-measurement:${kind}`)
     };
     activeVitalMeasurementLock.value = lock;
     scheduleActiveVitalMeasurementLockRelease(lock);
@@ -330,14 +317,10 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     });
     return lock.token;
   };
-  const releaseVitalMeasurementLock = (token: string, reason = 'page-release') =>
-    releaseActiveVitalMeasurementLock(reason, { token });
+  const releaseVitalMeasurementLock = (token: string, reason = 'page-release') => releaseActiveVitalMeasurementLock(reason, { token });
   const getLegacyWearMeasurementBusyRemainingMs = () => {
     if (resolveRingProtocol(sdk.deviceInfo.value) !== 'legacy') return 0;
-    return Math.max(
-      0,
-      (legacyWearMeasurementBusyUntilByDevice.get(getLegacyWearMeasurementDeviceKey()) || 0) - Date.now()
-    );
+    return Math.max(0, (legacyWearMeasurementBusyUntilByDevice.get(getLegacyWearMeasurementDeviceKey()) || 0) - Date.now());
   };
   const syncVitalMeasurementLockWithLegacyBusy = (token: string) => {
     const current = getActiveVitalMeasurementLock();
@@ -379,10 +362,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     if (resolveRingProtocol(sdk.deviceInfo.value) !== 'legacy') return;
     const deviceKey = getLegacyWearMeasurementDeviceKey();
     const nextBusyUntil = Date.now() + durationMs;
-    legacyWearMeasurementBusyUntilByDevice.set(
-      deviceKey,
-      Math.max(legacyWearMeasurementBusyUntilByDevice.get(deviceKey) || 0, nextBusyUntil)
-    );
+    legacyWearMeasurementBusyUntilByDevice.set(deviceKey, Math.max(legacyWearMeasurementBusyUntilByDevice.get(deviceKey) || 0, nextBusyUntil));
   };
   const waitForLegacyWearMeasurementIdle = async (timeoutMs = 12_000) => {
     clearPendingLegacyWearMeasurement();
@@ -414,7 +394,10 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     return settled;
   };
   const normalizeLegacyWearMeasurementKind = (name: unknown): LegacyWearMeasurementKind | null => {
-    const normalized = String(name || '').trim().toLowerCase().replace(/-/g, '_');
+    const normalized = String(name || '')
+      .trim()
+      .toLowerCase()
+      .replace(/-/g, '_');
     if (normalized === 'heart_rate' || normalized === 'hr' || normalized === 'hrv') return 'heart_rate';
     if (normalized === 'blood_oxygen' || normalized === 'oxygen' || normalized === 'spo2') return 'blood_oxygen';
     if (normalized === 'temperature' || normalized === 'body_temperature' || normalized === 'skin_temperature') return 'temperature';
@@ -422,16 +405,11 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   };
   const consumePendingLegacyWearMeasurement = (requestedNames: unknown[]) => {
     if (!pendingLegacyWearMeasurement) return null;
-    if (
-      resolveRingProtocol(sdk.deviceInfo.value) !== 'legacy' ||
-      pendingLegacyWearMeasurement.expiresAt <= Date.now()
-    ) {
+    if (resolveRingProtocol(sdk.deviceInfo.value) !== 'legacy' || pendingLegacyWearMeasurement.expiresAt <= Date.now()) {
       pendingLegacyWearMeasurement = null;
       return null;
     }
-    const matchedName = requestedNames.find(
-      (name) => normalizeLegacyWearMeasurementKind(name) === pendingLegacyWearMeasurement?.kind
-    );
+    const matchedName = requestedNames.find((name) => normalizeLegacyWearMeasurementKind(name) === pendingLegacyWearMeasurement?.kind);
     if (matchedName == null) return null;
     const reused = pendingLegacyWearMeasurement;
     pendingLegacyWearMeasurement = null;
@@ -448,10 +426,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const getCurrentRwStableMac = () => {
     const currentDevice = sdk.deviceInfo.value;
     const currentStableMac = currentDevice.mac || currentDevice.advertis?.macInfo || '';
-    return (
-      currentStableMac ||
-      (isColonSeparatedBleMac(currentDevice.uniMacId) ? currentDevice.uniMacId : '')
-    );
+    return currentStableMac || (isColonSeparatedBleMac(currentDevice.uniMacId) ? currentDevice.uniMacId : '');
   };
   const normalMac = computed(() => {
     const currentStableMac = sdk.deviceInfo.value.mac || sdk.deviceInfo.value.advertis?.macInfo || '';
@@ -482,9 +457,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
         const previousKey = String(previous?.[1] || deviceId || '').toUpperCase();
         const currentKey = getCommunicationDeviceKey();
         const previousCleared = communicationReadyPromiseByDevice.delete(previousKey);
-        const currentCleared = currentKey !== previousKey
-          ? communicationReadyPromiseByDevice.delete(currentKey)
-          : false;
+        const currentCleared = currentKey !== previousKey ? communicationReadyPromiseByDevice.delete(currentKey) : false;
         const cleared = previousCleared || currentCleared;
         deviceInfoCommandQueueByDevice.delete(previousKey);
         if (currentKey !== previousKey) deviceInfoCommandQueueByDevice.delete(currentKey);
@@ -514,11 +487,13 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     if (existing) return existing;
     const task = sdk.ensureCommunicationReady();
     communicationReadyPromiseByDevice.set(deviceKey, task);
-    task.finally(() => {
-      if (communicationReadyPromiseByDevice.get(deviceKey) === task) {
-        communicationReadyPromiseByDevice.delete(deviceKey);
-      }
-    }).catch(() => undefined);
+    task
+      .finally(() => {
+        if (communicationReadyPromiseByDevice.get(deviceKey) === task) {
+          communicationReadyPromiseByDevice.delete(deviceKey);
+        }
+      })
+      .catch(() => undefined);
     return task;
   };
 
@@ -561,21 +536,10 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
 
   const hasDeviceInfoFastPath = () => {
     const current = sdk.deviceInfo.value;
-    return Boolean(
-      sdk.isConnected.value &&
-      current.deviceId &&
-      current.serviceId &&
-      current.cmdCharId &&
-      current.dataCharId &&
-      current.notifyEnabled !== false
-    );
+    return Boolean(sdk.isConnected.value && current.deviceId && current.serviceId && current.cmdCharId && current.dataCharId && current.notifyEnabled !== false);
   };
 
-  const enqueueDeviceInfoCommand = <T>(
-    command: string,
-    task: () => Promise<T>,
-    options: Pick<CompatDeviceInfoCommandOptions, 'retryReady'> = {}
-  ) => {
+  const enqueueDeviceInfoCommand = <T>(command: string, task: () => Promise<T>, options: Pick<CompatDeviceInfoCommandOptions, 'retryReady'> = {}) => {
     const queuedAt = Date.now();
     const run = async () => {
       await waitForHistoryCommandWindow(command);
@@ -630,26 +594,24 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     const deviceKey = getCommunicationDeviceKey() || 'unknown-device';
     const previousQueue = deviceInfoCommandQueueByDevice.get(deviceKey) || Promise.resolve();
     const queued = previousQueue.then(run, run);
-    const settledQueue = queued.then(() => undefined, () => undefined);
+    const settledQueue = queued.then(
+      () => undefined,
+      () => undefined
+    );
     deviceInfoCommandQueueByDevice.set(deviceKey, settledQueue);
-    settledQueue.finally(() => {
-      if (deviceInfoCommandQueueByDevice.get(deviceKey) === settledQueue) {
-        deviceInfoCommandQueueByDevice.delete(deviceKey);
-      }
-    }).catch(() => undefined);
+    settledQueue
+      .finally(() => {
+        if (deviceInfoCommandQueueByDevice.get(deviceKey) === settledQueue) {
+          deviceInfoCommandQueueByDevice.delete(deviceKey);
+        }
+      })
+      .catch(() => undefined);
     return queued;
   };
 
-  const readLocalData = (
-    readAll = false,
-    time: CompatHistoryTimeInput = '',
-    dataType?: CompatRwHistoryDataInput,
-    readOptions: CompatReadLocalDataOptions = {}
-  ) => {
+  const readLocalData = (readAll = false, time: CompatHistoryTimeInput = '', dataType?: CompatRwHistoryDataInput, readOptions: CompatReadLocalDataOptions = {}) => {
     const sinceTimestamp = readAll ? undefined : parseCompatHistorySinceTimestamp(time);
-    const normalizedDataTypes = Array.isArray(dataType)
-      ? Array.from(new Set(dataType.map((item) => normalizeCompatRwHistoryDataName(item)).filter(Boolean)))
-      : undefined;
+    const normalizedDataTypes = Array.isArray(dataType) ? Array.from(new Set(dataType.map((item) => normalizeCompatRwHistoryDataName(item)).filter(Boolean))) : undefined;
     const normalizedDataType = dataType && !Array.isArray(dataType) ? normalizeCompatRwHistoryDataName(dataType) : undefined;
     const timeoutMs = Number(readOptions.timeoutMs);
     const historyOptions = {
@@ -702,13 +664,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
 
   const discoverServicesAndChars = (deviceId: string, mac = '') => {
     const sourceDevice = findScannedDevice(deviceId, mac);
-    const deviceName =
-      sourceDevice?.displayName ||
-      sourceDevice?.deviceName ||
-      sourceDevice?.name ||
-      sourceDevice?.localName ||
-      sdk.deviceInfo.value.name ||
-      mac;
+    const deviceName = sourceDevice?.displayName || sourceDevice?.deviceName || sourceDevice?.name || sourceDevice?.localName || sdk.deviceInfo.value.name || mac;
     return sdk.discoverServicesAndChars(deviceId, deviceName, sourceDevice);
   };
 
@@ -729,9 +685,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   };
 
   const refreshHealthData = (params?: CompatRefreshOptions) => {
-    const requestedMetricNames = Array.isArray(params?.realtimeMetricNames)
-      ? params.realtimeMetricNames
-      : [];
+    const requestedMetricNames = Array.isArray(params?.realtimeMetricNames) ? params.realtimeMetricNames : [];
     const reusedWearMeasurement = consumePendingLegacyWearMeasurement(requestedMetricNames);
     if (reusedWearMeasurement) {
       // 佩戴门禁已用同一条正式测量命令启动采集。页面继续等待同一 frameId
@@ -748,14 +702,8 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
             record && typeof record === 'object'
               ? {
                   ...(record as Record<string, any>),
-                  timestamp:
-                    Number((record as Record<string, any>).timestamp) > 0
-                      ? Number((record as Record<string, any>).timestamp)
-                      : completedAt,
-                  receivedAt:
-                    Number((record as Record<string, any>).receivedAt) > 0
-                      ? Number((record as Record<string, any>).receivedAt)
-                      : completedAt
+                  timestamp: Number((record as Record<string, any>).timestamp) > 0 ? Number((record as Record<string, any>).timestamp) : completedAt,
+                  receivedAt: Number((record as Record<string, any>).receivedAt) > 0 ? Number((record as Record<string, any>).receivedAt) : completedAt
                 }
               : record;
           if (completedRecord && typeof completedRecord === 'object') {
@@ -800,14 +748,11 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const syncHistoricalData = readLocalData;
   const cancelReadLocalData = () => sdk.clearDataListener?.();
   const syncAllHealthData = () => runWithReady(() => sdk.syncAllHealthData());
-  const syncHealthDataByType = (name?: CompatRwHistoryDataName) =>
-    runWithReady(() => sdk.syncHealthDataByType(name ? normalizeCompatRwHistoryDataName(name) : undefined));
+  const syncHealthDataByType = (name?: CompatRwHistoryDataName) => runWithReady(() => sdk.syncHealthDataByType(name ? normalizeCompatRwHistoryDataName(name) : undefined));
   const readRwHealthData = (name: CompatRwHealthDataName) => runWithReady(() => sdk.readRwHealthData(normalizeCompatRwHealthDataName(name)));
   const deleteRwHealthData = (name: CompatRwHealthDataName) => runWithReady(() => sdk.deleteRwHealthData(normalizeCompatRwHealthDataName(name)));
-  const controlRwHealthData = (name: CompatRwHealthDataName, enabled = true) =>
-    runWithReady(() => sdk.controlRwHealthData(normalizeCompatRwHealthDataName(name), enabled));
-  const readRwMonitoringConfig = (name: Parameters<typeof sdk.readRwMonitoringConfig>[0]) =>
-    runWithReady(() => sdk.readRwMonitoringConfig(name));
+  const controlRwHealthData = (name: CompatRwHealthDataName, enabled = true) => runWithReady(() => sdk.controlRwHealthData(normalizeCompatRwHealthDataName(name), enabled));
+  const readRwMonitoringConfig = (name: Parameters<typeof sdk.readRwMonitoringConfig>[0]) => runWithReady(() => sdk.readRwMonitoringConfig(name));
   const setRwMonitoringConfig = (name: Parameters<typeof sdk.setRwMonitoringConfig>[0], config: RwHealthMonitoringConfig) =>
     runWithReady(() => sdk.setRwMonitoringConfig(name, config));
   const setRwUserProfile = (profile: RwUserProfile) => runWithReady(() => sdk.setRwUserProfile(profile));
@@ -826,26 +771,27 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const setTimedBloodSugarJL = (config: RwHealthMonitoringConfig) => runWithReady(() => sdk.setTimedBloodSugarJL(config));
   const setTimedBloodPressureJL = (config: RwHealthMonitoringConfig) => runWithReady(() => sdk.setTimedBloodPressureJL(config));
   const setTimedTemperatureJL = (config: RwHealthMonitoringConfig) => runWithReady(() => sdk.setTimedTemperatureJL(config));
-  const controlHealthDataJL = (name: CompatRwHealthDataName, enabled = true) =>
-    runWithReady(() => sdk.controlHealthDataJL(normalizeCompatRwHealthDataName(name), enabled));
+  const controlHealthDataJL = (name: CompatRwHealthDataName, enabled = true) => runWithReady(() => sdk.controlHealthDataJL(normalizeCompatRwHealthDataName(name), enabled));
   const readBattery = (options: CompatDeviceInfoCommandOptions = {}) =>
-    enqueueDeviceInfoCommand('battery', async () => {
-      // Writing 0x12 only proves that WeChat accepted the command.  The value
-      // shown by the pages must come from the matching Notify response.  Start
-      // the waiter before the write so a fast device response cannot be lost.
-      const pendingBattery = sdk.waitForParsedData(
-        (parsed) => parsed.type === 'battery',
-        Number.isFinite(Number(options.timeoutMs)) && Number(options.timeoutMs) > 0
-          ? Number(options.timeoutMs)
-          : DEFAULT_COMPAT_REFRESH_TIMEOUT_MS,
-        { replayRecent: false }
-      );
-      // If the write fails first, keep the waiter rejection observed while the
-      // command error is propagated to the caller.
-      pendingBattery.catch(() => undefined);
-      await sdk.sendBatteryCommand();
-      return pendingBattery;
-    }, { retryReady: options.retryReady });
+    enqueueDeviceInfoCommand(
+      'battery',
+      async () => {
+        // Writing 0x12 only proves that WeChat accepted the command.  The value
+        // shown by the pages must come from the matching Notify response.  Start
+        // the waiter before the write so a fast device response cannot be lost.
+        const pendingBattery = sdk.waitForParsedData(
+          (parsed) => parsed.type === 'battery',
+          Number.isFinite(Number(options.timeoutMs)) && Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : DEFAULT_COMPAT_REFRESH_TIMEOUT_MS,
+          { replayRecent: false }
+        );
+        // If the write fails first, keep the waiter rejection observed while the
+        // command error is propagated to the caller.
+        pendingBattery.catch(() => undefined);
+        await sdk.sendBatteryCommand();
+        return pendingBattery;
+      },
+      { retryReady: options.retryReady }
+    );
   const readFirmwareVersion = () => enqueueDeviceInfoCommand('firmware-version', () => sdk.sendFirmwareVersion());
   const readSoftwareVersion = () => enqueueDeviceInfoCommand('software-version', () => sdk.sendSoftwareVersion());
   const readHeartRate = () => {
@@ -868,34 +814,30 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
    * 佩戴正确时继续复用这次已启动的测量，不再发送停止+重启命令。任何超时或未知状态都由上层
    * 按 fail-closed 处理，禁止在没有确认佩戴时继续发送正式测量命令。
    */
-  const queryCurrentWearState = async (
-    measurementKindOrTimeout: LegacyWearMeasurementKind | number = 'heart_rate',
-    timeoutMs = 8000
-  ) => {
-    const measurementKind =
-      typeof measurementKindOrTimeout === 'number' ? 'heart_rate' : measurementKindOrTimeout;
-    const requestedTimeoutMs =
-      typeof measurementKindOrTimeout === 'number' ? measurementKindOrTimeout : timeoutMs;
+  const queryCurrentWearState = async (measurementKindOrTimeout: LegacyWearMeasurementKind | number = 'heart_rate', timeoutMs = 8000) => {
+    const measurementKind = typeof measurementKindOrTimeout === 'number' ? 'heart_rate' : measurementKindOrTimeout;
+    const requestedTimeoutMs = typeof measurementKindOrTimeout === 'number' ? measurementKindOrTimeout : timeoutMs;
     const protocol = resolveRingProtocol(sdk.deviceInfo.value);
     const boundedTimeoutMs = Math.max(4000, Math.min(12000, Number(requestedTimeoutMs) || 8000));
 
     if (protocol === 'legacy') {
       // 启动回包既是佩戴状态，也表示这次正式测量已开始。
-      const probeConfig = measurementKind === 'blood_oxygen'
-        ? {
-            command: 0x32,
-            payload: buildLegacyBloodOxygenMeasurementPayload(),
-            type: 'active_OxyGenMeasure',
-            statusField: 'bloodOxygenStatus'
-          }
-        : measurementKind === 'temperature'
-          ? { command: 0x34, payload: 0x00, type: 'active_Temperature', statusField: 'temperatureStatus' }
-          : {
-              command: 0x31,
-              payload: buildLegacyHeartRateMeasurementPayload(),
-              type: 'active_measure',
-              statusField: 'heartbeatStatus'
-            };
+      const probeConfig =
+        measurementKind === 'blood_oxygen'
+          ? {
+              command: 0x32,
+              payload: buildLegacyBloodOxygenMeasurementPayload(),
+              type: 'active_OxyGenMeasure',
+              statusField: 'bloodOxygenStatus'
+            }
+          : measurementKind === 'temperature'
+            ? { command: 0x34, payload: 0x00, type: 'active_Temperature', statusField: 'temperatureStatus' }
+            : {
+                command: 0x31,
+                payload: buildLegacyHeartRateMeasurementPayload(),
+                type: 'active_measure',
+                statusField: 'heartbeatStatus'
+              };
       const frameId = createLegacyFrameId();
       const valuePromise = sdk.waitForParsedData(
         (parsed) => {
@@ -950,10 +892,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       // 部分固件会在采集结束时返回 status=1，此时只清除“固件繁忙”状态。
       // 页面测量仍是一个整体事务，必须等最终值、弹层和结果页处理完成后再释放共享锁。
       const terminalStatusPromise = sdk.waitForParsedData(
-        (parsed) =>
-          parsed.type === probeConfig.type &&
-          Number(parsed.frameId) === frameId &&
-          Number((parsed as Record<string, any>)[probeConfig.statusField]) === 0x01,
+        (parsed) => parsed.type === probeConfig.type && Number(parsed.frameId) === frameId && Number((parsed as Record<string, any>)[probeConfig.statusField]) === 0x01,
         LEGACY_WEAR_MEASUREMENT_BUSY_WINDOW_MS,
         { replayRecent: false }
       );
@@ -971,10 +910,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       });
       markLegacyWearMeasurementBusy();
       try {
-        await sdk.sendBytes(
-          buildLegacyCommandBytes(probeConfig.command, 0x00, { frameId, payload: probeConfig.payload }),
-          `wear-preflight/legacy-${measurementKind}`
-        );
+        await sdk.sendBytes(buildLegacyCommandBytes(probeConfig.command, 0x00, { frameId, payload: probeConfig.payload }), `wear-preflight/legacy-${measurementKind}`);
       } catch (error) {
         legacyWearMeasurementBusyUntilByDevice.delete(getLegacyWearMeasurementDeviceKey());
         throw error;
@@ -984,10 +920,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
 
       const measurementStarted = measurementKind === 'temperature' ? status === 0x00 : status === 0x03;
       if (status === 0x04) {
-        legacyWearMeasurementBusyUntilByDevice.set(
-          getLegacyWearMeasurementDeviceKey(),
-          Date.now() + LEGACY_WEAR_MEASUREMENT_BUSY_RETRY_MS
-        );
+        legacyWearMeasurementBusyUntilByDevice.set(getLegacyWearMeasurementDeviceKey(), Date.now() + LEGACY_WEAR_MEASUREMENT_BUSY_RETRY_MS);
       } else if (!measurementStarted) {
         legacyWearMeasurementBusyUntilByDevice.delete(getLegacyWearMeasurementDeviceKey());
       }
@@ -1007,28 +940,19 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
         measurementStatus: (parsed as Record<string, any>)[probeConfig.statusField],
         status: parsed.status
       });
-      const worn = measurementKind === 'temperature'
-        ? status === 0x00 || status === 0x01
-        : status === 0x01 || status === 0x03;
+      const worn = measurementKind === 'temperature' ? status === 0x00 || status === 0x01 : status === 0x01 || status === 0x03;
       return {
         supported: true,
         protocol,
-        state: status === 0x04
-          ? ('unknown' as const)
-          : worn
-          ? ('worn' as const)
-          : measurementKind !== 'temperature' && status === 0x02
-            ? ('charging' as const)
-            : ('not_worn' as const),
+        state:
+          status === 0x04 ? ('unknown' as const) : worn ? ('worn' as const) : measurementKind !== 'temperature' && status === 0x02 ? ('charging' as const) : ('not_worn' as const),
         record: parsed
       };
     }
 
-    const responsePromise = sdk.waitForParsedData(
-      (parsed) => parsed.type === 'qkeer_v2_last_data' && typeof parsed.isWorn === 'boolean',
-      boundedTimeoutMs,
-      { replayRecent: false }
-    );
+    const responsePromise = sdk.waitForParsedData((parsed) => parsed.type === 'qkeer_v2_last_data' && typeof parsed.isWorn === 'boolean', boundedTimeoutMs, {
+      replayRecent: false
+    });
     // 命令发送失败时 waiter 仍会按自身超时结束；提前挂 catch 避免产生未处理拒绝。
     responsePromise.catch(() => undefined);
     if (protocol === 'rw') {
@@ -1056,8 +980,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const sendDeleteAllLocalDataCommand = () => runWithReady(() => sdk.sendDeleteAllLocalDataCommand());
   const sendResetCommand = () => runWithReady(() => sdk.sendResetCommand());
   const sendFactoryResetWithTimeCommand = () => runWithReady(() => sdk.sendFactoryResetWithTimeCommand());
-  const sendCollectPeriodSettingCommand = (...args: Parameters<typeof sdk.sendCollectPeriodSettingCommand>) =>
-    runWithReady(() => sdk.sendCollectPeriodSettingCommand(...args));
+  const sendCollectPeriodSettingCommand = (...args: Parameters<typeof sdk.sendCollectPeriodSettingCommand>) => runWithReady(() => sdk.sendCollectPeriodSettingCommand(...args));
   const readCollectPeriodCommand = () => runWithReady(() => sdk.readCollectPeriodCommand());
   const readRwMetric = (name: CompatRwHealthDataName, legacyFallback?: () => Promise<unknown>) =>
     runWithReady(async () => {
@@ -1084,12 +1007,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const isMacLikeCompatIdentity = (value = '') => normalizeCompatIdentity(value).length === 12;
   const getRwStableCompatIdentity = (device?: RingDeviceInfo | null, fallback = '') => {
     if (!device) return isMacLikeCompatIdentity(fallback) ? fallback : '';
-    return (
-      device.mac ||
-      device.advertis?.macInfo ||
-      (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '') ||
-      (isMacLikeCompatIdentity(fallback) ? fallback : '')
-    );
+    return device.mac || device.advertis?.macInfo || (isColonSeparatedBleMac(device.uniMacId) ? device.uniMacId : '') || (isMacLikeCompatIdentity(fallback) ? fallback : '');
   };
   const getScannedStableIdentities = (device: RingDeviceInfo) => {
     const protocol = resolveRingProtocol(device);
@@ -1104,11 +1022,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     const stableIds = getScannedStableIdentities(device)
       .map((item) => normalizeCompatIdentity(`${item || ''}`))
       .filter((item) => item.length >= 6);
-    return stableIds.some(
-      (item) =>
-        item === normalizedValue ||
-        (allowTail && (item.endsWith(normalizedValue.slice(-6)) || normalizedValue.endsWith(item.slice(-6))))
-    );
+    return stableIds.some((item) => item === normalizedValue || (allowTail && (item.endsWith(normalizedValue.slice(-6)) || normalizedValue.endsWith(item.slice(-6)))));
   };
 
   const findScannedDevice = (deviceId: string, uniMacId = '') => {
@@ -1151,8 +1065,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     return nameMatches.length === 1 ? nameMatches[0] : undefined;
   };
 
-  const findRwCompatScanCandidate = (deviceId: string, uniMacId = '', deviceName = '') =>
-    findCompatScanCandidate(deviceId, uniMacId, deviceName, 'rw');
+  const findRwCompatScanCandidate = (deviceId: string, uniMacId = '', deviceName = '') => findCompatScanCandidate(deviceId, uniMacId, deviceName, 'rw');
 
   const waitForCompatScanCandidate = async (deviceId: string, uniMacId = '', deviceName = '', protocolHint = '') => {
     const existing = findCompatScanCandidate(deviceId, uniMacId, deviceName, protocolHint);
@@ -1193,8 +1106,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const connectDevice = async (input: CompatConnectInput, deviceName = '', uniMacId = '', fromScan = false) => {
     const inputDevice = typeof input === 'string' ? null : input;
     const requestedId = typeof input === 'string' ? input : input.deviceId || input.uniMacId || input.mac || '';
-    const preferredName =
-      inputDevice?.displayName || inputDevice?.deviceName || inputDevice?.name || inputDevice?.localName || deviceName || requestedId;
+    const preferredName = inputDevice?.displayName || inputDevice?.deviceName || inputDevice?.name || inputDevice?.localName || deviceName || requestedId;
     const preferredStableMac = getRwStableCompatIdentity(inputDevice, uniMacId) || inputDevice?.mac || inputDevice?.advertis?.macInfo || '';
     const preferredLookupId = uniMacId || preferredStableMac;
     let scannedDevice = findScannedDevice(requestedId, preferredLookupId);
@@ -1206,9 +1118,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
       deviceId: sourceDevice?.deviceId || (typeof input === 'string' ? requestedId : inputDevice?.deviceId || requestedId),
       uniMacId:
         stableSourceMac ||
-        (resolveRingProtocol(sourceDevice || inputDevice || ({} as RingDeviceInfo)) === 'rw'
-          ? ''
-          : sourceDevice?.uniMacId || inputDevice?.uniMacId || preferredLookupId),
+        (resolveRingProtocol(sourceDevice || inputDevice || ({} as RingDeviceInfo)) === 'rw' ? '' : sourceDevice?.uniMacId || inputDevice?.uniMacId || preferredLookupId),
       mac: stableSourceMac,
       name: sourceDevice?.name || inputDevice?.name || preferredName,
       deviceName: sourceDevice?.deviceName || inputDevice?.deviceName || preferredName,

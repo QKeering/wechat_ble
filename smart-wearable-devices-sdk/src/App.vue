@@ -10,6 +10,7 @@ import { refreshSystemLocale, syncTabBarLocale } from '@/i18n';
 import {
   cancelDeferredRingBackgroundDisconnect,
   getRingBackgroundCriticalTasks,
+  RING_BACKGROUND_TASK_OTA,
   runOrDeferRingBackgroundDisconnect
 } from '@/utils/ringBackgroundTasks';
 
@@ -59,9 +60,11 @@ onShow((options: any) => {
     familyEntry: launchedFromFamilyEntry || isFamilyEntry(options),
     pendingBackgroundTasks: activeBackgroundTasks
   });
-  // 关键任务（OTA/历史同步/全面测量）还持有 BLE 链路时不能恢复自动重连：
-  // 尤其是 OTA，回来后 resume 会立刻去连业务设备，跟 BOOT 升级抢链路。
-  if (activeBackgroundTasks.length === 0) {
+  // OTA 期间链路已换成 BOOT 设备，回来后必须保持自动重连挂起，避免抢链路。
+  // 测量/历史同步等任务持有的是业务链路：恢复“自动重连开关”本身不会发起连接，
+  // 若不恢复，任务结束后整个前台会话都处于挂起状态，后续断线也不会自动回连。
+  const otaOwnsBle = activeBackgroundTasks.includes(RING_BACKGROUND_TASK_OTA);
+  if (!otaOwnsBle) {
     try {
       useRingBLE().resumeRuntimeRecovery();
     } catch (error) {
@@ -71,7 +74,8 @@ onShow((options: any) => {
     }
   } else {
     appendRingDiagnosticLog('APP', 'app-show-resume-skipped', {
-      activeBackgroundTasks
+      activeBackgroundTasks,
+      reason: 'ota-owns-ble'
     });
   }
   // 早于 BLE 分支：家人页也要跟随系统语言刷新，并保证 tabBar 文案正确。

@@ -266,6 +266,17 @@ const isBleConnectOperateTimeout = (error: unknown) => {
   return message.includes('createbleconnection') && (message.includes('operate time out') || message.includes('operation timeout'));
 };
 
+// Android 上 status:133 / errCode 10003 是"链路被占用或旧连接尚未释放"的典型
+// 返回，通常立刻失败，适合短暂清理后重试；真正的超时不会命中这里。
+const isTransientLegacyConnectFailure = (error: unknown) => {
+  const record = (error && typeof error === 'object' ? error : {}) as Record<string, unknown>;
+  const message = `${record.errMsg || record.message || error || ''}`.toLowerCase();
+  const errorCode = Number(record.errCode ?? record.errno ?? 0);
+  return (
+    errorCode === 133 || errorCode === 10003 || message.includes('createbleconnection:fail:connection fail') || message.includes('status:133') || message.includes('status 133')
+  );
+};
+
 type BluetoothDeviceFoundCallback = Parameters<typeof uni.onBluetoothDeviceFound>[0];
 type BleConnectionStateCallback = Parameters<typeof uni.onBLEConnectionStateChange>[0];
 type BleCharacteristicValueCallback = Parameters<typeof uni.onBLECharacteristicValueChange>[0];
@@ -491,6 +502,12 @@ const LEGACY_QUIET_BLE_CALL_TIMEOUT_MS = 2000;
 // createBLEConnection 的平台 timeout 参数在部分 Android 基座上不生效，
 // JS 侧必须再兜一层，否则握手会一直停在建链这一步。
 const LEGACY_CONNECT_CALL_TIMEOUT_MS = 15000;
+// 建链瞬时失败（Android status:133 / errCode 10003）多由上一轮连接尚未释放
+// 引起，快速重试通常能成功。这里只重试"快速失败"，不重试超时：超时说明戒指
+// 很可能还被另一台手机占着，再等一轮只会让用户多等十几秒。
+const LEGACY_CREATE_CONNECTION_RETRY_DELAYS_MS = [0, 900, 1800];
+const LEGACY_MAPPED_IDENTITY_TIMEOUT_RETRY_DELAY_MS = 1200;
+const LEGACY_ALREADY_CONNECTED_RETRY_DELAY_MS = 350;
 const LEGACY_GATT_CELL_TIMEOUT_MS = 10000;
 const BLUETOOTH_ADAPTER_STATE_CHECK_TIMEOUT_MS = 800;
 const BLUETOOTH_ADAPTER_OPEN_FOREGROUND_TIMEOUT_MS = 3000;
@@ -1583,50 +1600,56 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   };
 
   const readBleMtu = (deviceId: string) =>
-    withTimeout(new Promise<{
-      supported: boolean;
-      ok: boolean;
-      mtu: number | null;
-      result?: unknown;
-      error?: unknown;
-    }>((resolve) => {
-      const getBLEMTU = (uni as any).getBLEMTU;
-      if (typeof getBLEMTU !== 'function') {
-        resolve({ supported: false, ok: false, mtu: null });
-        return;
-      }
-      getBLEMTU({
-        deviceId,
-        writeType: 'writeNoResponse',
-        success: (result: Record<string, unknown>) => {
-          const actualMtu = Number(result?.mtu);
-          resolve({
-            supported: true,
-            ok: Number.isFinite(actualMtu) && actualMtu > 0,
-            mtu: Number.isFinite(actualMtu) && actualMtu > 0 ? actualMtu : null,
-            result
-          });
-        },
-        fail: (error: unknown) => resolve({ supported: true, ok: false, mtu: null, error })
-      });
-    }), LEGACY_QUIET_BLE_CALL_TIMEOUT_MS, 'Get BLE MTU timeout.')
-      .catch(() => ({ supported: true, ok: false, mtu: null, error: new Error('getBLEMTU timed out') }));
+    withTimeout(
+      new Promise<{
+        supported: boolean;
+        ok: boolean;
+        mtu: number | null;
+        result?: unknown;
+        error?: unknown;
+      }>((resolve) => {
+        const getBLEMTU = (uni as any).getBLEMTU;
+        if (typeof getBLEMTU !== 'function') {
+          resolve({ supported: false, ok: false, mtu: null });
+          return;
+        }
+        getBLEMTU({
+          deviceId,
+          writeType: 'writeNoResponse',
+          success: (result: Record<string, unknown>) => {
+            const actualMtu = Number(result?.mtu);
+            resolve({
+              supported: true,
+              ok: Number.isFinite(actualMtu) && actualMtu > 0,
+              mtu: Number.isFinite(actualMtu) && actualMtu > 0 ? actualMtu : null,
+              result
+            });
+          },
+          fail: (error: unknown) => resolve({ supported: true, ok: false, mtu: null, error })
+        });
+      }),
+      LEGACY_QUIET_BLE_CALL_TIMEOUT_MS,
+      'Get BLE MTU timeout.'
+    ).catch(() => ({ supported: true, ok: false, mtu: null, error: new Error('getBLEMTU timed out') }));
 
   const requestBleMtu = (deviceId: string, mtu: number) =>
-    withTimeout(new Promise<{ ok: boolean; result?: unknown; error?: unknown }>((resolve) => {
-      const setBLEMTU = (uni as any).setBLEMTU;
-      if (typeof setBLEMTU !== 'function') {
-        resolve({ ok: false, error: new Error('setBLEMTU API unavailable') });
-        return;
-      }
-      setBLEMTU({
-        deviceId,
-        mtu,
-        success: (result: unknown) => resolve({ ok: true, result }),
-        fail: (error: unknown) => resolve({ ok: false, error })
-      });
-    }), LEGACY_QUIET_BLE_CALL_TIMEOUT_MS, 'Set BLE MTU timeout.')
-      .catch(() => ({ ok: false, error: new Error('setBLEMTU timed out') }));
+    withTimeout(
+      new Promise<{ ok: boolean; result?: unknown; error?: unknown }>((resolve) => {
+        const setBLEMTU = (uni as any).setBLEMTU;
+        if (typeof setBLEMTU !== 'function') {
+          resolve({ ok: false, error: new Error('setBLEMTU API unavailable') });
+          return;
+        }
+        setBLEMTU({
+          deviceId,
+          mtu,
+          success: (result: unknown) => resolve({ ok: true, result }),
+          fail: (error: unknown) => resolve({ ok: false, error })
+        });
+      }),
+      LEGACY_QUIET_BLE_CALL_TIMEOUT_MS,
+      'Set BLE MTU timeout.'
+    ).catch(() => ({ ok: false, error: new Error('setBLEMTU timed out') }));
 
   const setMTU = async (deviceId: string, mtu = LEGACY_TARGET_MTU) => {
     const systemInfo = uni.getSystemInfoSync();
@@ -1746,38 +1769,67 @@ export const createLegacyRingAdapter = (state: RingBleState, runtime?: RingBleRu
   };
 
   const connectDevice = async (deviceId: string, deviceName = '', sourceDevice?: RingDeviceInfo) => {
-    try {
-      return { ...sourceDevice, ...(await createBleConnectionOnce(deviceId, deviceName)) };
-    } catch (error) {
-      const identitySource = sourceDevice as (RingDeviceInfo & { uniMacId?: string; mac?: string }) | undefined;
-      const stableDeviceIdentity = normalizeBleIdentifier(identitySource?.uniMacId || identitySource?.mac);
-      const hasMappedTransportIdentity = Boolean(stableDeviceIdentity && stableDeviceIdentity !== normalizeBleIdentifier(deviceId));
-      if (hasMappedTransportIdentity && isBleConnectOperateTimeout(error)) {
-        appendRingDiagnosticLog('L19 BLE', 'legacy-mapped-device-connect-timeout-retry', {
+    const identitySource = sourceDevice as (RingDeviceInfo & { uniMacId?: string; mac?: string }) | undefined;
+    const stableDeviceIdentity = normalizeBleIdentifier(identitySource?.uniMacId || identitySource?.mac);
+    const hasMappedTransportIdentity = Boolean(stableDeviceIdentity && stableDeviceIdentity !== normalizeBleIdentifier(deviceId));
+    const maxAttempts = LEGACY_CREATE_CONNECTION_RETRY_DELAYS_MS.length;
+    const connectStartedAt = Date.now();
+    let lastError: unknown;
+    // 映射身份的超时重试是最慢的路径（每次要等满平台 10s 超时）。保留历史上
+    // 的一次性重试语义，避免把等待时间叠到外层连接超时之后。
+    let mappedTimeoutRetryUsed = false;
+
+    for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
+      const attempt = attemptIndex + 1;
+      try {
+        return { ...sourceDevice, ...(await createBleConnectionOnce(deviceId, deviceName)) };
+      } catch (error) {
+        lastError = error;
+        const hasAttemptLeft = attemptIndex < maxAttempts - 1;
+
+        // OS 报"已连接"不代表链路可用：先确认目标确实在已连接列表里，
+        // 否则按普通失败清理后重试，避免带着残留句柄继续发现服务。
+        if (isAlreadyConnectedError(error)) {
+          const connectedDeviceIds = await getConnectedLegacyDeviceIds();
+          if (connectedDeviceIds.includes(deviceId)) {
+            return { ...sourceDevice, deviceId, name: deviceName, protocol: 'legacy' as const };
+          }
+          appendRingDiagnosticLog('L19 BLE', 'already-connected-target-retry-without-closing-others', {
+            deviceId,
+            connectedDeviceIds,
+            attempt,
+            maxAttempts,
+            cooldownMs: LEGACY_ALREADY_CONNECTED_RETRY_DELAY_MS,
+            error: formatLegacyBleError(error)
+          });
+          if (!hasAttemptLeft) throw error;
+          await closeBleConnectionQuietly(deviceId);
+          await sleep(LEGACY_ALREADY_CONNECTED_RETRY_DELAY_MS);
+          continue;
+        }
+
+        const mappedTimeoutRetry = !mappedTimeoutRetryUsed && hasMappedTransportIdentity && isBleConnectOperateTimeout(error);
+        const transientRetry = isTransientLegacyConnectFailure(error);
+        const retriable = mappedTimeoutRetry || transientRetry;
+        appendRingDiagnosticLog('L19 BLE', retriable && hasAttemptLeft ? 'legacy-connect-retry' : 'legacy-connect-giveup', {
           deviceId,
           stableDeviceIdentity,
-          cooldownMs: 1200,
+          attempt,
+          maxAttempts,
+          mappedTimeoutRetry,
+          transientRetry,
+          elapsedTotalMs: Date.now() - connectStartedAt,
           error: formatLegacyBleError(error)
         });
+        if (!retriable || !hasAttemptLeft) throw error;
+
+        if (mappedTimeoutRetry) mappedTimeoutRetryUsed = true;
         await closeBleConnectionQuietly(deviceId);
-        await sleep(1200);
-        return { ...sourceDevice, ...(await createBleConnectionOnce(deviceId, deviceName)) };
+        await sleep(mappedTimeoutRetry ? LEGACY_MAPPED_IDENTITY_TIMEOUT_RETRY_DELAY_MS : LEGACY_CREATE_CONNECTION_RETRY_DELAYS_MS[attemptIndex + 1] || 0);
       }
-      if (!isAlreadyConnectedError(error)) throw error;
-
-      const connectedDeviceIds = await getConnectedLegacyDeviceIds();
-      if (connectedDeviceIds.includes(deviceId)) {
-        return { ...sourceDevice, deviceId, name: deviceName, protocol: 'legacy' as const };
-      }
-
-      appendRingDiagnosticLog('L19 BLE', 'already-connected-target-retry-without-closing-others', {
-        deviceId,
-        connectedDeviceIds
-      });
-      await closeBleConnectionQuietly(deviceId);
-      await sleep(350);
-      return { ...sourceDevice, ...(await createBleConnectionOnce(deviceId, deviceName)) };
     }
+
+    throw lastError;
   };
 
   const connectAndDiscover = async (deviceId: string, deviceName = '', sourceDevice?: RingDeviceInfo) => {

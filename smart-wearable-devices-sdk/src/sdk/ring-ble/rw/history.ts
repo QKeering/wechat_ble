@@ -59,11 +59,7 @@ const RING_DIAGNOSTIC_LOG_STORAGE_KEY = 'qkeer:ring-diagnostic-logs';
 const RING_DIAGNOSTIC_LOG_MAX_COUNT = 500;
 const RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH = 4000;
 
-const shouldSkipRwHistoryCommandForDiagnosticLock = (
-  readDetails: Record<string, unknown>,
-  commandLabel: string,
-  details: Record<string, unknown> = {}
-) => {
+const shouldSkipRwHistoryCommandForDiagnosticLock = (readDetails: Record<string, unknown>, commandLabel: string, details: Record<string, unknown> = {}) => {
   const lock = getRwDiagnosticCommandLock();
   if (!lock) return false;
   appendRwHistoryDiagnosticLog('history-command-skip-diagnostic-lock', {
@@ -93,10 +89,7 @@ interface RwAbHealthHistoryReadOptions {
   deleteAfterRead?: boolean;
 }
 
-export const syncRwHistoryFiles = async (
-  adapter: LegacyRingAdapter,
-  options: SyncRwHistoryOptions = {}
-): Promise<SyncRwHistoryResult> => {
+export const syncRwHistoryFiles = async (adapter: LegacyRingAdapter, options: SyncRwHistoryOptions = {}): Promise<SyncRwHistoryResult> => {
   const timeoutMs = options.timeoutMs ?? 30000;
   const readAll = Boolean(options.readAll);
   const sinceTimestamp = getRwHistorySinceTimestamp(options);
@@ -106,179 +99,163 @@ export const syncRwHistoryFiles = async (
   const l19SessionGeneration = useL19Compatibility ? adapter.beginL19HistorySession?.() : null;
 
   try {
-  watchForUnexpectedRwHistoryResponse(adapter, timeoutMs, readDetails, unexpectedResponses);
-  if (useL19Compatibility) {
-    appendRwHistoryDiagnosticLog('history-preflight-skipped', {
+    watchForUnexpectedRwHistoryResponse(adapter, timeoutMs, readDetails, unexpectedResponses);
+    if (useL19Compatibility) {
+      appendRwHistoryDiagnosticLog('history-preflight-skipped', {
+        ...readDetails,
+        reason: 'l19-history-compatibility'
+      });
+    } else {
+      await runRwHistoryPreflight(adapter, options, readDetails);
+    }
+
+    if (!useL19Compatibility && isRwLastDataOnlyHistoryRequest(options)) {
+      return syncRwNativeLastDataOnly(adapter, options, sinceTimestamp, readAll, timeoutMs, readDetails, unexpectedResponses);
+    }
+
+    const pendingInitialHistory = adapter.waitForParsedData(
+      isRwInitialHistoryResponse,
+      useL19Compatibility ? RW_L19_HISTORY_NOTIFY_SETTLE_MS + RW_L19_HISTORY_FIRST_FRAME_TIMEOUT_MS * 2 + 500 : timeoutMs
+    );
+    pendingInitialHistory.catch(() => undefined);
+    appendRwHistoryDiagnosticLog('history-initial-wait-start', {
       ...readDetails,
-      reason: 'l19-history-compatibility'
+      primaryCommand: readAll ? '3601' : '3600',
+      fallbackCommand: '3610'
     });
-  } else {
-    await runRwHistoryPreflight(adapter, options, readDetails);
-  }
+    const initialParsed = useL19Compatibility
+      ? await waitForL19HistoryInitial(adapter, pendingInitialHistory, readDetails)
+      : await (async () => {
+          await sendRwLegacyLocalDataRead(adapter, readDetails);
+          return waitForRwHistoryInitialWithFallback(adapter, pendingInitialHistory, options, readDetails, unexpectedResponses);
+        })();
+    if (!initialParsed) {
+      const parsed: RingParsedData = {
+        type: 'local_data',
+        protocol: 'rw',
+        status: 'empty',
+        message: 'L19 history returned no valid first frame after one retry.',
+        records: [],
+        files: [],
+        readAll,
+        sinceTimestamp,
+        dataType: options.dataType,
+        dataTypes: normalizeRwHistoryDataTypes(options.dataTypes),
+        raw: []
+      };
+      appendRwHistoryDiagnosticLog('l19-history-no-first-frame-finished', {
+        ...readDetails,
+        attempts: 2,
+        status: 'empty'
+      });
+      return { parsed, records: [] };
+    }
+    if (isRwLegacyLocalDataResponse(initialParsed)) {
+      return mapRwLegacyLocalDataResult(initialParsed, options, sinceTimestamp, readAll, readDetails);
+    }
 
-  if (!useL19Compatibility && isRwLastDataOnlyHistoryRequest(options)) {
-    return syncRwNativeLastDataOnly(adapter, options, sinceTimestamp, readAll, timeoutMs, readDetails, unexpectedResponses);
-  }
+    if (isRwNativeHistoryListResponse(initialParsed)) {
+      return mapRwNativeHistoryListResult(initialParsed, options, sinceTimestamp, readAll, readDetails);
+    }
 
-  const pendingInitialHistory = adapter.waitForParsedData(
-    isRwInitialHistoryResponse,
-    useL19Compatibility
-      ? RW_L19_HISTORY_NOTIFY_SETTLE_MS + RW_L19_HISTORY_FIRST_FRAME_TIMEOUT_MS * 2 + 500
-      : timeoutMs
-  );
-  pendingInitialHistory.catch(() => undefined);
-  appendRwHistoryDiagnosticLog('history-initial-wait-start', {
-    ...readDetails,
-    primaryCommand: readAll ? '3601' : '3600',
-    fallbackCommand: '3610'
-  });
-  const initialParsed = useL19Compatibility
-    ? await waitForL19HistoryInitial(adapter, pendingInitialHistory, readDetails)
-    : await (async () => {
-        await sendRwLegacyLocalDataRead(adapter, readDetails);
-        return waitForRwHistoryInitialWithFallback(
-          adapter,
-          pendingInitialHistory,
-          options,
-          readDetails,
-          unexpectedResponses
-        );
-      })();
-  if (!initialParsed) {
-    const parsed: RingParsedData = {
-      type: 'local_data',
-      protocol: 'rw',
-      status: 'empty',
-      message: 'L19 history returned no valid first frame after one retry.',
-      records: [],
-      files: [],
+    if (isRwAbHealthHistoryResponse(initialParsed)) {
+      return mapRwAbHealthHistoryResult(initialParsed, options, sinceTimestamp, readAll, readDetails);
+    }
+
+    const fileListParsed = initialParsed;
+    const allFiles = (Array.isArray(fileListParsed.files) ? fileListParsed.files : []) as RwFileListItem[];
+    const files = filterRwHistoryFilesByOptions(allFiles, options, sinceTimestamp);
+    const identity = getRwParsedIdentity(fileListParsed);
+    const historyMeta = {
+      allFiles,
+      totalFileCount: allFiles.length,
+      selectedFileCount: files.length,
+      filteredFileCount: Math.max(0, allFiles.length - files.length),
       readAll,
       sinceTimestamp,
       dataType: options.dataType,
-      dataTypes: normalizeRwHistoryDataTypes(options.dataTypes),
-      raw: []
+      dataTypes: normalizeRwHistoryDataTypes(options.dataTypes)
     };
-    appendRwHistoryDiagnosticLog('l19-history-no-first-frame-finished', {
+    appendRwHistoryDiagnosticLog('file-list-received', {
       ...readDetails,
-      attempts: 2,
-      status: 'empty'
+      totalFileCount: allFiles.length,
+      selectedFileCount: files.length,
+      filteredFileCount: Math.max(0, allFiles.length - files.length),
+      files: summarizeRwHistoryFiles(files)
     });
-    return { parsed, records: [] };
-  }
-  if (isRwLegacyLocalDataResponse(initialParsed)) {
-    return mapRwLegacyLocalDataResult(initialParsed, options, sinceTimestamp, readAll, readDetails);
-  }
 
-  if (isRwNativeHistoryListResponse(initialParsed)) {
-    return mapRwNativeHistoryListResult(initialParsed, options, sinceTimestamp, readAll, readDetails);
-  }
+    if (files.length === 0) {
+      const isFilteredEmpty = allFiles.length > 0;
+      const parsed: RingParsedData = {
+        type: 'local_data',
+        protocol: 'rw',
+        status: isFilteredEmpty ? 'filtered' : 'empty',
+        message: isFilteredEmpty ? 'RW history files are outside the current read range or type filter.' : 'RW history file list is empty.',
+        records: [],
+        files,
+        ...identity,
+        ...historyMeta,
+        raw: fileListParsed.raw || []
+      };
+      appendRwHistoryDiagnosticLog('sync-empty', {
+        ...historyMeta,
+        status: parsed.status,
+        message: parsed.message
+      });
+      return { parsed, records: [] };
+    }
 
-  if (isRwAbHealthHistoryResponse(initialParsed)) {
-    return mapRwAbHealthHistoryResult(initialParsed, options, sinceTimestamp, readAll, readDetails);
-  }
+    const records: Array<Record<string, any>> = [];
+    const uploadEvents: RingParsedData[] = [];
 
-  const fileListParsed = initialParsed;
-  const allFiles = (Array.isArray(fileListParsed.files) ? fileListParsed.files : []) as RwFileListItem[];
-  const files = filterRwHistoryFilesByOptions(allFiles, options, sinceTimestamp);
-  const identity = getRwParsedIdentity(fileListParsed);
-  const historyMeta = {
-    allFiles,
-    totalFileCount: allFiles.length,
-    selectedFileCount: files.length,
-    filteredFileCount: Math.max(0, allFiles.length - files.length),
-    readAll,
-    sinceTimestamp,
-    dataType: options.dataType,
-    dataTypes: normalizeRwHistoryDataTypes(options.dataTypes)
-  };
-  appendRwHistoryDiagnosticLog('file-list-received', {
-    ...readDetails,
-    totalFileCount: allFiles.length,
-    selectedFileCount: files.length,
-    filteredFileCount: Math.max(0, allFiles.length - files.length),
-    files: summarizeRwHistoryFiles(files)
-  });
+    for (const file of files) {
+      appendRwHistoryDiagnosticLog('upload-request-start', summarizeRwHistoryFile(file));
+      const fileEvents = await requestRwFileUpload(adapter, file, timeoutMs);
+      appendRwHistoryDiagnosticLog('upload-request-result', {
+        ...summarizeRwHistoryFile(file),
+        eventTypes: fileEvents.map((event) => event.type),
+        recordCount: fileEvents.reduce((count, event) => count + (Array.isArray(event.records) ? event.records.length : 0), 0),
+        finished: fileEvents.some(isRwUploadFinished)
+      });
+      uploadEvents.push(...fileEvents);
+      records.push(...fileEvents.flatMap((event) => mapRwUploadEventToRecords(event, file, identity)));
 
-  if (files.length === 0) {
-    const isFilteredEmpty = allFiles.length > 0;
+      if (!fileEvents.some((event) => event.type === 'rw_upload_file')) {
+        records.push(mapRwFileListItemToRecord(file, 'pending_upload_payload', identity));
+      }
+    }
+
     const parsed: RingParsedData = {
       type: 'local_data',
       protocol: 'rw',
-      status: isFilteredEmpty ? 'filtered' : 'empty',
-      message: isFilteredEmpty ? 'RW history files are outside the current read range or type filter.' : 'RW history file list is empty.',
-      records: [],
+      status: records.length > 0 ? 'success' : 'empty',
+      records,
       files,
       ...identity,
       ...historyMeta,
+      uploadEvents,
+      totalNum: records.length,
       raw: fileListParsed.raw || []
     };
-    appendRwHistoryDiagnosticLog('sync-empty', {
+
+    appendRwHistoryDiagnosticLog('sync-result', {
       ...historyMeta,
       status: parsed.status,
-      message: parsed.message
+      recordCount: records.length,
+      uploadEventCount: uploadEvents.length
     });
-    return { parsed, records: [] };
-  }
 
-  const records: Array<Record<string, any>> = [];
-  const uploadEvents: RingParsedData[] = [];
-
-  for (const file of files) {
-    appendRwHistoryDiagnosticLog('upload-request-start', summarizeRwHistoryFile(file));
-    const fileEvents = await requestRwFileUpload(adapter, file, timeoutMs);
-    appendRwHistoryDiagnosticLog('upload-request-result', {
-      ...summarizeRwHistoryFile(file),
-      eventTypes: fileEvents.map((event) => event.type),
-      recordCount: fileEvents.reduce((count, event) => count + (Array.isArray(event.records) ? event.records.length : 0), 0),
-      finished: fileEvents.some(isRwUploadFinished)
-    });
-    uploadEvents.push(...fileEvents);
-    records.push(...fileEvents.flatMap((event) => mapRwUploadEventToRecords(event, file, identity)));
-
-    if (!fileEvents.some((event) => event.type === 'rw_upload_file')) {
-      records.push(mapRwFileListItemToRecord(file, 'pending_upload_payload', identity));
-    }
-  }
-
-  const parsed: RingParsedData = {
-    type: 'local_data',
-    protocol: 'rw',
-    status: records.length > 0 ? 'success' : 'empty',
-    records,
-    files,
-    ...identity,
-    ...historyMeta,
-    uploadEvents,
-    totalNum: records.length,
-    raw: fileListParsed.raw || []
-  };
-
-  appendRwHistoryDiagnosticLog('sync-result', {
-    ...historyMeta,
-    status: parsed.status,
-    recordCount: records.length,
-    uploadEventCount: uploadEvents.length
-  });
-
-  return { parsed, records };
+    return { parsed, records };
   } finally {
     if (useL19Compatibility) adapter.endL19HistorySession?.(l19SessionGeneration);
   }
 };
 
-const sendRwLegacyLocalDataRead = async (
-  adapter: LegacyRingAdapter,
-  readDetails: Record<string, unknown>
-) => {
+const sendRwLegacyLocalDataRead = async (adapter: LegacyRingAdapter, readDetails: Record<string, unknown>) => {
   const readAll = Boolean(readDetails.readAll);
   const sinceTimestamp = Number(readDetails.sinceTimestamp || 0);
-  const writeHistoryBytes = adapter.isL19HistoryDevice?.() && adapter.sendL19HistoryBytes
-    ? adapter.sendL19HistoryBytes
-    : adapter.sendBytes;
-  await writeHistoryBytes(
-    buildRwReadLocalDataCommand(sinceTimestamp, readAll),
-    `history/read-local-data-${readAll ? 'full' : 'incremental'}`
-  );
+  const writeHistoryBytes = adapter.isL19HistoryDevice?.() && adapter.sendL19HistoryBytes ? adapter.sendL19HistoryBytes : adapter.sendBytes;
+  await writeHistoryBytes(buildRwReadLocalDataCommand(sinceTimestamp, readAll), `history/read-local-data-${readAll ? 'full' : 'incremental'}`);
 };
 
 const waitForL19HistoryInitial = async (
@@ -332,16 +309,10 @@ const waitForL19HistoryInitial = async (
   return null;
 };
 
-const runRwHistoryPreflight = async (
-  adapter: LegacyRingAdapter,
-  options: SyncRwHistoryOptions,
-  readDetails: Record<string, unknown>
-) => {
+const runRwHistoryPreflight = async (adapter: LegacyRingAdapter, options: SyncRwHistoryOptions, readDetails: Record<string, unknown>) => {
   const preflightDelayMs = getRwHistoryPreflightDelayMs(options, Number(readDetails.timeoutMs || 0));
   const responseTimeoutMs = getRwHistoryPreflightResponseTimeoutMs(options, Number(readDetails.timeoutMs || 0));
-  const pendingTimeResponse = responseTimeoutMs > 0
-    ? adapter.waitForParsedData(isRwHistoryPreflightResponse, responseTimeoutMs)
-    : null;
+  const pendingTimeResponse = responseTimeoutMs > 0 ? adapter.waitForParsedData(isRwHistoryPreflightResponse, responseTimeoutMs) : null;
   pendingTimeResponse?.catch(() => undefined);
 
   appendRwHistoryDiagnosticLog('history-preflight-start', {
@@ -409,11 +380,7 @@ const runRwHistoryPreflight = async (
   }
 };
 
-const sendRwDefaultMonitoringConfigs = async (
-  adapter: LegacyRingAdapter,
-  readDetails: Record<string, unknown>,
-  preflightDelayMs: number
-) => {
+const sendRwDefaultMonitoringConfigs = async (adapter: LegacyRingAdapter, readDetails: Record<string, unknown>, preflightDelayMs: number) => {
   const config: RwHealthMonitoringConfig = {
     enabled: true,
     startHour: 0,
@@ -437,10 +404,7 @@ const sendRwDefaultMonitoringConfigs = async (
 
   for (const command of commands) {
     try {
-      await adapter.sendBytes(
-        buildRwSetHealthMonitoringCommand(command.key, config),
-        `history/preflight-default-monitoring/${command.label}`
-      );
+      await adapter.sendBytes(buildRwSetHealthMonitoringCommand(command.key, config), `history/preflight-default-monitoring/${command.label}`);
       if (preflightDelayMs > 0) await sleep(Math.min(preflightDelayMs, 120));
     } catch (error) {
       appendRwHistoryDiagnosticLog('history-preflight-default-monitoring-failed', {
@@ -453,11 +417,7 @@ const sendRwDefaultMonitoringConfigs = async (
   }
 };
 
-const sendRwNativeHistoryListReads = async (
-  adapter: LegacyRingAdapter,
-  options: SyncRwHistoryOptions,
-  readDetails: Record<string, unknown>
-) => {
+const sendRwNativeHistoryListReads = async (adapter: LegacyRingAdapter, options: SyncRwHistoryOptions, readDetails: Record<string, unknown>) => {
   const startTimestamp = Number(readDetails.sinceTimestamp || 0);
   const endTimestamp = Math.floor(Date.now() / 1000);
   const commands = getRwNativeHistoryListCommands(options);
@@ -471,20 +431,14 @@ const sendRwNativeHistoryListReads = async (
 
   for (let index = 0; index < commands.length; index += 1) {
     const command = commands[index];
-    await adapter.sendBytes(
-      buildRwQkeerV2HistoryListCommand(command.cmd, startTimestamp, endTimestamp),
-      `history/native-list/${command.label}`
-    );
+    await adapter.sendBytes(buildRwQkeerV2HistoryListCommand(command.cmd, startTimestamp, endTimestamp), `history/native-list/${command.label}`);
     if (index < commands.length - 1) {
       await sleep(RW_HISTORY_NATIVE_LIST_COMMAND_INTERVAL_MS);
     }
   }
 };
 
-const sendRwNativeLastDataRead = async (
-  adapter: LegacyRingAdapter,
-  readDetails: Record<string, unknown>
-) => {
+const sendRwNativeLastDataRead = async (adapter: LegacyRingAdapter, readDetails: Record<string, unknown>) => {
   appendRwHistoryDiagnosticLog('history-native-last-data-fallback', readDetails);
   await adapter.sendBytes(buildRwQkeerV2LastDataCommand(), 'history/native-last-data');
 };
@@ -514,19 +468,16 @@ const readRwAbHealthHistoryKeys = async (
   });
 
   for (const command of commands) {
-    if (shouldSkipRwHistoryCommandForDiagnosticLock(readDetails, `history/ab-key/${command.label}`, {
-      phase,
-      key: command.key,
-      label: command.label
-    })) break;
+    if (
+      shouldSkipRwHistoryCommandForDiagnosticLock(readDetails, `history/ab-key/${command.label}`, {
+        phase,
+        key: command.key,
+        label: command.label
+      })
+    )
+      break;
 
-    const sdkLoopResponses = await readRwAbHealthHistoryWithSdkDeleteLoop(
-      adapter,
-      command,
-      readDetails,
-      phase,
-      responseWaitMs
-    );
+    const sdkLoopResponses = await readRwAbHealthHistoryWithSdkDeleteLoop(adapter, command, readDetails, phase, responseWaitMs);
     if (sdkLoopResponses.length > 0) {
       responses.push(...sdkLoopResponses);
       if (RW_HISTORY_AB_KEY_COMMAND_INTERVAL_MS > 0) {
@@ -545,18 +496,18 @@ const readRwAbHealthHistoryKeys = async (
 
     for (const attempt of attempts) {
       const commandLabel = `history/ab-key/${command.label}/${attempt.attempt}`;
-      if (shouldSkipRwHistoryCommandForDiagnosticLock(readDetails, commandLabel, {
-        phase,
-        attempt: attempt.attempt,
-        flag: attempt.flag,
-        key: command.key,
-        label: command.label
-      })) break;
+      if (
+        shouldSkipRwHistoryCommandForDiagnosticLock(readDetails, commandLabel, {
+          phase,
+          attempt: attempt.attempt,
+          flag: attempt.flag,
+          key: command.key,
+          label: command.label
+        })
+      )
+        break;
 
-      const pendingResponse = adapter.waitForParsedData(
-        (parsed) => isRwAbHealthHistoryResponseForKeyAndAttempt(parsed, command.key, attempt.flag),
-        responseWaitMs
-      );
+      const pendingResponse = adapter.waitForParsedData((parsed) => isRwAbHealthHistoryResponseForKeyAndAttempt(parsed, command.key, attempt.flag), responseWaitMs);
       pendingResponse.catch(() => undefined);
 
       await adapter.sendBytes(attempt.build(command.key), commandLabel);
@@ -616,7 +567,6 @@ const readRwAbHealthHistoryKeys = async (
           break;
         }
       }
-
     }
 
     if (RW_HISTORY_AB_KEY_COMMAND_INTERVAL_MS > 0) {
@@ -630,10 +580,7 @@ const readRwAbHealthHistoryKeys = async (
     type: 'rw_ab_health_history',
     protocol: 'rw',
     packetShape: 'ab_health_key',
-    status: responses.some((item) => Array.isArray(item.records) && item.records.length > 0) ||
-      responses.some((item) => item.value != null)
-      ? 'success'
-      : 'empty',
+    status: responses.some((item) => Array.isArray(item.records) && item.records.length > 0) || responses.some((item) => item.value != null) ? 'success' : 'empty',
     records: responses.flatMap((item) => mapRwAbHealthParsedToRecords(item, options)),
     sourceResponses: responses.map(summarizeRwHistoryInitialResponse),
     timestamp: Date.now()
@@ -685,17 +632,17 @@ const readRwAbHealthHistoryWithSdkDeleteLoop = async (
         });
       } else {
         const commandLabel = `history/ab-key/${command.label}/read`;
-        if (shouldSkipRwHistoryCommandForDiagnosticLock(readDetails, commandLabel, {
-          phase,
-          key: command.key,
-          label: command.label,
-          readIndex: readIndex + 1
-        })) break;
+        if (
+          shouldSkipRwHistoryCommandForDiagnosticLock(readDetails, commandLabel, {
+            phase,
+            key: command.key,
+            label: command.label,
+            readIndex: readIndex + 1
+          })
+        )
+          break;
 
-        const pendingRead = adapter.waitForParsedData(
-          (pendingParsed) => isRwAbHealthHistoryResponseForKeyAndAttempt(pendingParsed, command.key, RwKeyFlag.Read),
-          responseWaitMs
-        );
+        const pendingRead = adapter.waitForParsedData((pendingParsed) => isRwAbHealthHistoryResponseForKeyAndAttempt(pendingParsed, command.key, RwKeyFlag.Read), responseWaitMs);
         pendingRead.catch(() => undefined);
 
         await adapter.sendBytes(buildRwReadHealthDataCommand(command.key), commandLabel);
@@ -730,14 +677,7 @@ const readRwAbHealthHistoryWithSdkDeleteLoop = async (
           fingerprint: payloadFingerprint,
           response: summarizeRwHistoryInitialResponse(parsed)
         });
-        const retryAckResult = await sendRwAbHealthHistorySdkAck(
-          adapter,
-          command,
-          readDetails,
-          phase,
-          responses.length,
-          'payload'
-        );
+        const retryAckResult = await sendRwAbHealthHistorySdkAck(adapter, command, readDetails, phase, responses.length, 'payload');
         if (retryAckResult.nextPayload) {
           queuedReadPayload = retryAckResult.nextPayload;
           continue;
@@ -748,14 +688,7 @@ const readRwAbHealthHistoryWithSdkDeleteLoop = async (
       if (payloadFingerprint) seenPayloadFingerprints.add(payloadFingerprint);
 
       responses.push(parsed);
-      const ackResult = await sendRwAbHealthHistorySdkAck(
-        adapter,
-        command,
-        readDetails,
-        phase,
-        responses.length,
-        'payload'
-      );
+      const ackResult = await sendRwAbHealthHistorySdkAck(adapter, command, readDetails, phase, responses.length, 'payload');
 
       if (ackResult.nextPayload) {
         queuedReadPayload = ackResult.nextPayload;
@@ -806,21 +739,21 @@ const sendRwAbHealthHistorySdkAck = async (
   ackReason: 'payload'
 ): Promise<RwAbHealthHistorySdkAckResult> => {
   const commandLabel = `history/ab-key/${command.label}/ack`;
-  if (shouldSkipRwHistoryCommandForDiagnosticLock(readDetails, commandLabel, {
-    phase,
-    key: command.key,
-    label: command.label,
-    readCount,
-    ackReason
-  })) return { ack: null, nextPayload: null };
+  if (
+    shouldSkipRwHistoryCommandForDiagnosticLock(readDetails, commandLabel, {
+      phase,
+      key: command.key,
+      label: command.label,
+      readCount,
+      ackReason
+    })
+  )
+    return { ack: null, nextPayload: null };
 
   const pendingAck = adapter.waitForParsedData(
     (parsed) =>
       isRwAbHealthHistoryResponseForKeyAndAttempt(parsed, command.key, RwKeyFlag.Delete) ||
-      (
-        isRwAbHealthHistoryResponseForKeyAndAttempt(parsed, command.key, RwKeyFlag.Read) &&
-        hasRwAbHealthHistoryDataBlockPayload(parsed)
-      ),
+      (isRwAbHealthHistoryResponseForKeyAndAttempt(parsed, command.key, RwKeyFlag.Read) && hasRwAbHealthHistoryDataBlockPayload(parsed)),
     RW_HISTORY_AB_KEY_DELETE_WAIT_MS
   );
   pendingAck.catch(() => undefined);
@@ -868,19 +801,20 @@ const sendRwAbHealthHistorySdkAck = async (
   }
 };
 
-const isRwAbSdkAckLoopKey = (key: RwKey) => [
-  RwKey.ActivityCurrentDay,
-  RwKey.Activity,
-  RwKey.Sleep,
-  RwKey.RawSleep,
-  RwKey.HeartRate,
-  RwKey.BloodPressure,
-  RwKey.Temperature,
-  RwKey.BloodOxygen,
-  RwKey.Hrv,
-  RwKey.Stress,
-  RwKey.BloodSugar
-].includes(key);
+const isRwAbSdkAckLoopKey = (key: RwKey) =>
+  [
+    RwKey.ActivityCurrentDay,
+    RwKey.Activity,
+    RwKey.Sleep,
+    RwKey.RawSleep,
+    RwKey.HeartRate,
+    RwKey.BloodPressure,
+    RwKey.Temperature,
+    RwKey.BloodOxygen,
+    RwKey.Hrv,
+    RwKey.Stress,
+    RwKey.BloodSugar
+  ].includes(key);
 
 const getRwAbSdkAckLoopMaxReads = (key: RwKey) => {
   if (key === RwKey.ActivityCurrentDay || key === RwKey.Activity) return RW_HISTORY_AB_ACTIVITY_SDK_LOOP_MAX_READS;
@@ -893,14 +827,10 @@ const mergeRwAbHealthHistoryParsed = (...values: Array<RingParsedData | null | u
   if (parsedValues.length === 0) return null;
   if (parsedValues.length === 1) return parsedValues[0];
 
-  const records = parsedValues.flatMap((item) => Array.isArray(item.records) ? item.records : []);
-  const sourceResponses = parsedValues.flatMap((item) =>
-    Array.isArray(item.sourceResponses) ? item.sourceResponses : []
-  );
-  const dataTypes = Array.from(new Set(parsedValues.flatMap((item) =>
-    Array.isArray(item.dataTypes) ? item.dataTypes : []
-  ).filter(Boolean)));
-  const raw = parsedValues.flatMap((item) => Array.isArray(item.raw) ? item.raw : []);
+  const records = parsedValues.flatMap((item) => (Array.isArray(item.records) ? item.records : []));
+  const sourceResponses = parsedValues.flatMap((item) => (Array.isArray(item.sourceResponses) ? item.sourceResponses : []));
+  const dataTypes = Array.from(new Set(parsedValues.flatMap((item) => (Array.isArray(item.dataTypes) ? item.dataTypes : [])).filter(Boolean)));
+  const raw = parsedValues.flatMap((item) => (Array.isArray(item.raw) ? item.raw : []));
   const latest = parsedValues[parsedValues.length - 1];
 
   return {
@@ -924,20 +854,22 @@ const mergeRwHistoryFallbackWithAbHealthParsed = (...values: Array<RingParsedDat
   const abValues = parsedValues.filter((item) => item.type === 'rw_ab_health_history');
   if (abValues.length === 0) return null;
 
-  const records = parsedValues.flatMap((item) => Array.isArray(item.records) ? item.records : []);
+  const records = parsedValues.flatMap((item) => (Array.isArray(item.records) ? item.records : []));
   if (records.length === 0) return mergeRwAbHealthHistoryParsed(...abValues);
 
   const sourceResponses = parsedValues.flatMap((item) =>
-    Array.isArray(item.sourceResponses) && item.sourceResponses.length > 0
-      ? item.sourceResponses
-      : [summarizeRwHistoryInitialResponse(item)]
+    Array.isArray(item.sourceResponses) && item.sourceResponses.length > 0 ? item.sourceResponses : [summarizeRwHistoryInitialResponse(item)]
   );
-  const dataTypes = Array.from(new Set(parsedValues.flatMap((item) => {
-    const declared = Array.isArray(item.dataTypes) ? item.dataTypes : [];
-    const direct = normalizeRwHistoryDataType(item.dataType || item.name);
-    return [...declared, direct].filter(Boolean);
-  })));
-  const raw = parsedValues.flatMap((item) => Array.isArray(item.raw) ? item.raw : []);
+  const dataTypes = Array.from(
+    new Set(
+      parsedValues.flatMap((item) => {
+        const declared = Array.isArray(item.dataTypes) ? item.dataTypes : [];
+        const direct = normalizeRwHistoryDataType(item.dataType || item.name);
+        return [...declared, direct].filter(Boolean);
+      })
+    )
+  );
+  const raw = parsedValues.flatMap((item) => (Array.isArray(item.raw) ? item.raw : []));
   const latest = parsedValues[parsedValues.length - 1];
 
   return {
@@ -1112,10 +1044,7 @@ const getRwPreNativeAbHealthHistoryCommands = (options: SyncRwHistoryOptions) =>
   return selected;
 };
 
-const excludeRwAbHealthHistoryCommands = (
-  commands: RwAbHealthHistoryCommand[],
-  excludedKeys: Set<RwKey>
-) => commands.filter((command) => !excludedKeys.has(command.key));
+const excludeRwAbHealthHistoryCommands = (commands: RwAbHealthHistoryCommand[], excludedKeys: Set<RwKey>) => commands.filter((command) => !excludedKeys.has(command.key));
 
 const mapRwAbHealthParsedToRecords = (parsed: RingParsedData, options: SyncRwHistoryOptions) => {
   const identity = getRwParsedIdentity(parsed);
@@ -1138,9 +1067,7 @@ const mapRwAbHealthParsedToRecords = (parsed: RingParsedData, options: SyncRwHis
   if (parsed.value == null || parsed.type !== 'rw_health_data') return [];
   const metric = createRwAbHealthMetricRecord(fallbackDataType, parsed.value);
   if (!metric) return [];
-  const unixTime = normalizeRwRecordTimestamp(parsed.recordTime) ||
-    normalizeRwRecordTimestamp(parsed.timestamp) ||
-    Math.floor(Date.now() / 1000);
+  const unixTime = normalizeRwRecordTimestamp(parsed.recordTime) || normalizeRwRecordTimestamp(parsed.timestamp) || Math.floor(Date.now() / 1000);
   return [
     normalizeRwHistoryRecordMetrics({
       ...identity,
@@ -1194,15 +1121,7 @@ const createRwAbHealthMetricRecord = (dataType: string, value: unknown) => {
     const record = value as Record<string, unknown>;
     const systolic = normalizeRwHistoryFiniteNumber(record.systolic);
     const diastolic = normalizeRwHistoryFiniteNumber(record.diastolic);
-    if (
-      systolic == null ||
-      diastolic == null ||
-      systolic < 60 ||
-      systolic > 260 ||
-      diastolic < 30 ||
-      diastolic > 180 ||
-      systolic <= diastolic
-    ) {
+    if (systolic == null || diastolic == null || systolic < 60 || systolic > 260 || diastolic < 30 || diastolic > 180 || systolic <= diastolic) {
       return null;
     }
     return { systolic, diastolic, bloodPressure: `${systolic ?? '-'}/${diastolic ?? '-'}` };
@@ -1322,10 +1241,7 @@ const waitForRwHistoryInitialWithFallback = async (
     } else {
       await sendRwNativeHistoryListReads(adapter, options, readDetails);
 
-      const nativeListWaitMs = getRwHistoryFallbackResponseWaitMs(
-        readDetails,
-        RW_HISTORY_NATIVE_LIST_FALLBACK_DELAY_MS
-      );
+      const nativeListWaitMs = getRwHistoryFallbackResponseWaitMs(readDetails, RW_HISTORY_NATIVE_LIST_FALLBACK_DELAY_MS);
       const nativeResult = await Promise.race([
         pendingFallback.then(
           (parsed) => ({ parsed }),
@@ -1369,10 +1285,7 @@ const waitForRwHistoryInitialWithFallback = async (
 
         await sendRwNativeLastDataRead(adapter, readDetails);
 
-        const lastDataWaitMs = getRwHistoryFallbackResponseWaitMs(
-          readDetails,
-          RW_HISTORY_LAST_DATA_FALLBACK_DELAY_MS
-        );
+        const lastDataWaitMs = getRwHistoryFallbackResponseWaitMs(readDetails, RW_HISTORY_LAST_DATA_FALLBACK_DELAY_MS);
         const lastDataResult = await Promise.race([
           pendingFallback.then(
             (parsed) => ({ parsed }),
@@ -1421,13 +1334,10 @@ const waitForRwHistoryInitialWithFallback = async (
             sinceTimestamp: Number(readDetails.sinceTimestamp || 0),
             readAll: Boolean(readDetails.readAll),
             dataType: typeof readDetails.dataType === 'string' ? readDetails.dataType : options.dataType,
-            dataTypes: Array.isArray(readDetails.dataTypes) ? readDetails.dataTypes as string[] : options.dataTypes
+            dataTypes: Array.isArray(readDetails.dataTypes) ? (readDetails.dataTypes as string[]) : options.dataTypes
           });
 
-          const finalReadWaitMs = getRwHistoryFallbackResponseWaitMs(
-            readDetails,
-            RW_HISTORY_FINAL_FILE_LIST_FALLBACK_DELAY_MS
-          );
+          const finalReadWaitMs = getRwHistoryFallbackResponseWaitMs(readDetails, RW_HISTORY_FINAL_FILE_LIST_FALLBACK_DELAY_MS);
           const finalReadResult = await Promise.race([
             pendingFallback.then(
               (parsed) => ({ parsed }),
@@ -1484,9 +1394,11 @@ const waitForRwHistoryInitialWithFallback = async (
         response: summarizeRwHistoryInitialResponse(abHealthParsed)
       });
       if (hasRwAbHealthHistoryPayload(abHealthParsed)) {
-        return mergeRwHistoryFallbackWithAbHealthParsed(fallbackParsed, preNativeAbFallbackParsed, abHealthParsed) ||
+        return (
+          mergeRwHistoryFallbackWithAbHealthParsed(fallbackParsed, preNativeAbFallbackParsed, abHealthParsed) ||
           mergeRwAbHealthHistoryParsed(preNativeAbFallbackParsed, abHealthParsed) ||
-          abHealthParsed;
+          abHealthParsed
+        );
       }
       if (!fallbackParsed) {
         return abHealthParsed;
@@ -1529,12 +1441,7 @@ const waitForRwHistoryInitialWithFallback = async (
   }
 };
 
-const watchForUnexpectedRwHistoryResponse = (
-  adapter: LegacyRingAdapter,
-  timeoutMs: number,
-  readDetails: Record<string, unknown>,
-  unexpectedResponses: RingParsedData[]
-) => {
+const watchForUnexpectedRwHistoryResponse = (adapter: LegacyRingAdapter, timeoutMs: number, readDetails: Record<string, unknown>, unexpectedResponses: RingParsedData[]) => {
   const pendingUnexpectedResponse = adapter.waitForParsedData(isRwUnexpectedHistoryResponse, timeoutMs);
   pendingUnexpectedResponse.then(
     (parsed) => {
@@ -1632,9 +1539,7 @@ const isRwAbHealthHistoryKey = (key: number) => {
 const hasRwAbHealthHistoryPayload = (parsed: RingParsedData) => {
   if (Array.isArray(parsed.records) && parsed.records.length > 0) return true;
   if (parsed.value != null && parsed.value !== '') return true;
-  const data = Array.isArray((parsed as { data?: unknown }).data)
-    ? ((parsed as { data?: unknown[] }).data || [])
-    : [];
+  const data = Array.isArray((parsed as { data?: unknown }).data) ? (parsed as { data?: unknown[] }).data || [] : [];
   return data.length > 1;
 };
 
@@ -1651,12 +1556,7 @@ const getRwAbHealthHistoryPayloadFingerprint = (parsed: RingParsedData) => {
   const bytes = data.length > 1 ? data : getRwHistoryRawBytes(parsed.raw);
   if (bytes.length === 0) return '';
   const hex = bytes.map((value) => value.toString(16).padStart(2, '0')).join('');
-  return [
-    Number(parsed.key),
-    getRwAbHealthHistoryResponseFlag(parsed) ?? '',
-    bytes.length,
-    hex
-  ].join(':');
+  return [Number(parsed.key), getRwAbHealthHistoryResponseFlag(parsed) ?? '', bytes.length, hex].join(':');
 };
 
 const hasRwHistoryParsedPayload = (parsed: RingParsedData | null | undefined) => {
@@ -1666,19 +1566,14 @@ const hasRwHistoryParsedPayload = (parsed: RingParsedData | null | undefined) =>
   return parsed.value != null && parsed.value !== '';
 };
 
-const shouldContinueRwFinalAbAfterFallback = (
-  parsed: RingParsedData,
-  finalAbCommands: RwAbHealthHistoryCommand[]
-) => {
+const shouldContinueRwFinalAbAfterFallback = (parsed: RingParsedData, finalAbCommands: RwAbHealthHistoryCommand[]) => {
   if (finalAbCommands.length === 0) return false;
   if (!hasRwHistoryParsedPayload(parsed)) return true;
   return getMissingRwFinalAbCommandsForFallback(parsed, finalAbCommands).length > 0;
 };
 
-const getMissingRwFinalAbCommandsForFallback = (
-  parsed: RingParsedData,
-  finalAbCommands: RwAbHealthHistoryCommand[]
-) => finalAbCommands.filter((command) => !hasRwHistoryParsedMetricForCommand(parsed, command));
+const getMissingRwFinalAbCommandsForFallback = (parsed: RingParsedData, finalAbCommands: RwAbHealthHistoryCommand[]) =>
+  finalAbCommands.filter((command) => !hasRwHistoryParsedMetricForCommand(parsed, command));
 
 const hasRwHistoryParsedMetricForCommand = (parsed: RingParsedData, command: RwAbHealthHistoryCommand) => {
   if (Number(parsed.key) === command.key && (parsed.value != null || (Array.isArray(parsed.records) && parsed.records.length > 0))) {
@@ -1698,24 +1593,27 @@ const hasRwHistoryRecordMetricForCommand = (record: Record<string, any>, command
     return /step|sport|activity/.test(dataTypeText) || hasAlias(['stepCount', 'step_count', 'steps', 'step', 'totalSteps']);
   }
   if (command.key === RwKey.Sleep || command.key === RwKey.RawSleep) {
-    return /sleep/.test(dataTypeText) || hasAlias([
-      'sleepState',
-      'sleep_state',
-      'sleepStatus',
-      'sleep_status',
-      'sleepType',
-      'sleep_type',
-      'sleepDuration',
-      'sleep_duration',
-      'durationMinutes',
-      'duration_minutes',
-      'sleepTotalMinutes',
-      'sleep_total_minutes',
-      'totalSleepMinutes',
-      'total_sleep_minutes',
-      'sleepMinutes',
-      'sleep_minutes'
-    ]);
+    return (
+      /sleep/.test(dataTypeText) ||
+      hasAlias([
+        'sleepState',
+        'sleep_state',
+        'sleepStatus',
+        'sleep_status',
+        'sleepType',
+        'sleep_type',
+        'sleepDuration',
+        'sleep_duration',
+        'durationMinutes',
+        'duration_minutes',
+        'sleepTotalMinutes',
+        'sleep_total_minutes',
+        'totalSleepMinutes',
+        'total_sleep_minutes',
+        'sleepMinutes',
+        'sleep_minutes'
+      ])
+    );
   }
   if (command.key === RwKey.HeartRate) {
     return hasAlias(['heartRate', 'heart_rate', 'heartrate', 'hr', 'bpm']);
@@ -1937,10 +1835,7 @@ const getRwHistoryFileListRetryDelay = (options: SyncRwHistoryOptions) => {
   return Math.min(configuredDelayMs, Math.max(0, timeoutMs - 500));
 };
 
-const getRwHistoryFallbackResponseWaitMs = (
-  readDetails: Record<string, unknown>,
-  preferredWaitMs: number
-) => {
+const getRwHistoryFallbackResponseWaitMs = (readDetails: Record<string, unknown>, preferredWaitMs: number) => {
   const timeoutMs = Number(readDetails.timeoutMs || 30000);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return preferredWaitMs;
   if (timeoutMs <= 3000) return Math.min(preferredWaitMs, Math.max(120, Math.floor(timeoutMs * 0.08)));
@@ -1962,12 +1857,7 @@ const getRwHistoryPreflightResponseTimeoutMs = (options: SyncRwHistoryOptions, t
   return timeoutMs > 5000 ? RW_HISTORY_PREFLIGHT_RESPONSE_TIMEOUT_MS : 0;
 };
 
-const getRwHistoryReadDetails = (
-  options: SyncRwHistoryOptions,
-  sinceTimestamp: number,
-  readAll: boolean,
-  timeoutMs: number
-) => ({
+const getRwHistoryReadDetails = (options: SyncRwHistoryOptions, sinceTimestamp: number, readAll: boolean, timeoutMs: number) => ({
   timeoutMs,
   readAll,
   sinceTimestamp,
@@ -1976,9 +1866,7 @@ const getRwHistoryReadDetails = (
 });
 
 const formatRwHistoryFileListTimeout = (details: Record<string, unknown>, cause: string) => {
-  const dataTypes = Array.isArray(details.dataTypes) && details.dataTypes.length > 0
-    ? (details.dataTypes as string[]).join(',')
-    : '-';
+  const dataTypes = Array.isArray(details.dataTypes) && details.dataTypes.length > 0 ? (details.dataTypes as string[]).join(',') : '-';
   return [
     `RW history response timeout after ${details.timeoutMs}ms`,
     `readAll=${details.readAll}`,
@@ -1987,7 +1875,9 @@ const formatRwHistoryFileListTimeout = (details: Record<string, unknown>, cause:
     `dataTypes=${dataTypes}`,
     details.historyMode ? `mode=${details.historyMode}` : '',
     cause ? `cause=${cause}` : ''
-  ].filter(Boolean).join('; ');
+  ]
+    .filter(Boolean)
+    .join('; ');
 };
 
 const summarizeRwHistoryFiles = (files: RwFileListItem[]) => files.slice(0, 8).map(summarizeRwHistoryFile);
@@ -2043,9 +1933,7 @@ const normalizeRwHistoryDiagnosticDetails = (details: unknown) => {
       text = String(details);
     }
   }
-  return text.length > RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH
-    ? `${text.slice(0, RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH)}...<truncated>`
-    : text;
+  return text.length > RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH ? `${text.slice(0, RING_DIAGNOSTIC_LOG_MAX_DETAILS_LENGTH)}...<truncated>` : text;
 };
 
 const formatRwHistoryRawHex = (raw: unknown) => {
@@ -2293,10 +2181,7 @@ const normalizeRwHistoryDataTypes = (values?: string[]) => {
 };
 
 const getRwRequestedHistoryDataTypes = (options: SyncRwHistoryOptions) =>
-  normalizeRwHistoryDataTypes([
-    ...(options.dataType ? [options.dataType] : []),
-    ...(Array.isArray(options.dataTypes) ? options.dataTypes : [])
-  ]);
+  normalizeRwHistoryDataTypes([...(options.dataType ? [options.dataType] : []), ...(Array.isArray(options.dataTypes) ? options.dataTypes : [])]);
 
 const isRwLastDataOnlyHistoryRequest = (options: SyncRwHistoryOptions) => {
   const requestedTypes = getRwRequestedHistoryDataTypes(options);
@@ -2316,11 +2201,7 @@ const getRwLegacyLocalDataRecordType = (record: Record<string, any>, options: Sy
   return 'daily_health';
 };
 
-const getRwNativeHistoryRecordType = (
-  record: Record<string, any>,
-  parsed: RingParsedData,
-  options: SyncRwHistoryOptions
-) => {
+const getRwNativeHistoryRecordType = (record: Record<string, any>, parsed: RingParsedData, options: SyncRwHistoryOptions) => {
   if (parsed.type === 'qkeer_v2_last_data') {
     return getRwLastDataHistoryRecordType(record, options);
   }
@@ -2345,10 +2226,7 @@ const getRwNativeHistoryRecordType = (
 };
 
 const getRwLastDataHistoryRecordType = (record: Record<string, any>, options: SyncRwHistoryOptions) => {
-  const requestedTypes = normalizeRwHistoryDataTypes([
-    ...(options.dataType ? [options.dataType] : []),
-    ...(Array.isArray(options.dataTypes) ? options.dataTypes : [])
-  ]);
+  const requestedTypes = normalizeRwHistoryDataTypes([...(options.dataType ? [options.dataType] : []), ...(Array.isArray(options.dataTypes) ? options.dataTypes : [])]);
 
   if (requestedTypes.length === 1 && isRwLastDataRecordCompatibleWithType(record, requestedTypes[0])) {
     return requestedTypes[0];
@@ -2362,15 +2240,7 @@ const getRwLastDataHistoryRecordType = (record: Record<string, any>, options: Sy
 
 const isRwLastDataRecordCompatibleWithType = (record: Record<string, any>, dataType: string): boolean => {
   if (dataType === 'sleep') {
-    return hasRwHistoryRecordValue(record, [
-      'sleepTotalMinutes',
-      'totalSleepMinutes',
-      'sleepDuration',
-      'sleepDurationMinutes',
-      'sleepMinutes',
-      'sleepTime',
-      'totalSleepTime'
-    ]);
+    return hasRwHistoryRecordValue(record, ['sleepTotalMinutes', 'totalSleepMinutes', 'sleepDuration', 'sleepDurationMinutes', 'sleepMinutes', 'sleepTime', 'totalSleepTime']);
   }
   if (dataType === 'step') return hasRwHistoryRecordValue(record, ['stepCount', 'steps', 'step', 'totalSteps']);
   if (dataType === 'heart_rate') return hasRwHistoryRecordValue(record, ['heartRate', 'heartrate', 'heart_rate', 'hr', 'bpm']);

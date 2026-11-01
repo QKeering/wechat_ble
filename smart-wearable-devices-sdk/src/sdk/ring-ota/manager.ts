@@ -88,11 +88,7 @@ export default class RingOTAManager {
       }
 
       try {
-        await withOtaTimeout(
-          Promise.resolve(uni.setBLEMTU({ deviceId: this.deviceId, mtu: this.options.mtu })),
-          OTA_MTU_CALL_TIMEOUT_MS,
-          'OTA set MTU'
-        );
+        await withOtaTimeout(Promise.resolve(uni.setBLEMTU({ deviceId: this.deviceId, mtu: this.options.mtu })), OTA_MTU_CALL_TIMEOUT_MS, 'OTA set MTU');
       } catch (error) {
         console.warn('[RingOTA] set MTU failed, continue with default MTU.', error);
       }

@@ -10,21 +10,11 @@ import {
 } from '@/composables/useRingMetricReadings';
 import { useRingStore } from '@/stores';
 import { useUserStore } from '@/stores/user';
-import {
-  appendRingDiagnosticLog,
-  isRingDiagnosticNodeRuntime,
-  RING_DIAGNOSTIC_LOG_STORAGE_KEY
-} from '@/utils/ringDiagnosticLog';
+import { beginRingBackgroundCriticalTask } from '@/utils/ringBackgroundTasks';
+import { appendRingDiagnosticLog, isRingDiagnosticNodeRuntime, RING_DIAGNOSTIC_LOG_STORAGE_KEY } from '@/utils/ringDiagnosticLog';
 export { appendRingDiagnosticLog };
 
-export type RwForegroundMetric =
-  | 'heart_rate'
-  | 'blood_oxygen'
-  | 'temperature'
-  | 'hrv'
-  | 'stress'
-  | 'blood_pressure'
-  | 'blood_sugar';
+export type RwForegroundMetric = 'heart_rate' | 'blood_oxygen' | 'temperature' | 'hrv' | 'stress' | 'blood_pressure' | 'blood_sugar';
 
 export const RW_FOREGROUND_METRIC_RESULT_TIMEOUT_MS = 45000;
 export const RW_FOREGROUND_METRIC_READ_AT_MS = [1500, 8000, 18000, 28000] as const;
@@ -66,15 +56,7 @@ const RW_FOREGROUND_METRIC_LABELS: Record<RwForegroundMetric, string> = {
   blood_pressure: '\u8840\u538b',
   blood_sugar: '\u8840\u7cd6'
 };
-const RW_FOREGROUND_METRIC_NAMES: RwForegroundMetric[] = [
-  'heart_rate',
-  'blood_oxygen',
-  'temperature',
-  'hrv',
-  'stress',
-  'blood_pressure',
-  'blood_sugar'
-];
+const RW_FOREGROUND_METRIC_NAMES: RwForegroundMetric[] = ['heart_rate', 'blood_oxygen', 'temperature', 'hrv', 'stress', 'blood_pressure', 'blood_sugar'];
 
 export const getRwForegroundMetricExpectedKey = (name: RwForegroundMetric) => RW_REALTIME_METRIC_KEYS[name];
 
@@ -118,7 +100,7 @@ const parseDiagnosticDetails = (details: unknown): Record<string, any> | null =>
   if (!text || text.includes('...<truncated>')) return null;
   try {
     const parsed = JSON.parse(text);
-    return parsed && typeof parsed === 'object' ? parsed as Record<string, any> : null;
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, any>) : null;
   } catch {
     return null;
   }
@@ -129,8 +111,7 @@ const getDiagnosticLogTimestamp = (entry: RingDiagnosticLogEntry) => {
   return Number.isFinite(idTimestamp) && idTimestamp > 0 ? idTimestamp : 0;
 };
 
-export const isRwForegroundMetric = (name: string): name is RwForegroundMetric =>
-  RW_FOREGROUND_METRIC_NAMES.includes(name as RwForegroundMetric);
+export const isRwForegroundMetric = (name: string): name is RwForegroundMetric => RW_FOREGROUND_METRIC_NAMES.includes(name as RwForegroundMetric);
 
 const pickFirstMetricValue = (...values: any[]) => values.find((value) => value != null && value !== '');
 const RW_FOREGROUND_STATUS_ONLY_BYTES = new Set([0x11, 0x31]);
@@ -218,14 +199,10 @@ const isRwForegroundAppRealtimeStatusKey = (key: number | null) => key === 0x022
 
 const readUint32LEFromArray = (values: unknown[]) => {
   if (values.length < 4 || values.slice(0, 4).some((value) => typeof value !== 'number')) return null;
-  return ((values[0] as number) || 0) |
-    (((values[1] as number) || 0) << 8) |
-    (((values[2] as number) || 0) << 16) |
-    (((values[3] as number) || 0) << 24);
+  return ((values[0] as number) || 0) | (((values[1] as number) || 0) << 8) | (((values[2] as number) || 0) << 16) | (((values[3] as number) || 0) << 24);
 };
 
-const isPlausibleRwForegroundHistoryTimestamp = (value: number) =>
-  Number.isFinite(value) && value >= 946_684_800 && value <= 4_102_444_800;
+const isPlausibleRwForegroundHistoryTimestamp = (value: number) => Number.isFinite(value) && value >= 946_684_800 && value <= 4_102_444_800;
 
 const hasRwForegroundHistoryRecords = (item: Record<string, any>) => {
   const records = item.records ?? item.metrics?.records ?? item.raw?.records;
@@ -258,7 +235,10 @@ const getRwForegroundTemperatureDataValue = (data: unknown) => {
   return values[0] >= 25 && values[0] <= 45 ? values[0] : null;
 };
 const normalizeRwForegroundMetricName = (value: unknown) => {
-  const compact = String(value || '').trim().replace(/[-_\s]/g, '').toLowerCase();
+  const compact = String(value || '')
+    .trim()
+    .replace(/[-_\s]/g, '')
+    .toLowerCase();
   if (compact === 'heartrate' || compact === 'hr') return 'heart_rate';
   if (compact === 'bloodoxygen' || compact === 'spo2' || compact === 'oxygen') return 'blood_oxygen';
   if (compact === 'temperature' || compact === 'bodytemperature' || compact === 'temp') return 'temperature';
@@ -349,91 +329,101 @@ export const getRwForegroundMetricValue = (name: RwForegroundMetric, data: any) 
   const directValue = data.value ?? data.metrics?.value ?? data.raw?.value ?? null;
   const sourceData = data.data ?? data.metrics?.data ?? data.raw?.data;
   if (name === 'heart_rate') {
-    return normalizeRwForegroundHeartRateValue(
-      pickFirstMetricValue(
-        data.heartRate,
-        data.heart_rate,
-        data.hr,
-        data.metrics?.heartRate,
-        data.metrics?.heart_rate,
-        data.metrics?.hr,
-        data.raw?.heartRate,
-        data.raw?.heart_rate,
-        data.raw?.hr,
-        directValue
-      )
-    ) ?? normalizeRwForegroundHeartRateValue(getRwForegroundScalarDataValue(sourceData));
+    return (
+      normalizeRwForegroundHeartRateValue(
+        pickFirstMetricValue(
+          data.heartRate,
+          data.heart_rate,
+          data.hr,
+          data.metrics?.heartRate,
+          data.metrics?.heart_rate,
+          data.metrics?.hr,
+          data.raw?.heartRate,
+          data.raw?.heart_rate,
+          data.raw?.hr,
+          directValue
+        )
+      ) ?? normalizeRwForegroundHeartRateValue(getRwForegroundScalarDataValue(sourceData))
+    );
   }
   if (name === 'blood_oxygen') {
-    return normalizeRwForegroundBloodOxygenValue(
-      data.bloodOxygen ??
-        data.blood_oxygen ??
-        data.spo2 ??
-        data.oxygen ??
-        data.metrics?.bloodOxygen ??
-        data.metrics?.blood_oxygen ??
-        data.metrics?.spo2 ??
-        data.metrics?.oxygen ??
-        data.raw?.bloodOxygen ??
-        data.raw?.blood_oxygen ??
-        data.raw?.spo2 ??
-        data.raw?.oxygen ??
-        directValue
-    ) ?? normalizeRwForegroundBloodOxygenValue(getRwForegroundScalarDataValue(sourceData));
+    return (
+      normalizeRwForegroundBloodOxygenValue(
+        data.bloodOxygen ??
+          data.blood_oxygen ??
+          data.spo2 ??
+          data.oxygen ??
+          data.metrics?.bloodOxygen ??
+          data.metrics?.blood_oxygen ??
+          data.metrics?.spo2 ??
+          data.metrics?.oxygen ??
+          data.raw?.bloodOxygen ??
+          data.raw?.blood_oxygen ??
+          data.raw?.spo2 ??
+          data.raw?.oxygen ??
+          directValue
+      ) ?? normalizeRwForegroundBloodOxygenValue(getRwForegroundScalarDataValue(sourceData))
+    );
   }
   if (name === 'hrv') {
-    return normalizeRwForegroundHrvValue(
-      pickFirstMetricValue(
-        data.heartRateVariability,
-        data.heart_rate_variability,
-        data.hrv,
-        data.metrics?.heartRateVariability,
-        data.metrics?.heart_rate_variability,
-        data.metrics?.hrv,
-        data.raw?.heartRateVariability,
-        data.raw?.heart_rate_variability,
-        data.raw?.hrv,
-        directValue
-      )
-    ) ?? normalizeRwForegroundHrvValue(getRwForegroundScalarDataValue(sourceData));
+    return (
+      normalizeRwForegroundHrvValue(
+        pickFirstMetricValue(
+          data.heartRateVariability,
+          data.heart_rate_variability,
+          data.hrv,
+          data.metrics?.heartRateVariability,
+          data.metrics?.heart_rate_variability,
+          data.metrics?.hrv,
+          data.raw?.heartRateVariability,
+          data.raw?.heart_rate_variability,
+          data.raw?.hrv,
+          directValue
+        )
+      ) ?? normalizeRwForegroundHrvValue(getRwForegroundScalarDataValue(sourceData))
+    );
   }
   if (name === 'stress') {
-    return normalizeRwForegroundStressValue(
-      pickFirstMetricValue(
-        data.stressIndex,
-        data.stress_index,
-        data.stress,
-        data.pressure,
-        data.metrics?.stressIndex,
-        data.metrics?.stress_index,
-        data.metrics?.stress,
-        data.metrics?.pressure,
-        data.raw?.stressIndex,
-        data.raw?.stress_index,
-        data.raw?.stress,
-        data.raw?.pressure,
-        directValue
-      )
-    ) ?? normalizeRwForegroundStressValue(getRwForegroundScalarDataValue(sourceData));
+    return (
+      normalizeRwForegroundStressValue(
+        pickFirstMetricValue(
+          data.stressIndex,
+          data.stress_index,
+          data.stress,
+          data.pressure,
+          data.metrics?.stressIndex,
+          data.metrics?.stress_index,
+          data.metrics?.stress,
+          data.metrics?.pressure,
+          data.raw?.stressIndex,
+          data.raw?.stress_index,
+          data.raw?.stress,
+          data.raw?.pressure,
+          directValue
+        )
+      ) ?? normalizeRwForegroundStressValue(getRwForegroundScalarDataValue(sourceData))
+    );
   }
   if (name === 'blood_sugar') {
-    return normalizeRwForegroundBloodSugarValue(
-      pickFirstMetricValue(
-        data.bloodSugar,
-        data.blood_sugar,
-        data.glucose,
-        data.sugar,
-        data.metrics?.bloodSugar,
-        data.metrics?.blood_sugar,
-        data.metrics?.glucose,
-        data.metrics?.sugar,
-        data.raw?.bloodSugar,
-        data.raw?.blood_sugar,
-        data.raw?.glucose,
-        data.raw?.sugar,
-        directValue
-      )
-    ) ?? normalizeRwForegroundBloodSugarValue(getRwForegroundScalarDataValue(sourceData));
+    return (
+      normalizeRwForegroundBloodSugarValue(
+        pickFirstMetricValue(
+          data.bloodSugar,
+          data.blood_sugar,
+          data.glucose,
+          data.sugar,
+          data.metrics?.bloodSugar,
+          data.metrics?.blood_sugar,
+          data.metrics?.glucose,
+          data.metrics?.sugar,
+          data.raw?.bloodSugar,
+          data.raw?.blood_sugar,
+          data.raw?.glucose,
+          data.raw?.sugar,
+          directValue
+        )
+      ) ?? normalizeRwForegroundBloodSugarValue(getRwForegroundScalarDataValue(sourceData))
+    );
   }
   if (name === 'blood_pressure') {
     const bloodPressure = data.bloodPressure ?? data.blood_pressure ?? data.bp;
@@ -443,23 +433,25 @@ export const getRwForegroundMetricValue = (name: RwForegroundMetric, data: any) 
     if (systolic != null || diastolic != null) return { systolic: systolic ?? null, diastolic: diastolic ?? null };
     return directValue;
   }
-  return normalizeRwForegroundTemperatureValue(
-    pickFirstMetricValue(
-      data.temperature,
-      data.bodyTemperature,
-      data.body_temperature,
-      data.bodyTemp,
-      data.metrics?.temperature,
-      data.metrics?.bodyTemperature,
-      data.metrics?.body_temperature,
-      data.metrics?.bodyTemp,
-      data.raw?.temperature,
-      data.raw?.bodyTemperature,
-      data.raw?.body_temperature,
-      data.raw?.bodyTemp,
-      directValue
-    )
-  ) ?? getRwForegroundTemperatureDataValue(sourceData);
+  return (
+    normalizeRwForegroundTemperatureValue(
+      pickFirstMetricValue(
+        data.temperature,
+        data.bodyTemperature,
+        data.body_temperature,
+        data.bodyTemp,
+        data.metrics?.temperature,
+        data.metrics?.bodyTemperature,
+        data.metrics?.body_temperature,
+        data.metrics?.bodyTemp,
+        data.raw?.temperature,
+        data.raw?.bodyTemperature,
+        data.raw?.body_temperature,
+        data.raw?.bodyTemp,
+        directValue
+      )
+    ) ?? getRwForegroundTemperatureDataValue(sourceData)
+  );
 };
 
 const getBloodPressureDisplayParts = (value: any) => {
@@ -508,12 +500,7 @@ export const useRwForegroundMeasurement = () => {
   const { controlRwHealthData, readRwHealthData } = ringBle;
 
   const getStoreSources = () => [ringStore, userStore];
-  const getSharedDataSources = () => [
-    ringStore.normalizedData || [],
-    ringStore.receivedData || [],
-    userStore.normalizedData || [],
-    userStore.receivedData || []
-  ];
+  const getSharedDataSources = () => [ringStore.normalizedData || [], ringStore.receivedData || [], userStore.normalizedData || [], userStore.receivedData || []];
 
   const findLatestRealtimeControlAck = (name: RwForegroundMetric, since = 0) => {
     for (const source of getSharedDataSources()) {
@@ -560,13 +547,7 @@ export const useRwForegroundMeasurement = () => {
     if (metricName && metricName !== 'unknown' && metricName !== name) return false;
     if (key != null && key > 0 && !expectedKeys.includes(key)) return false;
     const flag = getRwForegroundFlag(parsed);
-    if (
-      key != null &&
-      key > 0 &&
-      isRwForegroundCompatMetricKey(name, key) &&
-      requiresRwForegroundCompatReadFlag(name) &&
-      !isRwForegroundReadFlag(flag)
-    ) {
+    if (key != null && key > 0 && isRwForegroundCompatMetricKey(name, key) && requiresRwForegroundCompatReadFlag(name) && !isRwForegroundReadFlag(flag)) {
       return false;
     }
     if (key != null && key > 0 && hasRwForegroundHistoryRecords(parsed)) {
@@ -618,14 +599,7 @@ export const useRwForegroundMeasurement = () => {
     }
   };
 
-  const waitForDirectRealtimeMetric = async (
-    name: RwForegroundMetric,
-    startedAt: number,
-    timeoutMs: number,
-    token: number,
-    source: string,
-    measureStatus?: () => string
-  ) => {
+  const waitForDirectRealtimeMetric = async (name: RwForegroundMetric, startedAt: number, timeoutMs: number, token: number, source: string, measureStatus?: () => string) => {
     const parsed = await ringBle.waitForParsedData(
       (item: Record<string, any>) => token === rwMetricReadToken && activeRwMetric === name && isDirectRealtimeMetricPacket(item, name),
       timeoutMs,
@@ -640,11 +614,7 @@ export const useRwForegroundMeasurement = () => {
     return parsed;
   };
 
-  const getRwForegroundMeasurementSnapshot = (
-    name: RwForegroundMetric,
-    startedAt: number,
-    measureStatus?: () => string
-  ) => ({
+  const getRwForegroundMeasurementSnapshot = (name: RwForegroundMetric, startedAt: number, measureStatus?: () => string) => ({
     target: name,
     label: RW_FOREGROUND_METRIC_LABELS[name],
     startedAt,
@@ -676,14 +646,7 @@ export const useRwForegroundMeasurement = () => {
     latestAck: summarizeRealtimeControlAck(findLatestRealtimeControlAck(name, startedAt))
   });
 
-  const waitForSharedRealtimeMetric = async (
-    name: RwForegroundMetric,
-    startedAt: number,
-    timeoutMs: number,
-    token: number,
-    source: string,
-    measureStatus?: () => string
-  ) => {
+  const waitForSharedRealtimeMetric = async (name: RwForegroundMetric, startedAt: number, timeoutMs: number, token: number, source: string, measureStatus?: () => string) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (token !== rwMetricReadToken || activeRwMetric !== name) return null;
@@ -740,14 +703,15 @@ export const useRwForegroundMeasurement = () => {
 
   const runRwForegroundMeasurement = async (metric: RwForegroundMetric, options: RunRwForegroundMeasurementOptions = {}) => {
     const source = options.source || 'RW PAGE';
+    // 测量过程中 App 切到后台不能立刻断连：设备还在回帧，断开等于把这次测量作废。
+    // 持有关键任务 token，App.vue 会把断连推迟到本次测量真正结束之后。
+    // 必须在 stopActiveRwMeasurement 之前持有，避免上一轮测量收尾时把链路提前释放。
+    const releaseBackgroundTask = beginRingBackgroundCriticalTask(`foreground-measurement:${metric}`);
     await stopActiveRwMeasurement(source);
     const token = (rwMetricReadToken += 1);
     activeRwMetric = metric;
     const startedAt = options.startedAt || Date.now();
-    const timeoutMs =
-      options.timeoutMs ??
-      RW_FOREGROUND_METRIC_RESULT_TIMEOUT_MS_BY_METRIC[metric] ??
-      RW_FOREGROUND_METRIC_RESULT_TIMEOUT_MS;
+    const timeoutMs = options.timeoutMs ?? RW_FOREGROUND_METRIC_RESULT_TIMEOUT_MS_BY_METRIC[metric] ?? RW_FOREGROUND_METRIC_RESULT_TIMEOUT_MS;
     const minActiveMs = Math.max(0, options.minActiveMs || 0);
     const readAtMs = options.readAtMs || RW_FOREGROUND_METRIC_READ_AT_MS_BY_METRIC[metric] || RW_FOREGROUND_METRIC_READ_AT_MS;
     let controlAckPreview: Record<string, any> | null = null;
@@ -776,11 +740,7 @@ export const useRwForegroundMeasurement = () => {
     let controlCurrentlyEnabled = false;
     try {
       const waitForMetricOrDelay = async (delayMs: number) => {
-        const result = await Promise.race([
-          sleep(Math.max(0, delayMs)).then(() => null),
-          getDirectMetricWaiter(),
-          sharedMetricWaiter
-        ]);
+        const result = await Promise.race([sleep(Math.max(0, delayMs)).then(() => null), getDirectMetricWaiter(), sharedMetricWaiter]);
         return result;
       };
       const waitForMinActiveDuration = async () => {
@@ -884,6 +844,7 @@ export const useRwForegroundMeasurement = () => {
           reason: 'superseded'
         });
       }
+      releaseBackgroundTask();
     }
   };
 
@@ -892,13 +853,3 @@ export const useRwForegroundMeasurement = () => {
     stopActiveRwMeasurement
   };
 };
-
-
-
-
-
-
-
-
-
-
