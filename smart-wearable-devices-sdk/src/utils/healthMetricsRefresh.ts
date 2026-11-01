@@ -75,12 +75,10 @@ export const readHealthSummaryReadyAt = () => readFreshTimestamp(HEALTH_SUMMARY_
  * 失败只做有限重试：测量数据本身已经提交成功，汇总失败时仍保留标记，
  * 首页下一次 onShow 会再尝试刷新。
  */
-export const finalizeHealthSummaryAfterMeasurement = async (options: {
-  date: string;
-  metric?: string;
-  deviceMac?: string;
-}) => {
-  const date = String(options.date || '').trim().slice(0, 10);
+export const finalizeHealthSummaryAfterMeasurement = async (options: { date: string; metric?: string; deviceMac?: string }) => {
+  const date = String(options.date || '')
+    .trim()
+    .slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
 
   for (const delay of SUMMARY_FINALIZE_RETRY_DELAYS_MS) {
@@ -110,11 +108,7 @@ export const finalizeHealthSummaryAfterMeasurement = async (options: {
 };
 
 /** 测量数据提交成功后调用：立即广播标记，并异步补齐后端汇总。 */
-export const notifyMeasurementSubmitted = (options: {
-  recordTime: string;
-  metric: string;
-  deviceMac?: string;
-}) => {
+export const notifyMeasurementSubmitted = (options: { recordTime: string; metric: string; deviceMac?: string }) => {
   const recordTime = String(options.recordTime || '').trim();
   markHealthMetricsRecorded({
     metric: options.metric,

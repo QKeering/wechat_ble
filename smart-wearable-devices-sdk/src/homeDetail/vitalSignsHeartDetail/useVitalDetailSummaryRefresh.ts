@@ -1,10 +1,6 @@
 import type { Ref } from 'vue';
 import { formatLocalDate } from '@/utils/utils.js';
-import {
-  HEALTH_METRICS_RECORDED_EVENT,
-  readHealthSummaryReadyAt,
-  type HealthMetricsRecordedPayload
-} from '@/utils/healthMetricsRefresh';
+import { HEALTH_METRICS_RECORDED_EVENT, readHealthSummaryReadyAt, type HealthMetricsRecordedPayload } from '@/utils/healthMetricsRefresh';
 
 type VitalDetailSummaryRefreshOptions = {
   currentDate: Ref<Date>;
