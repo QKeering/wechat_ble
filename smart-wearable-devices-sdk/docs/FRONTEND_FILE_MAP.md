@@ -14,7 +14,7 @@
 | `tsconfig.json` | TypeScript 配置。 |
 | `project.config.json` | 微信小程序项目配置。 |
 | `src/main.ts` | Vue SSR app 创建入口，安装 Pinia、uv-ui、全局 share mixin、HTTP Request 初始化。 |
-| `src/App.vue` | 应用生命周期入口：`onLaunch` 安装错误提示保护；`onShow` 初始化蓝牙、注册监听、恢复业务自动刷新与上次绑定设备；`onHide` 暂停自动刷新并重置蓝牙 ready 状态。 |
+| `src/App.vue` | 应用生命周期入口：`onLaunch` 安装错误提示保护；`onShow` 初始化蓝牙、注册监听、恢复业务自动刷新与上次绑定设备（App 端先做链路体检）；`onHide` 暂停自动刷新并挂起自动恢复；非 App 端重置蓝牙 ready 状态并延迟断开，App 端保留 BLE 链路、只停扫描。 |
 | `src/pages.json` | 小程序页面、分包、tabBar、全局样式配置。主 tab 为感知首页、健康、我的；详情页集中在 `homeDetail` 分包。 |
 | `src/manifest.json` | 小程序 manifest，含 appid、权限、懒加载等。 |
 | `src/uni.scss` | uni-app 全局变量与样式。 |

@@ -35,6 +35,12 @@ import {
   showRingWearGuidance,
   type RingWearState
 } from '@/utils/ringWearGate';
+import {
+  beginMeasurementIntent,
+  endMeasurementIntent,
+  ensureRingReadyForMeasurement,
+  isMeasurementIntentPending
+} from '@/composables/useRingMeasurementGate';
 
 const { t } = useI18n();
 const userStore = useUserStore();
@@ -44,6 +50,7 @@ const {
   queryCurrentWearState,
   isVitalMeasurementLocked,
   vitalMeasurementLockKind,
+  isVitalMeasurementLockTokenActive,
   acquireVitalMeasurementLock,
   releaseVitalMeasurementLock,
   completeVitalMeasurement,
@@ -73,6 +80,8 @@ const agreementChecked = ref(false);
 // 测量状态：'idle' | 'measuring' | 'completed'
 const measureStatus = ref('idle');
 let vitalMeasurementLockToken = '';
+let pageAlive = true;
+const measureReadyRetry = ref(false);
 watch(
   () => [props.hrvData, props.sleepSegmentObj],
   async (newVal, oldVal) => {
@@ -416,20 +425,61 @@ const startMeasure = async () => {
     return;
   }
   measurePopup.value?.close?.();
-  if (!getSubmitDeviceMac(userStore, isIOS.value)) {
+  const hasDeviceIdentity = Boolean(
+    getSubmitDeviceMac(userStore, isIOS.value) || (userStore.deviceInfo as any)?.deviceId
+  );
+  if (!hasDeviceIdentity) {
     uni.showToast({ title: t('请先连接设备'), icon: 'none' });
     (uni as any).$uv.route('/pagesA/mines/connectDevice');
     return;
   }
-  const acquiredLockToken = acquireVitalMeasurementLock('hrv');
-  if (!acquiredLockToken) {
-    showVitalMeasurementBusy();
+  if (!beginMeasurementIntent('hrv')) {
+    // 已有一个测量意图在等待链路：按钮已显示“连接中”，不要再弹提示。
     return;
   }
-  vitalMeasurementLockToken = acquiredLockToken;
+  measureReadyRetry.value = false;
+  try {
+    // 回前台时链路可能仍在恢复：排队等它就绪，连上后自动继续。
+    const ready = await ensureRingReadyForMeasurement({ loadingTitle: t('正在连接设备...') });
+    if (!pageAlive) return;
+    if (!ready) {
+      // 静默失败：按钮显示“重试”，不要用超时提示打断用户。
+      measureReadyRetry.value = true;
+      return;
+    }
+    if (!getSubmitDeviceMac(userStore, isIOS.value)) {
+      uni.showToast({ title: t('请先连接设备'), icon: 'none' });
+      (uni as any).$uv.route('/pagesA/mines/connectDevice');
+      return;
+    }
+    const acquiredLockToken = acquireVitalMeasurementLock('hrv');
+    if (!acquiredLockToken) {
+      showVitalMeasurementBusy();
+      return;
+    }
+    vitalMeasurementLockToken = acquiredLockToken;
+  } finally {
+    endMeasurementIntent('hrv');
+  }
 
+  // 预检本身会下发探测命令；先确认锁还在，避免链路刚断开时白跑一轮。
+  if (!isVitalMeasurementLockTokenActive(vitalMeasurementLockToken)) {
+    vitalMeasurementLockToken = '';
+    uni.showToast({ title: t('设备未连接，请靠近设备后重试'), icon: 'none' });
+    return;
+  }
   if (!(await ensureRingWornBeforeMeasurement(() => queryCurrentWearState('heart_rate')))) {
     settleOwnVitalMeasurementLock('wear-preflight-blocked');
+    return;
+  }
+  if (!pageAlive) {
+    settleOwnVitalMeasurementLock('page-unload');
+    return;
+  }
+  // 佩戴预检期间链路可能掉线，锁会被自动释放；token 失效就不要继续下发命令。
+  if (!isVitalMeasurementLockTokenActive(vitalMeasurementLockToken)) {
+    vitalMeasurementLockToken = '';
+    uni.showToast({ title: t('设备未连接，请靠近设备后重试'), icon: 'none' });
     return;
   }
   if (!isRwDevice()) syncVitalMeasurementLockWithLegacyBusy(vitalMeasurementLockToken);
@@ -556,11 +606,16 @@ watch(
 );
 // 动态文本（计算属性）
 const measureText = computed(() => {
-  if (!getSubmitDeviceMac(userStore, isIOS.value)) {
+  const hasDeviceIdentity = Boolean(
+    getSubmitDeviceMac(userStore, isIOS.value) || (userStore.deviceInfo as any)?.deviceId
+  );
+  if (!hasDeviceIdentity) {
     return t('未连接');
   }
   // legacy 数值返回后的共享锁仅用于保护固件命令通道，不能显示为仍在测量。
   if (measureStatus.value === 'measuring') return t('HRV测量中');
+  if (isMeasurementIntentPending() || userStore.reconnectStatus === 'reconnecting') return t('连接中');
+  if (measureReadyRetry.value && !userStore.isConnected) return t('重试');
   return t('测量');
 });
 const jumpDetail = () => {
@@ -571,6 +626,7 @@ const jumpDetail = () => {
 
 onLoad(() => {});
 onShow(async () => {
+  pageAlive = true;
   // 测量中切到后台再回来时不能把状态重置成 idle：后台那轮测量还在跑。
   if (measureStatus.value === 'measuring') return;
   clearMeasureCompleteTimer();
@@ -583,6 +639,8 @@ onShow(async () => {
   popup1.value?.close?.();
 });
 onUnload(() => {
+  pageAlive = false;
+  endMeasurementIntent('hrv');
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }

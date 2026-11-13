@@ -41,15 +41,21 @@ import {
   type RingWearState
 } from '@/utils/ringWearGate';
 import { notifyMeasurementSubmitted } from '@/utils/healthMetricsRefresh';
+import {
+  beginMeasurementIntent,
+  endMeasurementIntent,
+  ensureRingReadyForMeasurement,
+  isMeasurementIntentPending
+} from '@/composables/useRingMeasurementGate';
 
 const { t } = useI18n();
 const {
   sendActiveMeasureCommand,
   refreshHealthData,
-  ensureCommunicationReady,
   queryCurrentWearState,
   isVitalMeasurementLocked,
   vitalMeasurementLockKind,
+  isVitalMeasurementLockTokenActive,
   acquireVitalMeasurementLock,
   releaseVitalMeasurementLock,
   completeVitalMeasurement,
@@ -235,15 +241,22 @@ const jumpDetail = () => {
 const measureStatus = ref('idle');
 const heartRate = ref(0);
 let vitalMeasurementLockToken = '';
+let pageAlive = true;
+const measureReadyRetry = ref(false);
 
 // 动态文本（计算属性）
 const measureText = computed(() => {
-  if (!getSubmitDeviceMac(userStore, isIOS.value)) {
+  const hasDeviceIdentity = Boolean(
+    getSubmitDeviceMac(userStore, isIOS.value) || (userStore.deviceInfo as any)?.deviceId
+  );
+  if (!hasDeviceIdentity) {
     return t('未连接');
   }
   // 共享锁在 legacy 固件返回数值后仍会保留一段时间，用于避免立即下发下一条
   // 测量命令触发“设备繁忙”。它是内部冷却状态，不代表页面仍在测量。
   if (measureStatus.value === 'measuring') return t('心率测量中');
+  if (isMeasurementIntentPending() || userStore.reconnectStatus === 'reconnecting') return t('连接中');
+  if (measureReadyRetry.value && !userStore.isConnected) return t('重试');
   return t('测量');
 });
 // 监听 userStore.receivedData 变化
@@ -327,7 +340,6 @@ let completedMeasurementReading: any = null;
 let wearGatePending = false;
 let wearConfirmedForRun = false;
 let legacyMeasurementValueReady = false;
-const HEART_RATE_READY_TIMEOUT_MS = 12000;
 const measureChange = (e: any) => {};
 const isRwDevice = () => resolveRingProtocol(userStore.deviceInfo as any) === 'rw';
 const showVitalMeasurementBusy = () => {
@@ -368,26 +380,6 @@ const getHeartRateMeasureSnapshot = () => ({
   notifyEnabled: Boolean((userStore.deviceInfo as any)?.notifyEnabled),
   measureStatus: measureStatus.value
 });
-const ensureHeartRateCommunicationReady = async () => {
-  appendRingDiagnosticLog('VITAL HEART', 'heart-rate-ready-check-start', getHeartRateMeasureSnapshot());
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    const ready = await Promise.race([
-      Promise.resolve(ensureCommunicationReady()),
-      new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), HEART_RATE_READY_TIMEOUT_MS);
-      })
-    ]);
-    appendRingDiagnosticLog('VITAL HEART', 'heart-rate-ready-check-result', {
-      ...getHeartRateMeasureSnapshot(),
-      ready: Boolean(ready),
-      timeoutMs: HEART_RATE_READY_TIMEOUT_MS
-    });
-    if (!ready) throw new Error('设备连接未就绪，请靠近设备后重试');
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-};
 const clearMeasureCompleteTimer = () => {
   if (!measureCompleteTimer) return;
   clearTimeout(measureCompleteTimer);
@@ -522,37 +514,73 @@ const startMeasure = async () => {
     return;
   }
   measurePopup.value?.close?.();
-  if (!getSubmitDeviceMac(userStore, isIOS.value)) {
+  const hasDeviceIdentity = Boolean(
+    getSubmitDeviceMac(userStore, isIOS.value) || (userStore.deviceInfo as any)?.deviceId
+  );
+  if (!hasDeviceIdentity) {
     uni.showToast({ title: t('请先连接设备'), icon: 'none' });
     (uni as any).$uv.route('/pagesA/mines/connectDevice');
     return;
   }
-  const acquiredLockToken = acquireVitalMeasurementLock('heart_rate');
-  if (!acquiredLockToken) {
-    showVitalMeasurementBusy();
+  if (!beginMeasurementIntent('heart_rate')) {
+    // 已有一个测量意图在等待链路：按钮已显示“连接中”，不要再弹提示。
     return;
   }
-  vitalMeasurementLockToken = acquiredLockToken;
+  measureReadyRetry.value = false;
 
-  appendRingDiagnosticLog('VITAL HEART', 'heart-rate-measure-requested', getHeartRateMeasureSnapshot());
-  uni.showLoading({ title: t('正在连接设备...') });
   try {
-    await ensureHeartRateCommunicationReady();
+    appendRingDiagnosticLog('VITAL HEART', 'heart-rate-measure-requested', getHeartRateMeasureSnapshot());
+    // 回前台时链路可能仍在恢复：排队等它就绪，连上后自动继续，而不是直接放弃。
+    const ready = await ensureRingReadyForMeasurement({ loadingTitle: t('正在连接设备...') });
+    if (!pageAlive) return;
+    if (!ready) {
+      appendRingDiagnosticLog('VITAL HEART', 'heart-rate-ready-check-failed', getHeartRateMeasureSnapshot());
+      // 静默失败：按钮显示“重试”，不要用超时提示打断用户。
+      measureReadyRetry.value = true;
+      return;
+    }
+    // 等链路期间设备身份可能变化（切换/解绑），必须重新校验。
+    if (!getSubmitDeviceMac(userStore, isIOS.value)) {
+      uni.showToast({ title: t('请先连接设备'), icon: 'none' });
+      (uni as any).$uv.route('/pagesA/mines/connectDevice');
+      return;
+    }
+    const acquiredLockToken = acquireVitalMeasurementLock('heart_rate');
+    if (!acquiredLockToken) {
+      showVitalMeasurementBusy();
+      return;
+    }
+    vitalMeasurementLockToken = acquiredLockToken;
   } catch (error) {
-    uni.hideLoading();
     appendRingDiagnosticLog('VITAL HEART', 'heart-rate-ready-check-failed', {
       ...getHeartRateMeasureSnapshot(),
       error: formatBleErrorMessage(error, '设备连接未就绪')
     });
-    settleOwnVitalMeasurementLock('ready-check-failed');
-    uni.showToast({ title: t(formatBleErrorMessage(error, '设备未连接，请靠近设备后重试')), icon: 'none' });
+    measureReadyRetry.value = true;
+    return;
+  } finally {
+    endMeasurementIntent('heart_rate');
+  }
+
+  // 预检本身会下发探测命令；先确认锁还在，避免链路刚断开时白跑一轮。
+  if (!isVitalMeasurementLockTokenActive(vitalMeasurementLockToken)) {
+    vitalMeasurementLockToken = '';
+    uni.showToast({ title: t('设备未连接，请靠近设备后重试'), icon: 'none' });
     return;
   }
-  uni.hideLoading();
-
   if (!(await ensureRingWornBeforeMeasurement(() => queryCurrentWearState('heart_rate')))) {
     appendRingDiagnosticLog('VITAL HEART', 'heart-rate-wear-preflight-blocked', getHeartRateMeasureSnapshot());
     settleOwnVitalMeasurementLock('wear-preflight-blocked');
+    return;
+  }
+  if (!pageAlive) {
+    settleOwnVitalMeasurementLock('page-unload');
+    return;
+  }
+  // 佩戴预检期间链路可能掉线，锁会被自动释放；token 失效就不要继续下发命令。
+  if (!isVitalMeasurementLockTokenActive(vitalMeasurementLockToken)) {
+    vitalMeasurementLockToken = '';
+    uni.showToast({ title: t('设备未连接，请靠近设备后重试'), icon: 'none' });
     return;
   }
   if (!isRwDevice()) syncVitalMeasurementLockWithLegacyBusy(vitalMeasurementLockToken);
@@ -628,6 +656,7 @@ const startMeasure = async () => {
 };
 onLoad(async () => {});
 onShow(async () => {
+  pageAlive = true;
   // 测量中切到后台再回来时不能把状态重置成 idle：后台那轮测量还在跑，
   // 重置会让页面显示“已停止”，结果也无法回填。
   if (measureStatus.value === 'measuring') return;
@@ -644,6 +673,8 @@ onShow(async () => {
   popup.value?.close?.();
 });
 onUnload(() => {
+  pageAlive = false;
+  endMeasurementIntent('heart_rate');
   if (measureTimeout) {
     clearTimeout(measureTimeout);
   }

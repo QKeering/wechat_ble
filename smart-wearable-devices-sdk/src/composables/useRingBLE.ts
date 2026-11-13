@@ -279,6 +279,11 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
   const vitalMeasurementLock = computed(() => getActiveVitalMeasurementLock());
   const isVitalMeasurementLocked = computed(() => Boolean(vitalMeasurementLock.value));
   const vitalMeasurementLockKind = computed(() => vitalMeasurementLock.value?.kind || null);
+  // 链路抖动时锁会被自动释放；测量在等待/预检后需要确认自己手里的 token 仍是当前活动锁。
+  const isVitalMeasurementLockTokenActive = (token: string) => {
+    if (!token) return false;
+    return getActiveVitalMeasurementLock()?.token === token;
+  };
   const acquireVitalMeasurementLock = (kind: VitalMeasurementLockKind, fallbackMs?: number) => {
     const deviceKey = getLegacyWearMeasurementDeviceKey();
     const current = getActiveVitalMeasurementLock();
@@ -1237,6 +1242,7 @@ export const useRingBLE = (options: UseRingBLEOptions = {}) => {
     vitalMeasurementLock,
     isVitalMeasurementLocked,
     vitalMeasurementLockKind,
+    isVitalMeasurementLockTokenActive,
     acquireVitalMeasurementLock,
     releaseVitalMeasurementLock,
     completeVitalMeasurement,

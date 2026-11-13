@@ -98,6 +98,12 @@
 						return rawSetOption(options, ...args)
 					}
 
+					// 页面显式要求关闭 tooltip 时（如首页的压力/生命体征小图），
+					// 不要再强制打开 axis tooltip。
+					if (options?.qkeerDisableTooltip === true) {
+						return rawSetOption(options, ...args)
+					}
+
 					keepTapTooltipVisible = true
 					const currentTooltip = options?.tooltip && !Array.isArray(options.tooltip) ? options.tooltip : {}
 					const currentAxisPointer = currentTooltip?.axisPointer || {}

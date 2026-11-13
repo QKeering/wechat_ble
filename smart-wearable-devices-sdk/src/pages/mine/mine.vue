@@ -56,6 +56,7 @@ import { submitData } from '@/common/api/homeDetail';
 import { scan, getBindInfo } from '@/common/api/device';
 import CustomSteps from '@/components/customSteps.vue';
 import { clearFrontendRingBindingState, getBoundRingIdentity, hasBoundRingIdentity } from '@/utils/ringBinding';
+import { isForegroundLinkVerificationPending } from '@/utils/foregroundLinkGate';
 import { hasAnyRingCommunicationReady, isRingConnectionActive, isRingConnectionConnecting } from '@/utils/ringConnectionStatus';
 import { clearRwDiagnosticCommandLock, setRwDiagnosticCommandLock } from '@/utils/rwDiagnosticCommandLock';
 import { useUnifiedBatteryDisplay } from '@/composables/useUnifiedBatteryDisplay';
@@ -3453,6 +3454,14 @@ onShow(async () => {
     if (deviceSyncActive) {
       appendMineDiagnosticLog('page-show-device-sync-active-ready', {
         reason: 'backend-page-initialized-ble-reused',
+        snapshot: getMineConnectionSnapshot()
+      });
+      return;
+    }
+
+    // App 回前台会先做链路体检；页面侧不要并发重连/命令，否则会抢链路。
+    if (isForegroundLinkVerificationPending()) {
+      appendMineDiagnosticLog('page-show-link-verification-pending', {
         snapshot: getMineConnectionSnapshot()
       });
       return;

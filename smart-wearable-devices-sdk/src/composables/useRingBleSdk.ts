@@ -1737,6 +1737,35 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     return result;
   };
 
+  /**
+   * Drop only the "communication ready" metadata, keeping the device identity
+   * and cached business data intact.
+   *
+   * Android keeps the BLE link while the app is in the background. If the OS or
+   * the ring dropped the physical link, the stale `deviceInfo` snapshot still
+   * looks ready (service/characteristic fields + notifyEnabled). A full
+   * `disconnect()` would clear the Pinia runtime and destroy the cached values
+   * that make foreground return feel instant, so this helper invalidates just
+   * enough for `restoreLastBusinessDevice()` to run a real reconnect.
+   */
+  const invalidateCommunicationReadyFields = () => {
+    const current = deviceInfo.value as RingDeviceInfo;
+    if (!current?.deviceId) return;
+    // 取消在途连接/重连尝试，并清掉 30s 复用租约；保留退避计数。
+    expirePendingConnectionAttempt({ resetBackoff: false });
+    expectedConnectionDevice = null;
+    reconnectStatus.value = 'reconnecting';
+    reconnectResult.value = null;
+    deviceInfo.value = {
+      ...current,
+      serviceId: '',
+      cmdCharId: '',
+      dataCharId: '',
+      dataServiceId: '',
+      notifyEnabled: false
+    };
+  };
+
   const ensureCommunicationReady = async () => {
     const lifecycleToken = connectionLifecycleToken;
     const currentDevice = deviceInfo.value as RingDeviceInfo;
@@ -3145,6 +3174,7 @@ export const useRingBleSdk = (options: UseRingBleSdkOptions = {}) => {
     discoverServicesAndChars,
     enableNotify,
     disconnect,
+    invalidateCommunicationReadyFields,
     suspendRuntimeRecovery,
     resumeRuntimeRecovery,
     ensureCommunicationReady,

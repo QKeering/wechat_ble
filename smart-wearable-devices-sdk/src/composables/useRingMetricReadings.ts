@@ -655,6 +655,7 @@ export const getLatestHeartRateReading = (store: RingStoreLike, since = 0) => {
   if (legacyData) {
     return {
       ...normalizeMetricRecordNumbers(legacyData, ['heartRate', 'heartRateVariability', 'stressIndex', 'stress']),
+      timestampSource: 'record',
       heartRate: normalizeHeartRateMetricValue(legacyData.heartRate)
     };
   }
@@ -673,6 +674,7 @@ export const getLatestHeartRateReading = (store: RingStoreLike, since = 0) => {
   const hrvReading = getLatestHrvReading(store, since);
   const reading: any = {
     timestamp,
+    timestampSource: rwValue !== null ? 'record' : 'fallback',
     heartRate: value
   };
   if (stressReading?.stressIndex != null) {
@@ -694,9 +696,11 @@ export const getLatestSpo2Reading = (store: RingStoreLike, since = 0, afterIndex
   if (legacyData) {
     const legacyValue = normalizeBloodOxygenMetricValue(getMetricValue(legacyData, BLOOD_OXYGEN_VALUE_KEYS));
     if (legacyValue === null) return undefined;
+    const legacyTimestamp = getMetricRecordTime(legacyData, 0);
     return {
       ...normalizeMetricRecordNumbers(legacyData, BLOOD_OXYGEN_VALUE_KEYS),
-      timestamp: getMetricRecordTime(legacyData, Date.now()),
+      timestamp: legacyTimestamp || Date.now(),
+      timestampSource: legacyTimestamp ? 'record' : 'fallback',
       bloodOxygen: legacyValue
     };
   }
@@ -720,6 +724,7 @@ export const getLatestSpo2Reading = (store: RingStoreLike, since = 0, afterIndex
 
   return {
     timestamp,
+    timestampSource: rwValue !== null ? 'record' : 'fallback',
     bloodOxygen: value
   };
 };

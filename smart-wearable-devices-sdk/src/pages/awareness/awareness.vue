@@ -5,6 +5,7 @@ import { onLoad, onShow, onReady, onHide, onPageScroll, onUnload, onPullDownRefr
 import { useUserStore } from '@/stores/user';
 import { useRingStore } from '@/stores';
 import { useRingBLE } from '@/composables/useRingBLE';
+import { getLatestHeartRateReading, getLatestSpo2Reading } from '@/composables/useRingMetricReadings';
 import { getDateInfo, getYesterday, getBeforeYesterday, getSleepDurationHours, getSleepDurationMinutes } from '@/utils/utils.js';
 import { chartOptionFirst, chartOptionSecound, chartOptionThird, vitalOption, relaxOption } from './echartOptions';
 import {
@@ -43,6 +44,7 @@ import { getGoalInfo } from '@/common/api/user';
 import DetailInfo from '@/components/DetailInfo.vue';
 import { usePopupFixer } from '@/hooks/usePopupFixer';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { isForegroundLinkVerificationPending } from '@/utils/foregroundLinkGate';
 import { normalizeHealthText } from '@/utils/healthText';
 import {
   normalizeSleepScore,
@@ -203,6 +205,9 @@ const bloodOxygenDetailObj = ref<heartRateDetail>();
 const motionSummaryObj = ref<motionSummary>();
 const stressSummaryObj = ref<stressSummaryType>();
 const vitalSignObj = ref<vitalSignType>();
+// vitalSignObj 成功加载时对应的日期；图表兜底必须与当前选中日期一致，
+// 否则切换日期请求失败时会把上一日期的点标成"最近一次"。
+const vitalSignDate = ref('');
 const balanceScoreObj = ref<balanceScoreType>();
 const homeGoalInfo = ref<Record<string, any>>({});
 
@@ -447,7 +452,8 @@ const LEGACY_HOME_CLOUD_COVERAGE_TIMEOUT_MS = 1200;
 const AWARENESS_PROCESSED_REFRESH_DEDUP_MS = 3000;
 const AWARENESS_FINAL_REFRESH_DEDUP_MS = 15000;
 const AWARENESS_BUSINESS_REFRESH_QUEUE_DEDUP_MS = 5000;
-const AWARENESS_PAGE_SHOW_REFRESH_DEDUP_MS = 5 * 60 * 1000;
+// 前台快通道：离开 <60 秒直接复用缓存，≥60 秒回前台才重新拉服务端概览。
+const AWARENESS_PAGE_SHOW_REFRESH_DEDUP_MS = 60 * 1000;
 const AWARENESS_RECENT_SUCCESS_OVERVIEW_TTL_MS = 2 * 60 * 1000;
 const AWARENESS_AUXILIARY_REFRESH_TTL_MS = 5 * 60 * 1000;
 const AWARENESS_STRONG_AUXILIARY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -660,7 +666,7 @@ const hasAwarenessCommunicationReady = () =>
 // Persisted store snapshots may survive a page/process restart. Only the active
 // SDK runtime proves that this page can write commands and receive Notify data.
 const hasAwarenessRuntimeCommunicationReady = () =>
-  hasRingCommunicationReady(ringBleDeviceInfo.value);
+  !isForegroundLinkVerificationPending() && hasRingCommunicationReady(ringBleDeviceInfo.value);
 const awarenessPageActive = ref(false);
 const awarenessRuntimeConnectionPending = ref(false);
 const awarenessCommunicationReadySignal = computed(() => hasAwarenessRuntimeCommunicationReady());
@@ -4881,6 +4887,69 @@ const displayBloodOxygenValue = computed(() =>
     userStore.latestMetrics?.bloodOxygen
   )
 );
+// 主数字保持后端日平均；副行只回答"最近一次读数是多少、什么时候"。
+// 优先用 BLE 内存里的最新读数，其次用服务端图表最后一个有效点。
+const formatSpotClock = (timestamp?: number) => {
+  const value = Number(timestamp || 0);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+};
+const extractChartClock = (value?: unknown) => {
+  const matched = String(value ?? '').match(/(\d{1,2}):(\d{2})/);
+  if (!matched) return '';
+  return `${matched[1].padStart(2, '0')}:${matched[2]}`;
+};
+const getSelectedLocalDay = () => {
+  const base = today.value instanceof Date ? today.value : new Date();
+  return formatLocalDate(base);
+};
+const isTimestampOnSelectedDay = (timestamp: number) => {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return false;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return false;
+  return formatLocalDate(date) === getSelectedLocalDay();
+};
+const getLastChartSpot = (points: Point[] | undefined, min: number, max: number) => {
+  // 图表属于 vitalSignObj 加载时的日期；与当前选中日期不一致时不能当"最近一次"。
+  if (vitalSignDate.value !== getSelectedDetailDate()) return null;
+  const list = Array.isArray(points) ? points : [];
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const numeric = Number(String(list[index]?.value ?? '').replace(/[^\d.-]/g, ''));
+    if (!Number.isFinite(numeric) || numeric < min || numeric > max) continue;
+    const time = extractChartClock(list[index]?.time);
+    if (!time) continue;
+    return { value: Math.round(numeric), time };
+  }
+  return null;
+};
+const getBleSpot = (reading: any, valueKey: string) => {
+  // 只接受带真实记录时间的读数：缓存的 healthData 值使用全局 lastMetricUpdateAt，
+  // 任何指标（电量/步数/体温…）更新都会刷新它，会把旧心率误标成"刚刚"。
+  if (reading?.timestampSource !== 'record') return null;
+  const numeric = Number(reading?.[valueKey]);
+  const timestamp = Number(reading?.timestamp || 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  if (!isTimestampOnSelectedDay(timestamp)) return null;
+  return { value: Math.round(numeric), time: formatSpotClock(timestamp) };
+};
+// 历史日期不显示"最近一次"，避免把今天的读数标注到过去的日期上。
+const isTodaySelected = computed(() => !hasSelectedDate.value && selectedDayIndex.value === 2);
+const latestHeartRateSpot = computed(() => {
+  if (!isTodaySelected.value) return null;
+  return (
+    getBleSpot(getLatestHeartRateReading(userStore, 0), 'heartRate') ||
+    getLastChartSpot(vitalSignObj.value?.heartRateChart, 20, 250)
+  );
+});
+const latestBloodOxygenSpot = computed(() => {
+  if (!isTodaySelected.value) return null;
+  return (
+    getBleSpot(getLatestSpo2Reading(userStore, 0), 'bloodOxygen') ||
+    getLastChartSpot(vitalSignObj.value?.spo2Chart, 50, 100)
+  );
+});
 const AWARENESS_CONNECTED_STATUS_DWELL_MS = 350;
 const awarenessConnectedStatusSettled = ref(false);
 let awarenessConnectedStatusTimer: ReturnType<typeof setTimeout> | null = null;
@@ -7687,6 +7756,7 @@ const getVitalSigns = async (currentDate = new Date()) => {
   const hasUsableResponse = res != null;
   if (hasUsableResponse) {
     vitalSignObj.value = res;
+    vitalSignDate.value = date;
   }
   return hasUsableResponse;
 };
@@ -7848,6 +7918,14 @@ const claimAwarenessPageShowRefresh = (date: string, trigger: string, force = fa
   lastAwarenessPageShowRefreshKey = refreshKey;
   lastAwarenessPageShowRefreshAt = now;
   return true;
+};
+
+// 请求失败/被排队时释放 page-show 去重，否则 60 秒内的下一次前台刷新会被直接跳过。
+const releaseAwarenessPageShowRefreshClaim = (date: string, trigger: string) => {
+  const refreshKey = `${getAwarenessHomeUploadDeviceKey()}:${date}:${trigger}`;
+  if (lastAwarenessPageShowRefreshKey !== refreshKey) return;
+  lastAwarenessPageShowRefreshKey = '';
+  lastAwarenessPageShowRefreshAt = 0;
 };
 
 const queueAwarenessBusinessRefresh = (date: string, trigger: string, reason: string, bypassDedup = false) => {
@@ -8176,11 +8254,14 @@ const refreshAwarenessBusinessOverview = async (
       });
       return;
     }
-    lastAwarenessBusinessRefreshDate = date;
-    lastAwarenessBusinessRefreshAt = Date.now();
-    if (isAwarenessFinalBusinessRefreshKey(taskRefreshKey)) {
-      lastAwarenessFinalRefreshKey = taskRefreshKey;
-      lastAwarenessFinalRefreshAt = lastAwarenessBusinessRefreshAt;
+    // 失败/被排队的刷新不能算作"新鲜"，否则会压掉下一次前台刷新。
+    if (refreshOk === true) {
+      lastAwarenessBusinessRefreshDate = date;
+      lastAwarenessBusinessRefreshAt = Date.now();
+      if (isAwarenessFinalBusinessRefreshKey(taskRefreshKey)) {
+        lastAwarenessFinalRefreshKey = taskRefreshKey;
+        lastAwarenessFinalRefreshAt = lastAwarenessBusinessRefreshAt;
+      }
     }
   } finally {
     if (awarenessBusinessRefreshPromise !== businessRefreshTask) return;
@@ -8212,6 +8293,8 @@ const refreshAwarenessBusinessOverview = async (
     const shouldDropQueuedRefreshAsDuplicate =
       Boolean(queuedDate) &&
       !queuedBypassDedup &&
+      // 同步后的最终刷新代表"刚上传的新数据"，不能被同日的普通刷新去重掉。
+      !isAwarenessFinalBusinessRefreshKey(queuedKey) &&
       queuedDate === lastAwarenessBusinessRefreshDate &&
       lastAwarenessBusinessRefreshAt > 0 &&
       Date.now() - lastAwarenessBusinessRefreshAt < AWARENESS_BUSINESS_REFRESH_QUEUE_DEDUP_MS;
@@ -8436,6 +8519,8 @@ const refreshAwarenessAfterDataProcessed = async (reason: string, date = getSele
     });
     await refreshAwarenessBusinessOverview(refreshDate, {
       allowDuringSync: true,
+      // 同步上传完成后的最终刷新必须真正执行，不能被并行中的普通概览刷新去重。
+      bypassQueueDedup: true,
       trigger: reason,
       forceStressRefresh: true
     });
@@ -9027,6 +9112,9 @@ const getProcessedOption = () => {
   newOption.yAxis.min = 0;
   newOption.yAxis.max = HOME_VITAL_CHART_Y_AXIS_MAX;
   newOption.yAxis.splitNumber = 6;
+  // 首页小图不展示 tooltip / 十字轴，避免点按时弹出遮挡内容。
+  newOption.qkeerDisableTooltip = true;
+  newOption.tooltip = { show: false, triggerOn: 'none', alwaysShowContent: false };
   return newOption;
 };
 const getRelaxOption = () => {
@@ -9039,6 +9127,9 @@ const getRelaxOption = () => {
   newOption.yAxis.min = 0;
   newOption.yAxis.max = HOME_RELAX_CHART_Y_AXIS_MAX;
   newOption.yAxis.splitNumber = 5;
+  // 首页小图不展示 tooltip / 十字轴，避免点按时弹出遮挡内容。
+  newOption.qkeerDisableTooltip = true;
+  newOption.tooltip = { show: false, triggerOn: 'none', alwaysShowContent: false };
   return newOption;
 };
 const initVitalChart = async () => {
@@ -11629,13 +11720,16 @@ const refreshPageDataAndCharts = async (
     pullDownRefresh.value = false;
     pullDownProgress.value = 0;
   }
+  if (overviewOk !== true) {
+    releaseAwarenessPageShowRefreshClaim(refreshDate, trigger);
+  }
   return overviewOk;
 };
 
 /**
  * 测量页提交成功（以及后端汇总 finalize 完成）后会广播这个事件。
  * 首页此刻可能已经在前台（用户从详情页返回），onShow 不会再触发，
- * 因此这里直接绕过 5 分钟 page-show 去重做一次强制刷新。
+ * 因此这里直接绕过 page-show 去重做一次强制刷新。
  */
 const handleHealthMetricsRecorded = (payload?: HealthMetricsRecordedPayload) => {
   const markedAt = Number(payload?.at || 0);
@@ -12031,8 +12125,16 @@ onShow(async () => {
     // First dispatch backend overview requests. BLE readiness/APP_CONNECT is
     // allowed to progress in parallel, while the history stage waits on the
     // explicit gate above.
+    // 前台快通道：数据超过 60 秒就并行刷新概览，即使此时有设备同步在进行；
+    // 只有"刚刷新过"才继续复用旧快照，避免后台回来永远是旧数据。
+    const overviewAgeMs = lastAwarenessBusinessRefreshAt
+      ? Date.now() - lastAwarenessBusinessRefreshAt
+      : Number.POSITIVE_INFINITY;
     const keepPreviousCompleteSnapshot = Boolean(
-      !forceOverviewRefresh && (activeAwarenessHomeSyncClaim || isAwarenessDataSyncInProgress())
+      !forceOverviewRefresh &&
+        lastAwarenessBusinessRefreshDate === getSelectedDetailDate() &&
+        overviewAgeMs < AWARENESS_PAGE_SHOW_REFRESH_DEDUP_MS &&
+        (activeAwarenessHomeSyncClaim || isAwarenessDataSyncInProgress())
     );
     if (keepPreviousCompleteSnapshot) {
       appendAwarenessDiagnosticLog('business-overview-page-show-stable-snapshot-kept', {
@@ -12049,7 +12151,7 @@ onShow(async () => {
             ? 'metrics-recorded-page-show-data-load'
             : 'page-show-data-load',
         force: forceOverviewRefresh,
-        allowDuringSync: metricsRecordedRefresh,
+        allowDuringSync: true,
         bypassQueueDedup: metricsRecordedRefresh
       });
       const releaseInitialOverviewGate = () => {
@@ -12081,7 +12183,14 @@ onShow(async () => {
         }
       );
     }
-    if (userStore.isBluetoothReady && !hasAwarenessRuntimeCommunicationReady()) {
+    if (isForegroundLinkVerificationPending()) {
+      // App 端回前台会先做链路体检；页面侧不要并发重连，体检结束后
+      // awarenessCommunicationReadySignal / reconnectResult 会触发同步。
+      appendAwarenessDiagnosticLog('page-show-link-verification-pending', {
+        trigger: pageShowTrigger,
+        snapshot: getAwarenessConnectionSnapshot()
+      });
+    } else if (userStore.isBluetoothReady && !hasAwarenessRuntimeCommunicationReady()) {
       void restoreAwarenessDeviceSnapshot();
     } else {
       dispatchAwarenessHomeSyncWhenReady(pageShowTrigger);
@@ -12531,6 +12640,9 @@ onPullDownRefresh(async () => {
               <view class="vital-text ml-10">
                 <text class="vital-value fs-36">{{ displayHeartRateValue }}</text>
                 <text class="vital-unit t-979797">{{ t('次/分钟') }}</text>
+                <view v-if="latestHeartRateSpot" class="vital-latest fs-20 t-979797">
+                  {{ t('最近一次') }} · {{ latestHeartRateSpot.value }} · {{ latestHeartRateSpot.time }}
+                </view>
               </view>
             </view>
             <view class="vital-item flex ai-center mb-10">
@@ -12538,6 +12650,9 @@ onPullDownRefresh(async () => {
               <view class="vital-text ml-10">
                 <text class="vital-value fs-36">{{ displayBloodOxygenValue }}</text>
                 <text class="vital-unit t-979797">%</text>
+                <view v-if="latestBloodOxygenSpot" class="vital-latest fs-20 t-979797">
+                  {{ t('最近一次') }} · {{ latestBloodOxygenSpot.value }}% · {{ latestBloodOxygenSpot.time }}
+                </view>
               </view>
             </view>
           </view>
@@ -12629,6 +12744,10 @@ onPullDownRefresh(async () => {
   &:last-child {
     margin-bottom: 0;
   }
+}
+.vital-latest {
+  margin-top: 4rpx;
+  line-height: 1.2;
 }
 .health-section {
   background: linear-gradient(136.9deg, #2e70fc0d 0%, #ffffff00 100%);
