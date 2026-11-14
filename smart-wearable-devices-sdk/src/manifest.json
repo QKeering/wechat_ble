@@ -58,7 +58,10 @@
             },
             "ios" : {
                 "dSYMs" : false,
+                "UIBackgroundModes" : [ "bluetooth-central" ],
                 "privacyDescription" : {
+                    "NSBluetoothAlwaysUsageDescription" : "用于搜索并连接智能戒指，同步心率、血氧、体温、睡眠等健康数据",
+                    "NSBluetoothPeripheralUsageDescription" : "用于与智能戒指保持连接并同步健康数据",
                     "NSPhotoLibraryUsageDescription" : "用于在意见反馈中上传图片",
                     "NSPhotoLibraryAddUsageDescription" : "用于保存客服二维码到相册",
                     "NSCameraUsageDescription" : "用于拍摄反馈图片"
