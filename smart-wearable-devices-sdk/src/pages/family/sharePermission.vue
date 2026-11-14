@@ -165,6 +165,6 @@ onLoad((query: any) => {
   position: fixed;
   left: 30rpx;
   right: 30rpx;
-  bottom: 40rpx;
+  bottom: calc(40rpx + env(safe-area-inset-bottom));
 }
 </style>

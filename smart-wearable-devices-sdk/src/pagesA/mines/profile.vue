@@ -4,6 +4,7 @@ import { ref, computed } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
 import { uploadImage } from '@/common/api/upload';
 import { getFullUrl } from '@/utils/utils.js';
+import { openPermissionSettings } from '@/utils/permissionSettings';
 import { useUserStore } from '@/stores/user';
 import { useRingBLE } from '@/composables/useRingBLE';
 import { useI18n, usePageTitle } from '@/i18n';
@@ -169,7 +170,18 @@ const onChooseAvatarTap = () => {
       }
       // 权限被拒时 uni.chooseImage 只走 fail，不加这个分支会表现为「点了没反应」。
       const denied = /deny|denied|auth|permission/i.test(message);
-      uni.showToast({ title: denied ? t('请先允许访问相册和相机权限') : t('打开相册失败，请重试'), icon: 'none' });
+      if (denied) {
+        uni.showModal({
+          title: t('提示'),
+          content: t('请在系统设置中允许访问相册和相机'),
+          confirmText: t('去设置'),
+          success: (res) => {
+            if (res.confirm) openPermissionSettings();
+          }
+        });
+        return;
+      }
+      uni.showToast({ title: t('打开相册失败，请重试'), icon: 'none' });
     }
   });
   // #endif

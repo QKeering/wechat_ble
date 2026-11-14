@@ -13,6 +13,7 @@ import {
 import { useUserStore } from '@/stores/user';
 import { useI18n, usePageTitle } from '@/i18n';
 import { formatBleErrorMessage } from '@/utils/bleError';
+import { openPermissionSettings } from '@/utils/permissionSettings';
 
 type FeedbackCategoryOption = {
   value: FeedbackCategory;
@@ -63,7 +64,8 @@ const descriptionPlaceholder = computed(
 const selectedCategoryLabel = computed(() => categoryOptions.find((item) => item.value === category.value)?.label || '');
 const canAddImage = computed(() => imagePaths.value.length < MAX_IMAGE_COUNT);
 const feedbackPageStyle = computed(() => ({
-  paddingBottom: keyboardHeight.value > 0 ? `${keyboardHeight.value + 24}px` : '56rpx'
+  paddingBottom:
+    keyboardHeight.value > 0 ? `${keyboardHeight.value + 24}px` : 'calc(56rpx + env(safe-area-inset-bottom))'
 }));
 
 const scrollDescriptionIntoView = () => {
@@ -99,6 +101,23 @@ const getFirstText = (source: Record<string, any>, keys: string[]) => {
   return '';
 };
 
+// App 端上报真实 App 版本，避免所有客户端都标成 mp-weixin 影响排障。
+const resolveAppVersion = () => {
+  // #ifdef APP-PLUS
+  try {
+    const runtimeVersion = String(plus.runtime.version || '').trim();
+    if (runtimeVersion) return runtimeVersion;
+  } catch {
+    // plus.runtime 不可用时回退
+  }
+  return 'app';
+  // #endif
+
+  // #ifndef APP-PLUS
+  return 'mp-weixin';
+  // #endif
+};
+
 const collectFeedbackContext = async () => {
   const userStore = useUserStore();
   const userInfo = userStore.userInfo || uni.getStorageSync('userInfo') || {};
@@ -118,7 +137,7 @@ const collectFeedbackContext = async () => {
     deviceName: getFirstText(ring, ['deviceName', 'name']),
     deviceModel: getFirstText(ring, ['model', 'deviceModel', 'protocol']),
     firmwareVersion: getFirstText(ring, ['firmwareVersion', 'firmware', 'version']),
-    appVersion: 'mp-weixin',
+    appVersion: resolveAppVersion(),
     platform: getFirstText(systemInfo, ['uniPlatform', 'platform', 'system']) || 'mp-weixin',
     systemInfo,
     sourcePage: sourcePage.value,
@@ -141,6 +160,7 @@ const chooseImages = () => {
     sourceType: ['album', 'camera'],
     success: (res) => {
       const files = (res.tempFiles || []) as Array<{ path?: string; size?: number }>;
+      const fallbackPaths = (res.tempFilePaths || []) as string[];
       const validPaths: string[] = [];
       for (const file of files) {
         if (file.size && file.size > MAX_IMAGE_SIZE) {
@@ -148,6 +168,10 @@ const chooseImages = () => {
           continue;
         }
         if (file.path) validPaths.push(file.path);
+      }
+      // 部分基础版本只返回 tempFilePaths，避免选完图没有任何反应。
+      if (!files.length) {
+        validPaths.push(...fallbackPaths.filter(Boolean));
       }
       imagePaths.value = [...imagePaths.value, ...validPaths].slice(0, MAX_IMAGE_COUNT);
     }
@@ -236,7 +260,21 @@ const saveCustomerServiceQr = () => {
       uni.saveImageToPhotosAlbum({
         filePath: downloadRes.tempFilePath,
         success: () => uni.showToast({ title: t('已保存到相册'), icon: 'none' }),
-        fail: () => uni.showToast({ title: t('请允许保存到相册'), icon: 'none' })
+        fail: (err: any) => {
+          const errMsg = String(err?.errMsg || '');
+          if (errMsg.includes('auth deny') || errMsg.includes('auth denied')) {
+            uni.showModal({
+              title: t('提示'),
+              content: t('请在系统设置中允许访问相册'),
+              confirmText: t('去设置'),
+              success: (res) => {
+                if (res.confirm) openPermissionSettings();
+              }
+            });
+            return;
+          }
+          uni.showToast({ title: t('请允许保存到相册'), icon: 'none' });
+        }
       });
     },
     fail: () => uni.showToast({ title: t('二维码下载失败'), icon: 'none' })

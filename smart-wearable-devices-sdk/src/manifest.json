@@ -34,7 +34,9 @@
         "usingComponents" : true,
         "modules" : {
             "Bluetooth" : {},
-            "Camera" : {}
+            "Camera" : {},
+            "Barcode" : {},
+            "Record" : {}
         },
         "distribute" : {
             "android" : {
@@ -64,7 +66,8 @@
                     "NSBluetoothPeripheralUsageDescription" : "用于与智能戒指保持连接并同步健康数据",
                     "NSPhotoLibraryUsageDescription" : "用于在意见反馈中上传图片",
                     "NSPhotoLibraryAddUsageDescription" : "用于保存客服二维码到相册",
-                    "NSCameraUsageDescription" : "用于拍摄反馈图片"
+                    "NSCameraUsageDescription" : "用于拍摄反馈图片",
+                    "NSMicrophoneUsageDescription" : "用于录制语音进行健康问答"
                 }
             },
             "icons" : {

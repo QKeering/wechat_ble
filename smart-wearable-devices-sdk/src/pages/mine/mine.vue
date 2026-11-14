@@ -63,6 +63,7 @@ import { useUnifiedBatteryDisplay } from '@/composables/useUnifiedBatteryDisplay
 import { writeBatteryDisplayCache } from '@/utils/batteryCache';
 import { isAnyDeviceSyncSessionRunning } from '@/utils/deviceSyncSession';
 import { getMiniProgramVersionText } from '@/utils/miniProgramVersion';
+import { openPermissionSettings } from '@/utils/permissionSettings';
 import { showRingConnectionTroubleshootingPrompt } from '@/utils/ringConnectionTroubleshooting';
 const {
   deviceInfo: ringDeviceInfo,
@@ -3025,6 +3026,9 @@ const scanDevice = async () => {
       return;
     }
 
+    // 小程序要先申请 scope.camera；App 端没有这套授权模型，
+    // 直接交给原生扫码，由系统相机权限弹窗处理（iOS/Android 一致）。
+    // #ifndef APP-PLUS
     const setting = await uni.getSetting();
 
     if (!setting.authSetting['scope.camera']) {
@@ -3032,6 +3036,7 @@ const scanDevice = async () => {
         scope: 'scope.camera'
       });
     }
+    // #endif
 
     uni.scanCode({
       onlyFromCamera: true,
@@ -3052,7 +3057,7 @@ const scanDevice = async () => {
         confirmText: '\u53bb\u8bbe\u7f6e',
         success: (res) => {
           if (res.confirm) {
-            uni.openSetting();
+            openPermissionSettings();
           }
         }
       });
@@ -3128,7 +3133,7 @@ const handleScanError = (err: any) => {
       confirmText: '\u53bb\u8bbe\u7f6e',
       success: (res) => {
         if (res.confirm) {
-          uni.openSetting();
+          openPermissionSettings();
         }
       }
     });

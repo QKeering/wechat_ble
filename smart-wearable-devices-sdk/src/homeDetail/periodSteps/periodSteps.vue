@@ -830,7 +830,7 @@ onLoad(async () => {
 .left-btn-wrap {
   position: fixed;
   left: 50rpx;
-  bottom: 70rpx;
+  bottom: calc(70rpx + env(safe-area-inset-bottom));
 
   .next-btn {
     width: 110rpx;
@@ -852,7 +852,7 @@ onLoad(async () => {
 .next-btn-wrap {
   position: fixed;
   right: 50rpx;
-  bottom: 70rpx;
+  bottom: calc(70rpx + env(safe-area-inset-bottom));
 
   .next-btn {
     width: 110rpx;
@@ -881,7 +881,7 @@ onLoad(async () => {
   position: absolute;
   top: 30rpx;
   right: 50rpx;
-  bottom: 220rpx;
+  bottom: calc(220rpx + env(safe-area-inset-bottom));
   left: 50rpx;
   display: flex;
   flex-direction: column;
@@ -952,7 +952,7 @@ onLoad(async () => {
   left: 0;
   right: 0;
   bottom: 0;
-  padding: 24rpx 40rpx 60rpx;
+  padding: 24rpx 40rpx calc(60rpx + env(safe-area-inset-bottom));
   background: #f5f0ee;
   display: flex;
   align-items: center;
