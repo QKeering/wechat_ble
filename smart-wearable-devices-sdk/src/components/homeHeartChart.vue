@@ -123,6 +123,7 @@ defineExpose({
           v-for="tick in timeTicks"
           :key="tick.key"
           class="chart-time-tick"
+          :style="{ left: `${tick.left}%`, transform: tick.isFirst ? 'translateX(0)' : tick.isLast ? 'translateX(-100%)' : 'translateX(-50%)' }"
         >{{ tick.label }}</text>
       </view>
 
@@ -199,15 +200,16 @@ defineExpose({
   position: relative;
   z-index: 2;
   height: 42rpx;
-  margin: 2rpx 28rpx 0;
-  display: flex;
-  justify-content: space-between;
+  /* 与 ECharts grid 的 left: 46 / right: 12 对齐，刻度才能落在真实时间位置 */
+  margin: 2rpx 12px 0 46px;
   color: #9ca3af;
   font-size: 20rpx;
   line-height: 1;
 }
 
 .chart-time-tick {
+  position: absolute;
+  top: 0;
   white-space: nowrap;
 }
 

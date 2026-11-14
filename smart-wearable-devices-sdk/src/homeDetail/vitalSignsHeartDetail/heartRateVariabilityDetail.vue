@@ -13,7 +13,7 @@ import type { HistoryPageSilentRequestConfig } from '@/composables/useRingBusine
 import { useUserStore } from '@/stores/user';
 import { cloneDeep } from 'lodash-es';
 import { pickMetricNumber, withMetricDetailFallback } from './metricFallback';
-import { buildDailyDetailTimeTicks, buildDetailTimeTicks } from './detailTimeAxis';
+import { buildDailyDetailTimeTicks, buildDetailChartAxis, buildDetailRangeTimeTicks } from './detailTimeAxis';
 import { useVitalDetailSummaryRefresh } from './useVitalDetailSummaryRefresh';
 
 const { t } = useI18n();
@@ -82,7 +82,10 @@ const heartRateList = ref([
 ]);
 
 const chartData = ref<Point[]>([]);
-const chartTimeTicks = computed(() => (currentName.value === 'day' ? buildDailyDetailTimeTicks() : buildDetailTimeTicks(chartData.value)));
+const chartAxis = computed(() => buildDetailChartAxis(chartData.value, currentName.value, heartRateObj.value));
+const chartTimeTicks = computed(() =>
+  currentName.value === 'day' ? buildDailyDetailTimeTicks() : buildDetailRangeTimeTicks(chartAxis.value.xData)
+);
 watch(
   chartData,
   () => {
@@ -183,30 +186,13 @@ const getProcessedOption = () => {
   // 深拷贝原option
   const newOption = cloneDeep(activeEchartOption.value) as any;
 
-  // 1. 根据数据生成完整的x轴数据，如果没有数据则生成24小时数据
-  let fullXData: string[];
-  let fullSeriesData: (number | null)[] = [];
+  // 横轴按真实时间排布：日视图固定 00:00-24:00，周/月视图覆盖完整区间，
+  // 没有数据的时段留 null，避免把有数据的那几个小时拉伸铺满整条横轴。
+  const axis = chartAxis.value;
+  const fullXData = axis.xData;
+  const fullSeriesData = axis.seriesData;
 
-  if (chartData.value && chartData.value?.length > 0) {
-    // 有数据时使用实际数据
-    fullXData = chartData.value.map((item: Point) => item.time?.toString() || '00:00');
-    fullSeriesData = chartData.value.map((item) => Number(item.value) || 0);
-    fullSeriesData =
-      chartData.value.map((item: Point) => {
-        const value = Number(item.value);
-        // 将0值替换为null，让ECharts跳过这些点
-        return value === 0 ? null : value;
-      }) || [];
-  } else {
-    // 没有数据时生成24小时的默认数据
-    fullXData = Array.from({ length: 24 }, (_, i) => {
-      const hour = i.toString().padStart(2, '0');
-      return `${hour}:00`;
-    });
-    fullSeriesData = chartData.value.map((item) => Number(item.value) || 0);
-  }
-
-  // 替换xAxis.data和series.data为完整数据
+  // 替换xAxis.data和series.data为按时间对齐后的数据
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = fullSeriesData;
   newOption.yAxis.min = 0;

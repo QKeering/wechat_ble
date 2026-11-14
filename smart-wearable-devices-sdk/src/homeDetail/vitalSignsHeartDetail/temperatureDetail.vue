@@ -11,7 +11,7 @@ import type { heartRateDetail, Point } from '@/types/api/homeDetail';
 import type { HistoryPageSilentRequestConfig } from '@/composables/useRingBusinessHistoryPageSync';
 import { cloneDeep } from 'lodash-es';
 import { useUserStore } from '@/stores/user';
-import { buildDailyDetailTimeTicks, buildDetailTimeTicks } from './detailTimeAxis';
+import { buildDailyDetailTimeTicks, buildDetailChartAxis, buildDetailRangeTimeTicks } from './detailTimeAxis';
 import { useVitalDetailSummaryRefresh } from './useVitalDetailSummaryRefresh';
 
 const { t } = useI18n();
@@ -46,7 +46,10 @@ const heartRateList = ref([
 
 const heartRateObj = ref<heartRateDetail>({});
 const chartData = ref<Point[]>([]);
-const chartTimeTicks = computed(() => (currentName.value === 'day' ? buildDailyDetailTimeTicks() : buildDetailTimeTicks(chartData.value)));
+const chartAxis = computed(() => buildDetailChartAxis(chartData.value, currentName.value, heartRateObj.value));
+const chartTimeTicks = computed(() =>
+  currentName.value === 'day' ? buildDailyDetailTimeTicks() : buildDetailRangeTimeTicks(chartAxis.value.xData)
+);
 const normalizeTemperatureDisplay = (value: unknown) => {
   if (value === null || value === undefined || value === '') return 0;
   const numeric = typeof value === 'number' ? value : Number(String(value).replace(/[^\d.-]/g, ''));
@@ -164,25 +167,10 @@ const nextDay = async () => {
 const getProcessedOption = () => {
   // 深拷贝原option
   const newOption = cloneDeep(activeEchartOption.value) as any;
-  // 使用实际数据而不是测试数据
-  // 1. 根据数据生成完整的x轴数据，如果没有数据则生成24小时数据
-  let fullXData: string[];
-  let fullSeriesData: number[];
-
-  if (chartData.value && chartData.value?.length > 0) {
-    // 有数据时使用实际数据
-    fullXData = chartData.value.map((item: Point) => item.time?.toString() || '00:00');
-    fullSeriesData = chartData.value.map((item) => Number(item.value) || 0);
-  } else {
-    // 没有数据时生成24小时的默认数据
-    fullXData = Array.from({ length: 24 }, (_, i) => {
-      const hour = i.toString().padStart(2, '0');
-      return `${hour}:00`;
-    });
-    fullSeriesData = chartData.value.map((item) => Number(item.value) || 0);
-  }
-  // const fullXData = chartData.value.map((item: Point) => item.time?.toString() || '00:00');
-  // const fullSeriesData = chartData.value.map((item) => Number(item.value) || 0);
+  // 横轴按真实时间排布：日视图固定 00:00-24:00，周/月视图覆盖完整区间，
+  // 没有数据的时段留 null（不画柱子），避免把有数据的那几个小时拉伸铺满整条横轴。
+  const axis = chartAxis.value;
+  const fullXData = axis.xData;
   const startColor = '#e9f7ee';
   const endColor = '#69ca8d';
 
@@ -198,77 +186,28 @@ const getProcessedOption = () => {
     const rgb = startRgb.map((c, i) => Math.round(c + (endRgb[i] - c) * percent));
     return `rgb(${rgb.join(',')})`;
   };
-  // const seriesData = test1;
-  const seriesData = fullSeriesData.map((value, index) => {
-    // 处理单个数据点的情况
-    let percent = 0.5; // 默认使用中间颜色
-
-    if (fullSeriesData.length > 1) {
-      // 多个数据点时正常计算百分比
-      percent = index / (fullSeriesData.length - 1);
-    }
-
-    // 生成纯色（随索引增加，颜色越来越深）
-    const solidColor = mixColors(percent);
-
+  const lastIndex = Math.max(1, fullXData.length - 1);
+  const seriesData = axis.seriesData.map((value, index) => {
+    if (value === null) return null;
+    // 柱子颜色按一天中的位置渐变，而不是按样本序号。
     return {
-      value: value,
-      // 每个柱子单独设置纯色
-      itemStyle: { color: solidColor }
+      value,
+      itemStyle: { color: mixColors(index / lastIndex) }
     };
   });
-  // 替换xAxis.data和series.data为扩展后的数据
+  // 替换xAxis.data和series.data为按时间对齐后的数据
   newOption.xAxis.data = fullXData;
   newOption.series[0].data = seriesData;
-
-  newOption.xAxis.axisLabel = {
-    ...newOption.xAxis.axisLabel,
-    interval: 0,
-    formatter: (value: string, index: number) => {
-      const dataLength = newOption.xAxis.data.length;
-      // 如果数据长度为24，则只显示指定刻度
-      if (dataLength === 24) {
-        return [0, 6, 12, 18, 23].includes(index) ? value : '';
-      } else {
-        // 数据长度不为24时，显示两端和部分中间刻度
-        const firstIndex = 0;
-        const lastIndex = dataLength - 1;
-
-        // 总是显示第一个和最后一个刻度
-        if (index === firstIndex || index === lastIndex) {
-          return value;
-        }
-
-        // 根据数据长度决定中间显示几个刻度
-        if (dataLength <= 5) {
-          // 数据很少时，显示所有刻度
-          return value;
-        } else if (dataLength <= 10) {
-          // 中等长度数据，显示中间1个刻度
-          const midIndex = Math.floor(dataLength / 2);
-          return index === midIndex ? value : '';
-        } else {
-          // 较长数据，显示中间2个刻度（四等分点）
-          const midIndex = Math.floor(dataLength / 2);
-          const quarter1 = Math.floor(dataLength / 4);
-          const quarter3 = Math.floor((dataLength * 3) / 4);
-          return index === quarter1 || index === quarter3 || index === midIndex ? value : '';
-        }
-      }
-    }
+  newOption.grid = {
+    ...(newOption.grid || {}),
+    left: 46,
+    right: 12,
+    bottom: 18,
+    containLabel: false
   };
-  // // 针对单个数据点的特殊处理
-  // if (fullSeriesData.length === 1) {
-  //   // 显示数据点标记
-  //   newOption.series[0].symbol = 'circle';
-  //   newOption.series[0].symbolSize = 6;
-  //   // 显示tooltip以便查看数据
-  //   newOption.tooltip.show = true;
-  // }
-  // else {
-  //   // 多个数据点时使用默认配置
-  //   newOption.series[0].symbol = 'none';
-  // }
+
+  // 详情卡片使用独立的时间刻度层，避免 ECharts 标签和页面刻度重复。
+  newOption.xAxis.axisLabel = { ...(newOption.xAxis.axisLabel || {}), show: false };
   return newOption;
 };
 const initChart = async (chartRef: any) => {

@@ -224,11 +224,11 @@ export const applyVitalSignsLineStyle = (
   };
   option.series[0] = {
     ...series,
-    // Keep Y values as plain numbers so older cached mini-program chart
-    // runtimes can still render the curve. The lightweight renderer uses the
-    // companion xPositions field when available to preserve the real time
-    // position; older runtimes safely ignore it and still draw the data.
-    data: normalizedSeriesData.map((point) => point[1]),
+    // Emit [bucketIndex, value] pairs: the value axis then places every point
+    // at its real position in the day on every renderer. Plain Y values are
+    // spread by array index, which compresses 08:00-10:00 samples across the
+    // whole 00:00-24:00 axis (App/H5 use full ECharts and ignore xPositions).
+    data: normalizedSeriesData.map((point) => [point[0], point[1]]),
     xPositions: normalizedSeriesData.map((point) => point[0]),
     type: 'line',
     smooth: 0.38,
