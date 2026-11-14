@@ -77,11 +77,7 @@ const BLOOD_OXYGEN_VALUE_KEYS = [
   'oxygen_saturation_value'
 ];
 
-export const requestMetricRefresh = async (
-  refreshHealthData: RefreshMetricTask,
-  fallbackCommand: () => Promise<unknown>,
-  options: RequestMetricRefreshOptions = {}
-) => {
+export const requestMetricRefresh = async (refreshHealthData: RefreshMetricTask, fallbackCommand: () => Promise<unknown>, options: RequestMetricRefreshOptions = {}) => {
   const realtimeMetricNames = normalizeExpectedRefreshSteps(options.expectedSteps)
     .map((step) => step.replace(/_pending$/, ''))
     .filter(Boolean);
@@ -104,14 +100,9 @@ export const requestMetricRefresh = async (
   }
 };
 
-const normalizeExpectedRefreshSteps = (expectedSteps?: string | string[]) =>
-  (Array.isArray(expectedSteps) ? expectedSteps : expectedSteps ? [expectedSteps] : []).filter(Boolean);
+const normalizeExpectedRefreshSteps = (expectedSteps?: string | string[]) => (Array.isArray(expectedSteps) ? expectedSteps : expectedSteps ? [expectedSteps] : []).filter(Boolean);
 
-const shouldFallbackMetricRefresh = (
-  result: unknown,
-  expectedSteps?: string | string[],
-  acceptPending = true
-) => {
+const shouldFallbackMetricRefresh = (result: unknown, expectedSteps?: string | string[], acceptPending = true) => {
   const expected = normalizeExpectedRefreshSteps(expectedSteps);
   if (expected.length === 0) return isRefreshResultFailed(result);
   if (!result || typeof result !== 'object') return false;
@@ -186,8 +177,7 @@ const toMetricTimestamp = (...values: any[]) => {
   return null;
 };
 
-const normalizeMetricTimestamp = (timestamp: number) =>
-  timestamp > 0 && timestamp < 100_000_000_000 ? timestamp * 1000 : timestamp;
+const normalizeMetricTimestamp = (timestamp: number) => (timestamp > 0 && timestamp < 100_000_000_000 ? timestamp * 1000 : timestamp);
 
 export const getMetricRecordTime = (record: any, fallback?: number) => {
   const timestamp = toMetricTimestamp(
@@ -238,9 +228,7 @@ export const formatMetricRecordTime = (timestamp: number) => {
 
 export const getSubmitDeviceMac = (store: RingStoreLike, isIOS: boolean) => {
   const currentStableMac = store.deviceInfo?.mac || store.deviceInfo?.advertis?.macInfo;
-  const rwStableMac =
-    currentStableMac ||
-    (isColonSeparatedBleMac(store.deviceInfo?.uniMacId) ? store.deviceInfo?.uniMacId : '');
+  const rwStableMac = currentStableMac || (isColonSeparatedBleMac(store.deviceInfo?.uniMacId) ? store.deviceInfo?.uniMacId : '');
   const stableMac = currentStableMac || store.normalMac;
   if (resolveRingProtocol(store.deviceInfo as RingDeviceInfo) === 'rw') return rwStableMac || '';
   if (isIOS) return stableMac || store.iosMacId || store.deviceInfo?.uniMacId || '';
@@ -317,8 +305,7 @@ const getMetricValue = (record: any, keys: string[], depth = 0): number | null =
   return null;
 };
 
-const getMetricRecordKind = (record: Record<string, any> = {}) =>
-  String(record.type ?? record.name ?? record.metric ?? record.metricName ?? record.kind ?? '').trim();
+const getMetricRecordKind = (record: Record<string, any> = {}) => String(record.type ?? record.name ?? record.metric ?? record.metricName ?? record.kind ?? '').trim();
 
 const isLegacyBloodOxygenMetricRecord = (record: Record<string, any> = {}) => {
   const kind = getMetricRecordKind(record);
@@ -343,13 +330,7 @@ const getRawMetricDeviceIds = (record: Record<string, any> = {}) =>
 const getMetricDeviceIds = (record: Record<string, any> = {}, protocolHint = '') => {
   const protocol = record.protocol || protocolHint;
   if (protocol === 'rw') {
-    return [
-      record.mac,
-      record.advertis?.macInfo,
-      isColonSeparatedBleMac(record.uniMacId) ? record.uniMacId : ''
-    ]
-      .filter(Boolean)
-      .map((value) => String(value).trim());
+    return [record.mac, record.advertis?.macInfo, isColonSeparatedBleMac(record.uniMacId) ? record.uniMacId : ''].filter(Boolean).map((value) => String(value).trim());
   }
   return getRawMetricDeviceIds(record);
 };
@@ -367,9 +348,7 @@ const normalizeMetricIdentity = (value: unknown) =>
 const hasMatchingMetricIdentityTail = (leftIds: string[], rightIds: string[]) => {
   const leftNormalized = leftIds.map(normalizeMetricIdentity).filter((value) => value.length >= 6);
   const rightNormalized = rightIds.map(normalizeMetricIdentity).filter((value) => value.length >= 6);
-  return leftNormalized.some((leftId) =>
-    rightNormalized.some((rightId) => leftId.endsWith(rightId.slice(-6)) || rightId.endsWith(leftId.slice(-6)))
-  );
+  return leftNormalized.some((leftId) => rightNormalized.some((rightId) => leftId.endsWith(rightId.slice(-6)) || rightId.endsWith(leftId.slice(-6))));
 };
 
 const isMetricRecordForCurrentDevice = (store: RingStoreLike, record: Record<string, any>) => {
@@ -392,12 +371,7 @@ const isMetricRecordForCurrentDevice = (store: RingStoreLike, record: Record<str
   return recordIds.some((id) => currentIds.includes(id)) || hasMatchingMetricIdentityTail(recordIds, currentIds);
 };
 
-const findLatestReceived = (
-  store: RingStoreLike,
-  predicate: (record: any) => boolean,
-  since = 0,
-  afterIndex?: number
-) => {
+const findLatestReceived = (store: RingStoreLike, predicate: (record: any) => boolean, since = 0, afterIndex?: number) => {
   const records = store.receivedData || [];
   return records
     .map((record, index) => ({ record, index, timestamp: getComparableMetricTime(record) }))
@@ -412,11 +386,7 @@ const findLatestReceived = (
     })[0]?.record;
 };
 
-const findLatestReceivedAfterIndex = (
-  store: RingStoreLike,
-  predicate: (record: any) => boolean,
-  afterIndex?: number
-) => {
+const findLatestReceivedAfterIndex = (store: RingStoreLike, predicate: (record: any) => boolean, afterIndex?: number) => {
   if (typeof afterIndex !== 'number' || afterIndex < 0) return undefined;
   const records = store.receivedData || [];
   const lowerBound = Math.max(0, afterIndex);
@@ -441,13 +411,9 @@ const getRwMetricFlag = (record: any) => {
 
 const isRwRealtimeReadFlag = (flag: number | null) => flag === 0x10 || flag === 0x11;
 
-const getRwMetricAcceptedKeys = (kind: RwMetricKind) => [
-  RW_PRIMARY_REALTIME_METRIC_KEYS[kind],
-  ...(RW_COMPAT_REALTIME_METRIC_KEYS[kind] || [])
-];
+const getRwMetricAcceptedKeys = (kind: RwMetricKind) => [RW_PRIMARY_REALTIME_METRIC_KEYS[kind], ...(RW_COMPAT_REALTIME_METRIC_KEYS[kind] || [])];
 
-const isRwCompatRealtimeMetricKey = (kind: RwMetricKind, key: number) =>
-  (RW_COMPAT_REALTIME_METRIC_KEYS[kind] || []).includes(key);
+const isRwCompatRealtimeMetricKey = (kind: RwMetricKind, key: number) => (RW_COMPAT_REALTIME_METRIC_KEYS[kind] || []).includes(key);
 
 const requiresRwCompatReadFlag = (_kind: RwMetricKind) => true;
 
@@ -458,15 +424,11 @@ const getRwMetricDataArray = (record: any) => {
   return Array.isArray(data) ? data : null;
 };
 
-const isPlausibleRwHistoryTimestamp = (value: number) =>
-  Number.isFinite(value) && value >= 946_684_800 && value <= 4_102_444_800;
+const isPlausibleRwHistoryTimestamp = (value: number) => Number.isFinite(value) && value >= 946_684_800 && value <= 4_102_444_800;
 
 const readUint32LEFromArray = (values: unknown[]) => {
   if (values.length < 4 || values.slice(0, 4).some((value) => typeof value !== 'number')) return null;
-  return ((values[0] as number) || 0) |
-    (((values[1] as number) || 0) << 8) |
-    (((values[2] as number) || 0) << 16) |
-    (((values[3] as number) || 0) << 24);
+  return ((values[0] as number) || 0) | (((values[1] as number) || 0) << 8) | (((values[2] as number) || 0) << 16) | (((values[3] as number) || 0) << 24);
 };
 
 const hasRwHistoryRecords = (record: any) => {
@@ -566,20 +528,8 @@ const getRwMetricValue = (record: any, keys: string[], kind: RwMetricKind) => {
   return getRwScalarDataValue(data);
 };
 
-const findLatestRwMetricReceived = (
-  store: RingStoreLike,
-  names: string[],
-  keys: string[],
-  kind: RwMetricKind,
-  since = 0,
-  afterIndex?: number
-) =>
-  findLatestReceived(
-    store,
-    (record) => isRwHealthRecord(record, names, kind, since) && getRwMetricValue(record, keys, kind) !== null,
-    since,
-    afterIndex
-  );
+const findLatestRwMetricReceived = (store: RingStoreLike, names: string[], keys: string[], kind: RwMetricKind, since = 0, afterIndex?: number) =>
+  findLatestReceived(store, (record) => isRwHealthRecord(record, names, kind, since) && getRwMetricValue(record, keys, kind) !== null, since, afterIndex);
 
 const getHealthDataValue = (store: RingStoreLike, keys: string[]) => {
   for (const key of keys) {
@@ -622,12 +572,8 @@ const getBloodPressureParts = (...values: unknown[]) => {
     }
     if (typeof value === 'object') {
       const record = value as Record<string, any>;
-      const systolic = toMetricNumber(
-        record.systolic ?? record.high ?? record.highPressure ?? record.bloodPressureHigh ?? record.blood_pressure_high ?? record.sbp ?? record.sp
-      );
-      const diastolic = toMetricNumber(
-        record.diastolic ?? record.low ?? record.lowPressure ?? record.bloodPressureLow ?? record.blood_pressure_low ?? record.dbp ?? record.dp
-      );
+      const systolic = toMetricNumber(record.systolic ?? record.high ?? record.highPressure ?? record.bloodPressureHigh ?? record.blood_pressure_high ?? record.sbp ?? record.sp);
+      const diastolic = toMetricNumber(record.diastolic ?? record.low ?? record.lowPressure ?? record.bloodPressureLow ?? record.blood_pressure_low ?? record.dbp ?? record.dp);
       if (systolic !== null || diastolic !== null) return { systolic, diastolic };
     }
     if (typeof value === 'string') {
@@ -647,11 +593,7 @@ const getRwBloodPressureParts = (record: any) =>
   });
 
 export const getLatestHeartRateReading = (store: RingStoreLike, since = 0) => {
-  const legacyData: any = findLatestReceived(
-    store,
-    (record) => record.type === 'active_measure' && normalizeHeartRateMetricValue(record.heartRate) !== null,
-    since
-  );
+  const legacyData: any = findLatestReceived(store, (record) => record.type === 'active_measure' && normalizeHeartRateMetricValue(record.heartRate) !== null, since);
   if (legacyData) {
     return {
       ...normalizeMetricRecordNumbers(legacyData, ['heartRate', 'heartRateVariability', 'stressIndex', 'stress']),
@@ -662,9 +604,7 @@ export const getLatestHeartRateReading = (store: RingStoreLike, since = 0) => {
 
   const rwData: any = findLatestRwMetricReceived(store, ['heart_rate', 'heartRate', 'hr'], ['value', 'heartRate', 'heart_rate', 'hr'], 'heart_rate', since);
   const rwValue = getRwMetricValue(rwData, ['value', 'heartRate', 'heart_rate', 'hr'], 'heart_rate');
-  const cachedValue = shouldUseCachedMetricFallback(store, since)
-    ? normalizeHeartRateMetricValue(getHealthDataValue(store, ['heartRate', 'heart_rate', 'hr']))
-    : null;
+  const cachedValue = shouldUseCachedMetricFallback(store, since) ? normalizeHeartRateMetricValue(getHealthDataValue(store, ['heartRate', 'heart_rate', 'hr'])) : null;
   const value = rwValue ?? cachedValue;
   if (value === null) return undefined;
   const timestamp = getMetricTimestamp(store, rwData, rwValue !== null);
@@ -688,11 +628,8 @@ export const getLatestHeartRateReading = (store: RingStoreLike, since = 0) => {
 
 export const getLatestSpo2Reading = (store: RingStoreLike, since = 0, afterIndex?: number) => {
   const isValidLegacySpo2Record = (record: any) =>
-    isLegacyBloodOxygenMetricRecord(record) &&
-    normalizeBloodOxygenMetricValue(getMetricValue(record, BLOOD_OXYGEN_VALUE_KEYS)) !== null;
-  const legacyData: any =
-    findLatestReceivedAfterIndex(store, isValidLegacySpo2Record, afterIndex) ||
-    findLatestReceived(store, isValidLegacySpo2Record, since, afterIndex);
+    isLegacyBloodOxygenMetricRecord(record) && normalizeBloodOxygenMetricValue(getMetricValue(record, BLOOD_OXYGEN_VALUE_KEYS)) !== null;
+  const legacyData: any = findLatestReceivedAfterIndex(store, isValidLegacySpo2Record, afterIndex) || findLatestReceived(store, isValidLegacySpo2Record, since, afterIndex);
   if (legacyData) {
     const legacyValue = normalizeBloodOxygenMetricValue(getMetricValue(legacyData, BLOOD_OXYGEN_VALUE_KEYS));
     if (legacyValue === null) return undefined;
@@ -705,18 +642,9 @@ export const getLatestSpo2Reading = (store: RingStoreLike, since = 0, afterIndex
     };
   }
 
-  const rwData: any = findLatestRwMetricReceived(
-    store,
-    BLOOD_OXYGEN_VALUE_KEYS,
-    BLOOD_OXYGEN_VALUE_KEYS,
-    'blood_oxygen',
-    since,
-    afterIndex
-  );
+  const rwData: any = findLatestRwMetricReceived(store, BLOOD_OXYGEN_VALUE_KEYS, BLOOD_OXYGEN_VALUE_KEYS, 'blood_oxygen', since, afterIndex);
   const rwValue = getRwMetricValue(rwData, BLOOD_OXYGEN_VALUE_KEYS, 'blood_oxygen');
-  const cachedValue = shouldUseCachedMetricFallback(store, since)
-    ? normalizeBloodOxygenMetricValue(getHealthDataValue(store, BLOOD_OXYGEN_VALUE_KEYS))
-    : null;
+  const cachedValue = shouldUseCachedMetricFallback(store, since) ? normalizeBloodOxygenMetricValue(getHealthDataValue(store, BLOOD_OXYGEN_VALUE_KEYS)) : null;
   const value = rwValue ?? cachedValue;
   if (!isValidBloodOxygenValue(value)) return undefined;
   const timestamp = getMetricTimestamp(store, rwData, rwValue !== null);
@@ -767,11 +695,7 @@ export const getLatestTemperatureReading = (store: RingStoreLike, since = 0) => 
 };
 
 export const getLatestHrvReading = (store: RingStoreLike, since = 0) => {
-  const legacyData: any = findLatestReceived(
-    store,
-    (record) => record.type === 'active_measure' && toMetricNumber(record.heartRateVariability) !== null,
-    since
-  );
+  const legacyData: any = findLatestReceived(store, (record) => record.type === 'active_measure' && toMetricNumber(record.heartRateVariability) !== null, since);
   if (legacyData) return normalizeMetricRecordNumbers(legacyData, ['heartRateVariability']);
 
   const rwData: any = findLatestRwMetricReceived(
@@ -782,11 +706,7 @@ export const getLatestHrvReading = (store: RingStoreLike, since = 0) => {
     since
   );
   const rwValue = getRwMetricValue(rwData, ['value', 'hrv', 'heartRateVariability', 'heart_rate_variability'], 'hrv');
-  const value =
-    rwValue ??
-    (shouldUseCachedMetricFallback(store, since)
-      ? getHealthDataValue(store, ['heartRateVariability', 'heart_rate_variability', 'hrv'])
-      : null);
+  const value = rwValue ?? (shouldUseCachedMetricFallback(store, since) ? getHealthDataValue(store, ['heartRateVariability', 'heart_rate_variability', 'hrv']) : null);
   if (value === null) return undefined;
   const timestamp = getMetricTimestamp(store, rwData, rwValue !== null);
   if (timestamp < since) return undefined;
@@ -798,11 +718,7 @@ export const getLatestHrvReading = (store: RingStoreLike, since = 0) => {
 };
 
 export const getLatestStressReading = (store: RingStoreLike, since = 0) => {
-  const legacyData: any = findLatestReceived(
-    store,
-    (record) => record.type === 'active_measure' && toMetricNumber(record.stressIndex ?? record.stress) !== null,
-    since
-  );
+  const legacyData: any = findLatestReceived(store, (record) => record.type === 'active_measure' && toMetricNumber(record.stressIndex ?? record.stress) !== null, since);
   if (legacyData) return normalizeMetricRecordNumbers(legacyData, ['stressIndex', 'stress']);
 
   const rwData: any = findLatestRwMetricReceived(
@@ -813,11 +729,7 @@ export const getLatestStressReading = (store: RingStoreLike, since = 0) => {
     since
   );
   const rwValue = getRwMetricValue(rwData, ['value', 'stress', 'stressIndex', 'stress_index', 'pressure'], 'stress');
-  const value =
-    rwValue ??
-    (shouldUseCachedMetricFallback(store, since)
-      ? getHealthDataValue(store, ['stressIndex', 'stress_index', 'stress', 'pressure'])
-      : null);
+  const value = rwValue ?? (shouldUseCachedMetricFallback(store, since) ? getHealthDataValue(store, ['stressIndex', 'stress_index', 'stress', 'pressure']) : null);
   if (value === null) return undefined;
   const timestamp = getMetricTimestamp(store, rwData, rwValue !== null);
   if (timestamp < since) return undefined;
@@ -838,12 +750,8 @@ export const getLatestBloodSugarReading = (store: RingStoreLike, since = 0) => {
     since
   );
   const rwValue = getRwMetricValue(rwData, ['value', 'bloodSugar', 'blood_sugar', 'glucose', 'sugar'], 'blood_sugar');
-  const cachedValue = shouldUseCachedMetricFallback(store, since)
-    ? normalizeRwBloodSugarValue(getHealthDataValue(store, ['bloodSugar', 'blood_sugar', 'glucose', 'sugar']))
-    : null;
-  const value =
-    rwValue ??
-    cachedValue;
+  const cachedValue = shouldUseCachedMetricFallback(store, since) ? normalizeRwBloodSugarValue(getHealthDataValue(store, ['bloodSugar', 'blood_sugar', 'glucose', 'sugar'])) : null;
+  const value = rwValue ?? cachedValue;
   if (value === null) return undefined;
   const timestamp = getMetricTimestamp(store, rwData, rwValue !== null);
   if (timestamp < since) return undefined;
@@ -858,17 +766,13 @@ export const getLatestBloodSugarReading = (store: RingStoreLike, since = 0) => {
 export const getLatestBloodPressureReading = (store: RingStoreLike, since = 0) => {
   const rwData: any = findLatestReceived(
     store,
-    (record) =>
-      isRwHealthRecord(record, ['blood_pressure', 'bloodPressure', 'bp'], 'blood_pressure', since) &&
-      Boolean(getRwBloodPressureParts(record)),
+    (record) => isRwHealthRecord(record, ['blood_pressure', 'bloodPressure', 'bp'], 'blood_pressure', since) && Boolean(getRwBloodPressureParts(record)),
     since
   );
   const directValue = getRawMetricValue(rwData, ['value', 'bloodPressure', 'blood_pressure', 'bp']);
-  const healthDataValue =
-    shouldUseCachedMetricFallback(store, since)
-      ? getRawMetricValue(store.healthData, ['bloodPressure', 'blood_pressure', 'bp']) ??
-        getRawMetricValue(store.latestMetrics, ['bloodPressure', 'blood_pressure', 'bp'])
-      : undefined;
+  const healthDataValue = shouldUseCachedMetricFallback(store, since)
+    ? (getRawMetricValue(store.healthData, ['bloodPressure', 'blood_pressure', 'bp']) ?? getRawMetricValue(store.latestMetrics, ['bloodPressure', 'blood_pressure', 'bp']))
+    : undefined;
   const rwParts = getRwBloodPressureParts(rwData);
   const healthDataParts =
     getBloodPressureParts(healthDataValue) ??
