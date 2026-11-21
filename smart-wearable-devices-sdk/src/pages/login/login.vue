@@ -1,8 +1,10 @@
 <script setup>
 import { ref } from 'vue';
 import { onPageScroll } from '@dcloudio/uni-app';
-import { wechatQuickLogin } from '@/common/api/login';
+// #ifndef APP-PLUS
+import { wxLogin } from '@/common/api/login';
 import { getWechatLoginCode } from '@/utils/wechatLogin';
+// #endif
 import { useUserStore } from '@/stores/user';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { useI18n } from '@/i18n';
@@ -50,6 +52,7 @@ const finishLogin = async (response, loginOptions = {}) => {
   }, 300);
 };
 
+// #ifndef APP-PLUS
 const handleWechatLogin = async () => {
   if (isLoggingIn.value) return;
   if (!agreementChecked.value) {
@@ -62,7 +65,7 @@ const handleWechatLogin = async () => {
     uni.showLoading({ title: t('登录中') });
     const code = await withTimeout(getWechatLoginCode(), 10000, t('登录凭证获取超时'));
     const response = await withTimeout(
-      wechatQuickLogin(
+      wxLogin(
         {
           openIdCode: code
         },
@@ -79,6 +82,7 @@ const handleWechatLogin = async () => {
     uni.hideLoading();
   }
 };
+// #endif
 
 const handleMobileLoginEntry = () => {
   uni.navigateTo({

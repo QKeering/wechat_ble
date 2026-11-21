@@ -1,32 +1,11 @@
 import { getWechatProfileForNickname } from './wechatProfile';
 
 /**
- * 获取微信登录凭证 code，跨端抹平返回结构差异。
+ * 获取小程序微信登录凭证 code。
  *
- * - 小程序 `wx.login()` 返回 `{ code }`
- * - App 端 `uni.login({ provider: 'weixin' })` 返回 `{ authResult: { code } }`
- *
- * 统一返回 code 字符串；拿不到时抛错，由调用方兜底提示。
+ * App 端不做微信登录（仅提供手机号登录），因此这里只保留小程序实现。
  */
 export const getWechatLoginCode = (): Promise<string> => {
-  // #ifdef APP-PLUS
-  return new Promise<string>((resolve, reject) => {
-    uni.login({
-      provider: 'weixin',
-      success: (res) => {
-        const code = (res as any)?.authResult?.code;
-        if (code) {
-          resolve(code);
-        } else {
-          reject(new Error('微信登录凭证获取失败'));
-        }
-      },
-      fail: reject
-    });
-  });
-  // #endif
-
-  // #ifndef APP-PLUS
   return new Promise<string>((resolve, reject) => {
     const wxRuntime = (globalThis as any).wx;
     wxRuntime.login({
@@ -40,7 +19,6 @@ export const getWechatLoginCode = (): Promise<string> => {
       fail: reject
     });
   });
-  // #endif
 };
 
 /**
