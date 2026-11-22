@@ -17,6 +17,11 @@ dist
 *.keystore
 .keystore-password.txt
 
+# iOS 签名材料（私钥/CSR/p12/profile，严禁提交）
+.ios-signing/
+*.p12
+*.mobileprovision
+
 # Editor directories and files
 .idea
 *.suo

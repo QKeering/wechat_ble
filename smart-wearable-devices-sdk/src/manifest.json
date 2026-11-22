@@ -2,7 +2,7 @@
     "name" : "qkeer-ring",
     "appid" : "__UNI__31A4F95",
     "description" : "qkeer ring app",
-    "versionName" : "0.1.1",
+    "versionName" : "1.0.0",
     "versionCode" : "11",
     "transformPx" : false,
     "vueVersion" : "3",
@@ -60,6 +60,10 @@
             },
             "ios" : {
                 "dSYMs" : false,
+                "idfa" : false,
+                "plistcmds" : [
+                    "<key>ITSAppUsesNonExemptEncryption</key><false/>"
+                ],
                 "UIBackgroundModes" : [ "bluetooth-central" ],
                 "privacyDescription" : {
                     "NSBluetoothAlwaysUsageDescription" : "用于搜索并连接智能戒指，同步心率、血氧、体温、睡眠等健康数据",

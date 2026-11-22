@@ -41,6 +41,7 @@
     "type-check": "vue-tsc --noEmit",
     "i18n:check": "node scripts/i18n-check.mjs",
     "check:mp-weixin-size": "node scripts/inspect-mp-weixin-size.mjs",
+    "check:ios-packaging": "node scripts/check-ios-packaging.mjs",
     "fetch:rw-backend-log": "node scripts/fetch-rw-backend-log.mjs",
     "analyze:rw-log": "node scripts/analyze-rw-ble-log.mjs",
     "analyze:rw-backend-log": "node scripts/summarize-rw-backend-log.mjs",
