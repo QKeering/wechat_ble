@@ -61,9 +61,10 @@
             "ios" : {
                 "dSYMs" : false,
                 "idfa" : false,
-                "plistcmds" : [
-                    "<key>ITSAppUsesNonExemptEncryption</key><false/>"
-                ],
+                "ATS" : {
+                    "NSAllowsArbitraryLoads" : false
+                },
+                "plistcmds" : [ "<key>ITSAppUsesNonExemptEncryption</key><false/>" ],
                 "UIBackgroundModes" : [ "bluetooth-central" ],
                 "privacyDescription" : {
                     "NSBluetoothAlwaysUsageDescription" : "用于搜索并连接智能戒指，同步心率、血氧、体温、睡眠等健康数据",

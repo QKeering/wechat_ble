@@ -19,9 +19,6 @@ type LocalGuideItem = {
 const guideList = ref<FqaGuidItem[]>([]);
 const questionList = ref<FqaGuidItem[]>([]);
 const loading = ref(false);
-const showCommandDebugEntry = ref(false);
-const debugTapCount = ref(0);
-let debugTapTimer: ReturnType<typeof setTimeout> | null = null;
 const miniProgramVersionText = computed(getMiniProgramVersionText);
 
 const localGuideItems: LocalGuideItem[] = [
@@ -64,28 +61,6 @@ const openDetail = (item: FqaGuidItem | LocalGuideItem) => {
   }
   if (!item?.id) return;
   (uni as any).$uv.route(`/pagesA/mines/detail?id=${item.id}&title=${title}`);
-};
-
-const openCommandDebug = () => {
-  uni.navigateTo({ url: '/pagesA/mines/bleCommandDebug' });
-};
-
-const handleVersionTap = () => {
-  if (debugTapTimer) {
-    clearTimeout(debugTapTimer);
-    debugTapTimer = null;
-  }
-  debugTapCount.value += 1;
-  if (debugTapCount.value >= 3) {
-    debugTapCount.value = 0;
-    showCommandDebugEntry.value = true;
-    uni.showToast({ title: t('调试入口已开启'), icon: 'none' });
-    return;
-  }
-  debugTapTimer = setTimeout(() => {
-    debugTapCount.value = 0;
-    debugTapTimer = null;
-  }, 1200);
 };
 
 onLoad(async () => {
@@ -133,14 +108,7 @@ onLoad(async () => {
       <uv-icon name="arrow-right" color="#010101" size="14"></uv-icon>
     </view>
 
-    <view v-if="showCommandDebugEntry" class="debug-entry" @click="openCommandDebug">
-      <view>
-        <view class="debug-title">{{ t('BLE 命令测试') }}</view>
-        <view class="debug-desc">{{ t('临时入口：验证血氧、心率、电量等命令回执') }}</view>
-      </view>
-      <uv-icon name="arrow-right" color="#3478f6" size="14"></uv-icon>
-    </view>
-    <view class="debug-version" @click="handleVersionTap">{{ miniProgramVersionText }}</view>
+    <view class="debug-version">{{ miniProgramVersionText }}</view>
   </view>
 </template>
 
@@ -173,30 +141,6 @@ onLoad(async () => {
 
 .fallback-item:last-child {
   margin-bottom: 0;
-}
-
-.debug-entry {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 48rpx;
-  padding: 30rpx 34rpx;
-  border: 1rpx dashed rgba(52, 120, 246, 0.35);
-  border-radius: 32rpx;
-  background: rgba(52, 120, 246, 0.08);
-}
-
-.debug-title {
-  color: #1f5fd6;
-  font-size: 30rpx;
-  font-weight: 700;
-}
-
-.debug-desc {
-  margin-top: 8rpx;
-  color: #6b7280;
-  font-size: 24rpx;
-  line-height: 1.35;
 }
 
 .debug-version {

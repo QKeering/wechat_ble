@@ -73,6 +73,11 @@ if (!plistcmds.includes('ITSAppUsesNonExemptEncryption')) {
   errors.push('ios.plistcmds must set ITSAppUsesNonExemptEncryption');
 }
 
+// App Store 审核要求尽量关闭任意 HTTP 加载；所有接口都走 HTTPS。
+if (ios.ATS?.NSAllowsArbitraryLoads !== false) {
+  errors.push('ios.ATS.NSAllowsArbitraryLoads must be false (App Store review requires HTTPS-only)');
+}
+
 if (ios.idfa !== false) {
   warnings.push('ios.idfa is not explicitly false (no ads in this app)');
 }
@@ -117,7 +122,7 @@ if (!androidPackage) {
 
 console.log('iOS packaging preflight');
 console.log(`  manifest: ${manifestPath}`);
-console.log(`  versionName: ${manifest.versionName} (versionCode ${manifest.versionCode} is Android-only)`);
+console.log(`  versionName: ${manifest.versionName} (CFBundleShortVersionString), versionCode: ${manifest.versionCode} (CFBundleVersion, must increase per upload)`);
 console.log(`  Android package: ${androidPackage || '-'}`);
 console.log(`  iOS background modes: ${(ios.UIBackgroundModes || []).join(', ') || '-'}`);
 console.log(`  iOS icons referenced: ${iconPaths.length}`);

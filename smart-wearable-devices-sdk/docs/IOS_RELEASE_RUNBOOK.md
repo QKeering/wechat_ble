@@ -85,21 +85,56 @@ MSYS_NO_PATHCONV=1 openssl smime -inform der -verify -noverify \
 
 ## 4. 云打包正式包
 
-1. 版本号：`src/manifest.json` 的 `versionName`（iOS 只用它，`versionCode` 仅 Android）
+1. 版本号：`src/manifest.json` 的 `versionName` 对应 iOS 的 `CFBundleShortVersionString`；`versionCode` 对应 `CFBundleVersion`（构建号），**每次上传 TestFlight 都必须递增**，否则会报重复构建
 2. 发行 → 原生App-云打包 → iOS
 3. 选择 `ios-distribution.p12` + App Store Distribution profile
 4. 勾选「自动生成启动图」；不勾选 IDFA
 5. 产物为 `.ipa`
+6. 上传前跑一遍 `npm run check:ios-packaging`（模块、后台模式、隐私文案、图标、ATS）
+
+### 4.1 校验 IPA 的 ATS 配置（审核前必做）
+
+manifest 已声明 `app-plus.distribute.ios.ATS.NSAllowsArbitraryLoads: false`，但 HBuilderX 云打包存在把它强改为 `true` 的已知问题，**必须解包确认**：
+
+```bash
+# 1. 解压 ipa（改成 .zip 用解压软件也可以）
+unzip app.ipa -d ipa-check
+# 2. 读取 Info.plist（Python 可直接解析二进制 plist）
+python -c "import plistlib;d=plistlib.load(open('ipa-check/Payload/*.app/Info.plist','rb'));print(d.get('NSAppTransportSecurity'))"
+```
+
+期望输出包含 `'NSAllowsArbitraryLoads': False`。若为 `True`，该包不能提交审核，需改用离线打包或联系 DCloud 处理。
 
 ## 5. 上传与上架
 
 1. Transporter（或 HBuilderX 内置上传）上传 `.ipa` 到 App Store Connect
 2. TestFlight 内测通过后提交审核
-3. 审核材料：
+3. 审核备注中写明：
    - 隐私政策 URL
    - App 隐私问卷：健康与健身数据、设备标识、手机号
    - 健康类说明：数据仅用于展示与健康管理，不做诊断
    - 蓝牙后台模式说明：保持与戒指连接以同步数据
+   - AI 说明：读取哪些健康数据、是否发送外部 AI 服务、输出仅为趋势解读
+   - 亲友共享：被关怀人如何授权、共享哪些指标、如何撤销
+
+### 5.1 代码层面已处理的审核项
+
+| 审核关注点 | 处理方式 |
+|---|---|
+| 内部 BLE 命令测试页 | `pagesA/mines/bleCommandDebug` 路由已从 `pages.json` 移除，使用指南/常见问题里的三连击入口已删除，页面不会打进包。文件保留在仓库，本地调试需要时临时加回路由 |
+| 账户删除 | 「个人信息」页底部「注销账号」，二次确认后调用 `/app/user/cancelAccount`，并清理本地缓存 |
+| 任意 HTTP 加载 | manifest 声明 `ATS.NSAllowsArbitraryLoads=false`；上传前按 4.1 解包核实 IPA |
+| AI 医疗边界 | AI 入口下方固定展示“仅用于健康趋势参考，不构成医疗诊断或治疗建议” |
+| 麦克风权限 | 仅 AI 语音问答使用（`Record` 模块 + 小程序页录音）。若后续下线语音功能，必须同时移除 `app-plus.modules.Record` 与 `NSMicrophoneUsageDescription` |
+| 相机/相册 | 仅意见反馈图片上传与保存客服二维码，用途文案与功能一致 |
+
+### 5.2 仍需人工准备的审核材料
+
+- 稳定可用的测试账号（登录路径、测试数据）
+- 实体 iPhone + 戒指的实拍配对/同步视频（硬件依赖类 App 必需）
+- 亲友共享的授权/撤销流程说明与截图
+- AI 数据流向说明（是否调用外部模型、是否留存）
+- 确认审核期间后端 `https://sh.qkeering.com` 持续可用
 
 ## 6. 常见问题
 

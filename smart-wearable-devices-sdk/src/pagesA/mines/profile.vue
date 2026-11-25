@@ -3,7 +3,10 @@ import '@/pagesA/mines/i18n/pack';
 import { ref, computed } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
 import { uploadImage } from '@/common/api/upload';
+import { cancelAccount } from '@/common/api/user';
 import { getFullUrl } from '@/utils/utils.js';
+import { formatBleErrorMessage } from '@/utils/bleError';
+import { clearAccountLocalData } from '@/utils/accountLocalData';
 import { openPermissionSettings } from '@/utils/permissionSettings';
 import { useUserStore } from '@/stores/user';
 import { useRingBLE } from '@/composables/useRingBLE';
@@ -16,6 +19,7 @@ const userStore = useUserStore();
 const DEFAULT_AVATAR = '/static/images/mine/logo3.png';
 const avatarLoadFailed = ref(false);
 const avatarUploading = ref(false);
+const isCancellingAccount = ref(false);
 
 const userInfo = ref({
   id: '',
@@ -204,6 +208,73 @@ const handleLogout = () => {
   });
 };
 
+// 注销成功后清空本地登录态、账号缓存与运行时数据；蓝牙断开失败不阻断注销。
+const resetLocalAccountState = async () => {
+  try {
+    await disconnect();
+  } catch {
+    // 账号已在服务端注销，蓝牙清理失败不影响注销结果。
+  }
+  userStore.logout();
+  clearAccountLocalData();
+  userStore.clearRuntime?.();
+};
+
+const submitCancelAccount = async () => {
+  if (isCancellingAccount.value) return;
+  isCancellingAccount.value = true;
+  uni.showLoading({
+    title: t('注销中...'),
+    mask: true
+  });
+  try {
+    await cancelAccount({}, { custom: { toast: false, catch: true } });
+    await resetLocalAccountState();
+    uni.hideLoading();
+    uni.showToast({ title: t('账号已注销'), icon: 'success' });
+    // 注销后旧页面仍持有已注销账号的数据，重置页面栈再进登录页。
+    // 成功分支保持 isCancellingAccount，避免跳转前重复触发。
+    setTimeout(() => {
+      uni.reLaunch({
+        url: '/pages/login/login',
+        complete: () => {
+          // 跳转失败时避免入口一直停在“注销中”。
+          isCancellingAccount.value = false;
+        }
+      });
+    }, 1200);
+  } catch (error) {
+    isCancellingAccount.value = false;
+    uni.hideLoading();
+    uni.showToast({
+      title: t(formatBleErrorMessage(error, '注销失败，请稍后重试')),
+      icon: 'none'
+    });
+  }
+};
+
+const handleCancelAccount = () => {
+  if (isCancellingAccount.value) return;
+  uni.showModal({
+    title: t('注销账号'),
+    content: t('注销后账号及个人数据将被清除，且无法恢复。确认继续吗？'),
+    confirmText: t('继续注销'),
+    confirmColor: '#FF5959',
+    success: (first) => {
+      if (!first.confirm) return;
+      uni.showModal({
+        title: t('再次确认'),
+        content: t('确定要注销当前账号吗？此操作不可撤销。'),
+        confirmText: t('确认注销'),
+        confirmColor: '#FF5959',
+        success: (second) => {
+          if (second.confirm) void submitCancelAccount();
+        }
+      });
+    }
+  });
+};
+
 const handleClick = (item) => {
   if (item.editable === false) return;
   if (item.key == 'nickName') {
@@ -317,6 +388,10 @@ const confirm = async (e) => {
         }"
         @click="handleLogout"
       ></uv-button>
+      <!-- 注销账号：不可恢复，二次确认后才调用接口。 -->
+      <view class="cancel-account-entry flex jc-center" @click="handleCancelAccount">
+        <text class="fs-28 t-979797">{{ isCancellingAccount ? t('注销中...') : t('注销账号') }}</text>
+      </view>
       <uv-safe-bottom></uv-safe-bottom>
     </view>
 
@@ -350,6 +425,11 @@ const confirm = async (e) => {
 
 .info-item {
   border-bottom: 2rpx solid #f4f4f4;
+}
+
+.cancel-account-entry {
+  margin-top: 30rpx;
+  padding: 20rpx 0;
 }
 
 .text-ellipsis {

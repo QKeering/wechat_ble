@@ -145,6 +145,10 @@ onUnload(() => uni.$off('refreshAiStatus', fetchApplyStatus));
     <view class="ai-lab-action" @tap.stop="handleApplyClick">
       <text>{{ actionText }}</text>
     </view>
+    <!-- 审核要求：AI 输出的定位与医疗边界必须在 App 内可见。 -->
+    <view class="ai-lab-disclaimer">
+      <text>{{ t('AI 内容仅用于健康趋势参考，不构成医疗诊断或治疗建议；如有身体不适，请及时就医。') }}</text>
+    </view>
   </view>
 </template>
 
@@ -174,5 +178,13 @@ onUnload(() => uni.$off('refreshAiStatus', fetchApplyStatus));
   align-items: center;
   justify-content: center;
   box-shadow: 0 6rpx 18rpx rgba(46, 112, 252, 0.1);
+}
+
+.ai-lab-disclaimer {
+  padding: 16rpx 8rpx 0;
+  color: #979797;
+  font-size: 22rpx;
+  line-height: 1.5;
+  text-align: center;
 }
 </style>
