@@ -2,9 +2,9 @@ import { onLocaleChange, t } from './core';
 
 /**
  * tabBar 文案仍写在 pages.json 里，运行时按当前语言覆盖。
- * 顺序与 pages.json 的 list 一致：0 感知 / 1 健康 / 2 我的。
+ * 顺序与 pages.json 的 list 一致：0 感知 / 1 活动 / 2 我的。
  */
-const TAB_BAR_KEYS = ['感知', '健康', '我的'];
+const TAB_BAR_KEYS = ['感知', '活动', '我的'];
 
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 

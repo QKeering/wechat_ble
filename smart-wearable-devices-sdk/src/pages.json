@@ -18,23 +18,9 @@
     {
       "path": "pages/health/health",
       "style": {
-        "navigationBarTitleText": "健康",
+        "navigationBarTitleText": "活动",
         "navigationStyle": "custom",
         "enablePullDownRefresh": true
-      }
-    },
-    {
-      "path": "pages/health/growth-girlfriend",
-      "style": {
-        "navigationBarTitleText": "Ai lab",
-        "navigationStyle": "custom"
-      }
-    },
-    {
-      "path": "pages/awareness/aiApply",
-      "style": {
-        "navigationBarTitleText": "AI Lab申请",
-        "navigationStyle": "custom"
       }
     },
     {
@@ -74,103 +60,6 @@
     }
   ],
   "subPackages": [
-    {
-      "root": "pages/family",
-      "pages": [
-        {
-          "path": "family",
-          "style": {
-            "navigationBarTitleText": "亲友关怀",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        },
-        {
-          "path": "addMember",
-          "style": {
-            "navigationBarTitleText": "添加家人",
-            "navigationStyle": "custom"
-          }
-        },
-        {
-          "path": "memberDetail",
-          "style": {
-            "navigationBarTitleText": "家人详情",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        },
-        {
-          "path": "careDetail",
-          "style": {
-            "navigationBarTitleText": "亲友健康明细",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        },
-        {
-          "path": "bindDevice",
-          "style": {
-            "navigationBarTitleText": "绑定父母设备",
-            "navigationStyle": "custom"
-          }
-        },
-        {
-          "path": "sharePermission",
-          "style": {
-            "navigationBarTitleText": "共享权限",
-            "navigationStyle": "custom"
-          }
-        },
-        {
-          "path": "elderHome",
-          "style": {
-            "navigationBarTitleText": "长辈模式",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        },
-        {
-          "path": "elderDevice",
-          "style": {
-            "navigationBarTitleText": "我的设备",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        },
-        {
-          "path": "shareManage",
-          "style": {
-            "navigationBarTitleText": "分享我的数据",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        },
-        {
-          "path": "inviteList",
-          "style": {
-            "navigationBarTitleText": "亲友邀请",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        },
-        {
-          "path": "acceptInvite",
-          "style": {
-            "navigationBarTitleText": "确认邀请",
-            "navigationStyle": "custom"
-          }
-        },
-        {
-          "path": "familyCollaborate",
-          "style": {
-            "navigationBarTitleText": "协同照护",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        }
-      ]
-    },
     {
       "root": "pagesA/mines",
       "pages": [
@@ -249,20 +138,6 @@
       "root": "pagesA/healths",
       "pages": [
         {
-          "path": "deviceData",
-          "style": {
-            "navigationBarTitleText": "设备测量数据",
-            "navigationStyle": "custom"
-          }
-        },
-        {
-          "path": "healthReport",
-          "style": {
-            "navigationBarTitleText": "检测报告",
-            "navigationStyle": "custom"
-          }
-        },
-        {
           "path": "indicatorDetail",
           "style": {
             "navigationBarTitleText": "健康详情",
@@ -275,41 +150,6 @@
     {
       "root": "homeDetail",
       "pages": [
-        // 生命体特征
-        {
-          "path": "vitalSigns/vitalSigns",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        },
-
-        // 生命体特征详情
-        {
-          "path": "vitalSignsEdit/vitalSignsEdit",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationBarTitleText": "编辑卡片"
-          }
-        },
-        //放松状态
-        {
-          "path": "relaxStatus/relaxStatus",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationBarTitleText": "放松状态",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        },
-        {
-          "path": "relaxEdit/relaxEdit",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationBarTitleText": "编辑卡片"
-          }
-        },
         //活动模块
         {
           "path": "exercise/exercise",
@@ -324,77 +164,6 @@
           "style": {
             "navigationBarBackgroundColor": "#ffffff",
             "navigationBarTitleText": "编辑卡片"
-          }
-        },
-        //睡眠
-        {
-          "path": "sleepPage/sleepPage",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationStyle": "custom",
-            "enablePullDownRefresh": true
-          }
-        },
-        {
-          "path": "sleepPageEdit/sleepPageEdit",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationBarTitleText": "编辑卡片"
-          }
-        },
-        //心率详情
-        {
-          "path": "vitalSignsHeartDetail/vitalSignsDetail",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationStyle": "custom"
-          }
-        },
-        //血氧详情
-        {
-          "path": "vitalSignsHeartDetail/oxyGenDetail",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationStyle": "custom"
-          }
-        },
-        //体温详情
-        {
-          "path": "vitalSignsHeartDetail/temperatureDetail",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationStyle": "custom"
-          }
-        },
-        //心率变异性详情
-        {
-          "path": "vitalSignsHeartDetail/heartRateVariabilityDetail",
-          "style": {
-            "navigationBarBackgroundColor": "#ffffff",
-            "navigationStyle": "custom"
-          }
-        },
-        // 生理期信息问卷
-        {
-          "path": "periodQuestionnaire/periodQuestionnaire",
-          "style": {
-            "navigationBarBackgroundColor": "#f5f0ee",
-            "navigationStyle": "custom"
-          }
-        },
-        // 生理期问卷步骤页
-        {
-          "path": "periodSteps/periodSteps",
-          "style": {
-            "navigationBarBackgroundColor": "#eef0f5",
-            "navigationStyle": "custom"
-          }
-        },
-        {
-          "path": "periodDetail/periodDetail",
-          "style": {
-            "navigationBarTitleText": "经期详情",
-            "navigationStyle": "custom"
           }
         }
       ]
@@ -428,7 +197,7 @@
     },
     "pages/mine/mine": {
       "network": "all",
-      "packages": ["pagesA/mines", "homeDetail", "pages/family"]
+      "packages": ["pagesA/mines", "homeDetail"]
     }
   },
   "globalStyle": {
@@ -459,7 +228,7 @@
         "pagePath": "pages/health/health",
         "iconPath": "static/tabbar/health.png",
         "selectedIconPath": "static/tabbar/health-active.png",
-        "text": "健康"
+        "text": "活动"
       },
       {
         "pagePath": "pages/mine/mine",

@@ -17,6 +17,7 @@ import {
   normalizeCalorieGoalKcal
 } from '@/utils/calorieGoal';
 import { USER_GOAL_UPDATED_EVENT, type UserGoalUpdatedPayload } from '@/utils/goalSettings';
+import { HEALTH_MODULES_ENABLED } from '@/features/health';
 import { useI18n, usePageTitle } from '@/i18n';
 import type { AppLocale, LocaleMode } from '@/i18n';
 
@@ -346,7 +347,7 @@ onUnmounted(() => {
     <view>
       <view class="mb-50 fs-36 pl-40 pr-40 mb-50">{{ t('设置目标') }}</view>
       <view>
-        <picker mode="selector" :header-text="t('睡眠时长')" :range="getPickerOptionList('sleep')" :value="getPickerIndex('sleep')" @change="onPickerChange('sleep', $event)">
+        <picker v-if="HEALTH_MODULES_ENABLED" mode="selector" :header-text="t('睡眠时长')" :range="getPickerOptionList('sleep')" :value="getPickerIndex('sleep')" @change="onPickerChange('sleep', $event)">
           <view class="bg-white p-40 r-50 flex jc-between ai-center mb-30 fs-36">
             <view style="width: 50%">
               <text>{{ t('睡眠时长') }}</text>

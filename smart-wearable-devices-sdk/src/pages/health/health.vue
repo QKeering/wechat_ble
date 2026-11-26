@@ -16,6 +16,7 @@ import { formatHealthDateRangeText, formatHealthTrendText } from '@/utils/health
 import { clearFrontendRingBindingState, hasBoundRingIdentity } from '@/utils/ringBinding';
 import { isAnyDeviceSyncSessionRunning } from '@/utils/deviceSyncSession';
 import { useI18n } from '@/i18n';
+import { HEALTH_MODULES_ENABLED } from '@/features/health';
 
 import echarts from '@/utils/echarts';
 const { t, tt, locale } = useI18n();
@@ -320,12 +321,12 @@ onPullDownRefresh(async () => {
 
 <template>
   <view style="position: relative">
-    <uv-navbar placeholder leftIcon="" :title="t('健康')" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
+    <uv-navbar placeholder leftIcon="" :title="t('活动')" :bgColor="scrollTop > 0 ? '#f1f3f6' : 'rgba(255, 255, 255, 0)'"></uv-navbar>
     <view style="position: absolute; top: 0; left: 0; width: 100%">
       <uv-image src="/static/images/bg01.png" width="100%" mode="widthFix"></uv-image>
     </view>
     <view class="pt-30 pr-30 pb-100 pl-30 relative" style="z-index: 1; box-sizing: border-box">
-      <view class="flex fd-c ai-center">
+      <view v-if="HEALTH_MODULES_ENABLED" class="flex fd-c ai-center">
         <view class="report-period flex fd-c ai-center jc-center">
           <view class="period-date">{{ healthDateRangeDisplay }}</view>
           <view class="period-label fs-24">{{ t('本周') }}</view>
@@ -333,11 +334,11 @@ onPullDownRefresh(async () => {
       </view>
 
       <!-- AI 健康智能体 -->
-      <view class="module mt-30">
+      <view v-if="HEALTH_MODULES_ENABLED" class="module mt-30">
         <AiLab />
       </view>
 
-      <view class="score-card mt-30 r-50 bg-white p-40">
+      <view v-if="HEALTH_MODULES_ENABLED" class="score-card mt-30 r-50 bg-white p-40">
         <view class="score-title fs-36 mb-50">{{ t('生活习惯评分') }}</view>
         <view class="score-chart flex ai-center jc-center">
           <l-echart ref="chartRef1" @finished="initHabitChart" style="width: 524rpx; height: 262rpx"></l-echart>
@@ -354,7 +355,7 @@ onPullDownRefresh(async () => {
         />
       </view>
 
-      <view class="measure-guide mt-30 r-50 bg-white p-40">
+      <view v-if="HEALTH_MODULES_ENABLED" class="measure-guide mt-30 r-50 bg-white p-40">
         <view class="guide-title fs-36">{{ t('全面测量') }}</view>
         <view class="guide-desc mt-40 fs-32" style="color: #3d3d3d">{{ t('我将从运动、皮肤温度、睡眠、心率、心率变异性、血氧、压力各项指标全面开始测量。') }}</view>
         <view class="guide-action mt-90 flex jc-center ai-center relative" @click="jumpMeasureDetail">
@@ -368,7 +369,7 @@ onPullDownRefresh(async () => {
         </view>
       </view>
 
-      <view class="module sleep-module mt-40">
+      <view v-if="HEALTH_MODULES_ENABLED" class="module sleep-module mt-40">
         <view class="module-header flex jc-between ai-center">
           <view class="module-title fs-36">{{ t('睡眠') }}</view>
           <view class="module-legend flex ai-center">

@@ -42,6 +42,7 @@ import { buildRingRawHistoryFrames } from '@/api/ringDevice';
 import { bind, unbind, getBindInfo } from '@/common/api/device';
 import { getGoalInfo } from '@/common/api/user';
 import DetailInfo from '@/components/DetailInfo.vue';
+import { HEALTH_MODULES_ENABLED } from '@/features/health';
 import { usePopupFixer } from '@/hooks/usePopupFixer';
 import { formatBleErrorMessage } from '@/utils/bleError';
 import { isForegroundLinkVerificationPending } from '@/utils/foregroundLinkGate';
@@ -12491,6 +12492,7 @@ onPullDownRefresh(async () => {
 
       <!-- 睡眠模块 -->
       <view
+        v-if="HEALTH_MODULES_ENABLED"
         class="module-card sleep-module bg-white p-40 mt-30 r-50"
         @tap="openHomeDetail('sleep')"
       >
@@ -12584,6 +12586,7 @@ onPullDownRefresh(async () => {
 
       <!-- 放松状态模块 -->
       <view
+        v-if="HEALTH_MODULES_ENABLED"
         class="module-card relax-module bg-white p-40 mt-30 r-50"
         @tap="openHomeDetail('relax')"
       >
@@ -12613,6 +12616,7 @@ onPullDownRefresh(async () => {
 
       <!-- 生命体征模块 -->
       <view
+        v-if="HEALTH_MODULES_ENABLED"
         class="module-card vital-signs-module bg-white p-40 mt-30 r-50"
         @tap="openHomeDetail('vitalSigns')"
       >
@@ -12664,7 +12668,7 @@ onPullDownRefresh(async () => {
       </view>
 
       <!-- 生理期预测卡片 -->
-      <view v-if="showStartGirlCard" class="module-card period-card bg-white p-40 mt-30 r-50">
+      <view v-if="HEALTH_MODULES_ENABLED && showStartGirlCard" class="module-card period-card bg-white p-40 mt-30 r-50">
         <!-- 右箭头：绝对定位到卡片右上角 -->
         <view class="period-arrow-right">
           <uv-icon name="arrow-right" color="#C6C6C6" size="14"></uv-icon>
@@ -12686,7 +12690,7 @@ onPullDownRefresh(async () => {
       </view>
 
       <!-- 生理期周期详情卡片（点击去开启后展开） -->
-      <view v-if="showPeriodDetail" class="module-card period-detail-card bg-white p-40 mt-30 r-50" @tap="openPeriodPage('/homeDetail/periodDetail/periodDetail')">
+      <view v-if="HEALTH_MODULES_ENABLED && showPeriodDetail" class="module-card period-detail-card bg-white p-40 mt-30 r-50" @tap="openPeriodPage('/homeDetail/periodDetail/periodDetail')">
         <!-- 标题行 -->
         <view class="flex jc-between ai-center mb-30">
           <view class="fs-34 fw-bold" style="color: #333">{{ t('当前周期阶段') }}</view>

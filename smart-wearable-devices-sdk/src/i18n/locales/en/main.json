@@ -81,7 +81,7 @@
   "{value}公斤": "{value} kg",
   "请选择身高(厘米)": "Select height (cm)",
   "请选择体重(公斤)": "Select weight (kg)",
-  "注: 性别、身高、体重和出生日期将用于个性化计算您的卡消耗量和运动时的心率范围等指标。我们尊重您的隐私和数据安全，这些信息仅用于为您提供更加准确的数据。": "Note: Gender, height, weight, and date of birth are used to personalize calorie burn and exercise heart-rate ranges. We respect your privacy and data security; this information is used only to provide more accurate data.",
+  "注: 性别、身高、体重和出生日期将用于个性化计算您的卡路里消耗量和运动强度等指标。我们尊重您的隐私和数据安全，这些信息仅用于为您提供更加准确的数据。": "Note: Gender, height, weight, and date of birth are used to personalize calorie burn and exercise intensity. We respect your privacy and data security; this information is used only to provide more accurate data.",
   "友": "F",
   "亲友关怀": "Family Care",
   "已连接": "Connected",

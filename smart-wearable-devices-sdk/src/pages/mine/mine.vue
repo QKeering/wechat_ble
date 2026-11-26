@@ -15,6 +15,7 @@ import {
 import { useUserStore } from '@/stores/user';
 import { useRingStore } from '@/stores';
 import { useI18n } from '@/i18n';
+import { HEALTH_MODULES_ENABLED } from '@/features/health';
 import { getLegacyBleHistoryExclusiveSnapshot, resolveRingProtocol, type RingParsedData } from '@/sdk/ring-ble';
 import {
   RwHealthDataControlKey,
@@ -228,12 +229,16 @@ type MineMenuItem = {
 
 // title 存简体原文，展示时再翻译，切换语言才能实时刷新。
 const menuList = computed<MineMenuItem[]>(() => [
-  {
-    iconText: t('友'),
-    iconClass: 'menu-icon-family',
-    title: '\u4eb2\u53cb\u5173\u6000',
-    path: '/pages/family/family'
-  },
+  ...(HEALTH_MODULES_ENABLED
+    ? [
+        {
+          iconText: t('友'),
+          iconClass: 'menu-icon-family',
+          title: '\u4eb2\u53cb\u5173\u6000',
+          path: '/pages/family/family'
+        }
+      ]
+    : []),
   {
     icon: '/static/images/mine/menu01.png',
     title: '\u8bbe\u5907\u4fe1\u606f',
